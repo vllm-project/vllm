@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
-from typing import Any, Iterator, List, Tuple, Type, Union
+from typing import Any, Iterator, List, Optional, Tuple, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -15,12 +15,15 @@ from msgspec import msgpack
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.core.scheduler import Scheduler
+from vllm.v1.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapper
-from vllm.v1.engine.stats import EngineCoreStats
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.stats.common import (
+    EngineStatsUpdate, )
+from vllm.v1.stats.stats_agent import ThreadSafeEngineStatsAgent
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
@@ -37,10 +40,11 @@ class EngineCore:
     """Inner loop of vLLM's Engine."""
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: Type[GPUExecutor],
-        usage_context: UsageContext,
+            self,
+            vllm_config: VllmConfig,
+            executor_class: Type[GPUExecutor],
+            usage_context: UsageContext,
+            log_stats: bool,  # If stats collection is enabled.
     ):
         # Override the configs for V1.
         # FIXME
@@ -82,7 +86,12 @@ class EngineCore:
             vllm_config.lora_config,
         )
 
-        self._last_logging_time = time.time()
+        # Setup stats agent.
+        if log_stats:
+            self.stats_agent = ThreadSafeEngineStatsAgent()
+        else:
+            raise ValueError("Stats collection is disabled.")
+            self.stats_agent = None
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -130,14 +139,31 @@ class EngineCore:
         if not self.scheduler.has_unfinished_requests():
             return []
 
-        scheduler_output = self.scheduler.schedule()
+        stats = self.stats_agent.get_update() if self.stats_agent else None
+        scheduler_output = self.scheduler.schedule(stats)
+
         output = self.model_executor.execute_model(scheduler_output)
+
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output)
+            scheduler_output, output, stats)
+
         return engine_core_outputs
 
     def profile(self, is_start=True):
         self.model_executor.worker.profile(is_start)
+
+    def finalize_stats_update(self) -> EngineStatsUpdate:
+        """
+        Get the current stats update and reset the agent to track the next
+        update.
+        """
+
+        assert self.stats_agent is not None, "Stats collection is disabled."
+        stats = self.stats_agent.get_and_reset_update()
+
+        # Populate engine core scheduler stats.
+        self.scheduler.fill_stats(stats.scheduler_stats)
+        return stats
 
 
 class EngineCoreProc(EngineCore):
@@ -152,10 +178,16 @@ class EngineCoreProc(EngineCore):
         usage_context: UsageContext,
         input_path: str,
         output_path: str,
+        stats_path: Optional[str],
         ready_path: str,
         should_shutdown: Synchronized,
     ):
-        super().__init__(vllm_config, executor_class, usage_context)
+        super().__init__(
+            vllm_config,
+            executor_class,
+            usage_context,
+            log_stats=stats_path is not None,
+        )
 
         # Signal from main process to shutdown (multiprocessing.Value).
         self.should_shutdown = should_shutdown
@@ -165,14 +197,24 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue = queue.Queue()
-        self.output_queue = queue.Queue()
+        self.input_queue: queue.Queue[EngineCoreRequest] = queue.Queue()
+        self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
                          daemon=True).start()
         threading.Thread(target=self.process_output_socket,
                          args=(output_path, ),
                          daemon=True).start()
+
+        if stats_path is not None:
+            self.stats_queue: queue.Queue[EngineStatsUpdate] = queue.Queue()
+            threading.Thread(
+                target=self.process_stats_socket,
+                args=(stats_path, ),
+                daemon=True,
+            ).start()
+        else:
+            self.stats_queue = None
 
         # Send Readiness signal to EngineClient.
         with self.make_socket(ready_path, zmq.constants.PUSH) as ready_socket:
@@ -237,6 +279,7 @@ class EngineCoreProc(EngineCore):
         usage_context: UsageContext,
         input_path: str,
         output_path: str,
+        stats_path: Optional[str],
         ready_path: str,
         should_shutdown: Synchronized,
     ) -> BaseProcess:
@@ -249,6 +292,7 @@ class EngineCoreProc(EngineCore):
         process_kwargs = {
             "input_path": input_path,
             "output_path": output_path,
+            "stats_path": stats_path,
             "ready_path": ready_path,
             "vllm_config": vllm_config,
             "executor_class": executor_class,
@@ -292,7 +336,6 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
-                        self._log_stats(self._make_stats(engine_outputs=[]))
                         logger.debug("EngineCore busy loop waiting.")
                         if self.should_shutdown:
                             return
@@ -305,30 +348,8 @@ class EngineCoreProc(EngineCore):
             # 3) Step the engine core.
             outputs = self.step()
 
-            stats = self._make_stats(engine_outputs=outputs, )
-
             # 4) Put EngineCoreOutputs into the output queue.
-            self.output_queue.put_nowait((outputs, stats))
-
-            self._log_stats(stats)
-
-    def _make_stats(self,
-                    engine_outputs: List[EngineCoreOutput]) -> EngineCoreStats:
-        return EngineCoreStats(scheduler_stats=self.scheduler.get_stats(), )
-
-    def _log_stats(self, stats: EngineCoreStats):
-        """Log basic stats every LOGGING_TIME_S"""
-
-        now = time.time()
-
-        if now - self._last_logging_time > LOGGING_TIME_S:
-            logger.info(
-                "RUNNING: %s | WAITING: %s",
-                stats.scheduler_stats.num_running_reqs,
-                stats.scheduler_stats.num_waiting_reqs,
-            )
-
-            self._last_logging_time = now
+            self.output_queue.put_nowait(EngineCoreOutputs(outputs=outputs))
 
     def _handle_client_request(
         self, request: Union[EngineCoreRequest, EngineCoreProfile,
@@ -358,6 +379,18 @@ class EngineCoreProc(EngineCore):
                 request_type = type_frame.buffer
                 request_data = data_frame.buffer
 
+                if request_type == EngineCoreRequestType.STATS.value:
+                    # We get the stats update directly in this thread without
+                    # adding the request to the input queue so that we could
+                    # overlap stats update polling with other work.
+                    # TODO(rickyx): we could furhter optimize this by
+                    # isolating the stats polling from this IO thread.
+                    stats = self.finalize_stats_update()
+                    self._fill_engine_core_proc_stats(stats)
+
+                    self.stats_queue.put_nowait(stats)
+                    continue
+
                 # Deserialize the request data.
                 if request_type == EngineCoreRequestType.ADD.value:
                     request = decoder_add_req.decode(request_data)
@@ -371,21 +404,33 @@ class EngineCoreProc(EngineCore):
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait(request)
 
-    def process_output_socket(self, output_path: str):
-        """Output socket IO thread."""
+    def _fill_engine_core_proc_stats(self, stats: EngineStatsUpdate) -> None:
+        """
+        Fill the engine core process stats.
+        """
+        stats.engine_core_process_stats.input_queue_size = (
+            self.input_queue.qsize())
+        stats.engine_core_process_stats.output_queue_size = (
+            self.output_queue.qsize())
+
+    def _process_output_socket(self, queue: queue.Queue, path: str):
+        """Outgoing socket processing helper."""
 
         # Msgpack serialization encoding.
         encoder = msgpack.Encoder()
         # Reuse send buffer.
         buffer = bytearray()
 
-        with self.make_socket(output_path, zmq.constants.PUSH) as socket:
+        with self.make_socket(path, zmq.constants.PUSH) as socket:
             while True:
-                engine_core_outputs, engine_core_stats = self.output_queue.get(
-                )
-                outputs = EngineCoreOutputs(
-                    outputs=engine_core_outputs,
-                    stats=engine_core_stats,
-                )
-                encoder.encode_into(outputs, buffer)
+                data = queue.get()
+                encoder.encode_into(data, buffer)
                 socket.send_multipart((buffer, ), copy=False)
+
+    def process_stats_socket(self, stats_path: str):
+        """Stats socket IO thread."""
+        self._process_output_socket(self.stats_queue, stats_path)
+
+    def process_output_socket(self, output_path: str):
+        """Output socket IO thread."""
+        self._process_output_socket(self.output_queue, output_path)

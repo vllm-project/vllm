@@ -438,7 +438,8 @@ class LLMEngine:
                         local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                         labels=dict(
                             model_name=self.model_config.served_model_name),
-                        max_model_len=self.model_config.max_model_len),
+                        max_model_len=self.model_config.max_model_len,
+                    ),
                 }
                 self.stat_loggers["prometheus"].info("cache_config",
                                                      self.cache_config)

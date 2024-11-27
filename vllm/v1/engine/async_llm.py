@@ -5,6 +5,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.protocol import EngineClient
+from vllm.envs import VLLM_STATS_ENGINE_POLLING_INTERVAL_S
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -21,8 +22,8 @@ from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.engine.stats import (EngineCoreStats, initialize_stats_loggers,
-                                  make_stats)
+from vllm.v1.stats.common import initialize_stats_loggers
+from vllm.v1.stats.stats_manager import EngineStatsManager
 from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
@@ -77,14 +78,22 @@ class AsyncLLM(EngineClient):
             usage_context=usage_context,
             multiprocess_mode=True,
             asyncio_mode=True,
+            log_stats=log_stats,
         )
 
         # Async tasks that run in the background.
+        # We don't initialize the handlers until we have a request so
+        # they are None first.
         self.output_handler: Optional[asyncio.Task] = None
+        self.stats_handler: Optional[asyncio.Task] = None
 
         # Stats loggers. If not provided, initialize from defaults.
         self.stat_loggers: Dict[str, StatLoggerBase] = {}
+        self.stats_manager: Optional[EngineStatsManager] = None
+
         if self.log_stats:
+            self.stats_manager = EngineStatsManager()
+
             if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
@@ -133,6 +142,9 @@ class AsyncLLM(EngineClient):
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
 
+        if handler := getattr(self, "stats_handler", None):
+            handler.cancel()
+
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig):
         return GPUExecutor
@@ -152,6 +164,10 @@ class AsyncLLM(EngineClient):
 
         if self.detokenizer.is_request_active(request_id):
             raise KeyError(f"Request {request_id} already exists.")
+
+        # 0) Add the request to the stats manager to start tracking.
+        if self.stats_manager is not None:
+            self.stats_manager.add_request(request_id)
 
         # 1) Create a new AsyncStream for the request.
         stream = self._add_request_to_streams(request_id)
@@ -206,6 +222,9 @@ class AsyncLLM(EngineClient):
         if self.output_handler is None:
             self.output_handler = asyncio.create_task(
                 self._run_output_handler())
+
+        if self.stats_handler is None:
+            self.stats_handler = asyncio.create_task(self._run_stats_handler())
 
         async for output in await self.add_request(
                 request_id,
@@ -297,7 +316,6 @@ class AsyncLLM(EngineClient):
                 # 1) Pull EngineCoreOutput from the EngineCore.
                 outputs: EngineCoreOutputs = (
                     await self.engine_core.get_output_async())
-                self._log_stats(outputs.stats)
 
                 # 2) Detokenize based on the output.
                 request_outputs, reqs_to_abort = self.detokenizer.step(
@@ -319,12 +337,20 @@ class AsyncLLM(EngineClient):
             logger.error(e)
             raise e
 
-    def _log_stats(self, engine_core_stats: EngineCoreStats):
-        if not self.stat_loggers:
-            # No stats to log.
-            return
+    async def _run_stats_handler(self):
+        while True:
+            # Pull the stats from the EngineCore every X seconds.
+            await asyncio.sleep(VLLM_STATS_ENGINE_POLLING_INTERVAL_S)
 
-        stats: Stats = make_stats(engine_core_stats=engine_core_stats)
+            # Pull the stats from the EngineCore before finalizing the snapshot
+            # for an updated view of the current stats.
+            update = await self.engine_core.poll_stats_update_async()
+
+            # Finalize the snapshot and make the stats.
+            stats = self.stats_manager.make_engine_stats(update)
+            self._log_stats(stats)
+
+    def _log_stats(self, stats: Stats):
         for stat_logger in self.stat_loggers.values():
             # TODO(rickyx): we here assume loggers are lightweight and
             # non-blocking. To make this more robust, we should really

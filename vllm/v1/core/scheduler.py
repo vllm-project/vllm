@@ -4,12 +4,17 @@ from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.core.scheduler import SchedulerOutputs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput
-from vllm.v1.engine.stats import SchedulerStats
+from vllm.v1.stats.common import (
+    EngineStatsUpdate,
+    RequestStatsUpdate,
+    SchedulerStats,
+)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -80,7 +85,9 @@ class Scheduler:
         # is preallocated in the profiling run.
         self.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
 
-    def schedule(self) -> "SchedulerOutput":
+    def schedule(
+            self,
+            stats_update: Optional[EngineStatsUpdate]) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and num_tokens,
@@ -381,6 +388,7 @@ class Scheduler:
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
+        stats: Optional[EngineStatsUpdate],
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
@@ -502,11 +510,14 @@ class Scheduler:
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
 
-    def get_stats(self) -> SchedulerStats:
-        return SchedulerStats(
-            num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting),
-        )
+    def fill_stats(self, stats: SchedulerStats) -> None:
+        stats.num_running_reqs = len(self.running)
+        stats.num_waiting_reqs = len(self.waiting)
+
+    def get_request_updates(
+            self,
+            scheduler_outputs: SchedulerOutputs) -> List[RequestStatsUpdate]:
+        return []
 
 
 @dataclass
