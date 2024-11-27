@@ -822,25 +822,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
     ]
 
     # BitandBytes specific attributes
-    default_bitsandbytes_target_modules = [
-        ".gate_proj.",
-        ".down_proj.",
-        ".up_proj.",
-        ".q_proj.",
-        ".k_proj.",
-        ".v_proj.",
-        ".o_proj.",
-        # vision encoder
-        ".fc1.",
-        ".fc2.",
-        # Currently, vllm does not support BNB quantization for the `out_proj`
-        # of the resampler, so it's necessary to distinguish between the
-        # vision encoder and the resampler's out_proj. The same applies to
-        # MiniCPMV2_6.
-        ".self_attn.out_proj.",  #  vision encoder out_proj
-        # resampler
-        ".kv_proj.",
-    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -964,21 +945,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     ]
 
     # BitandBytes specific attributes
-    default_bitsandbytes_target_modules = [
-        ".gate_proj.",
-        ".down_proj.",
-        ".up_proj.",
-        ".q_proj.",
-        ".k_proj.",
-        ".v_proj.",
-        ".o_proj.",
-        # vision encoder
-        ".fc1.",
-        ".fc2.",
-        ".self_attn.out_proj.",
-        # resampler
-        ".kv_proj.",
-    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
