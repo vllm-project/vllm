@@ -67,6 +67,7 @@ Documentation
    getting_started/openvino-installation
    getting_started/cpu-installation
    getting_started/gaudi-installation
+   getting_started/arm-installation
    getting_started/neuron-installation
    getting_started/tpu-installation
    getting_started/xpu-installation
@@ -101,6 +102,7 @@ Documentation
    models/engine_args
    models/lora
    models/vlm
+   models/structured_outputs
    models/spec_decode
    models/performance
 
@@ -156,16 +158,18 @@ Documentation
    :maxdepth: 2
    :caption: Design
 
+   design/arch_overview
+   design/huggingface_integration
+   design/plugin_system
    design/input_processing/model_inputs_index
    design/kernel/paged_attention
    design/multimodal/multimodal_index
-   design/huggingface_integration
 
-.. Contributing: contributing to the vLLM project
+.. For Developers: contributing to the vLLM project
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contributing
+   :caption: For Developers
 
    contributing/overview
    contributing/profiling/profiling_index

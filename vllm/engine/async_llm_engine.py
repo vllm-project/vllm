@@ -19,6 +19,7 @@ from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType
+from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
@@ -679,7 +680,7 @@ class AsyncLLMEngine(EngineClient):
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         if engine_config is None:
-            engine_config = engine_args.create_engine_config()
+            engine_config = engine_args.create_engine_config(usage_context)
 
         executor_class = cls._get_executor_cls(engine_config)
 
@@ -728,6 +729,9 @@ class AsyncLLMEngine(EngineClient):
     def _error_callback(self, exc: Exception) -> None:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
+
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        return self.engine.input_preprocessor
 
     async def get_tokenizer(
         self,

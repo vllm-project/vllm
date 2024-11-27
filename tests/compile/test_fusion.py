@@ -3,10 +3,10 @@ import torch
 from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
-from vllm.compilation.config import CompilationConfig
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
                                      find_auto_fn_maybe)
 from vllm.compilation.reshapes import RedundantReshapesPass
+from vllm.config import CompilationConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear)
@@ -38,12 +38,6 @@ class TestModel(torch.nn.Module):
         return y3
 
 
-# Init does pattern registration, which can only happen once
-config = CompilationConfig(enable_fusion=True)
-reshape_pass = RedundantReshapesPass(config)
-fusion_pass = FusionPass.instance(config)
-
-
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [64, 3392, 4096])
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
@@ -58,6 +52,11 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
         pytest.skip("Only test eps=1e-5 for now")
 
     # Reshape pass is needed for the fusion pass to work
+    config = CompilationConfig.PassConfig(enable_fusion=True,
+                                          enable_reshape=True)
+    reshape_pass = RedundantReshapesPass(config)
+    fusion_pass = FusionPass.instance(config)
+
     backend = TestBackend(reshape_pass, fusion_pass)
     model = TestModel(hidden_size, eps)
 

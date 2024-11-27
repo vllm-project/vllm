@@ -2,8 +2,7 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Type)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import msgspec
 
@@ -18,7 +17,6 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
                         get_ip, get_open_port, get_vllm_instance_id,
                         make_async)
-from vllm.worker.worker_base import WorkerBase
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -81,33 +79,6 @@ class RayHPUExecutor(DistributedGPUExecutor):
     def finish_measurements(self):
         self._run_workers("finish_measurements")
 
-    def _get_worker_module_and_class(
-        self
-    ) -> Tuple[str, str, Optional[Callable[[],
-                                           Type[WorkerBase]]]]:  # noqa: F821
-        worker_class_fn = None
-        if self.scheduler_config.is_multi_step:
-            raise NotImplementedError(
-                "Multi-step execution is not implemented for HPU")
-        elif self.speculative_config:
-            raise NotImplementedError(
-                "Speculative decoding is not implemented for HPU")
-        else:
-            worker_module_name = "vllm.worker.hpu_worker"
-            worker_class_name = "HPUWorker"
-        return (worker_module_name, worker_class_name, worker_class_fn)
-
-    def _get_worker_wrapper_args(self) -> Dict[str, Any]:
-        (worker_module_name, worker_class_name,
-         worker_class_fn) = self._get_worker_module_and_class()
-
-        return dict(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-            worker_class_fn=worker_class_fn,
-            trust_remote_code=self.model_config.trust_remote_code,
-        )
-
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         # Otherwise, the ray workers are allocated with a full GPU.
@@ -128,7 +99,6 @@ class RayHPUExecutor(DistributedGPUExecutor):
 
         # Create the workers.
         driver_ip = get_ip()
-        worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("HPU", 0):
                 continue
@@ -144,7 +114,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
                 resources={'HPU': num_gpus},
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
 
             if self.use_ray_spmd_worker:
                 self.workers.append(worker)
@@ -155,7 +125,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
-                        **worker_wrapper_kwargs)
+                        vllm_config=self.vllm_config)
                 else:
                     # Else, added to the list of workers.
                     self.workers.append(worker)
@@ -222,8 +192,8 @@ class RayHPUExecutor(DistributedGPUExecutor):
                 f"Every node should have a unique IP address. Got {n_nodes}"
                 f" nodes with node ids {list(node_workers.keys())} and "
                 f"{n_ips} unique IP addresses {all_ips}. Please check your"
-                " network configuration. If you set `VLLM_HOST_IP` or "
-                "`HOST_IP` environment variable, make sure it is unique for"
+                " network configuration. If you set `VLLM_HOST_IP` "
+                "environment variable, make sure it is unique for"
                 " each node.")
 
         VLLM_INSTANCE_ID = get_vllm_instance_id()

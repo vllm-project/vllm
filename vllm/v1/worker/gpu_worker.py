@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -56,6 +57,22 @@ class Worker:
             init_cached_hf_modules()
 
         self.model_runner = GPUModelRunner(vllm_config)
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir, use_gzip=True))
+        else:
+            self.profiler = None
 
     def initialize(self):
         if self.device_config.device.type == "cuda":
@@ -105,35 +122,48 @@ class Worker:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
 
+        _, total_gpu_memory = torch.cuda.mem_get_info()
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
-
-        # Calculate the number of blocks that can be allocated with the
-        # profiled peak memory.
         torch.cuda.synchronize()
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+
+        free_gpu_memory, _ = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
-        assert peak_memory > 0, (
+        assert self.init_gpu_memory > free_gpu_memory, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_gpu_memory}, current free memory"
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
+        # Get the peak memory allocation recorded by torch
+        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+
+        # Check for any memory left around that may have been allocated on the
+        # gpu outside of `torch`. NCCL operations, for example, can use a few
+        # GB during a forward pass
+        torch.cuda.empty_cache()
+        torch_allocated_bytes = torch.cuda.memory_stats(
+        )["allocated_bytes.all.current"]
+        total_allocated_bytes = torch.cuda.mem_get_info(
+        )[1] - torch.cuda.mem_get_info()[0]
+        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+        if non_torch_allocations > 0:
+            peak_memory += non_torch_allocations
+        available_kv_cache_memory = (
+            total_gpu_memory * self.cache_config.gpu_memory_utilization -
+            peak_memory)
+
+        # Calculate the number of blocks that can be allocated with the
+        # profiled peak memory.
         cache_block_size = _get_cache_block_size(self.cache_config,
                                                  self.model_config,
                                                  self.parallel_config)
-        num_gpu_blocks = int(
-            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
+        num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
-        # if self.model_runner.lora_manager:
-        #     self.model_runner.remove_all_loras()
-        gc.collect()
-        torch.cuda.empty_cache()
         return num_gpu_blocks, 0
 
     def initialize_cache(self, num_gpu_blocks: int) -> None:
@@ -170,6 +200,14 @@ class Worker:
         output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
         return output
+
+    def profile(self, is_start=True):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        if is_start:
+            self.profiler.start()
+        else:
+            self.profiler.stop()
 
 
 def init_worker_distributed_environment(

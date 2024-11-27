@@ -3,7 +3,7 @@ import re
 from array import array
 from dataclasses import dataclass
 from functools import lru_cache, partial
-from typing import Iterable, List, Mapping, Optional, Tuple, TypedDict, Union
+from typing import Iterable, List, Mapping, Optional, Tuple, TypedDict
 
 import torch
 from einops import rearrange
@@ -13,7 +13,6 @@ from torch.nn import functional as F
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.selector import _Backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -37,14 +36,17 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.platforms import _Backend
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.processor import get_processor
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (get_vit_attn_backend,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
@@ -186,7 +188,7 @@ class MultiHeadDotProductAttention(nn.Module):
         )
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend()
+        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
         }:
@@ -369,6 +371,7 @@ class MolmoAttention(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -426,7 +429,8 @@ class MolmoAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
@@ -516,10 +520,14 @@ class MolmoDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         # Attention block.
-        self.self_attn = MolmoAttention(config, cache_config, quant_config)
+        self.self_attn = MolmoAttention(config,
+                                        cache_config,
+                                        quant_config,
+                                        prefix=f"{prefix}.self_attn")
 
         # MLP block.
         self.mlp = MolmoMLP(config, quant_config=quant_config)
@@ -716,14 +724,13 @@ class MolmoVisionBackbone(nn.Module):
 @support_torch_compile
 class MolmoModel(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
 
         self.embedding_size = config.embedding_size or config.vocab_size
@@ -738,7 +745,8 @@ class MolmoModel(nn.Module):
             else MolmoDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: decoder_layer(config, cache_config, quant_config),
+            lambda prefix: decoder_layer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -748,6 +756,12 @@ class MolmoModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -1024,14 +1038,9 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
 class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
@@ -1040,7 +1049,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config,
                                                    quant_config)
-        self.model = MolmoModel(config, cache_config, quant_config)
+        self.model = MolmoModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
 
         if self.config.weight_tying:
             self.lm_head = self.model.transformer.wte
@@ -1095,18 +1105,15 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return image_features
 
-    def _merge_multimodal_embeddings(
-        self,
-        inputs_embeds: torch.Tensor,
-        image_features: torch.Tensor,
-        image_input_idx: torch.Tensor,
-        seq_len: Union[torch.Tensor, List[torch.Tensor]],
-    ) -> torch.Tensor:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        image_features = self._process_image_input(image_input)
+        image_input_idx = image_input["image_input_idx"]
+        seq_len = image_input["seq_len"]
         batch_size, num_image, num_patch = image_features.shape[:3]
         assert image_input_idx.shape == (batch_size, num_image, num_patch)
-
-        image_features = image_features.to(inputs_embeds.device)
-        seq_len = seq_len.to(inputs_embeds.device)
 
         # insert the image feature into the embedding.
         image_features = image_features.view(batch_size, num_image * num_patch,
@@ -1127,12 +1134,24 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         image_input_idx = image_input_idx + offset.to(image_input_idx.dtype)
         image_input_idx = image_input_idx.flatten()[:, None]
         mat = image_input_idx == torch.arange(
-            seq_len.sum().item(), device=inputs_embeds.device)[None, :]
+            seq_len.sum().item(), device=image_features.device)[None, :]
         mat = mat.to(image_features.dtype)
 
-        inputs_embeds = inputs_embeds + torch.einsum('nd,nm->md',
-                                                     image_features, mat)
+        # Note: In this original implementation from AI2, the final
+        # vision_embeddings will be always be the same length
+        # of input embedddings, which is not very efficient.
+        # TODO(ywang96): see if this can be optimized.
+        vision_embeddings = torch.einsum('nd,nm->md', image_features, mat)
+        return vision_embeddings
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = inputs_embeds + multimodal_embeddings
         return inputs_embeds
 
     def forward(
@@ -1142,39 +1161,27 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> SamplerOutput:
+
         if intermediate_tensors is not None:
             inputs_embeds = None
-        else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
 
-            if image_input is not None:
-                inputs_embeds = self.model.embed_tokens(input_ids)
-                image_features = self._process_image_input(image_input)
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
-                inputs_embeds = self._merge_multimodal_embeddings(
-                    inputs_embeds,
-                    image_features,
-                    image_input["image_input_idx"],
-                    image_input["seq_len"],
-                )
-            else:
-                inputs_embeds = self.model.embed_tokens(input_ids)
-
-        # always pass the input via `inputs_embeds`
-        # to make sure the computation graph is consistent
-        # for `torch.compile` integration
-        input_ids = None
-
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.model(input_ids,
+                                   positions,
+                                   kv_caches,
+                                   attn_metadata,
+                                   intermediate_tensors,
+                                   inputs_embeds=inputs_embeds)
 
         return hidden_states
 
