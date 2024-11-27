@@ -1,4 +1,5 @@
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Dict, List, Literal, Optional
 
 import msgspec
@@ -29,7 +30,8 @@ class SchedulerStats:
     # Number of requests currently waiting.
     num_waiting_reqs: int = 0
 
-    kv_cache_stats: KVCacheStats = dataclass_field(default_factory=KVCacheStats)
+    kv_cache_stats: KVCacheStats = dataclass_field(
+        default_factory=KVCacheStats)
 
 
 @dataclass
@@ -72,7 +74,7 @@ class RequestStats:
     # Timestamp when the request arrived at the llm engine.
     arrival_ts_ms: float
 
-    # Number of tokens sheduled to compute. This includes both the encoder and
+    # Number of tokens scheduled to compute. This includes both the encoder and
     # decoder tokens. Only set when the request is scheduled, and before
     # the request forward pass finishes.
     num_tokens_to_compute: Optional[int] = None
@@ -89,15 +91,13 @@ class RequestStats:
     # A list of timestamps when the request finished the model forward pass.
     # This is used to calculate the model forward time.
     model_forward_end_ts_ms_lst: List[float] = dataclass_field(
-        default_factory=list
-    )
+        default_factory=list)
     # A list of timestamps when the request finished the model execute function.
     # This is used to calculate the model execute time, model executing includes
     # model forward, block/sync across workers, cpu-gpu sync time and sampling
     # time.
     model_execute_end_ts_ms_lst: List[float] = dataclass_field(
-        default_factory=list
-    )
+        default_factory=list)
 
     # A list of timestamps when the request was preempted.
     preempted_ts_ms_lst: List[float] = dataclass_field(default_factory=list)
@@ -124,10 +124,10 @@ class EngineStatsSnapshot:
     This decouples stats collection from actual processing of the requests such
     that:
         1. Stats collection is lightweight and could be aligned with the same
-        interval as the upper level stats logging (e.g. Prometheus scraping time,
-        logging interval, etc.).
+        interval as the upper level stats logging (e.g. Prometheus scraping
+        time, logging interval, etc.).
         2. Stats collection could happen independently of the request processing
-        so even if no requests were processed, stats would still be propogated
+        so even if no requests were processed, stats would still be propagated
         reliably.
     """
 
@@ -138,26 +138,24 @@ class EngineStatsSnapshot:
 
     # Snapshot of the scheduler stats.
     scheduler_stats: SchedulerStats = dataclass_field(
-        default_factory=SchedulerStats
-    )
+        default_factory=SchedulerStats)
 
     # Per request that's active in the engine.
-    requests_stats: Dict[str, RequestStats] = dataclass_field(
-        default_factory=dict
-    )
+    requests_stats: Dict[str,
+                         RequestStats] = dataclass_field(default_factory=dict)
 
     # Engine core's queue stats.
     engine_core_process_stats: EngineCoreProcessStats = dataclass_field(
-        default_factory=EngineCoreProcessStats
-    )
+        default_factory=EngineCoreProcessStats)
 
     # TODO(rickyx): Add other components' stats,
     # e.g. model runner/worker and etc.
 
 
-class RequestStatsUpdate(
-    msgspec.Struct, array_like=True, omit_defaults=True, gc=False
-):
+class RequestStatsUpdate(msgspec.Struct,
+                         array_like=True,
+                         omit_defaults=True,
+                         gc=False):
     """ """
 
     request_id: str
@@ -179,8 +177,7 @@ class RequestStatsUpdate(
         # Timestamps when the request finishes the model execute function.
         # (This includes model forward, block/sync across workers,
         # cpu-gpu sync time and sampling time.)
-        "model_execute_end",
-    ]
+        "model_execute_end", ]
 
     # Timestamp of the update occurred.
     ts_ms: float
@@ -198,9 +195,10 @@ class RequestStatsUpdate(
             assert self.num_tokens_cached is not None
 
 
-class EngineStatsUpdate(
-    msgspec.Struct, array_like=True, omit_defaults=True, gc=False
-):
+class EngineStatsUpdate(msgspec.Struct,
+                        array_like=True,
+                        omit_defaults=True,
+                        gc=False):
     """
     An update of the engine's current snapshot of stats.
     """
@@ -210,18 +208,15 @@ class EngineStatsUpdate(
 
     # Updates of the requests' stats.
     request_updates: List[RequestStatsUpdate] = msgspec_field(
-        default_factory=list
-    )
+        default_factory=list)
 
     # Current state of the engine's scheduler stats.
     scheduler_stats: SchedulerStats = msgspec_field(
-        default_factory=SchedulerStats
-    )
+        default_factory=SchedulerStats)
 
     # Queue stats (relevant for multi-process architecture)
     engine_core_process_stats: EngineCoreProcessStats = msgspec_field(
-        default_factory=EngineCoreProcessStats
-    )
+        default_factory=EngineCoreProcessStats)
 
 
 def ms_to_s(ms: float) -> float:
@@ -239,9 +234,8 @@ def initialize_stats_loggers(config: VllmConfig) -> Dict[str, StatLoggerBase]:
     from vllm.engine.metrics import LoggingStatLogger
 
     stat_loggers = {
-        "logging": LoggingStatLogger(
-            local_interval=_LOCAL_LOGGING_INTERVAL_SEC
-        ),
+        "logging":
+        LoggingStatLogger(local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
         # TODO(rickyx): Add prometheus stats logger.
         # "prometheus": PrometheusStatLogger(
         #     local_interval=_LOCAL_LOGGING_INTERVAL_SEC,

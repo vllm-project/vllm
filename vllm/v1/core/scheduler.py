@@ -10,13 +10,10 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput
-from vllm.v1.stats.common import (
-    EngineStatsUpdate,
-    RequestStatsUpdate,
-    SchedulerStats,
-)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.stats.common import (EngineStatsUpdate, RequestStatsUpdate,
+                                  SchedulerStats)
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalKwargs

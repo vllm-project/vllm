@@ -2,7 +2,6 @@ import threading
 import time
 from typing import List
 
-
 from vllm.logger import init_logger
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.engine import EngineCoreOutput
@@ -35,10 +34,7 @@ class EngineStatsAgent:
     def get_update(self) -> EngineStatsUpdate:
         return self._stats_update
 
-    def get_and_reset_update(
-        self,
-    ) -> EngineStatsUpdate:
-        logger.info(f"get_and_reset_update")
+    def get_and_reset_update(self, ) -> EngineStatsUpdate:
         cur_update = self._stats_update
         new_update = self._new_update()
         self._stats_update = new_update

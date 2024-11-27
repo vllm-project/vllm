@@ -22,9 +22,9 @@ from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
+from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.stats.common import initialize_stats_loggers
 from vllm.v1.stats.stats_manager import EngineStatsManager
-from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
 

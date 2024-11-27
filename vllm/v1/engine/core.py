@@ -2,7 +2,6 @@ import multiprocessing
 import pickle
 import queue
 import threading
-import time
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
@@ -15,18 +14,16 @@ from msgspec import msgpack
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.core.scheduler import Scheduler, SchedulerOutputs
+from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapper
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.stats.common import (
-    EngineStatsUpdate, )
-from vllm.v1.stats.stats_agent import ThreadSafeEngineStatsAgent
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.stats.common import EngineStatsUpdate
+from vllm.v1.stats.stats_agent import ThreadSafeEngineStatsAgent
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -383,7 +380,7 @@ class EngineCoreProc(EngineCore):
                     # We get the stats update directly in this thread without
                     # adding the request to the input queue so that we could
                     # overlap stats update polling with other work.
-                    # TODO(rickyx): we could furhter optimize this by
+                    # TODO(rickyx): we could further optimize this by
                     # isolating the stats polling from this IO thread.
                     stats = self.finalize_stats_update()
                     self._fill_engine_core_proc_stats(stats)

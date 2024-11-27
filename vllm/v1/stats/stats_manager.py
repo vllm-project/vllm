@@ -2,9 +2,8 @@ import time
 from typing import Dict
 
 from vllm.engine.metrics_types import Stats
-from vllm.v1.stats.common import RequestStats, RequestStatsUpdate
-from vllm.v1.stats.common import ms_to_s, s_to_ms
-from vllm.v1.stats.common import EngineStatsUpdate
+from vllm.v1.stats.common import (EngineStatsUpdate, RequestStats,
+                                  RequestStatsUpdate, ms_to_s, s_to_ms)
 
 
 class EngineStatsManager:
@@ -37,9 +36,8 @@ class EngineStatsManager:
         # Remove a request from tracking when it finishes or aborts.
         del self._requests_stats[request_id]
 
-    def _update_request(
-        self, req_stat: RequestStats, update: RequestStatsUpdate
-    ):
+    def _update_request(self, req_stat: RequestStats,
+                        update: RequestStatsUpdate):
         req_stat.last_updated_ts_ms = update.ts_ms
         if update.update_type == "waiting":
             req_stat.waiting_ts_ms = update.ts_ms
@@ -80,11 +78,15 @@ class EngineStatsManager:
             num_swapped_sys=0,
             num_waiting_sys=update.scheduler_stats.num_waiting_reqs,
             #   KV Cache Usage in %
-            gpu_cache_usage_sys=update.scheduler_stats.kv_cache_stats.gpu_cache_usage_sys,
-            cpu_cache_usage_sys=update.scheduler_stats.kv_cache_stats.cpu_cache_usage_sys,
+            gpu_cache_usage_sys=update.scheduler_stats.kv_cache_stats.
+            gpu_cache_usage_sys,
+            cpu_cache_usage_sys=update.scheduler_stats.kv_cache_stats.
+            cpu_cache_usage_sys,
             #   Prefix Cache Hit Rate
-            cpu_prefix_cache_hit_rate=update.scheduler_stats.kv_cache_stats.cpu_prefix_cache_hit_rate,
-            gpu_prefix_cache_hit_rate=update.scheduler_stats.kv_cache_stats.gpu_prefix_cache_hit_rate,
+            cpu_prefix_cache_hit_rate=update.scheduler_stats.kv_cache_stats.
+            cpu_prefix_cache_hit_rate,
+            gpu_prefix_cache_hit_rate=update.scheduler_stats.kv_cache_stats.
+            gpu_prefix_cache_hit_rate,
             # Iteration stats
             num_prompt_tokens_iter=0,
             num_generation_tokens_iter=0,
@@ -118,10 +120,8 @@ class EngineStatsManager:
         # Update the requests stats for finished/aborted requests.
         for req_stat in self._requests_stats.values():
             # Remove the request from tracking if it's finished or aborted.
-            if (
-                req_stat.finished_ts_ms is not None
-                or req_stat.aborted_ts_ms is not None
-            ):
+            if (req_stat.finished_ts_ms is not None
+                    or req_stat.aborted_ts_ms is not None):
                 self._remove_request(req_stat.request_id)
 
         return stats
