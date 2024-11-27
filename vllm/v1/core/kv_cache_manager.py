@@ -4,8 +4,7 @@ from typing import Dict, List, Optional
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock, hash_block_tokens,
-                                         hash_request_tokens)
+                                         KVCacheBlock, hash_block_tokens)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -92,8 +91,11 @@ class KVCacheManager:
                 parent_block_hash = cached_block.block_hash
                 assert parent_block_hash
             else:
-                block_token_ids = tuple(request.all_token_ids[idx * self.block_size : (idx + 1) * self.block_size])
-                block_hash = hash_block_tokens(parent_block_hash, block_token_ids)
+                block_token_ids = tuple(
+                    request.all_token_ids[idx * self.block_size:(idx + 1) *
+                                          self.block_size])
+                block_hash = hash_block_tokens(parent_block_hash,
+                                               block_token_ids)
                 if cached_block := self._get_cached_block(block_hash):
                     computed_blocks.append(cached_block)
                 else:
