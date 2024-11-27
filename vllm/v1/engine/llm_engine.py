@@ -111,9 +111,6 @@ class LLMEngine:
 
         return executor_class
 
-    def stop_remote_worker_execution_loop(self) -> None:
-        self.engine_core.shutdown()
-
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
 
