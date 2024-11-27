@@ -592,7 +592,7 @@ class MultiModalProcessor:
                 if isinstance(v, torch.Tensor) and v.ndim == 3:
                     # Pass through embedding inputs (single)
                     passthrough_data[f"{k}_embeds"] = [v]
-                elif is_list_of(v, torch.Tensor) and v[0].ndim == 3:
+                elif is_list_of(v, torch.Tensor) and v[0].ndim == 2:
                     # Pass through embedding inputs (multi)
                     passthrough_data[f"{k}_embeds"] = v
                 else:
