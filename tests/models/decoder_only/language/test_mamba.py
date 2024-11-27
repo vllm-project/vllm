@@ -294,34 +294,28 @@ def test_multistep(
     example_prompts,
 ) -> None:
     try:
-        with vllm_runner(model, num_scheduler_steps=8, max_num_seqs=2) as vllm_model:
+        with vllm_runner(model, num_scheduler_steps=8,
+                         max_num_seqs=2) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 10, 1)
     except ValueError:
         pytest.fail("Jamba inner state wasn't cleaned up between states, "
                     "could be related to finished_requests_ids")
 
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [64])
-def test_multistep_correctness(
-        vllm_runner, model: str, dtype: str, max_tokens: int,
-        example_prompts
-) -> None:
-    with vllm_runner(
-        model,
-        num_scheduler_steps=8,
-        max_num_seqs=2
-    ) as vllm_model:
-        vllm_outputs_multistep = vllm_model.generate_greedy(example_prompts,
-                                                       max_tokens)
+def test_multistep_correctness(vllm_runner, model: str, dtype: str,
+                               max_tokens: int, example_prompts) -> None:
+    with vllm_runner(model, num_scheduler_steps=8,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_multistep = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
 
-    with vllm_runner(
-        model,
-        num_scheduler_steps=1,
-        max_num_seqs=2
-    ) as vllm_model:
-        vllm_outputs_single_step = vllm_model.generate_greedy(example_prompts,
-                                                       max_tokens)
+    with vllm_runner(model, num_scheduler_steps=1,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_single_step = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=vllm_outputs_multistep,
@@ -329,5 +323,3 @@ def test_multistep_correctness(
         name_0="vllm_outputs_multistep",
         name_1="vllm_outputs_single_step",
     )
-
-
