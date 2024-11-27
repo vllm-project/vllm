@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Generic, NamedTuple, Optional, Protocol, TypeVar, Union
 
-import numpy as np
 import torch
 from transformers import BatchFeature, ProcessorMixin
 from typing_extensions import TypeAlias, TypedDict
@@ -352,21 +351,6 @@ class _PlaceholderInfo(NamedTuple):
     def length(self) -> int:
         return len(self.unit) * self.unit_count
 
-    def can_merge(self, next_: "_PlaceholderInfo") -> bool:
-        return (self.modality == next_.modality and self.unit == next_.unit
-                and self.start_idx + self.length == next_.start_idx)
-
-    def merge(self, next_: "_PlaceholderInfo") -> "_PlaceholderInfo":
-        if not self.can_merge(next_):
-            raise ValueError(f"Unable to merge {self} and {next_}")
-
-        return _PlaceholderInfo(
-            modality=self.modality,
-            start_idx=self.start_idx,
-            unit=self.unit,
-            unit_count=self.unit_count + next_.unit_count,
-        )
-
     def to_range(self) -> PlaceholderRange:
         return PlaceholderRange(
             offset=self.start_idx,
@@ -406,15 +390,16 @@ def _resolve_matches(
     Resolve :code:`matches` to ensure that there are no overlapping matches,
     and sort them such that earlier matches take priority over later ones.
     """
-    num_matches_by_idx = np.zeros(len(prompt), dtype=int)
-    for match in matches:
-        num_matches_by_idx[match.start_idx:match.end_idx] += 1
+    seen_matches = dict[int, _PromptReplacementMatch[_T, _S]]()
 
-    duplicate_matches_idxs, = np.nonzero(num_matches_by_idx > 1)
-    if len(duplicate_matches_idxs) > 0:
-        raise ValueError("Unable to find a unique replacement "
-                         f"at indices={duplicate_matches_idxs} "
-                         f"of prompt={prompt}")
+    for match in matches:
+        for idx in range(match.start_idx, match.end_idx):
+            if idx in seen_matches:
+                raise ValueError("Found overlapping matches "
+                                 f"({seen_matches[idx]} and {match}) "
+                                 f"at index={idx} of prompt={prompt}")
+
+            seen_matches[idx] = match
 
     return sorted(matches, key=lambda x: x.start_idx)
 
@@ -493,22 +478,26 @@ def replace_text_matches(
     return "".join(texts)
 
 
-def _merge_placeholders(
-        placeholders: Iterable[_PlaceholderInfo]
-) -> Iterable[_PlaceholderInfo]:
-    current_placeholder = None
+def _merge_placeholder_matches(
+    matches: Iterable[_PromptReplacementTokenMatch],
+) -> Iterable[_PromptReplacementTokenMatch]:
+    current_match = None
 
-    for placeholder in placeholders:
-        if current_placeholder is None:
-            current_placeholder = placeholder
-        elif current_placeholder.can_merge(placeholder):
-            current_placeholder = current_placeholder.merge(placeholder)
+    for match in sorted(matches, key=lambda x: x.start_idx):
+        if current_match is None:
+            current_match = match
+        elif (current_match.prompt_repl == match.prompt_repl
+              and current_match.end_idx == match.start_idx):
+            current_match = _PromptReplacementTokenMatch(
+                current_match.prompt_repl,
+                match=_TokenMatch(current_match.start_idx, match.end_idx),
+            )
         else:
-            yield current_placeholder
-            current_placeholder = placeholder
+            yield current_match
+            current_match = match
 
-    if current_placeholder is not None:
-        yield current_placeholder
+    if current_match is not None:
+        yield current_match
 
 
 def iter_placeholders(
@@ -521,21 +510,20 @@ def iter_placeholders(
     if min_unit_count <= 0:
         raise ValueError("`min_unit_count` must be a positive integer")
 
-    matches = [
-        _PromptReplacementTokenMatch(prompt_repl, match)
-        for prompt_repl in prompt_repls
-        if len(repl_unit := prompt_repl.repl_unit.token_ids) > 0
-        for match in iter_token_matches(prompt, repl_unit)
-    ]
+    matches = (_PromptReplacementTokenMatch(prompt_repl, match)
+               for prompt_repl in prompt_repls
+               if len(repl_unit := prompt_repl.repl_unit.token_ids) > 0
+               for match in iter_token_matches(prompt, repl_unit))
 
-    match_placeholders = (_PlaceholderInfo(
-        modality=match.modality,
-        start_idx=match.start_idx,
-        unit=match.prompt_repl.repl_unit.token_ids,
-        unit_count=1,
-    ) for match in _resolve_matches(prompt, matches))
+    for match in _merge_placeholder_matches(matches):
+        unit = match.repl_unit
+        placeholder = _PlaceholderInfo(
+            modality=match.modality,
+            start_idx=match.start_idx,
+            unit=unit,
+            unit_count=(match.end_idx - match.start_idx) // len(unit),
+        )
 
-    for placeholder in _merge_placeholders(match_placeholders):
         if placeholder.unit_count >= min_unit_count:
             yield placeholder
 
