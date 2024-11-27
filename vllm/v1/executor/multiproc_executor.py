@@ -101,7 +101,7 @@ class MultiprocExecutor:
         self.model_output_mq = MessageQueue.create_from_handle(
             model_output_mq_handle, 0)
 
-    def run_on_workers(self, fn: str, *args) -> List:
+    def _run_on_workers(self, fn: str, *args) -> List:
         with ThreadPoolExecutor() as executor:
             futures = [
                 executor.submit(getattr(type(w), fn), w, *args)
@@ -115,7 +115,7 @@ class MultiprocExecutor:
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        success_vals = self.run_on_workers('initialize', num_gpu_blocks)
+        success_vals = self._run_on_workers('initialize', num_gpu_blocks)
         if not all(success_vals):
             raise RuntimeError("Worker initialization failed.")
 
@@ -128,7 +128,7 @@ class MultiprocExecutor:
         underlying worker.
         """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self.run_on_workers('determine_num_available_blocks')
+        num_blocks = self._run_on_workers('determine_num_available_blocks')
 
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory

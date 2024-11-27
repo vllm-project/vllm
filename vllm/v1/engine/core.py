@@ -19,7 +19,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapper
-from vllm.v1.executor.uniproc_executor import UniprocExecutor
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
 from vllm.v1.utils import make_zmq_socket
@@ -38,7 +38,7 @@ class EngineCore:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[UniprocExecutor],
+        executor_class: Type[Executor],
         usage_context: UsageContext,
     ):
         # Override the configs for V1.
@@ -143,7 +143,7 @@ class EngineCoreProc(EngineCore):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[UniprocExecutor],
+        executor_class: Type[Executor],
         usage_context: UsageContext,
         input_path: str,
         output_path: str,
@@ -205,7 +205,7 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def make_engine_core_process(
         vllm_config: VllmConfig,
-        executor_class: Type[UniprocExecutor],
+        executor_class: Type[Executor],
         usage_context: UsageContext,
         input_path: str,
         output_path: str,

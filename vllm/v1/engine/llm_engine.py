@@ -1,4 +1,4 @@
-from typing import Dict, List, Mapping, Optional, Union
+from typing import Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -17,6 +17,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
+from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
@@ -27,7 +28,7 @@ class LLMEngine:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class,
+        executor_class: Type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
