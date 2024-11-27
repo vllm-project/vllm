@@ -30,9 +30,9 @@ class Telechat2Config(PretrainedConfig):
         hidden_dropout=0.0,
         attention_dropout=0.0,
         ffn_hidden_size=12288,
-        training_seqlen = 8192,
-        logn = True,
-        embed_layernorm = False,
+        training_seqlen=8192,
+        logn=True,
+        embed_layernorm=False,
         hidden_act="silu",
         **kwargs,
     ):
@@ -44,7 +44,8 @@ class Telechat2Config(PretrainedConfig):
         self.layer_norm_epsilon = layer_norm_epsilon
         self.initializer_range = initializer_range
         self.use_cache = use_cache
-        self.apply_residual_connection_post_layernorm = apply_residual_connection_post_layernorm
+        self.apply_residual_connection_post_layernorm = (
+            apply_residual_connection_post_layernorm)
         self.hidden_dropout = hidden_dropout
         self.attention_dropout = attention_dropout
         self.bos_token_id = bos_token_id
@@ -52,7 +53,9 @@ class Telechat2Config(PretrainedConfig):
         self.logn = logn
         self.training_seqlen = training_seqlen
         self.embed_layernorm = embed_layernorm
-        self.num_key_value_heads= kwargs.pop("num_key_value_heads", None)
+        self.num_key_value_heads = kwargs.pop("num_key_value_heads", None)
         self.ffn_hidden_size = ffn_hidden_size
         self.hidden_act = hidden_act
-        super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
+        super().__init__(bos_token_id=bos_token_id,
+                         eos_token_id=eos_token_id,
+                         **kwargs)
