@@ -9,8 +9,7 @@
 # label(str): the name of the test. emoji allowed.
 # fast_check(bool): whether to run this on each commit on fastcheck pipeline.
 # fast_check_only(bool): run this test on fastcheck pipeline only
-# nightly(bool): run this test in nightly pipeline only
-# optional(bool): never run this test by default (i.e. need to unblock manually)
+# optional(bool): never run this test by default (i.e. need to unblock manually) unless it's scheduled nightly run.
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for test. incompatbile with command.
 # mirror_hardwares(list): the list of hardwares to run the test on as well. currently only supports [amd]
@@ -51,7 +50,9 @@ steps:
   - tests/multimodal
   - tests/test_utils
   - tests/worker
+  - tests/test_lazy_torch_compile.py
   commands:
+  - python3 test_lazy_torch_compile.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
@@ -165,6 +166,14 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
+- label: V1 Test
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    - VLLM_USE_V1=1 pytest -v -s v1
+
 - label: Examples Test # 15min
   working_dir: "/vllm-workspace/examples"
   #mirror_hardwares: [amd]
@@ -221,7 +230,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore lora/test_long_context.py lora/test_chatglm3_tp.py lora/test_llama_tp.py
   parallelism: 4
 
 - label: "PyTorch Fullgraph Smoke Test" # 9min
@@ -269,7 +278,6 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
-  - pip install aiohttp
   - bash run-benchmarks.sh
 
 - label: Quantization Test # 33min
@@ -306,67 +314,70 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 3min
+- label: Basic Models Test # 30min
   source_file_dependencies:
   - vllm/
   - tests/models
   commands:
     - pip install -e ./plugins/vllm_add_dummy_model
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
+    - pytest -v -s models/test_registry.py
+    - pytest -v -s models/test_initialization.py
 
-- label: Decoder-only Language Models Test (Standard) # 35min
+- label: Language Models Test (Standard) # 42min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
+  - tests/models/embedding/language
+  - tests/models/encoder_decoder/language
   commands:
-    - pytest -v -s models/decoder_only/language/test_models.py
+    - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
+    - pytest -v -s models/embedding/language -m core_model
+    - pytest -v -s models/embedding/vision_language -m core_model
 
-- label: Decoder-only Language Models Test (Extended) # 1h20min
-  nightly: true
+- label: Language Models Test (Extended) # 50min
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
+  - tests/models/embedding/language
+  - tests/models/encoder_decoder/language
   commands:
-    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py
+    - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
+    - pytest -v -s models/embedding/language -m 'not core_model'
+    - pytest -v -s models/embedding/vision_language -m 'not core_model'
 
-- label: Decoder-only Multi-Modal Models Test (Standard)
+- label: Multi-Modal Models Test (Standard) # 26min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
+  - tests/models/embedding/vision_language
+  - tests/models/encoder_decoder/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m core_model
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
+    - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
+    - pytest -v -s models/encoder_decoder/language -m core_model
+    - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
-- label: Decoder-only Multi-Modal Models Test (Extended)
-  nightly: true
+- label: Multi-Modal Models Test (Extended) # 1h15m
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
+  - tests/models/embedding/vision_language
+  - tests/models/encoder_decoder/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m 'not core_model'
+    - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model'
-
-- label: Other Models Test # 6min
-  #mirror_hardwares: [amd]
-  source_file_dependencies:
-  - vllm/
-  - tests/models/embedding/language
-  - tests/models/embedding/vision_language
-  - tests/models/encoder_decoder/language
-  - tests/models/encoder_decoder/vision_language
-  commands:
-    - pytest -v -s models/embedding/language
-    - pytest -v -s models/embedding/vision_language
-    - pytest -v -s models/encoder_decoder/language
-    - pytest -v -s models/encoder_decoder/vision_language
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
+    - pytest -v -s models/encoder_decoder/language -m 'not core_model'
+    - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
@@ -464,18 +475,23 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
 
-- label: LoRA Long Context (Distributed) # 11min
-  # This test runs llama 13B, so it is required to run on 4 GPUs.
+- label: LoRA TP Test (Distributed)
   num_gpus: 4
   soft_fail: true
   source_file_dependencies:
   - vllm/lora
-  - tests/lora/test_long_context
+  - tests/lora
   commands:
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # This test runs llama 13B, so it is required to run on 4 GPUs.
     - pytest -v -s -x lora/test_long_context.py
+    # There is some Tensor Parallelism related processing logic in LoRA that 
+    # requires multi-GPU testing for validation.
+    - pytest -v -s -x lora/test_chatglm3_tp.py
+    - pytest -v -s -x lora/test_llama_tp.py
+
 
 - label: Weight Loading Multiple GPU Test  # 33min
   working_dir: "/vllm-workspace/tests"
@@ -503,6 +519,7 @@ steps:
 
 - label: Distributed Tests (A100) # optional
   gpu: a100
+  optional: true
   num_gpus: 4
   source_file_dependencies:
   - vllm/
@@ -516,6 +533,7 @@ steps:
 
 - label: LM Eval Large Models # optional
   gpu: a100
+  optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:

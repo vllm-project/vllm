@@ -382,14 +382,40 @@ def run_idefics3(question: str, modality: str):
     assert modality == "image"
     model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
 
-    llm = LLM(model=model_name,
-              max_model_len=8192,
-              max_num_seqs=2,
-              enforce_eager=True)
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        # if you are running out of memory, you can reduce the "longest_edge".
+        # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
+        mm_processor_kwargs={
+            "size": {
+                "longest_edge": 3 * 364
+            },
+        },
+    )
     prompt = (
         f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
     )
     stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Aria
+def run_aria(question: str, modality: str):
+    assert modality == "image"
+    model_name = "rhymes-ai/Aria"
+
+    llm = LLM(model=model_name,
+              tokenizer_mode="slow",
+              trust_remote_code=True,
+              dtype="bfloat16")
+
+    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
+              "<|im_end|>\n<|im_start|>assistant\n")
+
+    stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
     return llm, prompt, stop_token_ids
 
 
@@ -414,6 +440,7 @@ model_example_map = {
     "molmo": run_molmo,
     "glm4v": run_glm4v,
     "idefics3": run_idefics3,
+    "aria": run_aria,
 }
 
 

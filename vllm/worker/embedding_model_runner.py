@@ -8,7 +8,7 @@ from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
@@ -97,15 +97,20 @@ class EmbeddingModelRunner(
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-        with set_forward_context(model_input.attn_metadata):
+        cross_enc_kwargs = {}
+        if model_input.token_types is not None:
+            cross_enc_kwargs["token_type_ids"] = model_input.token_types
+
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device))
+                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+                                             device=self.device),
+                **cross_enc_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):

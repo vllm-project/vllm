@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SequenceGroupMetadata,
                            SequenceOutput)
@@ -247,11 +248,14 @@ def nvtx_range(msg, *args, **kwargs):
     Arguments:
         msg (string): message to associate with the range
     """
-    torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
-    try:
+    if current_platform.is_cuda_alike():
+        torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
+        try:
+            yield
+        finally:
+            torch.cuda.nvtx.range_pop()
+    else:
         yield
-    finally:
-        torch.cuda.nvtx.range_pop()
 
 
 class Timer:

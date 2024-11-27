@@ -1,24 +1,46 @@
 import glob
 import os
-import runpy
 import tempfile
 
 import depyf
 
-from vllm.compilation.levels import CompilationLevel
-
-# disable custom dispatcher, let Dynamo takes over
-# all the control
-os.environ['VLLM_TORCH_COMPILE_LEVEL'] = str(CompilationLevel.DYNAMO_AS_IS)
+from vllm.config import CompilationLevel
 
 temp_dir = tempfile.mkdtemp()
 with depyf.prepare_debug(temp_dir):
-    cur_dir = os.path.dirname(__file__)
-    parent_dir = os.path.dirname(cur_dir)
-    root_dir = os.path.dirname(parent_dir)
-    example_file = os.path.join(root_dir, "examples",
-                                "offline_inference_tpu.py")
-    runpy.run_path(example_file)
+    from vllm import LLM, SamplingParams
+
+    prompts = [
+        "A robot may not injure a human being",
+        "It is only with the heart that one can see rightly;",
+        "The greatest glory in living lies not in never falling,",
+    ]
+    answers = [
+        " or, through inaction, allow a human being to come to harm.",
+        " what is essential is invisible to the eye.",
+        " but in rising every time we fall.",
+    ]
+    N = 1
+    # Currently, top-p sampling is disabled. `top_p` should be 1.0.
+    sampling_params = SamplingParams(temperature=0.7,
+                                     top_p=1.0,
+                                     n=N,
+                                     max_tokens=16)
+
+    # Set `enforce_eager=True` to avoid ahead-of-time compilation.
+    # In real workloads, `enforace_eager` should be `False`.
+
+    # disable custom dispatcher, let Dynamo takes over
+    # all the control
+    llm = LLM(model="google/gemma-2b",
+              enforce_eager=True,
+              compilation_config={"level": CompilationLevel.DYNAMO_AS_IS})
+    outputs = llm.generate(prompts, sampling_params)
+    for output, answer in zip(outputs, answers):
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        assert generated_text.startswith(answer)
 
 compiled_code = sorted(
     glob.glob(os.path.join(temp_dir, "__transformed_code*.py")))
