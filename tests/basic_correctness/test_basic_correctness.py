@@ -19,8 +19,7 @@ from ..models.utils import check_outputs_equal
 from ..utils import multi_gpu_test
 
 MODELS = [
-    "facebook/opt-125m",
-    # "google/gemma-2-2b-it",
+    "google/gemma-2-2b-it",
     # "meta-llama/Llama-3.2-1B",
 ]
 
@@ -75,7 +74,9 @@ def test_models(
                     max_model_len=8192,
                     dtype=dtype,
                     enforce_eager=enforce_eager,
-                    gpu_memory_utilization=0.7) as vllm_model:
+                    distributed_executor_backend="ray",
+                    gpu_memory_utilization=0.7,
+                    tensor_parallel_size=4) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(

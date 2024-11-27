@@ -241,9 +241,9 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
         self.mq_broadcaster: Optional[MessageQueue] = None
-        if use_message_queue_broadcaster and self.world_size > 1:
-            self.mq_broadcaster = MessageQueue.create_from_process_group(
-                self.cpu_group, 1 << 22, 6)
+        # if use_message_queue_broadcaster and self.world_size > 1:
+        #     self.mq_broadcaster = MessageQueue.create_from_process_group(
+        #         self.cpu_group, 1 << 22, 6)
 
     @property
     def first_rank(self):

@@ -36,6 +36,7 @@ class GPUModelRunner:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        device: torch.device,
         input_registry: InputRegistry = INPUT_REGISTRY,
     ):
         self.vllm_config = vllm_config
@@ -54,7 +55,7 @@ class GPUModelRunner:
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
-        self.device = self.device_config.device
+        self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         if cache_config.cache_dtype == "auto":

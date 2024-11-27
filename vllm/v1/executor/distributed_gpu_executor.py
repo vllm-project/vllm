@@ -1,20 +1,29 @@
-import asyncio
 from abc import abstractmethod
-from typing import Any, Awaitable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Optional, Tuple
 
-from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.core.scheduler import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
 
 
-class DistributedGPUExecutor(GPUExecutor):
+class DistributedGPUExecutor:
     """Abstract superclass of multi-GPU executor implementations."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, vllm_config: VllmConfig):
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
@@ -27,7 +36,7 @@ class DistributedGPUExecutor(GPUExecutor):
             - tuple[num_gpu_blocks, num_cpu_blocks]
         """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self._run_workers("determine_num_available_blocks", )
+        num_blocks = self._run_workers("determine_num_available_blocks")
 
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
@@ -84,6 +93,4 @@ class DistributedGPUExecutor(GPUExecutor):
 
     @abstractmethod
     def check_health(self) -> None:
-        # SANG-TODO
         raise NotImplementedError
-

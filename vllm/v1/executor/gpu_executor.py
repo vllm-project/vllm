@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Tuple, Callable, Type, Dict, Any
+from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger

@@ -2,15 +2,16 @@ import importlib
 import os
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Union, Callable
-
-import msgspec
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import get_ip, update_environment_variables
 from vllm.v1.outputs import ModelRunnerOutput
+
+if TYPE_CHECKING:
+    from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
 PG_WAIT_TIMEOUT = 60
@@ -27,14 +28,14 @@ class WorkerWrapperBase:
     using worker_module_name and worker_class_name.
     """
 
-    def __init__(
-        self,
-        worker_module_name: str,
-        worker_class_name: str,
-        trust_remote_code: bool = False) -> None:
+    def __init__(self,
+                 worker_module_name: str,
+                 worker_class_name: str,
+                 trust_remote_code: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
         self.worker = None
+
         if trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -85,6 +86,7 @@ class WorkerWrapperBase:
             logger.exception(msg)
             raise e
 
+
 try:
     import ray
     from ray.util import placement_group_table
@@ -97,6 +99,7 @@ try:
         available_resources_per_node = _state._available_resources_per_node
 
     class RayWorkerWrapper(WorkerWrapperBase):
+
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
             # Since the compiled DAG runs a main execution
@@ -113,18 +116,21 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
-        def execute_model(
-            self,
-            scheduler_output: "SchedulerOutput",
-        ) -> ModelRunnerOutput:
+        def setup_device_if_necessary(self):
             # TODO(swang): This is needed right now because Ray CG executes
             # on a background thread, so we need to reset torch's current
             # device.
+            # We can remove this API after it is fixed in compiled graph.
             import torch
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
+        def execute_model(
+            self,
+            scheduler_output: "SchedulerOutput",
+        ) -> ModelRunnerOutput:
+            self.setup_device_if_necessary()
             output = self.worker.model_runner.execute_model(scheduler_output)
             return output
 

@@ -4,6 +4,7 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
+from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -18,6 +19,7 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.executor.ray_gpu_executor import RayGPUExecutor
 
 logger = init_logger(__name__)
 
@@ -99,7 +101,11 @@ class LLMEngine:
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig):
-        return GPUExecutor
+        if vllm_config.parallel_config.distributed_executor_backend == "ray":
+            initialize_ray_cluster(vllm_config.parallel_config)
+            return RayGPUExecutor
+        else:
+            return GPUExecutor
 
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
