@@ -127,7 +127,7 @@ async def test_healthcheck_response_time(
     tasks = [
         asyncio.create_task(create_func(**body)) for _ in range(num_requests)
     ]
-    await asyncio.sleep(1)
+    await asyncio.sleep(1)  # give the tasks a chance to start running
     load_response_time = get_response_time(server.url_for("health"))
 
     with contextlib.suppress(openai.APIStatusError):
