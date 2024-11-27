@@ -1,6 +1,6 @@
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Protocol, Set,
-                    Tuple, TypedDict, Union)
+from typing import (Iterable, List, Literal, Optional, Protocol, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import INPUT_REGISTRY, DummyData, InputContext
+from vllm.inputs import InputContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -24,14 +24,10 @@ from vllm.multimodal.processing import (InputProcessingContext,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
 
-from .clip import (CLIPVisionModel, dummy_image_for_clip,
-                   dummy_seq_data_for_clip, get_max_clip_image_tokens)
+from .clip import CLIPVisionModel, get_max_clip_image_tokens
 from .interfaces import SupportsMultiModal, SupportsPP
-from .pixtral import (PixtralHFVisionModel, dummy_image_for_pixtral_hf,
-                      dummy_seq_data_for_pixtral_hf,
-                      get_max_pixtral_hf_image_tokens)
-from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
-                     dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
+from .pixtral import PixtralHFVisionModel, get_max_pixtral_hf_image_tokens
+from .siglip import SiglipVisionModel, get_max_siglip_image_tokens
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -102,52 +98,6 @@ def get_max_llava_image_tokens(ctx: InputContext):
         return num_image_tokens
     else:
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
-
-def dummy_data_for_llava(ctx: InputContext, seq_len: int,
-                         mm_counts: Mapping[str, int]):
-    hf_config = ctx.get_hf_config(LlavaConfig)
-    vision_config = hf_config.vision_config
-    num_images = mm_counts["image"]
-
-    image_feature_size = get_max_llava_image_tokens(ctx)
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        seq_data, ranges = dummy_seq_data_for_clip(
-            vision_config,
-            seq_len,
-            num_images,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
-        )
-
-        mm_data = dummy_image_for_clip(vision_config, num_images)
-        return DummyData(seq_data, mm_data, ranges)
-    elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data, ranges = dummy_seq_data_for_siglip(
-            vision_config,
-            seq_len,
-            num_images,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
-        )
-
-        mm_data = dummy_image_for_siglip(vision_config, num_images)
-        return DummyData(seq_data, mm_data, ranges)
-    elif isinstance(vision_config, PixtralVisionConfig):
-        seq_data, ranges = dummy_seq_data_for_pixtral_hf(
-            vision_config,
-            seq_len,
-            num_images,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
-        )
-
-        mm_data = dummy_image_for_pixtral_hf(vision_config, num_images)
-        return DummyData(seq_data, mm_data, ranges)
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
 
 
 def create_metadata(
@@ -253,7 +203,6 @@ def init_vision_tower_for_llava(
 
 
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
 @MULTIMODAL_REGISTRY.register_processor_by_metadata(create_metadata)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
