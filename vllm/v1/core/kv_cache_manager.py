@@ -96,6 +96,7 @@ class KVCacheManager:
                                           self.block_size])
                 block_hash = hash_block_tokens(parent_block_hash,
                                                block_token_ids)
+                parent_block_hash = block_hash
                 if cached_block := self._get_cached_block(block_hash):
                     computed_blocks.append(cached_block)
                 else:
