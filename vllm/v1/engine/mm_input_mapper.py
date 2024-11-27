@@ -23,8 +23,9 @@ class MMInputMapper:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Dict[str, Any]],
     ) -> List[MultiModalKwargs]:
-        if self.mm_registry.has_processor(self.model_config):
-            return [MultiModalKwargs(mm_data)]  # Already processed
+        # Skip this redundant step if merged processor has been applied
+        if isinstance(mm_data, MultiModalKwargs):
+            return [mm_data]
 
         image_inputs = mm_data["image"]
         if not isinstance(image_inputs, list):
