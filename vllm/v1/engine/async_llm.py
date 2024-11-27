@@ -1,5 +1,5 @@
 import asyncio
-from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
+from typing import AsyncGenerator, Dict, List, Mapping, Optional, Union
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -20,7 +20,6 @@ from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.uniproc_executor import UniprocExecutor
 
 logger = init_logger(__name__)
 
