@@ -100,7 +100,7 @@ def get_max_llava_image_tokens(ctx: InputContext):
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
 
-def create_metadata(
+def create_metadata_for_llava(
         ctx: InputProcessingContext) -> MultiModalProcessingMetadata:
     hf_config = ctx.get_hf_config(LlavaConfig)
     image_token_id = hf_config.image_token_index
@@ -203,7 +203,7 @@ def init_vision_tower_for_llava(
 
 
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
-@MULTIMODAL_REGISTRY.register_processor_by_metadata(create_metadata)
+@MULTIMODAL_REGISTRY.register_processor_by_metadata(create_metadata_for_llava)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
