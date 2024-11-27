@@ -141,8 +141,8 @@ def test_models_distributed(
     with vllm_runner(model,
                      dtype=dtype,
                      tensor_parallel_size=2,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+                     distributed_executor_backend=distributed_executor_backend
+                     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     with hf_runner(model, dtype=dtype) as hf_model:

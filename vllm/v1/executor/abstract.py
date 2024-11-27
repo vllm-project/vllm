@@ -4,6 +4,7 @@ from typing import Tuple
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
+
 class Executor(ABC):
     """Abstract class for executors."""
 
