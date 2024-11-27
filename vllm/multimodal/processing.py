@@ -7,7 +7,7 @@ from typing import Any, Generic, NamedTuple, Optional, Protocol, TypeVar, Union
 
 import numpy as np
 import torch
-from transformers import BatchFeature
+from transformers import BatchFeature, ProcessorMixin
 from typing_extensions import TypeAlias, TypedDict
 
 from vllm.inputs import DummyData, InputProcessingContext
@@ -555,6 +555,12 @@ class MultiModalProcessor:
         self.ctx = ctx
         self.metadata = metadata
 
+    def _get_hf_processor(self) -> ProcessorMixin:
+        return self.ctx.get_hf_processor()
+
+    def _get_tokenizer(self) -> AnyTokenizer:
+        return self.ctx.tokenizer
+
     def __call__(
         self,
         prompt: str,
@@ -586,7 +592,7 @@ class MultiModalProcessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        hf_processor = self.ctx.get_hf_processor()
+        hf_processor = self._get_hf_processor()
 
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
@@ -606,12 +612,20 @@ class MultiModalProcessor:
             else:
                 processor_data[k] = v
 
-        hf_inputs = hf_processor(
-            text=prompt,  # type: ignore
-            **processor_data,
-            **mm_processor_kwargs,
-            return_tensors="pt",
-        )
+        try:
+            hf_inputs = hf_processor(
+                text=prompt,  # type: ignore
+                **processor_data,
+                **mm_processor_kwargs,
+                return_tensors="pt",
+            )
+        except Exception as exc:
+            data = dict(text=prompt, **processor_data)
+
+            raise RuntimeError(
+                f"Failed to apply {type(hf_processor).__name__} "
+                f"on data={data} with kwargs={mm_processor_kwargs}") from exc
+
         hf_inputs.update(passthrough_data)
 
         return hf_inputs
@@ -620,7 +634,7 @@ class MultiModalProcessor:
         self,
         mm_data: MultiModalDataDict,
     ) -> list[_BoundPromptReplacement[Any]]:
-        tokenizer = self.ctx.tokenizer
+        tokenizer = self._get_tokenizer()
 
         return [
             prompt_repl.bind(modality, tokenizer)
@@ -635,7 +649,7 @@ class MultiModalProcessor:
         token_ids: list[int],
         prompt_repls: Sequence[_BoundPromptReplacement[Any]],
     ) -> tuple[list[int], str, list[_PlaceholderInfo]]:
-        tokenizer = self.ctx.tokenizer
+        tokenizer = self._get_tokenizer()
 
         mm_items = to_multi_format(mm_data)
         token_matches = find_token_matches(token_ids, prompt_repls)
@@ -651,7 +665,7 @@ class MultiModalProcessor:
         # of the search text in the prompt, we instead perform string
         # replacement on the decoded token IDs, then encode them back.
         if all(
-            len(matches) >= len(mm_data[modality])
+            len(matches) >= len(mm_items[modality])
             for modality, matches in full_groupby_modality(token_matches)
         ):  # yapf: disable
             token_ids = replace_token_matches(
@@ -700,7 +714,7 @@ class MultiModalProcessor:
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        tokenizer = self.ctx.tokenizer
+        tokenizer = self._get_tokenizer()
 
         hf_inputs = self._apply_hf_processor(prompt_text, mm_data,
                                              mm_processor_kwargs)
@@ -749,7 +763,7 @@ class MultiModalProcessor:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        tokenizer = self.ctx.tokenizer
+        tokenizer = self._get_tokenizer()
 
         mm_placeholders = dict[str, list[_PlaceholderInfo]]()
         offset = 0
