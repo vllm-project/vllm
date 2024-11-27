@@ -15,7 +15,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import merge_async_iterators, random_uuid
+from vllm.utils import make_async, merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
@@ -145,9 +145,11 @@ class OpenAIServingScores(OpenAIServing):
                 tokenization_kwargs["truncation"] = True
                 tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
-            prompt_inputs = tokenizer(text=q,
-                                      text_pair=t,
-                                      **tokenization_kwargs)
+            tokenize_async = make_async(tokenizer.__call__,
+                                        executor=self._tokenizer_executor)
+            prompt_inputs = await tokenize_async(text=q,
+                                                 text_pair=t,
+                                                 **tokenization_kwargs)
             engine_prompt = TokensPrompt(
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
