@@ -5,24 +5,6 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class Telechat2Config(PretrainedConfig):
-    """
-    Args:
-        vocab_size (`int`, *optional*, defaults to 160256): Vocabulary size of the Telechat model.
-        hidden_size (`int`, *optional*, defaults to 4096): Dimensionality of the embeddings and hidden states.
-        ffn_hidden_size (`int`, *optional*, defaults to 12288): Dimensionality of the feed-forward hidden states.
-        n_layer (`int`, *optional*, defaults to 30): Number of hidden layers in the Transformer
-        n_head (`int`, *optional*, defaults to 32): Number of attention heads for each attention layer.
-        layer_norm_epsilon (`float`, *optional*, defaults to 1e-5): The epsilon to use in the layer normalization layers.
-        initializer_range (`float`, *optional*, defaults to 0.02): The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
-        apply_residual_connection_post_layernorm (`bool`, *optional*, defaults to `False`): If enabled, use the layer norm of the hidden states as the residual in the transformer blocks
-        hidden_dropout (`float`, *optional*, defaults to 0.0): Dropout rate of the dropout function on the bias dropout.
-        attention_dropout (`float`, *optional*, defaults to 0.0): Dropout rate applied to the attention probs
-        use_cache (`bool`, *optional*, defaults to `True`): Whether or not the model should return the last key/values attentions.
-        training_seqlen (`int`, *optional*, defaults to 8192): Sequence length during last finetuning.
-        logn (`bool`, *optional*, defaults to `True`): Whether or not to use logN during extrapolation.
-        embed_layernorm (`bool`, *optional*, defaults to `True`): Whether or not to use embedding layernorm.
-
-    """
 
     model_type = "telechat"
     keys_to_ignore_at_inference = ["past_key_values"]
