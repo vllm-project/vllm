@@ -493,6 +493,24 @@ def replace_text_matches(
     return "".join(texts)
 
 
+def _merge_placeholders(
+        placeholders: Iterable[_PlaceholderInfo]
+) -> Iterable[_PlaceholderInfo]:
+    current_placeholder = None
+
+    for placeholder in placeholders:
+        if current_placeholder is None:
+            current_placeholder = placeholder
+        elif current_placeholder.can_merge(placeholder):
+            current_placeholder = current_placeholder.merge(placeholder)
+        else:
+            yield current_placeholder
+            current_placeholder = placeholder
+
+    if current_placeholder is not None:
+        yield current_placeholder
+
+
 def iter_placeholders(
     prompt_repls: Sequence[_BoundPromptReplacement[Any]],
     prompt: list[int],
@@ -510,29 +528,16 @@ def iter_placeholders(
         for match in iter_token_matches(prompt, repl_unit)
     ]
 
-    current_placeholder = None
+    match_placeholders = (_PlaceholderInfo(
+        modality=match.modality,
+        start_idx=match.start_idx,
+        unit=match.prompt_repl.repl_unit.token_ids,
+        unit_count=1,
+    ) for match in _resolve_matches(prompt, matches))
 
-    for match in _resolve_matches(prompt, matches):
-        match_placeholder = _PlaceholderInfo(
-            modality=match.modality,
-            start_idx=match.start_idx,
-            unit=match.prompt_repl.repl_unit.token_ids,
-            unit_count=1,
-        )
-
-        if current_placeholder is None:
-            current_placeholder = match_placeholder
-        elif current_placeholder.can_merge(match_placeholder):
-            current_placeholder = current_placeholder.merge(match_placeholder)
-        else:
-            if current_placeholder.unit_count >= min_unit_count:
-                yield current_placeholder
-
-            current_placeholder = match_placeholder
-
-    if (current_placeholder is not None
-            and current_placeholder.unit_count >= min_unit_count):
-        yield current_placeholder
+    for placeholder in _merge_placeholders(match_placeholders):
+        if placeholder.unit_count >= min_unit_count:
+            yield placeholder
 
 
 class MultiModalProcessor:
