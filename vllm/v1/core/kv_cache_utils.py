@@ -180,13 +180,13 @@ def hash_request_tokens(
         token_ids: List[int],
         parent_block_hash: Optional[int] = None) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
-    token IDs and a parent block hash.
+    token IDs and the hash of last computed block(default None).
     The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
         token_ids: A sequence of token ids in the request.
-        parent_block_hash: The hash of last computed block in the request.
+        parent_block_hash: The hash of last computed block(default None).
 
     Returns:
         The list of computed hash values.
