@@ -83,13 +83,13 @@ class KVCacheManager:
         if num_full_blocks <= num_computed_blocks:
             return computed_blocks
 
-        parent_block_hash = computed_blocks[-1].block_hash if num_computed_blocks > 0 else None
+        parent_block_hash = computed_blocks[
+            -1].block_hash if num_computed_blocks > 0 else None
         for idx in range(num_computed_blocks, num_full_blocks):
             block_token_ids = tuple(
                 request.all_token_ids[idx * self.block_size:(idx + 1) *
                                       self.block_size])
-            block_hash = hash_block_tokens(parent_block_hash,
-                                           block_token_ids)
+            block_hash = hash_block_tokens(parent_block_hash, block_token_ids)
             parent_block_hash = block_hash
             if cached_block := self._get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
