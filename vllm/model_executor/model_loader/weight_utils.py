@@ -61,9 +61,11 @@ def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
     lock_dir = cache_dir or temp_dir
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
     model_name = model_name_or_path.replace("/", "-")
-    hash_name = hashlib.sha256(model_name.encode()).hexdigest()
     # add hash to avoid conflict with old users' lock files
-    lock_file_name = hash_name + model_name + ".lock"
+    hash_name = hashlib.sha256(model_name.encode()).hexdigest()
+    # Include the user name to avoid conflicts between different users
+    user_name = os.environ.get("USER", "")
+    lock_file_name = user_name + hash_name + model_name + ".lock"
     # mode 0o666 is required for the filelock to be shared across users
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
                              mode=0o666)
