@@ -1,9 +1,15 @@
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
-from vllm.sequence import SequenceGroupMetadata
-from vllm.spec_decode.util import get_all_seq_ids, split_batch_by_proposal_len
+from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.layers.sampler import _get_ranks
+from vllm.model_executor.layers.typical_acceptance_sampler import (
+    TypicalAcceptanceSampler)
+from vllm.sequence import SequenceGroupMetadata, get_all_seq_ids
+from vllm.spec_decode.util import (get_sampled_token_logprobs,
+                                   split_batch_by_proposal_len)
 
 
 def test_get_all_seq_ids():
@@ -51,10 +57,9 @@ def fake_sequence_group_metadata():
 
 def test_filter_zero_length_proposals(fake_sequence_group_metadata):
     proposal_lens = [0, 1, 0]
-    filtered_groups, indices = split_batch_by_proposal_len(
-        fake_sequence_group_metadata,
-        proposal_lens,
-        select_proposal_len_zero=True)
+    _, (filtered_groups,
+        indices) = split_batch_by_proposal_len(fake_sequence_group_metadata,
+                                               proposal_lens)
 
     expected_groups = [
         fake_sequence_group_metadata[0], fake_sequence_group_metadata[2]
@@ -67,10 +72,9 @@ def test_filter_zero_length_proposals(fake_sequence_group_metadata):
 
 def test_filter_non_zero_length_proposals(fake_sequence_group_metadata):
     proposal_lens = [0, 1, 2]
-    filtered_groups, indices = split_batch_by_proposal_len(
-        fake_sequence_group_metadata,
-        proposal_lens,
-        select_proposal_len_zero=False)
+    (filtered_groups,
+     indices), _ = split_batch_by_proposal_len(fake_sequence_group_metadata,
+                                               proposal_lens)
 
     expected_groups = [
         fake_sequence_group_metadata[1], fake_sequence_group_metadata[2]
@@ -82,8 +86,7 @@ def test_filter_non_zero_length_proposals(fake_sequence_group_metadata):
 
 
 def test_empty_inputs():
-    filtered_groups, indices = split_batch_by_proposal_len(
-        [], [], select_proposal_len_zero=True)
+    _, (filtered_groups, indices) = split_batch_by_proposal_len([], [])
 
     assert filtered_groups == []
     assert indices == []
@@ -91,10 +94,9 @@ def test_empty_inputs():
 
 def test_all_zero_with_non_zero_filter(fake_sequence_group_metadata):
     proposal_lens = [0, 0, 0]
-    filtered_groups, indices = split_batch_by_proposal_len(
-        fake_sequence_group_metadata,
-        proposal_lens,
-        select_proposal_len_zero=False)
+    (filtered_groups,
+     indices), _ = split_batch_by_proposal_len(fake_sequence_group_metadata,
+                                               proposal_lens)
 
     assert filtered_groups == []
     assert indices == []
@@ -102,10 +104,44 @@ def test_all_zero_with_non_zero_filter(fake_sequence_group_metadata):
 
 def test_all_non_zero_with_zero_filter(fake_sequence_group_metadata):
     proposal_lens = [1, 1, 1]
-    filtered_groups, indices = split_batch_by_proposal_len(
-        fake_sequence_group_metadata,
-        proposal_lens,
-        select_proposal_len_zero=True)
+    _, (filtered_groups,
+        indices) = split_batch_by_proposal_len(fake_sequence_group_metadata,
+                                               proposal_lens)
 
     assert filtered_groups == []
     assert indices == []
+
+
+def mock_spec_decode_sampler(acceptance_sampler_method):
+    """
+    Returns either a RejectionSampler or TypicalAcceptanceSampler
+    object depending on whether acceptance_sampler_method is 
+    'rejection_sampler' or 'typical_acceptance_sampler' respectively.
+    """
+    if acceptance_sampler_method == "rejection_sampler":
+        sampler = MagicMock(spec=RejectionSampler)
+        sampler.token_id_dtype = torch.int64
+        return sampler
+    elif acceptance_sampler_method == "typical_acceptance_sampler":
+        sampler = MagicMock(spec=TypicalAcceptanceSampler)
+        sampler.token_id_dtype = torch.int64
+        return sampler
+    else:
+        raise ValueError(f"Invalid sampler name {acceptance_sampler_method}")
+
+
+def test_get_sampled_token_logprobs():
+    """Verify get_sampled_token_logprobs returns consistent rankings 
+    with regular get_ranks when probabilities match exactly.
+    """
+    logprob_tensor = torch.tensor(
+        [[[-.1, -.1]] * 2])  # shape (num_steps, batch_size, vocab_size)
+    sampled_token_tensor = torch.tensor([[1,
+                                          0]])  # shape (num_steps, batch_size)
+    ranks_spec_dec, _ = get_sampled_token_logprobs(logprob_tensor,
+                                                   sampled_token_tensor)
+
+    ranks_regular = _get_ranks(logprob_tensor.reshape((2, -1)),
+                               sampled_token_tensor.reshape(-1))
+
+    assert torch.equal(ranks_spec_dec.reshape(-1), ranks_regular)

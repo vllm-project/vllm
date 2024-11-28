@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Optional, Set, Union
 
 import torch
 
 from vllm.sequence import ExecuteModelRequest
+from vllm.worker.worker_base import WorkerBase
 
 
 @dataclass
@@ -20,6 +22,9 @@ class SpeculativeProposals:
 
     # The valid length of each proposal; can be zero.
     proposal_lens: torch.Tensor
+
+    # A flag to mark that there's no available proposals
+    no_proposals: bool = False
 
     def __repr__(self):
         return (f"SpeculativeProposals("
@@ -46,6 +51,9 @@ class SpeculativeScores:
     # tokens and also non-speculative normal decoding.
     token_ids: torch.Tensor
 
+    # Optional last hidden states from the scoring model.
+    hidden_states: Optional[torch.Tensor] = None
+
     def __repr__(self):
         return (f"SpeculativeScores("
                 f"probs={self.probs.shape}, "
@@ -58,11 +66,22 @@ class SpeculativeProposer(ABC):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        # If set, this contains all sequence IDs that were assigned
+        # bonus tokens in their last forward pass.
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         raise NotImplementedError
 
 
 class SpeculativeScorer(ABC):
+
+    def __init__(self, scorer_worker: WorkerBase,
+                 device: Union[torch.device, str], vocab_size: int):
+        self._scorer_worker = scorer_worker
+        if isinstance(device, torch.device):
+            device = device.type
+        self._device = device
+        self._vocab_size = vocab_size
 
     @abstractmethod
     def score_proposals(

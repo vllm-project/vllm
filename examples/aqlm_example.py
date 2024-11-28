@@ -1,11 +1,10 @@
-import argparse
-
 from vllm import LLM, SamplingParams
+from vllm.utils import FlexibleArgumentParser
 
 
 def main():
 
-    parser = argparse.ArgumentParser(description='AQLM examples')
+    parser = FlexibleArgumentParser(description='AQLM examples')
 
     parser.add_argument('--model',
                         '-m',

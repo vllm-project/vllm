@@ -5,6 +5,15 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.platforms import current_platform
+
+# Static kernels parameters
+BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
+NUM_WARPS = 8
+
+# To check compatibility
+IS_TURING = current_platform.get_device_capability() == (7, 5)
+
 if triton.__version__ >= "2.1.0":
 
     @triton.jit
@@ -16,6 +25,8 @@ if triton.__version__ >= "2.1.0":
         V_cache,
         B_Loc,
         sm_scale,
+        k_scale,
+        v_scale,
         B_Start_Loc,
         B_Seqlen,
         B_Ctxlen,
@@ -46,6 +57,7 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
+        IN_PRECISION: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
@@ -115,13 +127,18 @@ if triton.__version__ >= "2.1.0":
                 cur_kv_head * stride_v_cache_h +
                 offs_d[None, :] * stride_v_cache_d +
                 (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl)
-            k = tl.load(K_cache + off_k,
-                        mask=dim_mask[:, None] &
-                        ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
-                        other=0.0)  # [D,N]
+            k_load = tl.load(K_cache + off_k,
+                             mask=dim_mask[:, None] &
+                             ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
+                             other=0.0)  # [D,N]
+
+            if k_load.dtype.is_fp8():
+                k = (k_load.to(tl.float32) * k_scale).to(q.dtype)
+            else:
+                k = k_load
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  # [M,N]
-            qk += tl.dot(q, k)
+            qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
                           float("-inf"))
             qk *= sm_scale
@@ -159,13 +176,17 @@ if triton.__version__ >= "2.1.0":
             acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
-            v = tl.load(V_cache + off_v,
-                        mask=dim_mask[None, :] &
-                        ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
-                        other=0.0)  # [N,D]
-
+            v_load = tl.load(V_cache + off_v,
+                             mask=dim_mask[None, :] &
+                             ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
+                             other=0.0)  # [N,D]
+            if v_load.dtype.is_fp8():
+                v = (v_load.to(tl.float32) * v_scale).to(q.dtype)
+            else:
+                v = v_load
             p = p.to(v.dtype)
-            acc += tl.dot(p, v)
+
+            acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
             # # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -191,7 +212,7 @@ if triton.__version__ >= "2.1.0":
                         other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk += tl.dot(q, k)
+            qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
             qk *= sm_scale
             # apply causal mask
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk,
@@ -223,9 +244,9 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_query_len),
                         other=0.0)
-
             p = p.to(v.dtype)
-            acc += tl.dot(p, v)
+
+            acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
             # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -334,7 +355,6 @@ if triton.__version__ >= "2.1.0":
             k = tl.load(K_cache + off_k,
                         mask=(start_n + offs_n[None, :]) < cur_batch_ctx_len,
                         other=0.0)
-
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
@@ -440,6 +460,8 @@ if triton.__version__ >= "2.1.0":
         V_cache,
         B_Loc,
         sm_scale,
+        k_scale,
+        v_scale,
         B_Start_Loc,
         B_Seqlen,
         B_Ctxlen,
@@ -471,6 +493,7 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
+        IN_PRECISION: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
@@ -535,13 +558,18 @@ if triton.__version__ >= "2.1.0":
                 cur_kv_head * stride_v_cache_h +
                 offs_d[None, :] * stride_v_cache_d +
                 (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl)
-            k = tl.load(K_cache + off_k,
-                        mask=dim_mask[:, None] &
-                        ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
-                        other=0.0)  # [D,N]
+            k_load = tl.load(K_cache + off_k,
+                             mask=dim_mask[:, None] &
+                             ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
+                             other=0.0)  # [D,N]
+
+            if k_load.dtype.is_fp8():
+                k = (k_load.to(tl.float32) * k_scale).to(q.dtype)
+            else:
+                k = k_load
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk += tl.dot(q, k)
+            qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
                           float("-inf"))
             qk *= sm_scale
@@ -571,13 +599,17 @@ if triton.__version__ >= "2.1.0":
             # acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
-            v = tl.load(V_cache + off_v,
-                        mask=dim_mask[None, :] &
-                        ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
-                        other=0.0)
-
+            v_load = tl.load(V_cache + off_v,
+                             mask=dim_mask[None, :] &
+                             ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
+                             other=0.0)
+            if v_load.dtype.is_fp8():
+                v = (v_load.to(tl.float32) * v_scale).to(q.dtype)
+            else:
+                v = v_load
             p = p.to(v.dtype)
-            acc += tl.dot(p, v, allow_tf32=False)
+
+            acc = tl.dot(p, v, acc=acc, input_precision='ieee')
             # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -612,7 +644,7 @@ if triton.__version__ >= "2.1.0":
                         other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk += tl.dot(q, k, allow_tf32=False)
+            qk = tl.dot(q, k, acc=qk, input_precision='ieee')
             qk *= sm_scale
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk,
                           float("-inf"))
@@ -648,9 +680,9 @@ if triton.__version__ >= "2.1.0":
                         ((start_n + offs_n[:, None]) <
                          cur_batch_seq_len - cur_batch_ctx_len),
                         other=0.0)
-
             p = p.to(v.dtype)
-            acc += tl.dot(p, v, allow_tf32=False)
+
+            acc = tl.dot(p, v, acc=acc, input_precision='ieee')
             # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -673,6 +705,7 @@ if triton.__version__ >= "2.1.0":
                               k,
                               v,
                               o,
+                              kv_cache_dtype: str,
                               k_cache,
                               v_cache,
                               b_loc,
@@ -680,11 +713,44 @@ if triton.__version__ >= "2.1.0":
                               b_seq_len,
                               b_ctx_len,
                               max_input_len,
+                              k_scale: float = 1.0,
+                              v_scale: float = 1.0,
                               alibi_slopes=None,
                               sliding_window=None):
 
-        cap = torch.cuda.get_device_capability()
-        BLOCK = 128 if cap[0] >= 8 else 64
+        q_dtype_is_f32 = q.dtype is torch.float32
+        # need to reduce num. blocks when using fp32
+        # due to increased use of GPU shared memory
+        # if q.dtype is torch.float32:
+        BLOCK = BASE_BLOCK // 2 if q_dtype_is_f32 else BASE_BLOCK
+
+        # Turing does have tensor core for float32 multiplication
+        # use ieee as fallback for triton kernels work. There is also
+        # warning on vllm/config.py to inform users this fallback
+        # implementation
+        IN_PRECISION = 'ieee' if IS_TURING and q_dtype_is_f32 else None
+
+        # Conversion of FP8 Tensor from uint8 storage to
+        # appropriate torch.dtype for interpretation by Triton
+        if "fp8" in kv_cache_dtype:
+            assert (k_cache.dtype == torch.uint8)
+            assert (v_cache.dtype == torch.uint8)
+
+            if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+                target_dtype = torch.float8_e4m3fn
+            elif kv_cache_dtype == "fp8_e5m2":
+                target_dtype = torch.float8_e5m2
+            else:
+                raise ValueError("Unsupported FP8 dtype:", kv_cache_dtype)
+
+            k_cache = k_cache.view(target_dtype)
+            v_cache = v_cache.view(target_dtype)
+
+        if (k_cache.dtype == torch.uint8
+                or v_cache.dtype == torch.uint8 and kv_cache_dtype == "auto"):
+            raise ValueError("kv_cache_dtype='auto' unsupported for\
+                FP8 KV Cache prefill kernel")
+
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv
@@ -701,7 +767,6 @@ if triton.__version__ >= "2.1.0":
         if sliding_window is None or sliding_window <= 0:
             sliding_window = 0
 
-        num_warps = 8 if Lk <= 64 else 8
         if alibi_slopes is not None:
             _fwd_kernel_alibi[grid](
                 q,
@@ -711,12 +776,14 @@ if triton.__version__ >= "2.1.0":
                 v_cache,
                 b_loc,
                 sm_scale,
+                k_scale,
+                v_scale,
                 b_start_loc,
                 b_seq_len,
                 b_ctx_len,
                 alibi_slopes,
                 v_cache.shape[3],
-                8,
+                k_cache.shape[4],
                 o,
                 b_loc.stride(0),
                 b_loc.stride(1),
@@ -745,11 +812,12 @@ if triton.__version__ >= "2.1.0":
                 v_cache.stride(
                     3),  #[num_blocks, num_kv_heads, head_size, block_size]
                 num_queries_per_kv=num_queries_per_kv,
+                IN_PRECISION=IN_PRECISION,
                 BLOCK_M=BLOCK,
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
                 BLOCK_N=BLOCK,
-                num_warps=num_warps,
+                num_warps=NUM_WARPS,
                 num_stages=1,
             )
             return
@@ -762,11 +830,13 @@ if triton.__version__ >= "2.1.0":
             v_cache,
             b_loc,
             sm_scale,
+            k_scale,
+            v_scale,
             b_start_loc,
             b_seq_len,
             b_ctx_len,
             v_cache.shape[3],
-            8,
+            k_cache.shape[4],
             o,
             b_loc.stride(0),
             b_loc.stride(1),
@@ -794,12 +864,13 @@ if triton.__version__ >= "2.1.0":
             v_cache.stride(
                 3),  #[num_blocks, num_kv_heads, head_size, block_size]
             num_queries_per_kv=num_queries_per_kv,
+            IN_PRECISION=IN_PRECISION,
             BLOCK_M=BLOCK,
             BLOCK_DMODEL=Lk,
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
             SLIDING_WINDOW=sliding_window,
-            num_warps=num_warps,
+            num_warps=NUM_WARPS,
             num_stages=1,
         )
         return

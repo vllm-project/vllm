@@ -1,0 +1,60 @@
+{%- if messages[0]["role"] == "system" %}
+    {%- set system_message = messages[0]["content"] %}
+    {%- set loop_messages = messages[1:] %}
+{%- else %}
+    {%- set loop_messages = messages %}
+{%- endif %}
+
+{%- if not tools is defined %}
+    {%- set tools = none %}
+{%- endif %}
+
+{{- bos_token }}
+{%- if system_message is defined %}
+{{- "<|im_start|>system\n" + system_message + "<|im_end|>\n" }}
+{%- endif %}
+
+{%- if tools is not none %}
+    {{- "<|im_start|>system name=<|plugin|>\n[" }}
+    {%- for tool in tools %}
+        {{- tool.function|tojson }}
+        {%- if not loop.last %}
+            {{- ", " }}
+        {%- else %}
+            {{- "]" }}
+        {%- endif %}
+    {%- endfor %}
+    {{- "<|im_end|>\n" }}
+{%- endif %}
+
+{%- for message in loop_messages %}
+    {%- if message["role"] == "user" %}
+        {{- "<|im_start|>user\n" + message["content"] + "<|im_end|>\n"}}
+    {%- elif message.tool_calls is defined and message.tool_calls is not none %}
+        {%- set content = message["content"] if message["content"] else "" %}
+        {{- "<|im_start|>assistant\n" + content }}
+        {%- for tool_call in message.tool_calls %}
+            {%- set function=tool_call.function %}
+            {{- "<|action_start|><|plugin|>\n" }}
+            {{- '{"name": "' + function.name + '", '}}
+            {{- '"arguments": ' + function.arguments|tojson + '}' }}
+            {{- "<|action_end|>" }}
+        {%- endfor %}
+        {{- "<|im_end|>\n" }}
+    {%- elif message["role"] == "assistant" %}
+        {{- "<|im_start|>assistant\n" + message["content"] + "<|im_end|>\n"}}
+    {%- elif message["role"] == "tool_results" or message["role"] == "tool" or message["role"] == "function" %}
+        {%- if message.content is defined and message.content.content is defined %}
+            {%- set content = message.content.content %}
+        {%- else %}
+            {%- set content = message.content %}
+        {%- endif %}
+        {{- "<|im_start|>environment name=<|plugin|>\n" + content|string + "<|im_end|>\n" }}
+    {%- else %}
+        {{- raise_exception("Only user and assistant and tool_results and tool and function roles are supported, with the exception of an initial optional system message!") }}
+    {%- endif %}
+{%- endfor %}
+
+{%- if add_generation_prompt %}
+{{- '<|im_start|>assistant\n' }}
+{%- endif %}

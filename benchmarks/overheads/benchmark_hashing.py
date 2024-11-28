@@ -1,8 +1,8 @@
-import argparse
 import cProfile
 import pstats
 
 from vllm import LLM, SamplingParams
+from vllm.utils import FlexibleArgumentParser
 
 # A very long prompt, total number of tokens is about 15k.
 LONG_PROMPT = ["You are an expert in large language models, aren't you?"
@@ -16,7 +16,6 @@ def main(args):
         enforce_eager=True,
         enable_prefix_caching=True,
         tensor_parallel_size=args.tensor_parallel_size,
-        use_v2_block_manager=args.use_v2_block_manager,
     )
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
@@ -47,7 +46,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description='Benchmark the performance of hashing function in'
         'automatic prefix caching.')
     parser.add_argument('--model', type=str, default='lmsys/longchat-7b-16k')
@@ -56,8 +55,5 @@ if __name__ == "__main__":
     parser.add_argument('--enable-prefix-caching',
                         action='store_true',
                         help='enable prefix caching')
-    parser.add_argument('--use-v2-block-manager',
-                        action='store_true',
-                        help='Use BlockSpaceMangerV2')
     args = parser.parse_args()
     main(args)

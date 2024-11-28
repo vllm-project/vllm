@@ -1,14 +1,19 @@
 [build-system]
 # Should be mirrored in requirements-build.txt
 requires = [
-    "cmake>=3.21",
+    "cmake>=3.26",
     "ninja",
     "packaging",
-    "setuptools >= 49.4.0",
-    "torch == 2.3.0",
+    "setuptools>=61",
+    "setuptools-scm>=8.0",
+    "torch == 2.5.1",
     "wheel",
+    "jinja2",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# version_file = "vllm/_version.py" # currently handled by `setup.py:get_version()`
 
 [tool.ruff]
 # Allow lines to be as long as 80.
@@ -18,6 +23,10 @@ exclude = [
     "examples/fp8/quantizer/quantize.py"
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"vllm/version.py" = ["F401"]
+"vllm/_version.py" = ["ALL"]
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
@@ -25,7 +34,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -41,16 +50,31 @@ ignore = [
     "E731",
     # Loop control variable not used within loop body
     "B007",
+    # f-string format
+    "UP032",
 ]
 
 [tool.mypy]
-python_version = "3.8"
-
 ignore_missing_imports = true
 check_untyped_defs = true
-follow_imports = "skip"
+follow_imports = "silent"
 
-files = "vllm"
+# After fixing type errors resulting from follow_imports: "skip" -> "silent",
+# move the directory here and remove it from tools/mypy.sh
+files = [
+    "vllm/*.py",
+    "vllm/adapter_commons",
+    "vllm/assets",
+    "vllm/entrypoints",
+    "vllm/core",
+    "vllm/inputs",
+    "vllm/logging_utils",
+    "vllm/multimodal",
+    "vllm/platforms",
+    "vllm/transformers_utils",
+    "vllm/triton_utils",
+    "vllm/usage",
+]
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 exclude = [
     "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
@@ -60,7 +84,7 @@ exclude = [
 
 [tool.codespell]
 ignore-words-list = "dout, te, indicies, subtile"
-skip = "./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
+skip = "./tests/models/fixtures,./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
 
 [tool.isort]
 use_parentheses = true
@@ -69,7 +93,10 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
-    "llm: run tests for vLLM API only",
-    "openai: run tests for OpenAI API only",
-    "llava: run tests for LLaVA models only",
+    "core_model: enable this model test in each PR instead of only nightly",
+    "cpu_model: enable this model test in CPU tests",
+    "quant_model: run this model test under Quantized category",
+    "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
+    "skip_v1: do not run this test with v1",
+    "optional: optional tests that are automatically skipped, include --optional to run them",
 ]

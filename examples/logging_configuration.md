@@ -95,9 +95,7 @@ to the path of the custom logging configuration JSON file:
 
 ```bash
 VLLM_LOGGING_CONFIG_PATH=/path/to/logging_config.json \
-    python3 -m vllm.entrypoints.openai.api_server \
-    --max-model-len 2048 \
-    --model mistralai/Mistral-7B-v0.1
+    vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
 
 
@@ -120,7 +118,7 @@ configuration for the root vLLM logger and for the logger you wish to silence:
 {
   "formatters": {
     "vllm": {
-      "class": "vllm.logging.NewLineFormatter",
+      "class": "vllm.logging_utils.NewLineFormatter",
       "datefmt": "%m-%d %H:%M:%S",
       "format": "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
     }
@@ -152,9 +150,7 @@ to the path of the custom logging configuration JSON file:
 
 ```bash
 VLLM_LOGGING_CONFIG_PATH=/path/to/logging_config.json \
-    python3 -m vllm.entrypoints.openai.api_server \
-    --max-model-len 2048 \
-    --model mistralai/Mistral-7B-v0.1
+    vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
 
 
@@ -167,9 +163,7 @@ loggers.
 
 ```bash
 VLLM_CONFIGURE_LOGGING=0 \
-    python3 -m vllm.entrypoints.openai.api_server \
-    --max-model-len 2048 \
-    --model mistralai/Mistral-7B-v0.1
+    vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
 
 

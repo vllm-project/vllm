@@ -1,9 +1,9 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -42,6 +42,7 @@ class Top1Proposer(SpeculativeProposer):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Get speculative proposals given the input batch.
 
@@ -65,13 +66,19 @@ class Top1Proposer(SpeculativeProposer):
             # token_ids is like [batch] format in proposal_len size list,
             # while if it is false, the format would be [proposal_len]
             # in batch size list
+            hidden_states = execute_model_req.previous_hidden_states
+            if hidden_states is not None:
+                hidden_states.prune(nonzero_proposal_len_seqs)
             nonzero_execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=nonzero_proposal_len_seqs,
                 num_lookahead_slots=proposal_len,
+                previous_hidden_states=hidden_states,
             )
             maybe_sampler_output, transposed = self._worker.sampler_output(
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
+                seq_ids_with_bonus_token_in_last_step=\
+                    seq_ids_with_bonus_token_in_last_step,
             )
             (
                 proposal_lens,
@@ -101,8 +108,7 @@ class Top1Proposer(SpeculativeProposer):
             proposal_token_ids=proposal_tokens,
             proposal_probs=proposal_probs,
             proposal_lens=proposal_lens,
-        )
-
+            no_proposals=maybe_sampler_output is None)
         return proposals
 
     def _split_by_proposal_len(
@@ -120,9 +126,10 @@ class Top1Proposer(SpeculativeProposer):
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
         nonzero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            # The speculative decoding for this request has been disabled
-            # (e.g. due to high traffic).
-            if seq_group_metadata.num_speculative_tokens == 0:
+            # The speculative decoding for this request has either been disabled
+            # (e.g. due to high traffic) or this is a prompt request.
+            if (seq_group_metadata.is_prompt
+                    or seq_group_metadata.num_speculative_tokens == 0):
                 proposal_lens.append(0)
                 continue
 
@@ -131,7 +138,7 @@ class Top1Proposer(SpeculativeProposer):
 
             # Currently only proposal lens of 0 or the global batch proposal len
             # are supported.
-            # If max_proposal_len is defined, then we shall no exccess this
+            # If max_proposal_len is defined, then we shall not exceed this
             # quota for nonzero_proposal
             new_k = 0
             if (self.max_proposal_len is None
@@ -212,7 +219,7 @@ class Top1Proposer(SpeculativeProposer):
         proposal_lens: List[int],
         nonzero_proposal_len_indices: List[int],
         sampler_transposed: bool,
-    ) -> Tuple[torch.Tensor, torch.tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """After speculations are produced, merge the speculation results with
         the skipped sequences.
         """
@@ -235,7 +242,7 @@ class Top1Proposer(SpeculativeProposer):
             return proposal_tokens, proposal_probs, proposal_lens_tensor
 
         sampler_output = maybe_sampler_output
-        proposal_tokens, proposal_probs, _ = sampler_output_to_torch(
+        proposal_tokens, proposal_probs, *_ = sampler_output_to_torch(
             sampler_output, sampler_transposed)
 
         # Now, reformat the output GPU tensors such that each sequence has

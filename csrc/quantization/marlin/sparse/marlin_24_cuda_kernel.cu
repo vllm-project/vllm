@@ -27,6 +27,8 @@
 #include <iostream>
 
 #include "common/base.h"
+#include "core/scalar_type.hpp"
+#include "core/registration.h"
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
@@ -86,7 +88,8 @@ __global__ void Marlin_24(
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   torch::Tensor& b_meta,
                                   torch::Tensor& b_scales,
-                                  torch::Tensor& workspace, int64_t num_bits,
+                                  torch::Tensor& workspace,
+                                  vllm::ScalarTypeId const b_q_type_id,
                                   int64_t size_m, int64_t size_n,
                                   int64_t size_k) {
   TORCH_CHECK_NOT_IMPLEMENTED(
@@ -293,13 +296,9 @@ __global__ void Marlin_24(
   // We use a different scale layout for grouped and column-wise quantization as
   // we scale a `half2` tile in column-major layout in the former and in
   // row-major in the latter case.
-  if (group_blocks != -1) {
-    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
-              (threadIdx.x % 32) / 4;
-  } else {
-    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
-              (threadIdx.x % 32) / 4;
-  }
+  s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+            (threadIdx.x % 32) / 4;  // Note that in the original Marlin kernel
+                                     // this is (threadIdx.x % 32) / 4
 
   // Precompute which thread should not read memory in which iterations; this is
   // needed if there are more threads than required for a certain tilesize or
@@ -404,10 +403,15 @@ __global__ void Marlin_24(
         meta_ptr[i] += m_gl_rd_delta_o;
       }
       // Only fetch scales if this tile starts a new group
-      if (group_blocks != -1 && pipe % (group_blocks / thread_k_blocks) == 0) {
-        int4* sh_s_stage = sh_s + s_sh_stage * pipe;
-        if (s_sh_wr_pred) cp_async4(&sh_s_stage[s_sh_wr], &s[s_gl_rd]);
-        s_gl_rd += s_gl_rd_delta;
+      if constexpr (group_blocks != -1) {
+        // This assumes group_blocks >= thread_k_blocks
+        // and would need to be modified to support smaller groups.
+        static_assert(group_blocks >= thread_k_blocks);
+        if (pipe % (group_blocks / thread_k_blocks) == 0) {
+          int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+          if (s_sh_wr_pred) cp_async4(&sh_s_stage[s_sh_wr], &s[s_gl_rd]);
+          s_gl_rd += s_gl_rd_delta;
+        }
       }
     }
     // Insert a fence even when we are winding down the pipeline to ensure that
@@ -432,7 +436,10 @@ __global__ void Marlin_24(
     // however, this does not seem to be a significant bottleneck, while some
     // theoretically better attempts have lead to bad instruction ordering by
     // the compiler and correspondingly a noticeable drop in performance.
-    if (group_blocks != -1) {
+    if constexpr (group_blocks != -1) {
+      // This assumes group_blocks >= thread_k_blocks
+      // and would need to be modified to support smaller groups.
+      static_assert(group_blocks >= thread_k_blocks);
       int4* sh_s_stage =
           sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
                                (pipe / (group_blocks / thread_k_blocks)));
@@ -899,13 +906,16 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
       // than better compute utilization
       thread_k = 128;
       thread_m = 128;
-    } else if (prob_n <= 256) {
+    } else {
       thread_k = 64;
       thread_m = 256;
-    } else {
-      thread_k = 32;
-      thread_m = 512;
     }
+    // Also had
+    // if prob_n > 256
+    //   thread_k = 32;
+    //   thread_m = 512;
+    // but this is broken,
+    // TODO(Lucas, Alex M): figure out why
   }
 
   int thread_k_blocks = thread_k / 32;  // 2:4 version with m16n8k32 instruction
@@ -1017,13 +1027,15 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   torch::Tensor& b_meta,
                                   torch::Tensor& b_scales,
-                                  torch::Tensor& workspace, int64_t num_bits,
+                                  torch::Tensor& workspace,
+                                  vllm::ScalarTypeId const b_q_type_id,
                                   int64_t size_m, int64_t size_n,
                                   int64_t size_k) {
+  vllm::ScalarType const b_q_type = vllm::ScalarType::from_id(b_q_type_id);
   // Verify num_bits
-  TORCH_CHECK(num_bits == 4 || num_bits == 8,
-              "num_bits must be 4 or 8. Got = ", num_bits);
-  int pack_factor = 32 / num_bits;
+  TORCH_CHECK(b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128,
+              "num_bits must be uint4b8 or uint8b128. Got = ", b_q_type.str());
+  int pack_factor = 32 / b_q_type.size_bits();
 
   // Verify M
   TORCH_CHECK(size_m == a.size(0),
@@ -1066,6 +1078,8 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   // Verify A device and strides
   TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
   TORCH_CHECK(a.is_contiguous(), "A is not contiguous");
+  TORCH_CHECK(a.dtype() == torch::kFloat16,
+              "A is not float16, currently only float16 is supported");
 
   // Verify B device and strides
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
@@ -1078,6 +1092,8 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   // Verify scales device and strides
   TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
   TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat16,
+              "A is not float16, currently only float16 is supported");
 
   // Alloc C matrix
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
@@ -1118,8 +1134,12 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   marlin_24::marlin_cuda_2_4(
       a.data_ptr(), b_q_weight.data_ptr(), b_meta.data_ptr(), c.data_ptr(),
       b_scales.data_ptr(), size_n, size_m, size_k, workspace.data_ptr(),
-      num_bits, groupsize, dev, at::cuda::getCurrentCUDAStream(dev), thread_k,
-      thread_m, sms, max_par);
+      b_q_type.size_bits(), groupsize, dev, at::cuda::getCurrentCUDAStream(dev),
+      thread_k, thread_m, sms, max_par);
 
   return c;
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("gptq_marlin_24_gemm", &gptq_marlin_24_gemm);
 }
