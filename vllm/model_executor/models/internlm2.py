@@ -322,7 +322,7 @@ class InternLM2Model(nn.Module):
 class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "wqkv": ["wqkv"],
-        "gate_up_proj": ["gate_proj", "up_proj"]
+        "gate_up_proj": ["w1", "w3"],
     }
 
     # LoRA specific attributes
