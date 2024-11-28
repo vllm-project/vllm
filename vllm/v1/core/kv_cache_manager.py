@@ -86,7 +86,8 @@ class KVCacheManager:
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
-            if cached_block := req_blocks[idx]:
+            cached_block = req_blocks[idx] if idx < len(req_blocks) else None
+            if cached_block:
                 computed_blocks.append(cached_block)
                 parent_block_hash = cached_block.block_hash
                 assert parent_block_hash
