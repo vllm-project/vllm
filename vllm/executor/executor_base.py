@@ -114,9 +114,11 @@ class ExecutorBase(ABC):
 
     def shutdown(self) -> None:
         """Shutdown the executor."""
+        print("ExecutorBase.shutdown")
         return
 
     def __del__(self):
+        print("Shutting down executor from destructor")
         self.shutdown()
 
 

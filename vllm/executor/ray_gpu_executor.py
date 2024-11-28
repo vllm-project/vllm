@@ -69,12 +69,16 @@ class RayGPUExecutor(DistributedGPUExecutor):
             Optional[List[SamplerOutput]])
 
     def shutdown(self) -> None:
+        logger.info("Shutting down RayGPUExecutor.")
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
+            logger.info("tearing down forward_dag.")
             self.forward_dag.teardown()
             import ray
             for worker in self.workers:
                 ray.kill(worker)
             self.forward_dag = None
+        else:
+            logger.info("hasattr=%s", hasattr(self, "forward_dag"))
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
@@ -491,6 +495,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
 
     def __del__(self):
+        logger.info("Shutting down RayGPUExecutor from destructor.")
         self.shutdown()
 
 
@@ -565,4 +570,5 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         return await asyncio.gather(*coros)
 
     def __del__(self):
+        logger.info("Shutting down RayGPUExecutor from destructor.")
         self.shutdown()
