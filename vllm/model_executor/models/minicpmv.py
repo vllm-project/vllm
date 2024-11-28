@@ -391,17 +391,15 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.vpm = self.init_vision_module(config,
                                            quant_config,
                                            prefix=maybe_prefix(prefix, "vpm"))
-        param_dtype = torch.get_default_dtype()
-        self.vpm.to(dtype=param_dtype)
         self.vision_dim = (self.vpm.embed_dim if self.version == (2, 0) else
                            self.vpm.embeddings.embed_dim)
         self.embed_dim = self.config.hidden_size
+
         self.resampler = self.init_resampler(self.embed_dim,
                                              self.vision_dim,
                                              quant_config=quant_config,
                                              prefix=maybe_prefix(
                                                  prefix, "resampler"))
-        self.resampler.to(device="cuda", dtype=param_dtype)
 
         self.make_empty_intermediate_tensors = (
             self.llm.make_empty_intermediate_tensors)
@@ -419,8 +417,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         image_inputs: Optional[MiniCPMVImageInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         vlm_embedding: torch.Tensor = self.llm.get_input_embeddings(input_ids)
-        if hasattr(self.config, "scale_emb"):
-            vlm_embedding *= self.config.scale_emb
 
         if image_inputs is None:  # No image
             vision_hidden_states = torch.tensor([], device=input_ids.device)
@@ -657,11 +653,12 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig],
         prefix: str = "",
     ) -> nn.Module:
-        # TODO :refactor this vision model
+        # TODO: refactor this vision model
         try:
             import timm
         except ImportError:
             raise ImportError("Please install timm==0.9.10") from ImportError
+
         with set_default_torch_dtype(torch.float16):
             model = timm.create_model(
                 "vit_so400m_patch14_siglip_384.webli",
@@ -670,6 +667,8 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                 dynamic_img_size=True,
                 dynamic_img_pad=True,
             )
+
+        model = model.to(dtype=torch.get_default_dtype())
 
         if (isinstance(model, timm.models.VisionTransformer)
                 and model.attn_pool is not None):
@@ -699,7 +698,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                                    quant_config=quant_config,
                                    prefix=prefix)
 
-        return resampler
+        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -807,7 +806,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                      kv_dim=vision_dim,
                                      quant_config=quant_config,
                                      prefix=prefix)
-        return resampler
+
+        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -927,7 +927,8 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                                      kv_dim=vision_dim,
                                      quant_config=quant_config,
                                      prefix=prefix)
-        return resampler
+
+        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
