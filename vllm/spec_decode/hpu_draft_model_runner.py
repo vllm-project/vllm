@@ -50,9 +50,19 @@ class HPUTP1DraftModelRunner(ModelRunnerBaseCls):
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if previous_hidden_states is not None:
-            _, block_size = model_input.input_tokens.shape
-            previous_hidden_states = previous_hidden_states.expand(
-                block_size, -1).unsqueeze(0)
+            batch_size, block_size = model_input.input_tokens.shape
+            previous_hidden_states = previous_hidden_states.unsqueeze(
+                dim=1).expand(-1, block_size, -1)
+            # because HPU will pad batch_size,
+            # we need to pad previous_hidden_states as well
+            batch_size_padding = batch_size - previous_hidden_states.shape[0]
+            if batch_size_padding > 0:
+                dummy_previous_hidden_states = torch.zeros_like(
+                    previous_hidden_states[1:2]).expand(
+                        batch_size_padding, -1, -1)
+                previous_hidden_states = torch.cat(
+                    [previous_hidden_states, dummy_previous_hidden_states],
+                    dim=0)
         return super().execute_model(
             model_input=model_input,
             kv_caches=kv_caches,

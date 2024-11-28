@@ -538,6 +538,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self._set_gc_threshold()
         self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
                                                 'true').lower() == 'true'
+        if vllm_config.speculative_config is not None \
+            and self.use_contiguous_pa:
+            raise ValueError(
+                "Speculative decoding is not supported with "
+                "contiguous PA, please set VLLM_CONTIGUOUS_PA=false")
         # For multi-step scheduling
         self.cached_step_outputs: List[torch.Tensor] = []
 

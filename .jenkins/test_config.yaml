@@ -44,3 +44,8 @@ stages:
       - name: gsm8k_small_g2_tp2_mss
         flavor: g2.s
         command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 2
+  - name: test_gsm8k_spec_decode
+    steps:
+      - name: gsm8k_small_g2_tp1_spec_decode
+        flavor: g2
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 1

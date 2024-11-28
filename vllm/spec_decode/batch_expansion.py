@@ -6,6 +6,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID, VLLM_TOKEN_ID_ARRAY_TYPE,
                            ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
@@ -159,11 +160,18 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_sampler_output will be contracted to.
         """
         contracted_bs = len(contracted_seq_group_metadata_list)
-        (target_token_ids, target_probs, target_logprobs, target_hidden_states,
-         non_spec_target_token_ids, non_spec_target_probs,
-         non_spec_target_logprobs,
-         non_spec_target_hidden_states) = self._split_scoring_output(
-             target_sampler_output, num_scoring_tokens)
+        if current_platform.is_hpu():
+            (target_token_ids, target_probs, target_logprobs,
+             target_hidden_states, non_spec_target_token_ids,
+             non_spec_target_probs, non_spec_target_logprobs,
+             non_spec_target_hidden_states) = self._split_scoring_output_hpu(
+                 target_sampler_output, num_scoring_tokens)
+        else:
+            (target_token_ids, target_probs, target_logprobs,
+             target_hidden_states, non_spec_target_token_ids,
+             non_spec_target_probs, non_spec_target_logprobs,
+             non_spec_target_hidden_states) = self._split_scoring_output(
+                 target_sampler_output, num_scoring_tokens)
 
         # Map distinct sequences used to score each token
         # of shape [batch_size * k + 1] back to [batch_size, k + 1].
@@ -239,18 +247,30 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # Map distinct sequences used to score each token
         # of shape [batch_size * k + 1] back to [batch_size, k + 1].
         contracted_bs, k = proposals.proposal_token_ids.shape
-
-        (
-            target_sampler_output.sampled_token_ids,
-            target_sampler_output.sampled_token_probs,
-            target_sampler_output.logprobs,
-            target_sampler_output.hidden_states,
-            _,
-            _,
-            _,
-            _,
-        ) = self._split_scoring_output(target_sampler_output,
-                                       num_scoring_tokens)
+        if current_platform.is_hpu():
+            (
+                target_sampler_output.sampled_token_ids,
+                target_sampler_output.sampled_token_probs,
+                target_sampler_output.logprobs,
+                target_sampler_output.hidden_states,
+                _,
+                _,
+                _,
+                _,
+            ) = self._split_scoring_output_hpu(target_sampler_output,
+                                               num_scoring_tokens)
+        else:
+            (
+                target_sampler_output.sampled_token_ids,
+                target_sampler_output.sampled_token_probs,
+                target_sampler_output.logprobs,
+                target_sampler_output.hidden_states,
+                _,
+                _,
+                _,
+                _,
+            ) = self._split_scoring_output(target_sampler_output,
+                                           num_scoring_tokens)
 
         # Reshape tensors to original batch size
         target_token_ids = target_sampler_output.sampled_token_ids.reshape(
@@ -396,6 +416,47 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             lora_request=None,
             token_chunk_size=1,
         )
+
+    @staticmethod
+    def _split_scoring_output_hpu(
+        sampler_output: SamplerOutput, num_scoring_tokens: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+               Optional[torch.Tensor], torch.Tensor, torch.Tensor,
+               torch.Tensor, Optional[torch.Tensor]]:
+        """Split the target model output into speculative and non-speculative
+        output.
+        """
+
+        # vLLM currently only supports proposal lens equal to zero or the batch
+        # proposal len. This adds some complexity (splitting the batch into spec
+        # and non spec sequences) and should be removed in the future. It can be
+        # done by supporting per-sequence proposal lens.
+        #
+        # First samples are from speculative scoring, latter samples are non-
+        # speculative samples.
+        split_sizes = (num_scoring_tokens,
+                       sampler_output.sampled_token_ids.numel() -
+                       num_scoring_tokens)
+        (spec_probs, non_spec_probs
+         ) = sampler_output.sampled_token_probs.split(split_sizes)
+        (spec_sampled_tokens, non_spec_sampled_tokens
+         ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
+        (
+            spec_logprobs,
+            non_spec_logprobs,
+        ) = sampler_output.logprobs.split(split_sizes)
+
+        if sampler_output.hidden_states is not None:
+            (
+                spec_hidden_states,
+                non_spec_hidden_states,
+            ) = sampler_output.hidden_states.split(split_sizes)
+        else:
+            spec_hidden_states, non_spec_hidden_states = None, None
+
+        return (spec_sampled_tokens, spec_probs, spec_logprobs,
+                spec_hidden_states, non_spec_sampled_tokens, non_spec_probs,
+                non_spec_logprobs, non_spec_hidden_states)
 
     @staticmethod
     def _split_scoring_output(
