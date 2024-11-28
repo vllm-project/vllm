@@ -933,7 +933,7 @@ class EngineArgs:
             default=EngineArgs.kv_buffer_device,
             choices=["cpu", "cuda"],
             help="The device used by kv connector to buffer the KV cache. Can "
-            "be CPU or GPU. Recommended value: CPU.")
+            "be cpu or cuda. Recommended value: cuda.")
 
         parser.add_argument(
             '--kv-role',
