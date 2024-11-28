@@ -52,6 +52,28 @@ def run_vllm(requests: List[SampleRequest],
     guided_decoding_req_idx = random.sample(
         range(len(requests)), int(len(requests) * guided_decoding_rate))
 
+    if warmup:
+        print(">>>>> Running warmup prompt, for the first 5")
+        # We setup the first 5 requests to warmup FSM
+        # if using xgrammar dataset, we will skip warmup
+        warmup_requests = requests[:5]
+        for i, request in enumerate(warmup_requests):
+            prompts.append(request.prompt)
+            sampling_params.append(
+                SamplingParams(
+                    n=n,
+                    temperature=1.0,
+                    top_p=1.0,
+                    ignore_eos=True,
+                    max_tokens=request.expected_output_len,
+                    guided_decoding=GuidedDecodingParams(json=request.schema)
+                    if guided_decoding_rate > 0 else None,
+                ))
+        llm.generate(prompts, sampling_params, use_tqdm=False)
+
+    print(">>>>> Benchmark started...")
+    prompts = []
+    sampling_params = []
     for i, request in enumerate(requests):
         prompts.append(request.prompt)
         sampling_params.append(
@@ -67,7 +89,7 @@ def run_vllm(requests: List[SampleRequest],
             ))
 
     start = time.perf_counter()
-    outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+    outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
     ret = []
     for output, request in zip(outputs, requests):
         generated_text = output.outputs[0].text
@@ -98,10 +120,10 @@ async def run_vllm_async(
             range(len(requests)), int(len(requests) * guided_decoding_rate))
 
         if warmup:
-            print("Running warmup prompt, for the first 5")
+            print(">>>>>> Running warmup prompt, for the first 5")
             # We setup the first 5 requests to warmup FSM
+            # if using xgrammar dataset, we will skip warmup
             warmup_requests = requests[:5]
-            requests = requests[5:]
             for i, request in enumerate(warmup_requests):
                 prompts.append(request.prompt)
                 sampling_params.append(
@@ -113,7 +135,7 @@ async def run_vllm_async(
                         max_tokens=request.expected_output_len,
                         guided_decoding=GuidedDecodingParams(
                             json=request.schema)
-                        if i in guided_decoding_req_idx else None,
+                        if guided_decoding_rate > 0 else None,
                     ))
             generators = []
             for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
@@ -123,6 +145,7 @@ async def run_vllm_async(
             async for i, res in all_gens:
                 pass
 
+        print(">>>>> Benchmark started...")
         prompts = []
         sampling_params = []
         for i, request in enumerate(requests):
@@ -157,11 +180,11 @@ async def run_vllm_async(
             'generated': gt,
             'expected': req.completion
         } for gt, req in zip(generated_texts, requests)]
+        end = time.perf_counter()
         first_latency = sum([lat[0]
                              for lat in latencies]) / len(latencies) * 1000
         next_latency = sum([(lat[-1] - lat[0]) / len(lat[1:])
                             for lat in latencies]) / len(latencies) * 1000
-        end = time.perf_counter()
         return end - start, ret, (first_latency, next_latency)
 
 
@@ -249,6 +272,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         ]
 
     elif args.dataset == "xgrammar_bench":
+        args.warmup = False
         requests: List[SampleRequest] = []
         dataset = datasets.load_dataset("NousResearch/json-mode-eval",
                                         split="train")
