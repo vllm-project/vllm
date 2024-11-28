@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config import KVTransferConfig
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.buffer import (
     LookupBuffer)
@@ -33,10 +33,10 @@ class PyNcclConnector(KVConnectorBase):
         self,
         rank: int,
         local_rank: int,
-        config: KVTransferConfig,
+        config: VllmConfig,
     ):
 
-        self.config = config
+        self.config = config.kv_transfer_config
 
         self.lookup_buffer_size = self.config.kv_buffer_size
 
@@ -48,22 +48,24 @@ class PyNcclConnector(KVConnectorBase):
 
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
-        if config.is_kv_producer:
+        if self.config.is_kv_producer:
 
             self.producer_data_pipe = PyNcclPipe(
                 local_rank=local_rank,
-                config=config,
+                config=self.config,
                 port_offset=port_offset_base,
             )
             self.producer_signal_pipe = PyNcclPipe(
                 local_rank=local_rank,
-                config=config,
+                config=self.config,
                 port_offset=port_offset_base + 1,
                 device="cpu",
             )
-            self.producer_buffer = LookupBuffer(self.producer_signal_pipe,
-                                                self.producer_data_pipe,
-                                                config.kv_buffer_size)
+            self.producer_buffer = LookupBuffer(
+                self.producer_signal_pipe,
+                self.producer_data_pipe,
+                self.config.kv_buffer_size
+            )
 
         else:
 
@@ -71,19 +73,19 @@ class PyNcclConnector(KVConnectorBase):
             # its recv pipe to the send pipe of KV producder
             self.consumer_data_pipe = PyNcclPipe(
                 local_rank=local_rank,
-                config=config,
+                config=self.config,
                 port_offset=port_offset_base,
             )
             self.consumer_signal_pipe = PyNcclPipe(
                 local_rank=local_rank,
-                config=config,
+                config=self.config,
                 port_offset=port_offset_base + 1,
                 device="cpu",
             )
             self.consumer_buffer = LookupBuffer(
                 self.consumer_signal_pipe,
                 self.consumer_data_pipe,
-                config.kv_buffer_size,
+                self.config.kv_buffer_size,
             )
 
     def select(self, input_tokens: Optional[torch.Tensor],

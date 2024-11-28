@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, List, Tuple, Union
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+    from vllm.config import VllmConfig
 
 import torch
 
@@ -46,12 +47,17 @@ class KVTransferAgent:
         self,
         rank: int,
         local_rank: int,
-        config,
+        config: "VllmConfig",
     ):
 
         self.config = config
-        assert self.config.is_kv_transfer_instance, "KV cache transfer "\
-            "agent should only be used when kv_connector is set."
+
+        if config.kv_transfer_config is None:
+            raise ValueError("KVTransferConfig is not set in the VllmConfig,"
+                             " cannot initialize KVConnector.")
+
+        assert self.config.kv_transfer_config.is_kv_transfer_instance, "KV"\
+            "TransferAgent should only be used when kv_connector is set."
 
         self.connector = KVConnectorFactory.create_connector(
             rank, local_rank, config)

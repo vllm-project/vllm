@@ -42,7 +42,7 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_custom_op
 
 if TYPE_CHECKING:
-    from vllm.config import KVTransferConfig
+    from vllm.config import VllmConfig 
 
 
 @dataclass
@@ -1103,17 +1103,19 @@ def initialize_model_parallel(
                                     group_name="pp")
 
 
-def ensure_kv_transfer_initialized(config: "KVTransferConfig") -> None:
+def ensure_kv_transfer_initialized(config: "VllmConfig") -> None:
     """
     Initialize KV cache transfer parallel group.
     """
 
     global _KV_TRANSFER
 
-    if config is None:
+    if config.kv_transfer_config is None:
         return
 
-    if all([config.need_kv_parallel_group, _KV_TRANSFER is None]):
+    if all([
+        config.kv_transfer_config.need_kv_parallel_group, 
+        _KV_TRANSFER is None]):
         _KV_TRANSFER = kv_transfer.KVTransferAgent(
             rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,

@@ -3,6 +3,19 @@
 # We will launch 2 vllm instances (1 for prefill and 1 for decode),
 # and then transfer the KV cache between them.
 
+# Trap the SIGINT signal (triggered by Ctrl+C)
+trap 'cleanup' INT
+
+# Cleanup function
+cleanup() {
+    echo "Caught Ctrl+C, cleaning up..."
+    # Cleanup commands, suppressing their output
+    pgrep pt_main_thread | xargs kill -9 > /dev/null 2>&1
+    pkill -f python3 > /dev/null 2>&1
+    echo "Cleanup complete. Exiting."
+    exit 0
+}
+
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
 # install quart first -- required for disagg prefill proxy serve
