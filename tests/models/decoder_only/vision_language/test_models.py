@@ -314,6 +314,9 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        postprocess_inputs=model_utils.ignore_inputs_post_processor(
+            "image_sizes"
+        ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
     ),
     # Tests for phi3v currently live in another file because of a bug in
