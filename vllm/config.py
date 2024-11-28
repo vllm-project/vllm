@@ -91,6 +91,8 @@ class ModelConfig:
             the default version.
         max_model_len: Maximum length of a sequence (including prompt and
             output). If None, will be derived from the model.
+        spec_target_max_model_len: Specify the the maximum length for spec
+            decoding draft models.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
         quantization_param_path: Path to JSON file containing scaling factors.
@@ -107,6 +109,7 @@ class ModelConfig:
             to eager mode. Additionally for encoder-decoder models, if the
             sequence length of the encoder input is larger than this, we fall
             back to the eager mode.
+        max_logprobs: Maximum number of log probabilities. Defaults to 20.
         disable_sliding_window: Whether to disable sliding window. If True,
             we will disable the sliding window functionality of the model.
             If the model does not support sliding window, this argument is
@@ -119,6 +122,8 @@ class ModelConfig:
             the model name will be the same as `model`.
         limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
+        use_async_output_proc: Whether to use async output processor.
+            Defaults to True.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
@@ -130,7 +135,7 @@ class ModelConfig:
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
             can not be gathered from the vllm arguments.
-        override_pooling_config: Initialize non default pooling config or
+        override_pooler_config: Initialize non default pooling config or
             override default pooling config for the embedding model.
     """
 
@@ -735,8 +740,13 @@ class CacheConfig:
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
         cache_dtype: Data type for kv cache storage.
+        is_attention_free: Whether the model is attention-free.
         num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
+        sliding_window: Sliding window size for the KV cache. Can not work with
+            prefix caching enabled.
+        enable_prefix_caching: Whether to enable prefix caching.
+        cpu_offload_gb: Size of the CPU offload buffer in GiB.
     """
 
     def __init__(
@@ -905,6 +915,7 @@ class LoadConfig:
             "tensorizer" will use CoreWeave's tensorizer library for
                 fast weight loading.
             "bitsandbytes" will load nf4 type weights.
+        model_loader_extra_config: The extra config for the model loader.
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
