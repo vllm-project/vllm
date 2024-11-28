@@ -138,8 +138,11 @@ class KVCacheManager:
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
                 # [..., max_num_blocks_per_req].
+                # TODO(woosuk): Check and reject requests if
+                # num_prompt_tokens + max_tokens > max_model_len.
                 self.max_num_blocks_per_req - len(req_blocks),
             )
+            assert num_new_blocks > 0
 
             new_blocks = self._get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
@@ -222,8 +225,11 @@ class KVCacheManager:
             # Should not exceed the maximum number of blocks per request.
             # This is especially because the block table has the shape
             # [..., max_num_blocks_per_req].
+            # TODO(woosuk): Check and reject requests if
+            # num_prompt_tokens + max_tokens > max_model_len.
             self.max_num_blocks_per_req - len(computed_blocks),
         )
+        assert num_new_blocks > 0
 
         # Concatenate the computed block IDs and the new block IDs.
         new_blocks = self._get_new_blocks(num_new_blocks)
