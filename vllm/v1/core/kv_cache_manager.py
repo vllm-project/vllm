@@ -17,12 +17,15 @@ class KVCacheManager:
         self,
         block_size: int,
         num_gpu_blocks: int,
+        max_model_len: int,
         sliding_window: Optional[int] = None,
         enable_caching: bool = True,
         num_preallocate_tokens: int = 64,
     ) -> None:
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
+        self.max_model_len = max_model_len
+        self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
         self.sliding_window = sliding_window
         self.enable_caching = enable_caching
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
@@ -132,6 +135,10 @@ class KVCacheManager:
             num_new_blocks = min(
                 num_new_blocks + self.num_preallocate_blocks,
                 self.free_block_queue.num_free_blocks,
+                # Should not exceed the maximum number of blocks per request.
+                # This is especially because the block table has the shape
+                # [..., max_num_blocks_per_req].
+                self.max_num_blocks_per_req - len(req_blocks),
             )
 
             new_blocks = self._get_new_blocks(num_new_blocks)
@@ -212,6 +219,10 @@ class KVCacheManager:
             num_required_blocks + self.num_preallocate_blocks,
             self.free_block_queue.num_free_blocks -
             num_evictable_computed_blocks,
+            # Should not exceed the maximum number of blocks per request.
+            # This is especially because the block table has the shape
+            # [..., max_num_blocks_per_req].
+            self.max_num_blocks_per_req - len(computed_blocks),
         )
 
         # Concatenate the computed block IDs and the new block IDs.
