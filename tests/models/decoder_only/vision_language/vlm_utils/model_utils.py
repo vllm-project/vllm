@@ -199,7 +199,7 @@ def get_key_type_post_processor(
 
 def ignore_inputs_post_processor(
         hf_inp_key: str) -> Callable[[BatchEncoding, str], BatchEncoding]:
-    """Gets a handle to a post processor which ignores a givenkey."""
+    """Gets a handle to a post processor which ignores a given key."""
 
     def process(hf_inputs: BatchEncoding, dtype: str):
         del hf_inputs[hf_inp_key]
