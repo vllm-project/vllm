@@ -11,5 +11,4 @@ spec:
       targetPort: {{ include "chart.container-port-name" . }}
       protocol: TCP
   selector:
-    environment: test
-    release: test
+  {{- include "chart.labels" . | nindent 4 }}
