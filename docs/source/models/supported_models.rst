@@ -139,6 +139,11 @@ Text Generation
     - :code:`google/gemma-2-9b`, :code:`google/gemma-2-27b`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`GlmForCausalLM`
+    - GLM-4
+    - :code:`THUDM/glm-4-9b-chat-hf`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
