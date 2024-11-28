@@ -11,7 +11,7 @@ from .registry import HF_EXAMPLE_MODELS
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
 def test_can_initialize(model_arch):
-    if (model_arch == "Idefics3ForConditionalGeneration"
+    if (model_arch in {"Idefics3ForConditionalGeneration", "GlmForCausalLM"}
             and transformers.__version__ < "4.46.0"):
         pytest.skip(reason="Model introduced in HF >= 4.46.0")
 
