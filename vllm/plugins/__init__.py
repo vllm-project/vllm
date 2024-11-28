@@ -4,6 +4,7 @@ import os
 import torch
 
 import vllm.envs as envs
+from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,8 @@ def load_general_plugins():
     os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
     # see https://github.com/vllm-project/vllm/issues/10619
     torch._inductor.config.compile_threads = 1
+    if current_platform.is_xpu():
+        os.environ['TORCH_COMPILE_DISABLE'] = 'True'
     global plugins_loaded
     if plugins_loaded:
         return
