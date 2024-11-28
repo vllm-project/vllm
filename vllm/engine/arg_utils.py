@@ -1139,7 +1139,9 @@ class EngineArgs:
             multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
-            policy=self.scheduling_policy)
+            policy=self.scheduling_policy,
+            log_stats=not self.disable_log_stats,
+        )
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
@@ -1182,6 +1184,7 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
             collect_model_execute_time="worker" in detailed_trace_modules
             or "all" in detailed_trace_modules,
+            log_stats=not self.disable_log_stats,
         )
 
         config = VllmConfig(

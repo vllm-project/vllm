@@ -23,8 +23,8 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.stats.common import initialize_stats_loggers
-from vllm.v1.stats.stats_manager import EngineStatsManager
+from vllm.v1.stats.stats_manager import (EngineStatsManager,
+                                         NoopEngineStatsManager)
 
 logger = init_logger(__name__)
 
@@ -87,19 +87,10 @@ class AsyncLLM(EngineClient):
         self.output_handler: Optional[asyncio.Task] = None
         self.stats_handler: Optional[asyncio.Task] = None
 
-        # Stats loggers. If not provided, initialize from defaults.
-        self.stat_loggers: Dict[str, StatLoggerBase] = {}
-        self.stats_manager: Optional[EngineStatsManager] = None
-
-        if self.log_stats:
-            self.stats_manager = EngineStatsManager()
-
-            if stat_loggers is not None:
-                self.stat_loggers = stat_loggers
-            else:
-                self.stat_loggers = initialize_stats_loggers(vllm_config)
-        if self.stat_loggers:
-            logger.info("Logging stats to: %s", list(self.stat_loggers.keys()))
+        if vllm_config.observability_config.log_stats:
+            self.stats_manager = EngineStatsManager(vllm_config, stat_loggers)
+        else:
+            self.stats_manager = NoopEngineStatsManager()
 
     def __del__(self):
         self.shutdown()
@@ -344,11 +335,12 @@ class AsyncLLM(EngineClient):
 
             # Pull the stats from the EngineCore before finalizing the snapshot
             # for an updated view of the current stats.
-            update = await self.engine_core.poll_stats_update_async()
+            stats_snapshot_from_engine = (await
+                                          self.engine_core.poll_stats_async())
 
-            # Finalize the snapshot and make the stats.
-            stats = self.stats_manager.make_engine_stats(update)
-            self._log_stats(stats)
+            # Update the snapshot and make the stats.
+            self.stats_manager.update_snapshot(stats_snapshot_from_engine)
+            self.stats_manager.log_stats(self.stats_manager.make_stats())
 
     def _log_stats(self, stats: Stats):
         for stat_logger in self.stat_loggers.values():

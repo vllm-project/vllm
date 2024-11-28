@@ -22,7 +22,7 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapper
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
-from vllm.v1.stats.common import EngineStatsUpdate
+from vllm.v1.stats.common import EngineStatsSnapshot
 from vllm.v1.stats.stats_agent import ThreadSafeEngineStatsAgent
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -37,11 +37,10 @@ class EngineCore:
     """Inner loop of vLLM's Engine."""
 
     def __init__(
-            self,
-            vllm_config: VllmConfig,
-            executor_class: Type[GPUExecutor],
-            usage_context: UsageContext,
-            log_stats: bool,  # If stats collection is enabled.
+        self,
+        vllm_config: VllmConfig,
+        executor_class: Type[GPUExecutor],
+        usage_context: UsageContext,
     ):
         assert vllm_config.model_config.task != "embedding"
 
@@ -63,19 +62,17 @@ class EngineCore:
         # Set up multimodal input mapper (e.g., convert PIL images to tensors).
         self.mm_input_mapper = MMInputMapper(vllm_config.model_config)
 
+        # Setup stats agent.
+        self.stats_agent = ThreadSafeEngineStatsAgent()
+
         # Setup scheduler.
         self.scheduler = Scheduler(
             vllm_config.scheduler_config,
             vllm_config.cache_config,
             vllm_config.lora_config,
+            self.stats_agent,
+            vllm_config.observability_config.log_stats,
         )
-
-        # Setup stats agent.
-        if log_stats:
-            self.stats_agent = ThreadSafeEngineStatsAgent()
-        else:
-            raise ValueError("Stats collection is disabled.")
-            self.stats_agent = None
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -123,31 +120,28 @@ class EngineCore:
         if not self.scheduler.has_unfinished_requests():
             return []
 
-        stats = self.stats_agent.get_update() if self.stats_agent else None
-        scheduler_output = self.scheduler.schedule(stats)
+        scheduler_output = self.scheduler.schedule()
 
         output = self.model_executor.execute_model(scheduler_output)
 
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output, stats)
-
+            scheduler_output, output)
         return engine_core_outputs
 
     def profile(self, is_start=True):
         self.model_executor.worker.profile(is_start)
 
-    def finalize_stats_update(self) -> EngineStatsUpdate:
+    def finalize_stats_snapshot(self) -> EngineStatsSnapshot:
         """
-        Get the current stats update and reset the agent to track the next
+        Get the current stats snapshot and reset the agent to track the next
         update.
         """
 
         assert self.stats_agent is not None, "Stats collection is disabled."
-        stats = self.stats_agent.get_and_reset_update()
-
-        # Populate engine core scheduler stats.
-        self.scheduler.fill_stats(stats.scheduler_stats)
-        return stats
+        snapshot = self.stats_agent.get_and_reset_snapshot()
+        scheduler_stats = self.scheduler.get_scheduler_stats()
+        snapshot.scheduler_stats = scheduler_stats
+        return snapshot
 
 
 class EngineCoreProc(EngineCore):
@@ -170,7 +164,6 @@ class EngineCoreProc(EngineCore):
             vllm_config,
             executor_class,
             usage_context,
-            log_stats=stats_path is not None,
         )
 
         # Signal from main process to shutdown (multiprocessing.Value).
@@ -191,7 +184,7 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         if stats_path is not None:
-            self.stats_queue: queue.Queue[EngineStatsUpdate] = queue.Queue()
+            self.stats_queue: queue.Queue[EngineStatsSnapshot] = queue.Queue()
             threading.Thread(
                 target=self.process_stats_socket,
                 args=(stats_path, ),
@@ -369,10 +362,10 @@ class EngineCoreProc(EngineCore):
                     # overlap stats update polling with other work.
                     # TODO(rickyx): we could further optimize this by
                     # isolating the stats polling from this IO thread.
-                    stats = self.finalize_stats_update()
-                    self._fill_engine_core_proc_stats(stats)
+                    snapshot = self.finalize_stats_snapshot()
+                    self._fill_engine_core_proc_stats(snapshot)
 
-                    self.stats_queue.put_nowait(stats)
+                    self.stats_queue.put_nowait(snapshot)
                     continue
 
                 # Deserialize the request data.
@@ -388,13 +381,14 @@ class EngineCoreProc(EngineCore):
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait(request)
 
-    def _fill_engine_core_proc_stats(self, stats: EngineStatsUpdate) -> None:
+    def _fill_engine_core_proc_stats(self,
+                                     snapshot: EngineStatsSnapshot) -> None:
         """
         Fill the engine core process stats.
         """
-        stats.engine_core_process_stats.input_queue_size = (
+        snapshot.engine_core_process_stats.input_queue_size = (
             self.input_queue.qsize())
-        stats.engine_core_process_stats.output_queue_size = (
+        snapshot.engine_core_process_stats.output_queue_size = (
             self.output_queue.qsize())
 
     def _process_output_socket(self, queue: queue.Queue, path: str):

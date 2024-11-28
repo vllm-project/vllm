@@ -1,14 +1,37 @@
-import time
-from typing import Dict
+from abc import abstractmethod
+from typing import Dict, Optional, Protocol
 
-from vllm.engine.metrics_types import Stats
-from vllm.v1.stats.common import (EngineStatsUpdate, RequestStats,
-                                  RequestStatsUpdate, ms_to_s, s_to_ms)
+from vllm.config import VllmConfig
+from vllm.engine.metrics_types import StatLoggerBase, Stats
+from vllm.logger import init_logger
+from vllm.v1.stats.common import (EngineStatsSnapshot,
+                                  initialize_stats_loggers, ms_to_s)
+
+logger = init_logger(__name__)
+
+
+class EngineStatsManagerBase(Protocol):
+
+    @abstractmethod
+    def add_request(self, request_id: str):
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_snapshot(self, other_snapshot: EngineStatsSnapshot):
+        raise NotImplementedError
+
+    @abstractmethod
+    def make_stats(self) -> Stats:
+        raise NotImplementedError
+
+    @abstractmethod
+    def log_stats(self, stats: Stats) -> None:
+        raise NotImplementedError
 
 
 class EngineStatsManager:
     """
-    This is responsible for aggregating EngineStatsUpdate from
+    This is responsible for aggregating EngineStatsSnapshot from
     EngineStatsAgent, and produce a snapshot of the engine's stats.
 
     This manager should be owned by the engine (i.e. AsyncLLM or LLMEngine),
@@ -16,76 +39,57 @@ class EngineStatsManager:
     the EngineStatsAgent.
     """
 
-    def __init__(self):
-        # A mapping from request ID to the request's stats.
-        self._requests_stats: Dict[str, RequestStats] = {}
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+    ):
+        self._vllm_config = vllm_config
+
+        self._stat_loggers = stat_loggers or initialize_stats_loggers(
+            vllm_config)
+        logger.info("Logging stats to: %s", list(self._stat_loggers.keys()))
+
+        # Represents the most recent snapshot of the engine's stats.
+        self._cur_snapshot = None
 
     def add_request(self, request_id: str):
         """
         Add a request to the stats snapshot.
         """
-        assert request_id not in self._requests_stats
+        if self._cur_snapshot is None:
+            self._cur_snapshot = EngineStatsSnapshot()
+        self._cur_snapshot.record_arrival_request(request_id)
 
-        self._requests_stats[request_id] = RequestStats(
-            request_id=request_id,
-            last_updated_ts_ms=s_to_ms(time.time()),
-            arrival_ts_ms=s_to_ms(time.time()),
-        )
+    def update_snapshot(self, other_snapshot: EngineStatsSnapshot):
+        """
+        Update the current snapshot with the new snapshot.
+        """
+        self._cur_snapshot.merge(other_snapshot)
 
-    def _remove_request(self, request_id: str):
-        # Remove a request from tracking when it finishes or aborts.
-        del self._requests_stats[request_id]
-
-    def _update_request(self, req_stat: RequestStats,
-                        update: RequestStatsUpdate):
-        req_stat.last_updated_ts_ms = update.ts_ms
-        if update.update_type == "waiting":
-            req_stat.waiting_ts_ms = update.ts_ms
-        elif update.update_type == "scheduled":
-            req_stat.num_tokens_to_compute = update.num_tokens_to_compute
-            req_stat.num_tokens_cached = update.num_tokens_cached
-            req_stat.scheduled_ts_ms_lst.append(update.ts_ms)
-        elif update.update_type == "finished":
-            req_stat.finished_ts_ms = update.ts_ms
-        elif update.update_type == "aborted":
-            req_stat.aborted_ts_ms = update.ts_ms
-        elif update.update_type == "model_forward_end":
-            req_stat.model_forward_end_ts_ms_lst.append(update.ts_ms)
-        elif update.update_type == "model_execute_end":
-            req_stat.model_execute_end_ts_ms_lst.append(update.ts_ms)
-        else:
-            raise ValueError(f"Unknown update type: {update.update_type}")
-
-    def make_engine_stats(self, update: EngineStatsUpdate) -> Stats:
-        """Finalize a snapshot of the engine's current stats: creating
-        a new snapshot and returning the current snapshot."""
-
-        # Aggregate the requests stats updates.
-        print(f"make_engine_stats: {update}")
-        for req_update in update.request_updates:
-            assert req_update.request_id in self._requests_stats
-            req_stat = self._requests_stats[req_update.request_id]
-            self._update_request(req_stat, req_update)
-
+    def make_stats(self) -> Stats:
+        """
+        Make the engine stats from the current snapshot.
+        """
         # TODO(rickyx): calculate the remaining stats.
-
         # Make the States
+        snapshot = self._cur_snapshot
         stats = Stats(
-            now=ms_to_s(update.updated_ts_ms),
+            now=ms_to_s(snapshot.last_updated_ts_ms),
             # System stats
             #   Scheduler State
-            num_running_sys=update.scheduler_stats.num_running_reqs,
+            num_running_sys=snapshot.scheduler_stats.num_running_reqs,
             num_swapped_sys=0,
-            num_waiting_sys=update.scheduler_stats.num_waiting_reqs,
+            num_waiting_sys=snapshot.scheduler_stats.num_waiting_reqs,
             #   KV Cache Usage in %
-            gpu_cache_usage_sys=update.scheduler_stats.kv_cache_stats.
+            gpu_cache_usage_sys=snapshot.scheduler_stats.kv_cache_stats.
             gpu_cache_usage_sys,
-            cpu_cache_usage_sys=update.scheduler_stats.kv_cache_stats.
+            cpu_cache_usage_sys=snapshot.scheduler_stats.kv_cache_stats.
             cpu_cache_usage_sys,
             #   Prefix Cache Hit Rate
-            cpu_prefix_cache_hit_rate=update.scheduler_stats.kv_cache_stats.
+            cpu_prefix_cache_hit_rate=snapshot.scheduler_stats.kv_cache_stats.
             cpu_prefix_cache_hit_rate,
-            gpu_prefix_cache_hit_rate=update.scheduler_stats.kv_cache_stats.
+            gpu_prefix_cache_hit_rate=snapshot.scheduler_stats.kv_cache_stats.
             gpu_prefix_cache_hit_rate,
             # Iteration stats
             num_prompt_tokens_iter=0,
@@ -116,12 +120,28 @@ class EngineStatsManager:
             waiting_lora_adapters=[],
             running_lora_adapters=[],
         )
-
-        # Update the requests stats for finished/aborted requests.
-        for req_stat in self._requests_stats.values():
-            # Remove the request from tracking if it's finished or aborted.
-            if (req_stat.finished_ts_ms is not None
-                    or req_stat.aborted_ts_ms is not None):
-                self._remove_request(req_stat.request_id)
-
+        print(stats)
         return stats
+
+    def log_stats(self, stats: Stats) -> None:
+        """
+        Log the engine stats.
+        """
+
+        for stat_logger in self._stat_loggers.values():
+            stat_logger.log(stats)
+
+
+class NoopEngineStatsManager(EngineStatsManagerBase):
+
+    def __init__(self):
+        logger.info("Stats logging is disabled.")
+
+    def add_request(self, request_id: str):
+        pass
+
+    def update_snapshot(self, other_snapshot: EngineStatsSnapshot):
+        pass
+
+    def log_stats(self) -> None:
+        pass

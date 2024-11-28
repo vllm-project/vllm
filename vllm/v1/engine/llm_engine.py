@@ -18,9 +18,8 @@ from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.engine.stats import (EngineCoreStats, initialize_stats_loggers,
-                                  make_stats)
 from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.stats.common import initialize_stats_loggers
 
 logger = init_logger(__name__)
 
@@ -168,12 +167,12 @@ class LLMEngine:
 
         return request_outputs
 
-    def _log_stats(self, engine_core_stats: EngineCoreStats) -> None:
-        if not self.stat_loggers:
-            return
-        stats = make_stats(engine_core_stats)
-        for logger in self.stat_loggers.values():
-            logger.log(stats)
+    # def _log_stats(self, engine_core_stats: EngineCoreStats) -> None:
+    #     if not self.stat_loggers:
+    #         return
+    #     stats = make_stats(engine_core_stats)
+    #     for logger in self.stat_loggers.values():
+    #         logger.log(stats)
 
     # TODO(rob): Can we get rid of these?
 

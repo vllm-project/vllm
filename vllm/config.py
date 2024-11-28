@@ -1132,6 +1132,8 @@ class SchedulerConfig:
 
     chunked_prefill_enabled: bool = field(init=False)
 
+    log_stats: bool = True
+
     def __post_init__(self) -> None:
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
@@ -2044,6 +2046,9 @@ class ObservabilityConfig:
 
     # If set, collects the model execute time for the request.
     collect_model_execute_time: bool = False
+
+    # If set, collects stats for the engine.
+    log_stats: bool = True
 
     def __post_init__(self):
         if not is_otel_available() and self.otlp_traces_endpoint is not None:

@@ -1,12 +1,15 @@
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Optional
 
 import msgspec
 from msgspec import field as msgspec_field
 
 from vllm.config import VllmConfig
 from vllm.engine.metrics_types import StatLoggerBase
+from vllm.v1.request import Request
 
 _LOCAL_LOGGING_INTERVAL_SEC = 5  # TODO(rickyx): Make this configurable.
 
@@ -61,56 +64,78 @@ class RequestStats:
                    under contention of resources. This will go back to the
                    waiting queue of the scheduler, and the request will be
                    scheduled again.
-    - Finished: a request is finished.
-    - Aborted: a request is aborted.
+    - Finished: a request is finished (aborted or stopped)
     """
 
     # Metadata
     request_id: str
 
     # Timestamp when the request was last updated.
-    last_updated_ts_ms: float
+    last_updated_ts_ms: Optional[float] = None
 
     # Timestamp when the request arrived at the llm engine.
-    arrival_ts_ms: float
-
-    # Number of tokens scheduled to compute. This includes both the encoder and
-    # decoder tokens. Only set when the request is scheduled, and before
-    # the request forward pass finishes.
-    num_tokens_to_compute: Optional[int] = None
+    arrival_ts_ms: Optional[float] = None
 
     # Number of tokens cached. When part of the request prefix is cached,
     # this will be set.
-    num_tokens_cached: Optional[int] = None
+    num_cached_tokens: Optional[int] = None
+
+    # Number of tokens computed.
+    num_computed_tokens: Optional[int] = None
 
     # The timestamp when the request was first added to the scheduler, waiting
     # in the queue.
     waiting_ts_ms: Optional[float] = None
-    # A list of timestamps when the request was scheduled.
-    scheduled_ts_ms_lst: List[float] = dataclass_field(default_factory=list)
-    # A list of timestamps when the request finished the model forward pass.
-    # This is used to calculate the model forward time.
-    model_forward_end_ts_ms_lst: List[float] = dataclass_field(
-        default_factory=list)
-    # A list of timestamps when the request finished the model execute function.
-    # This is used to calculate the model execute time, model executing includes
-    # model forward, block/sync across workers, cpu-gpu sync time and sampling
-    # time.
-    model_execute_end_ts_ms_lst: List[float] = dataclass_field(
-        default_factory=list)
 
-    # A list of timestamps when the request was preempted.
+    # A list of timestamps when the request was scheduled to run.
+    running_ts_ms_lst: List[float] = dataclass_field(default_factory=list)
+
+    # TODO(rickyx): we need model runner to surface these.
+    # # A list of timestamps when the request finished the model forward pass.
+    # # This is used to calculate the model forward time.
+    # model_forward_end_ts_ms_lst: List[float] = dataclass_field(
+    #     default_factory=list
+    # )
+    # # A list of timestamps when the request finished the model execute
+    # # function.
+    # # This is used to calculate the model execute time, model executing
+    # # includes model forward, block/sync across workers, cpu-gpu sync time
+    # # and sampling time.
+    # model_execute_end_ts_ms_lst: List[float] = dataclass_field(
+    #     default_factory=list
+    # )
+
+    # A list of timestamps when the request was preempted at the scheduler.
     preempted_ts_ms_lst: List[float] = dataclass_field(default_factory=list)
-    # Timestamp when the first token was generated.
+    # Timestamp when the first token was generated at the engine core.
     first_token_ts_ms: Optional[float] = None
-    # Timestamp when the request was finished.
+    # Timestamp when the request was finished at the engine core.
     finished_ts_ms: Optional[float] = None
-    # Timestamp when the request was aborted.
-    aborted_ts_ms: Optional[float] = None
+
+    def merge(self, other: "RequestStats"):
+        assert self.request_id == other.request_id
+
+        self.last_updated_ts_ms = other.last_updated_ts_ms
+        if other.num_cached_tokens is not None:
+            self.num_cached_tokens = other.num_cached_tokens
+        if other.num_computed_tokens is not None:
+            self.num_computed_tokens = other.num_computed_tokens
+        if other.waiting_ts_ms is not None:
+            self.waiting_ts_ms = other.waiting_ts_ms
+        if other.running_ts_ms_lst:
+            self.running_ts_ms_lst.extend(other.running_ts_ms_lst)
+        if other.preempted_ts_ms_lst:
+            self.preempted_ts_ms_lst.extend(other.preempted_ts_ms_lst)
+        if other.finished_ts_ms is not None:
+            self.finished_ts_ms = other.finished_ts_ms
+        if other.first_token_ts_ms is not None:
+            self.first_token_ts_ms = other.first_token_ts_ms
 
 
-@dataclass
-class EngineStatsSnapshot:
+class EngineStatsSnapshot(msgspec.Struct,
+                          array_like=True,
+                          omit_defaults=True,
+                          gc=False):
     """
     A snapshot of the engine's current stats.
     This represents a snapshot of the current engine core's stats over a
@@ -131,92 +156,107 @@ class EngineStatsSnapshot:
         reliably.
     """
 
+    # Timestamp of the snapshot last updated. None if the snapshot is just
+    # created.
+    last_updated_ts_ms: Optional[float] = None
+
     # Timestamp of the snapshot when created.
-    created_ts_ms: float
-    # Timestamp of the snapshot last updated.
-    last_updated_ts_ms: float
+    created_ts_ms: float = msgspec_field(
+        default_factory=lambda: ms_to_s(time.time()))
 
     # Snapshot of the scheduler stats.
-    scheduler_stats: SchedulerStats = dataclass_field(
+    scheduler_stats: SchedulerStats = msgspec_field(
         default_factory=SchedulerStats)
 
-    # Per request that's active in the engine.
-    requests_stats: Dict[str,
-                         RequestStats] = dataclass_field(default_factory=dict)
+    # Per request stats.
+    requests_stats: Dict[str, RequestStats] = msgspec_field(
+        default_factory=lambda: defaultdict(RequestStats))
 
     # Engine core's queue stats.
-    engine_core_process_stats: EngineCoreProcessStats = dataclass_field(
+    engine_core_process_stats: EngineCoreProcessStats = msgspec_field(
         default_factory=EngineCoreProcessStats)
 
     # TODO(rickyx): Add other components' stats,
     # e.g. model runner/worker and etc.
 
+    def _get_or_create_request_stats(self, request_id: str) -> RequestStats:
+        if request_id not in self.requests_stats:
+            self.requests_stats[request_id] = RequestStats(
+                request_id=request_id, )
+        return self.requests_stats[request_id]
 
-class RequestStatsUpdate(msgspec.Struct,
-                         array_like=True,
-                         omit_defaults=True,
-                         gc=False):
-    """ """
+    def record_arrival_request(self, request_id: str):
+        assert request_id not in self.requests_stats
+        now_ms = ms_to_s(time.time())
+        self.last_updated_ts_ms = now_ms
+        request_stats = self._get_or_create_request_stats(request_id)
+        request_stats.arrival_ts_ms = now_ms
+        request_stats.last_updated_ts_ms = now_ms
 
-    request_id: str
+    def record_running_request(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_cached_tokens: Optional[int],
+    ):
+        now_ms = ms_to_s(time.time())
+        self.last_updated_ts_ms = now_ms
+        request_stats = self._get_or_create_request_stats(request.request_id)
+        request_stats.running_ts_ms_lst.append(now_ms)
+        request_stats.num_computed_tokens = num_computed_tokens
+        request_stats.last_updated_ts_ms = now_ms
+        if num_cached_tokens is not None:
+            request_stats.num_cached_tokens = num_cached_tokens
 
-    update_type: Literal[
-        # Timestamp when the request was first added to the scheduler, waiting
-        # in the queue.
-        "waiting",
-        # Timestamp when the request is scheduled by the scheduler.
-        "scheduled",
-        # Timestamp when the request is preempted by the scheduler.
-        "preempted",
-        # Timestamp when the request is finished.
-        "finished",
-        # Timestamp when the request is aborted.
-        "aborted",
-        # Timestamps when the request finishes the model forward pass.
-        "model_forward_end",
-        # Timestamps when the request finishes the model execute function.
-        # (This includes model forward, block/sync across workers,
-        # cpu-gpu sync time and sampling time.)
-        "model_execute_end", ]
+    def record_finished_request(self, request: Request):
+        now_ms = ms_to_s(time.time())
+        self.last_updated_ts_ms = now_ms
+        request_stats = self._get_or_create_request_stats(request.request_id)
+        request_stats.finished_ts_ms = now_ms
+        request_stats.last_updated_ts_ms = now_ms
 
-    # Timestamp of the update occurred.
-    ts_ms: float
+    def record_waiting_request(self, request: Request):
+        now_ms = ms_to_s(time.time())
+        self.last_updated_ts_ms = now_ms
+        request_stats = self._get_or_create_request_stats(request.request_id)
+        request_stats.waiting_ts_ms = now_ms
+        request_stats.last_updated_ts_ms = now_ms
 
-    # Number of tokens cached. Only set when the request is prefilled.
-    num_tokens_cached: Optional[int] = None
+    def record_preempted_request(self, request: Request):
+        now_ms = ms_to_s(time.time())
+        self.last_updated_ts_ms = now_ms
+        request_stats = self._get_or_create_request_stats(request.request_id)
+        request_stats.preempted_ts_ms_lst.append(now_ms)
+        request_stats.last_updated_ts_ms = now_ms
 
-    # Number of tokens to compute. Only set when the request is scheduled, and
-    # before the request forward pass finishes.
-    num_tokens_to_compute: Optional[int] = None
+    def record_first_token_ts_ms(self, request: Request):
+        now_ms = ms_to_s(time.time())
+        self.last_updated_ts_ms = now_ms
+        request_stats = self._get_or_create_request_stats(request.request_id)
+        request_stats.first_token_ts_ms = now_ms
+        request_stats.last_updated_ts_ms = now_ms
 
-    def __post_init__(self):
-        if self.update_type == "scheduled":
-            assert self.num_tokens_to_compute is not None
-            assert self.num_tokens_cached is not None
+    def merge(self, snapshot: "EngineStatsSnapshot"):
+        self.last_updated_ts_ms = snapshot.last_updated_ts_ms
+        for request_id, target in snapshot.requests_stats.items():
+            assert request_id in self.requests_stats
+            source = self._get_or_create_request_stats(request_id)
+            source.merge(target)
 
+        # Just copy over the scheduler stats.
+        self.scheduler_stats = snapshot.scheduler_stats
 
-class EngineStatsUpdate(msgspec.Struct,
-                        array_like=True,
-                        omit_defaults=True,
-                        gc=False):
-    """
-    An update of the engine's current snapshot of stats.
-    """
+        # Just copy over the engine core process stats.
+        self.engine_core_process_stats = snapshot.engine_core_process_stats
 
-    # Update timestamp.
-    updated_ts_ms: float
-
-    # Updates of the requests' stats.
-    request_updates: List[RequestStatsUpdate] = msgspec_field(
-        default_factory=list)
-
-    # Current state of the engine's scheduler stats.
-    scheduler_stats: SchedulerStats = msgspec_field(
-        default_factory=SchedulerStats)
-
-    # Queue stats (relevant for multi-process architecture)
-    engine_core_process_stats: EngineCoreProcessStats = msgspec_field(
-        default_factory=EngineCoreProcessStats)
+    def prune(self):
+        # Prune the requests stats that are finished.
+        requests_to_prune = [
+            request_stats for request_stats in self.requests_stats.values()
+            if request_stats.finished_ts_ms is not None
+        ]
+        for request_stats in requests_to_prune:
+            del self.requests_stats[request_stats.request_id]
 
 
 def ms_to_s(ms: float) -> float:

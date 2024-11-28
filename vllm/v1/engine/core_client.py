@@ -13,7 +13,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequestType, EngineCoreStatsRequest)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.serial_utils import PickleEncoder
-from vllm.v1.stats.common import EngineStatsUpdate
+from vllm.v1.stats.common import EngineStatsSnapshot
 
 logger = init_logger(__name__)
 
@@ -60,7 +60,7 @@ class EngineCoreClient:
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    def poll_stats_update(self) -> EngineStatsUpdate:
+    def poll_stats(self) -> EngineStatsSnapshot:
         raise NotImplementedError
 
     async def profile(self, is_start=True) -> None:
@@ -78,7 +78,7 @@ class EngineCoreClient:
     async def abort_requests_async(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    async def poll_stats_update_async(self) -> EngineStatsUpdate:
+    async def poll_stats_async(self) -> EngineStatsSnapshot:
         raise NotImplementedError
 
 
@@ -106,8 +106,8 @@ class InprocClient(EngineCoreClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self.engine_core.abort_requests(request_ids)
 
-    def poll_stats_update(self) -> EngineStatsUpdate:
-        return self.engine_core.finalize_stats_update()
+    def poll_stats(self) -> EngineStatsSnapshot:
+        return self.engine_core.finalize_stats_snapshot()
 
     async def profile(self, is_start=True) -> None:
         self.engine_core.profile(is_start)
@@ -121,7 +121,7 @@ class MPClient(EngineCoreClient):
 
         * pushes EngineCoreRequests via input_socket
         * pulls EngineCoreOutputs via output_socket
-        * pulls EngineStatsUpdate via stats_socket
+        * pulls EngineStatsSnapshot via stats_socket
         * AsyncMPClient subclass for AsyncLLM usage
         * SyncMPClient subclass for LLM usage
     """
@@ -136,7 +136,7 @@ class MPClient(EngineCoreClient):
         # Serialization setup.
         self.encoder = PickleEncoder()
         self.output_decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
-        self.stats_decoder = msgspec.msgpack.Decoder(EngineStatsUpdate)
+        self.stats_decoder = msgspec.msgpack.Decoder(EngineStatsSnapshot)
 
         # ZMQ setup.
         self.ctx = (zmq.asyncio.Context() if asyncio_mode else zmq.Context())
@@ -150,7 +150,7 @@ class MPClient(EngineCoreClient):
         self.output_socket = self.ctx.socket(zmq.constants.PULL)
         self.output_socket.connect(output_path)
 
-        # Get stats (EngineStatsUpdate) from EngineCore.
+        # Get stats (EngineStatsSnapshot) from EngineCore.
         if log_stats:
             stats_path = get_open_zmq_ipc_path()
             self.stats_socket = self.ctx.socket(zmq.constants.PULL)
@@ -205,7 +205,7 @@ class SyncMPClient(MPClient):
         engine_core_outputs = self.output_decoder.decode(frame.buffer)
         return engine_core_outputs
 
-    def poll_stats_update(self) -> EngineStatsUpdate:
+    def poll_stats(self) -> EngineStatsSnapshot:
         self._send_input(EngineCoreRequestType.STATS, EngineCoreStatsRequest())
         (frame, ) = self.stats_socket.recv_multipart(copy=False)
         return self.stats_decoder.decode(frame.buffer)
@@ -245,7 +245,7 @@ class AsyncMPClient(MPClient):
 
         return engine_core_outputs
 
-    async def poll_stats_update_async(self) -> EngineStatsUpdate:
+    async def poll_stats_async(self) -> EngineStatsSnapshot:
         await self._send_input(EngineCoreRequestType.STATS,
                                EngineCoreStatsRequest())
         frames = await self.stats_socket.recv_multipart(copy=False)
