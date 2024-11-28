@@ -42,7 +42,7 @@ Here is a sample of `LLM` class usage:
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Initialize the LLM engine with the OPT-125M model
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct")
+    llm = LLM(model="facebook/opt-125m")
 
     # Generate outputs for the input prompts
     outputs = llm.generate(prompts, sampling_params)
