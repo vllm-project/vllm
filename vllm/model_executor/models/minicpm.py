@@ -548,7 +548,9 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.cache_config = cache_config
         self.quant_config = quant_config
 
-        self._init_model(vllm_config=vllm_config, prefix=prefix)
+        self.model = self._init_model(vllm_config=vllm_config,
+                                      prefix=maybe_prefix(prefix, "model"))
+
         unpadded_vocab_size = config.vocab_size
         if lora_config:
             unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -573,8 +575,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors)
 
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        self.model = MiniCPMModel(vllm_config=vllm_config,
-                                  prefix=maybe_prefix(prefix, "model"))
+        return MiniCPMModel(vllm_config=vllm_config, prefix=prefix)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
