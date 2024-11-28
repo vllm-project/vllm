@@ -23,7 +23,8 @@ def test_prefill():
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
-        sliding_window=False,
+        max_model_len=8192,
+        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=16,
     )
@@ -121,7 +122,8 @@ def test_decode():
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
-        sliding_window=False,
+        max_model_len=8192,
+        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=16,
     )
@@ -172,7 +174,8 @@ def test_evict():
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
-        sliding_window=False,
+        max_model_len=8192,
+        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=16,
     )
@@ -220,7 +223,8 @@ def test_hash_block_correct_reuse():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=1,
-        sliding_window=False,
+        max_model_len=8192,
+        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=0,
     )
@@ -256,7 +260,8 @@ def test_computed_blocks_not_evicted():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=2,
-        sliding_window=False,
+        max_model_len=8192,
+        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=0,
     )
@@ -303,7 +308,8 @@ def test_basic_prefix_caching_disabled():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=4,
-        sliding_window=False,
+        max_model_len=8192,
+        sliding_window=None,
         enable_caching=False,
         num_preallocate_tokens=0,
     )
@@ -342,7 +348,8 @@ def test_preallocate_blocks(num_preallocate_tokens: int, block_size: int):
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=10,
-        sliding_window=False,
+        max_model_len=8192,
+        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=num_preallocate_tokens,
     )
@@ -370,7 +377,8 @@ def test_cache_blocks():
     manager = KVCacheManager(
         block_size=block_size,
         num_gpu_blocks=5,
-        sliding_window=False,
+        max_model_len=8192,
+        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=0,
     )
