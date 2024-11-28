@@ -580,4 +580,6 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
         weights = hf_to_vllm_mapper.apply(weights)
+        weights = ((name, data) for name, data in weights
+                   if not name.startswith("lm_head."))
         self.model.load_weights(weights)
