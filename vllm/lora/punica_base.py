@@ -26,7 +26,7 @@ class PunicaWrapperBase(ABC):
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
-                 device: Union[torch.device, str]):
+                 device: Union[torch.device, str], **kwargs):
         self._token_lora_indices = torch.empty(max_num_batched_tokens,
                                                dtype=torch.long,
                                                device=device)
