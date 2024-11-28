@@ -79,7 +79,7 @@ class KVCacheManager:
 
         computed_blocks = []
 
-        req_blocks = self.req_to_blocks[request.request_id]
+        req_blocks = self.req_to_blocks.get(request.request_id, [])
         num_full_blocks = len(request.all_token_ids) // self.block_size
         parent_block_hash = None
         for idx in range(num_full_blocks):
