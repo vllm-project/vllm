@@ -43,7 +43,7 @@ CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
-    --max-model-len 10000 \
+    --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --kv-connector PyNcclConnector \
     --kv-role kv_producer \
@@ -55,7 +55,7 @@ CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \
-    --max-model-len 10000 \
+    --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --kv-connector PyNcclConnector \
     --kv-role kv_consumer \
