@@ -637,9 +637,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
         raise NotImplementedError
 
-    def is_default_weight_loading(self, name: str) -> bool:
-        raise NotImplementedError
-
 
 class MiniCPMV2_0(MiniCPMVBaseModel):
 
@@ -732,9 +729,6 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         pixel_values = data["data"]
 
         return self.get_vision_embedding(pixel_values)
-
-    def is_default_weight_loading(self, name: str) -> bool:
-        return "resampler" in name or "vpm" in name
 
 
 class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
@@ -854,9 +848,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
         return self.get_vision_embedding(all_pixel_values.type(dtype),
                                          patch_attn_mask, tgt_sizes)
-
-    def is_default_weight_loading(self, name: str) -> bool:
-        return "resampler" in name
 
 
 class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
@@ -983,9 +974,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
-
-    def is_default_weight_loading(self, name: str) -> bool:
-        return "resampler" in name
 
 
 _SUPPORT_VERSION = {
