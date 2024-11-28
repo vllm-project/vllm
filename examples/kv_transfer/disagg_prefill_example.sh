@@ -76,7 +76,7 @@ python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
 sleep 1
 
 # serve two example requests
-output1=$(curl -s http://localhost:8000/v1/completions \
+output1=$(curl -X POST -s http://localhost:8000/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
 "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
@@ -85,7 +85,7 @@ output1=$(curl -s http://localhost:8000/v1/completions \
 "temperature": 0
 }')
 
-output2=$(curl -s http://localhost:8000/v1/completions \
+output2=$(curl -X POST -s http://localhost:8000/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
 "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
@@ -106,5 +106,5 @@ echo ""
 echo "Output of first request: $output1"
 echo "Output of second request: $output2"
 
-echo "Successfully finished 2 test requests!"
+echo "🎉🎉 Successfully finished 2 test requests! 🎉🎉"
 echo ""
