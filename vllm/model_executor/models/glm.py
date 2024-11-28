@@ -15,8 +15,7 @@ class GlmForCausalLM(LlamaForCausalLM):
         # 2. There is no bias for o_proj in attention
         for layer in self.model.layers:
             if not isinstance(layer, PPMissingLayer):
-                layer.self_attn.rotary_emb.rotary_dim = (
-                    layer.self_attn.rotary_emb.rotary_dim // 2)
+                layer.self_attn.rotary_emb.rotary_dim //= 2
                 layer.self_attn.rotary_emb.is_neox_style = False
                 layer.self_attn.o_proj.bias = None
                 layer.self_attn.o_proj.skip_bias_add = True
