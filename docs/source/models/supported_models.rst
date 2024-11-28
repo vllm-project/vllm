@@ -177,7 +177,7 @@ Text Generation
   * - :code:`InternLM2ForCausalLM`
     - InternLM2
     - :code:`internlm/internlm2-7b`, :code:`internlm/internlm2-chat-7b`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`JAISLMHeadModel`
     - Jais
