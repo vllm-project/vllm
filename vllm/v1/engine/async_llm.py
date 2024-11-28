@@ -157,8 +157,7 @@ class AsyncLLM(EngineClient):
             raise KeyError(f"Request {request_id} already exists.")
 
         # 0) Add the request to the stats manager to start tracking.
-        if self.stats_manager is not None:
-            self.stats_manager.add_request(request_id)
+        self.stats_manager.add_request(request_id)
 
         # 1) Create a new AsyncStream for the request.
         stream = self._add_request_to_streams(request_id)
