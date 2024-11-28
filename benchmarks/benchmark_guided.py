@@ -8,6 +8,7 @@ import time
 from typing import List
 
 import datasets
+import pandas as pd
 import uvloop
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -181,10 +182,9 @@ async def run_vllm_async(
             'expected': req.completion
         } for gt, req in zip(generated_texts, requests)]
         end = time.perf_counter()
-        first_latency = sum([lat[0]
-                             for lat in latencies]) / len(latencies) * 1000
-        next_latency = sum([(lat[-1] - lat[0]) / len(lat[1:])
-                            for lat in latencies]) / len(latencies) * 1000
+        first_latency = pd.Series([lat[0] * 1000 for lat in latencies])
+        next_latency = pd.Series([(lat[-1] - lat[0]) / len(lat[1:]) * 1000
+                                  for lat in latencies])
         return end - start, ret, (first_latency, next_latency)
 
 
@@ -396,8 +396,10 @@ def main(args: argparse.Namespace):
     total_output_tokens = sum(request.expected_output_len
                               for request in requests)
     if first_latency is not None:
-        latency_breakdown = f"First token latency: {first_latency:.2f} msecs"
-        latency_breakdown += f"Next token latency: {next_latency:.2f} msecs"
+        latency_breakdown = "\nFirst token latency(msecs):\n"
+        latency_breakdown += f"{first_latency.describe()}"
+        latency_breakdown += "\nNext token latency(msecs):\n"
+        latency_breakdown += f"{next_latency.describe()}"
     print(
         f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
         f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
@@ -420,8 +422,10 @@ def main(args: argparse.Namespace):
         }
         results = {"outputs": ret, **results}
         if first_latency is not None:
-            results["first_token_latency(msecs)"] = first_latency
-            results["next_token_latency(msecs)"] = next_latency
+            results["first_token_latency(msecs)"] = first_latency.describe(
+            ).to_dict()
+            results["next_token_latency(msecs)"] = next_latency.describe(
+            ).to_dict()
         if args.output_json:
             with open(args.output_json, "w") as f:
                 json.dump(results, f, indent=4)
