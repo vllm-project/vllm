@@ -14,18 +14,17 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
                                                PoolingType)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .utils import maybe_prefix
+from .interfaces import SupportsCrossEncoding
+from .utils import WeightsMapper, maybe_prefix
 
 
 class BertEmbedding(nn.Module):
@@ -442,6 +441,10 @@ class BertEmbeddingModel(nn.Module):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
+        weights = hf_to_vllm_mapper.apply(weights)
+        weights = ((name, data) for name, data in weights
+                   if not name.startswith("lm_head."))
         self.model.load_weights(weights)
 
     def _build_model(self,

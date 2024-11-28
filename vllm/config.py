@@ -27,7 +27,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        identity, print_warning_once, resolve_obj_by_qualname)
+                        print_warning_once, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -183,7 +183,7 @@ class ModelConfig:
             hf_overrides_fn = hf_overrides
         else:
             hf_overrides_kw = hf_overrides
-            hf_overrides_fn = identity
+            hf_overrides_fn = None
 
         if rope_scaling is not None:
             hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
@@ -212,8 +212,15 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         hf_config = get_config(self.model, trust_remote_code, revision,
-                               code_revision, config_format, **hf_overrides_kw)
-        hf_config = hf_overrides_fn(hf_config)
+                               code_revision, config_format)
+
+        if hf_overrides_kw:
+            logger.info("Overriding HF config with %s", hf_overrides_kw)
+            hf_config.update(hf_overrides_kw)
+        if hf_overrides_fn:
+            logger.info("Overriding HF config with %s", hf_overrides_fn)
+            hf_config = hf_overrides_fn(hf_config)
+
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
@@ -983,6 +990,7 @@ class ParallelConfig:
     # the full name of the worker class to use. If "auto", the worker class
     # will be determined based on the platform.
     worker_cls: str = "auto"
+    sd_worker_cls: str = "auto"
 
     world_size: int = field(init=False)
 
@@ -1401,16 +1409,6 @@ class SpeculativeConfig:
                     speculative_draft_tensor_parallel_size,
                     draft_hf_config
             )
-
-            if (enable_chunked_prefill and \
-                 speculative_draft_tensor_parallel_size != 1):
-                # TODO - Investigate why the error reported in
-                # https://github.com/vllm-project/vllm/pull/9291#issuecomment-2463266258
-                # is happening and re-enable it.
-                raise ValueError(
-                    "Chunked prefill and speculative decoding can be enabled "
-                    "simultaneously only for draft models with tensor "
-                    "parallel size 1.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
@@ -2153,7 +2151,7 @@ class CompilationConfig(BaseModel):
 
     use_inductor: bool = True
     inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
-    inductor_compile_sizes: Optional[List[int]] = Field(default_factory=dict)
+    inductor_compile_sizes: Optional[List[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2292,9 +2290,8 @@ class CompilationConfig(BaseModel):
                 if x <= self.inductor_specialize_for_cudagraph_no_more_than
             ]
         else:
-            assert self.inductor_compile_sizes is not None, (
-                "inductor_compile_sizes should not be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is None")
+            if self.inductor_compile_sizes is None:
+                self.inductor_compile_sizes = []
             self.compile_sizes = self.inductor_compile_sizes
 
 
@@ -2380,6 +2377,16 @@ class VllmConfig:
             self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
+
+        if self.scheduler_config is not None and \
+            self.model_config is not None and \
+            self.scheduler_config.chunked_prefill_enabled and \
+            self.model_config.dtype == torch.float32 and \
+            current_platform.get_device_capability() == (7, 5):
+            print_warning_once(
+                "Turing devices tensor cores do not support float32 matmul. "
+                "To workaround this limitation, vLLM will set 'ieee' input "
+                "precision for chunked prefill triton kernels.")
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()

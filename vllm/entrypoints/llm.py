@@ -185,8 +185,14 @@ class LLM:
             kwargs["disable_log_stats"] = True
 
         if compilation_config is not None:
-            compilation_config_instance = CompilationConfig.from_cli(
-                json.dumps(compilation_config))
+            if isinstance(compilation_config, (int)):
+                compilation_config_instance = CompilationConfig.from_cli(
+                    str(compilation_config))
+            elif isinstance(compilation_config, (dict)):
+                compilation_config_instance = CompilationConfig.from_cli(
+                    json.dumps(compilation_config))
+            else:
+                compilation_config_instance = compilation_config
         else:
             compilation_config_instance = None
 

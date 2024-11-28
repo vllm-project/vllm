@@ -275,6 +275,44 @@ def test_state_cleanup(
                     "could be related to finished_requests_ids")
 
 
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+def test_multistep(
+    vllm_runner,
+    model: str,
+    dtype: str,
+    example_prompts,
+) -> None:
+    # This test is verifying that multistep works correctly
+    #on mamba-like models
+    with vllm_runner(model, num_scheduler_steps=8,
+                     max_num_seqs=2) as vllm_model:
+        vllm_model.generate_greedy([example_prompts[0]] * 10, 1)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("max_tokens", [64])
+def test_multistep_correctness(vllm_runner, model: str, dtype: str,
+                               max_tokens: int, example_prompts) -> None:
+    with vllm_runner(model, num_scheduler_steps=8,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_multistep = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    with vllm_runner(model, num_scheduler_steps=1,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_single_step = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_outputs_multistep,
+        outputs_1_lst=vllm_outputs_single_step,
+        name_0="vllm_outputs_multistep",
+        name_1="vllm_outputs_single_step",
+    )
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])

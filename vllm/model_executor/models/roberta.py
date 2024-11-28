@@ -11,12 +11,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
-from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
+
+from .interfaces import SupportsCrossEncoding
 
 
 class RobertaEmbedding(nn.Module):
