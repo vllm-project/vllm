@@ -42,7 +42,7 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_custom_op
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig 
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -1114,8 +1114,9 @@ def ensure_kv_transfer_initialized(config: "VllmConfig") -> None:
         return
 
     if all([
-        config.kv_transfer_config.need_kv_parallel_group, 
-        _KV_TRANSFER is None]):
+            config.kv_transfer_config.need_kv_parallel_group,
+            _KV_TRANSFER is None
+    ]):
         _KV_TRANSFER = kv_transfer.KVTransferAgent(
             rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,

@@ -61,11 +61,9 @@ class PyNcclConnector(KVConnectorBase):
                 port_offset=port_offset_base + 1,
                 device="cpu",
             )
-            self.producer_buffer = LookupBuffer(
-                self.producer_signal_pipe,
-                self.producer_data_pipe,
-                self.config.kv_buffer_size
-            )
+            self.producer_buffer = LookupBuffer(self.producer_signal_pipe,
+                                                self.producer_data_pipe,
+                                                self.config.kv_buffer_size)
 
         else:
 

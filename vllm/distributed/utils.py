@@ -138,7 +138,7 @@ class StatelessProcessGroup:
         cache communication."""
         self.expire_data()
         key = f"send_to/{dst}/{self.send_dst_counter[dst]}"
-        self.store.set(key, tensor.numpy().tobytes()) 
+        self.store.set(key, tensor.numpy().tobytes())
         self.send_dst_counter[dst] += 1
         self.entries.append((key, time.time()))
 
@@ -166,11 +166,10 @@ class StatelessProcessGroup:
         This function implements recv using CPU communication, which is 
         needed when the KV cache buffer is placed on CPU in distributed KV
         cache communication."""
-        received_tensor = torch.frombuffer(
-            self.store.get(
-                f"send_to/{self.rank}/{self.recv_src_counter[src]}"),
-            dtype=tensor.dtype
-        ).reshape(tensor.shape)
+        received_tensor = torch.frombuffer(self.store.get(
+            f"send_to/{self.rank}/{self.recv_src_counter[src]}"),
+                                           dtype=tensor.dtype).reshape(
+                                               tensor.shape)
         self.recv_src_counter[src] += 1
         tensor[...] = received_tensor
 

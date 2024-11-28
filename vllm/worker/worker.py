@@ -8,7 +8,7 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
