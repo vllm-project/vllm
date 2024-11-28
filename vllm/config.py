@@ -199,27 +199,7 @@ class ModelConfig:
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
-        if is_s3(model) or is_s3(tokenizer):
-            try:
-                from vllm.transformers_utils.s3_utils import S3Model
-            except ImportError as err:
-                raise ImportError(
-                    "Please install Run:ai optional dependency "
-                    "to use the S3 capabilities. "
-                    "You can install it with: pip install vllm[runai]"
-                ) from err
-
-            if is_s3(model):
-                self.s3_model = S3Model()
-                self.s3_model.pull_files(model, allow_pattern=["*config.json"])
-                self.model_weights = self.model
-                self.model = self.s3_model.dir
-
-            if is_s3(tokenizer):
-                self.s3_tokenizer = S3Model()
-                self.s3_tokenizer.pull_files(
-                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = self.s3_tokenizer.dir
+        self.pull_model_tokenizer_for_s3(model, tokenizer)
 
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
@@ -315,6 +295,29 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    def pull_model_tokenizer_for_s3(self, model: str, tokenizer: str) -> None:
+        if is_s3(model) or is_s3(tokenizer):
+            try:
+                from vllm.transformers_utils.s3_utils import S3Model
+            except ImportError as err:
+                raise ImportError(
+                    "Please install Run:ai optional dependency "
+                    "to use the S3 capabilities. "
+                    "You can install it with: pip install vllm[runai]"
+                ) from err
+
+            if is_s3(model):
+                self.s3_model = S3Model()
+                self.s3_model.pull_files(model, allow_pattern=["*config.json"])
+                self.model_weights = self.model
+                self.model = self.s3_model.dir
+
+            if is_s3(tokenizer):
+                self.s3_tokenizer = S3Model()
+                self.s3_tokenizer.pull_files(
+                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                self.tokenizer = self.s3_tokenizer.dir
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
