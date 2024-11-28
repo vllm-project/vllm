@@ -29,12 +29,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     Multi-LoRA, and to provide the interface for the punica kernel.
     """
 
-    def __init__(
-        self,
-        max_num_batched_tokens: int,
-        max_batches: int,
-        device: Union[torch.device, str],
-    ):
+    def __init__(self, max_num_batched_tokens: int, max_batches: int,
+                 device: Union[torch.device, str], **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
 
