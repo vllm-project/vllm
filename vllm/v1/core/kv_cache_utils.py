@@ -176,7 +176,8 @@ def hash_block_tokens(parent_block_hash: Optional[int],
 
 
 def hash_request_tokens(block_size: int,
-                        token_ids: List[int]) -> List[BlockHashType]:
+                        token_ids: List[int],
+                        parent_block_hash: Optional[int] = None) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
@@ -188,7 +189,6 @@ def hash_request_tokens(block_size: int,
         The list of computed hash values.
     """
     ret = []
-    parent_block_hash = None
     for start in range(0, len(token_ids), block_size):
         end = start + block_size
         block_token_ids = tuple(token_ids[start:end])

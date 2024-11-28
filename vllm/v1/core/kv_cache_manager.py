@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock, hash_block_tokens)
+                                         KVCacheBlock, hash_block_tokens, hash_request_tokens)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -78,19 +78,17 @@ class KVCacheManager:
             return []
 
         computed_blocks = self.req_to_blocks.get(request.request_id, [])
-        num_computed_blocks = len(computed_blocks)
-        num_full_blocks = len(request.all_token_ids) // self.block_size
-        if num_full_blocks <= num_computed_blocks:
-            return computed_blocks
-
         parent_block_hash = computed_blocks[
-            -1].block_hash if num_computed_blocks > 0 else None
-        for idx in range(num_computed_blocks, num_full_blocks):
-            block_token_ids = tuple(
-                request.all_token_ids[idx * self.block_size:(idx + 1) *
-                                      self.block_size])
-            block_hash = hash_block_tokens(parent_block_hash, block_token_ids)
-            parent_block_hash = block_hash
+            -1].block_hash if len(computed_blocks) > 0 else None
+        block_hashes = hash_request_tokens(self.block_size,
+                                           request.all_token_ids[
+                                           len(computed_blocks) * self.block_size:],
+                                           parent_block_hash)
+
+        for block_hash in block_hashes:
+            # block_hashes is a chain of block hashes. If a block hash is not
+            # in the cached_block_hash_to_id, the following block hashes are
+            # not computed yet for sure.
             if cached_block := self._get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
             else:
