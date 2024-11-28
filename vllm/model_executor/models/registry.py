@@ -106,6 +106,7 @@ _EMBEDDING_MODELS = {
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "LlamaModel": ("llama", "LlamaEmbeddingModel"),
     **{
         # Multiple models share the same architecture, so we include them all
