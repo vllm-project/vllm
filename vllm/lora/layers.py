@@ -17,7 +17,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
-from vllm.lora.punica import PunicaWrapper
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -30,7 +29,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
 if TYPE_CHECKING:
-    pass
+    from vllm.lora.punica_base import PunicaWrapperBase
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
@@ -169,9 +168,9 @@ class BaseLayerWithLoRA(nn.Module):
 
     def set_mapping(
         self,
-        punica_wrapper: PunicaWrapper,
+        punica_wrapper,
     ):
-        self.punica_wrapper: PunicaWrapper = punica_wrapper
+        self.punica_wrapper: PunicaWrapperBase = punica_wrapper
 
     @classmethod
     def can_replace_layer(
@@ -308,10 +307,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             )
 
         # Embedding layer only need expand op
-        self.punica_wrapper.add_expand(full_output,
-                                       full_lora_a_embeddings,
-                                       self.lora_b_stacked,
-                                       add_input=True)
+        self.punica_wrapper.add_lora_embedding(full_output,
+                                               full_lora_a_embeddings,
+                                               self.lora_b_stacked,
+                                               add_input=True)
         return full_output.view_as(full_output_org)
 
     @classmethod

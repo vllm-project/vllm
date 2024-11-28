@@ -21,7 +21,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLora,
                               LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
-from vllm.lora.punica import PunicaWrapper
+from vllm.lora.punica_selector import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
@@ -331,9 +331,9 @@ class LoRAModelManager(AdapterModelManager):
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
-        self.punica_wrapper = PunicaWrapper(max_num_batched_tokens,
-                                            max_batches=self.max_num_seqs,
-                                            device=self.device)
+        self.punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
+                                                 max_batches=self.max_num_seqs,
+                                                 device=self.device)
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}

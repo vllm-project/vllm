@@ -28,7 +28,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
 # yapf: enable
 from vllm.lora.models import (LongContextLoRAContext, LoRALayerWeights,
                               PackedLoRALayerWeights)
-from vllm.lora.punica import PunicaWrapper
+from vllm.lora.punica_gpu import PunicaWrapperGPU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -205,7 +205,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = PunicaWrapperGPU(8192, 256, device)
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
@@ -305,7 +305,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
     torch.cuda.set_device(device)
     torch.set_default_device(device)
     max_loras = 8
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = PunicaWrapperGPU(8192, 256, device)
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
@@ -441,7 +441,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
     torch.cuda.set_device(device)
     torch.set_default_device(device)
     max_loras = 8
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = PunicaWrapperGPU(8192, 256, device)
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
@@ -569,7 +569,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
 
     torch.cuda.set_device(device)
     torch.set_default_device(device)
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = PunicaWrapperGPU(8192, 256, device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -674,7 +674,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 
     torch.cuda.set_device(device)
     torch.set_default_device(device)
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = PunicaWrapperGPU(8192, 256, device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -789,7 +789,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
 
     torch.cuda.set_device(device)
     torch.set_default_device(device)
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = PunicaWrapperGPU(8192, 256, device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -941,7 +941,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
     seed = 0
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = PunicaWrapperGPU(8192, 256, device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
