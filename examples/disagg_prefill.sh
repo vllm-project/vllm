@@ -9,9 +9,8 @@ trap 'cleanup' INT
 # Cleanup function
 cleanup() {
     echo "Caught Ctrl+C, cleaning up..."
-    # Cleanup commands, suppressing their output
-    pgrep pt_main_thread | xargs kill -9 > /dev/null 2>&1
-    pkill -f python3 > /dev/null 2>&1
+    # Cleanup commands
+    pgrep python | xargs kill -9
     echo "Cleanup complete. Exiting."
     exit 0
 }
@@ -39,9 +38,7 @@ wait_for_server() {
 # You can also adjust --kv-ip and --kv-port for distributed inference.
 
 # prefilling instance, which is the KV producer
-CUDA_VISIBLE_DEVICES=0 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+CUDA_VISIBLE_DEVICES=0 vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
@@ -49,9 +46,7 @@ CUDA_VISIBLE_DEVICES=0 python3 \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' &
 
 # decoding instance, which is the KV consumer
-CUDA_VISIBLE_DEVICES=1 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+CUDA_VISIBLE_DEVICES=1 vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
@@ -68,7 +63,7 @@ wait_for_server 8200
 #   to 1
 # - after the prefill vLLM finishes prefill, send the request to decode vLLM 
 #   instance
-python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
+python3 ../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
 sleep 1
 
 # serve two example requests
@@ -91,11 +86,12 @@ output2=$(curl -X POST -s http://localhost:8000/v1/completions \
 }')
 
 
-# Cleanup commands, suppressing their output
-pgrep pt_main_thread | xargs kill -9 > /dev/null 2>&1
-pkill -f python3 > /dev/null 2>&1
+# Cleanup commands
+pgrep python | xargs kill -9
 
-sleep 4
+echo ""
+
+sleep 1
 
 # Print the outputs of the curl requests
 echo ""
