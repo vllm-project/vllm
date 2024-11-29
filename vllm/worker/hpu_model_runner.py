@@ -176,9 +176,21 @@ class HpuModelAdapter:
         self.dtype = dtype
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
-            self.model = torch.compile(self.model,
-                                       backend='hpu_backend',
-                                       dynamic=False)
+            if os.getenv("PT_REGIONAL_COMPILATION", 1):
+                self._compile_regions(self.model)
+            else:
+                self.model = torch.compile(self.model,
+                                           backend='hpu_backend',
+                                           dynamic=False)
+
+    def _compile_regions(self, model):
+        if isinstance(model, torch.nn.ModuleList):
+            for name, module in model.named_children():
+                module = torch.compile(module, backend='hpu_backend', dynamic=False)
+                setattr(model, name, module)
+        else:
+            for name, module in model.named_children():
+                self.compile_regions(module)
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
@@ -1538,7 +1550,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.bucketing_ctx.generate_decode_buckets(max_blocks)
 
         if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
-            cache_size_limit = len(self.bucketing_ctx.prompt_buckets) + len(
+            cache_size_limit = 3 * len(self.bucketing_ctx.prompt_buckets) + 3 * len(
                 self.bucketing_ctx.decode_buckets) + 1
             torch._dynamo.config.cache_size_limit = max(
                 cache_size_limit, torch._dynamo.config.cache_size_limit)
