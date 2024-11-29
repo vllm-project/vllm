@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 
 @pytest.mark.parametrize(("model_id", "expected_task"), [
     ("facebook/opt-125m", "generate"),
-    ("Qwen/Qwen2.5-Math-RM-72B", "embedding"),
+    ("intfloat/e5-mistral-7b-instruct", "embedding"),
 ])
 def test_auto_task(model_id, expected_task):
     config = ModelConfig(
