@@ -401,11 +401,20 @@ Reward Modeling
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`LlamaForCausalLM`
+    - Llama-based
+    - :code:`peiyi9979/math-shepherd-mistral-7b-prm`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`Qwen2ForRewardModel`
     - Qwen2-based
     - :code:`Qwen/Qwen2.5-Math-RM-72B`, etc.
     - ✅︎
     - ✅︎
+
+.. important::
+  For process-supervised reward models such as :code:`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
+  e.g.: :code:`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
 .. note::
     As an interim measure, these models are supported in both offline and online inference via Embeddings API.
