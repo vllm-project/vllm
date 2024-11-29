@@ -81,11 +81,11 @@ def as_embedding_model(cls: _T) -> _T:
 
             # For most other models
             if hasattr(cls, "load_weights"):
-                cls.load_weights(self, weights)  # type: ignore
+                return cls.load_weights(self, weights)  # type: ignore
             # Fallback
             else:
                 loader = AutoWeightsLoader(self)
-                loader.load_weights(weights)
+                return loader.load_weights(weights)
 
     ModelForEmbedding.__name__ = cls.__name__ \
         .removesuffix("ForCausalLM") \
