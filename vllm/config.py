@@ -137,24 +137,6 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         override_pooler_config: Initialize non default pooling config or
             override default pooling config for the embedding model.
-        config_format: The config format which shall be loaded.
-            Defaults to 'auto' which defaults to 'hf'.
-        mm_processor_kwargs: Arguments to be forwarded to the model's processor
-            for multi-modal data, e.g., image processor.
-        pooling_type: Used to configure the pooling method in the embedding
-            model.
-        pooling_norm: Used to determine whether to normalize the pooled
-            data in the embedding model.
-        pooling_softmax: Used to determine whether to softmax the pooled
-            data in the embedding model.
-        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates
-            that the score corresponding to the pooling_step_tag_id in the
-            generated sentence should be returned. Otherwise, it returns
-            the scores for all tokens.
-        pooling_returned_token_ids: pooling_returned_token_ids represents a
-            list of indices for the vocabulary dimensions to be extracted,
-            such as the token IDs of good_token and bad_token in the
-            math-shepherd-mistral-7b-prm model.
     """
 
     def __init__(
