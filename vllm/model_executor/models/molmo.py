@@ -847,7 +847,7 @@ class MolmoModel(nn.Module):
         loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
-            if "gate_up_proj":
+            if "gate_up_proj" in name:
                 up_proj, gate_proj = loaded_weight.chunk(2, dim=0)
                 loaded_weight = torch.cat([gate_proj, up_proj], dim=0)
 
