@@ -990,6 +990,7 @@ class ParallelConfig:
     # the full name of the worker class to use. If "auto", the worker class
     # will be determined based on the platform.
     worker_cls: str = "auto"
+    sd_worker_cls: str = "auto"
 
     world_size: int = field(init=False)
 
@@ -2150,7 +2151,7 @@ class CompilationConfig(BaseModel):
 
     use_inductor: bool = True
     inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
-    inductor_compile_sizes: Optional[List[int]] = Field(default_factory=dict)
+    inductor_compile_sizes: Optional[List[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2289,9 +2290,8 @@ class CompilationConfig(BaseModel):
                 if x <= self.inductor_specialize_for_cudagraph_no_more_than
             ]
         else:
-            assert self.inductor_compile_sizes is not None, (
-                "inductor_compile_sizes should not be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is None")
+            if self.inductor_compile_sizes is None:
+                self.inductor_compile_sizes = []
             self.compile_sizes = self.inductor_compile_sizes
 
 
