@@ -9,8 +9,11 @@ steps:
           - image: badouralix/curl-jq
             command:
             - sh .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
+
   - wait
+
   - label: "A100"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: A100
     plugins:
@@ -41,20 +44,43 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  # - label: "H100"
-  #   agents:
-  #     queue: H100
-  #   plugins:
-  #   - docker#v5.11.0:
-  #       image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
-  #       command:
-  #       - bash
-  #       - .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
-  #       mount-buildkite-agent: true
-  #       propagate-environment: true
-  #       ipc: host
-  #       gpus: all
-  #       environment:
-  #       - VLLM_USAGE_SOURCE
-  #       - HF_TOKEN
 
+  - label: "H200"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    agents:
+      queue: H200
+    plugins:
+    - docker#v5.12.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+        command:
+        - bash
+        - .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+        mount-buildkite-agent: true
+        propagate-environment: true
+        ipc: host
+        gpus: 4,5,6,7
+        volumes:
+          - /data/benchmark-hf-cache:/root/.cache/huggingface
+        environment:
+        - VLLM_USAGE_SOURCE
+        - HF_TOKEN
+
+  - label: "H100"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    agents:
+      queue: H100
+    plugins:
+    - docker#v5.12.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+        command:
+        - bash
+        - .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+        mount-buildkite-agent: true
+        propagate-environment: true
+        ipc: host
+        gpus: all # see CUDA_VISIBLE_DEVICES for actual GPUs used
+        volumes:
+          - /data/benchmark-hf-cache:/root/.cache/huggingface
+        environment:
+        - VLLM_USAGE_SOURCE
+        - HF_TOKEN

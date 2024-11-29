@@ -1,16 +1,14 @@
 """A GPU worker class."""
 import gc
 import os
+import time
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -27,7 +25,8 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
-from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
+                                     WorkerInput)
 
 logger = init_logger(__name__)
 
@@ -42,46 +41,31 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
-        lora_config: Optional[LoRAConfig] = None,
-        speculative_config: Optional[SpeculativeConfig] = None,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
-        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
-        self.model_config = model_config
-        self.parallel_config = parallel_config
+        WorkerBase.__init__(self, vllm_config)
         self.parallel_config.rank = rank
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
-        self.lora_config = lora_config
-        self.load_config = load_config
-        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
-        if parallel_config and is_driver_worker:
-            assert rank % parallel_config.tensor_parallel_size == 0, \
+        if is_driver_worker:
+            assert rank % self.parallel_config.tensor_parallel_size == 0, \
                    "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.observability_config = observability_config
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
+        speculative_config = self.speculative_config
+        model_config = self.model_config
         speculative_args = {} if speculative_config is None \
             or (speculative_config.draft_model_config.model ==
                 model_config.model) \
@@ -90,26 +74,19 @@ class Worker(LocalOrDistributedWorkerBase):
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_runner_cls is not None:
-            ModelRunnerClass = model_runner_cls
-        elif self._is_embedding_model():
+        if model_config.task == "embedding":
             ModelRunnerClass = EmbeddingModelRunner
-        elif self._is_encoder_decoder_model():
+        elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config=load_config,
-            lora_config=self.lora_config,
+            vllm_config=self.vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            prompt_adapter_config=prompt_adapter_config,
-            observability_config=observability_config,
             **speculative_args,
         )
+        if model_runner_cls is not None:
+            self.model_runner = model_runner_cls(self.model_runner)
+
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
@@ -143,12 +120,6 @@ class Worker(LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
-
-    def _is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
-
-    def _is_embedding_model(self):
-        return self.model_config.is_embedding_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -217,37 +188,85 @@ class Worker(LocalOrDistributedWorkerBase):
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+        start_time = time.time()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
+        torch.cuda.synchronize()
+
+        self._assert_memory_footprint_increased_during_profiling()
+
+        # Get the peak memory allocation recorded by torch
+        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+
+        # Check for any memory left around that may have been allocated on the
+        # gpu outside of `torch`. NCCL operations, for example, can use a few
+        # GB during a forward pass
+        torch.cuda.empty_cache()
+        torch_allocated_bytes = torch.cuda.memory_stats(
+        )["allocated_bytes.all.current"]
+        total_allocated_bytes = torch.cuda.mem_get_info(
+        )[1] - torch.cuda.mem_get_info()[0]
+        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+        if non_torch_allocations > 0:
+            peak_memory += non_torch_allocations
+
+        available_kv_cache_memory = (
+            total_gpu_memory * self.cache_config.gpu_memory_utilization -
+            peak_memory)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        torch.cuda.synchronize()
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        cache_block_size = self.get_cache_block_size_bytes()
+        if cache_block_size == 0:
+            num_gpu_blocks = 0
+            num_cpu_blocks = 0
+        else:
+            num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
+            num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                                 cache_block_size)
+        num_gpu_blocks = max(num_gpu_blocks, 0)
+        num_cpu_blocks = max(num_cpu_blocks, 0)
+
+        end_time = time.time()
+        logger.info(
+            "Memory profiling results: "
+            "duration=%.2f seconds, "
+            "total_gpu_memory=%.2fGiB, "
+            "initial_memory_usage=%.2fGiB, "
+            "peak_torch_memory=%.2fGiB, "
+            "memory_usage_post_profile=%.2fGiB, "
+            "non_torch_memory=%.2fGiB, "
+            "kv_cache_size=%.2fGiB, "
+            "gpu_memory_utilization=%.2f.", end_time - start_time,
+            total_gpu_memory / (1024**3),
+            (total_gpu_memory - free_memory_pre_profile) / (1024**3),
+            (peak_memory - non_torch_allocations) / (1024**3),
+            total_allocated_bytes / (1024**3),
+            non_torch_allocations / (1024**3),
+            available_kv_cache_memory / (1024**3),
+            self.cache_config.gpu_memory_utilization)
+
+        # Final cleanup
+        if self.model_runner.lora_manager:
+            self.model_runner.remove_all_loras()
+        gc.collect()
+
+        return num_gpu_blocks, num_cpu_blocks
+
+    def _assert_memory_footprint_increased_during_profiling(self):
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
-        assert peak_memory > 0, (
+        free_gpu_memory, _ = torch.cuda.mem_get_info()
+        assert self.init_gpu_memory - free_gpu_memory > 0, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_gpu_memory}, current free memory"
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
-
-        cache_block_size = self.get_cache_block_size_bytes()
-        num_gpu_blocks = int(
-            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                             cache_block_size)
-        num_gpu_blocks = max(num_gpu_blocks, 0)
-        num_cpu_blocks = max(num_cpu_blocks, 0)
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
-        gc.collect()
-        torch.cuda.empty_cache()
-        return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -257,6 +276,7 @@ class Worker(LocalOrDistributedWorkerBase):
         """
         raise_if_cache_size_invalid(num_gpu_blocks,
                                     self.cache_config.block_size,
+                                    self.cache_config.is_attention_free,
                                     self.model_config.max_model_len)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -472,14 +492,18 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 "`dtype` flag in CLI, for example: --dtype=half.")
 
 
-def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
+def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
                                 max_model_len) -> None:
-    if num_gpu_blocks <= 0:
+    if is_attention_free and num_gpu_blocks != 0:
+        raise ValueError("No memory should be allocated for the cache blocks "
+                         f"for an attention-free model, but {num_gpu_blocks}"
+                         "blocks are allocated.")
+    if not is_attention_free and num_gpu_blocks <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
                          "initializing the engine.")
     max_seq_len = block_size * num_gpu_blocks
-    if max_model_len > max_seq_len:
+    if not is_attention_free and max_model_len > max_seq_len:
         raise ValueError(
             f"The model's max seq len ({max_model_len}) "
             "is larger than the maximum number of tokens that can be "

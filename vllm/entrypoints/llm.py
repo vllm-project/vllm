@@ -1,20 +1,26 @@
 import itertools
+import json
 import warnings
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
 from tqdm import tqdm
 
+from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.engine.arg_utils import EngineArgs
+from vllm.config import CompilationConfig
+from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
+                                   TaskOption)
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         ChatTemplateContentFormatOption,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
-                                         parse_chat_messages)
-from vllm.inputs import PromptType, TextPrompt, TokensPrompt
+                                         parse_chat_messages,
+                                         resolve_chat_template_content_format)
+from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -29,7 +35,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_kwargs, is_list_of
+from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
 
@@ -53,6 +59,10 @@ class LLM:
             from the input.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
+        allowed_local_media_path: Allowing API requests to read local images
+            or videos from directories specified by the server file system.
+            This is a security risk. Should only be enabled in trusted
+            environments.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -88,15 +98,20 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode. Additionally for encoder-decoder models, if the
             sequence length of the encoder input is larger than this, we fall
             back to the eager mode.
-        disable_custom_all_reduce: See ParallelConfig
+        disable_custom_all_reduce: See :class:`~vllm.config.ParallelConfig`
+        disable_async_output_proc: Disable async output processing.
+            This may result in lower performance.
+        hf_overrides: If a dictionary, contains arguments to be forwarded to the
+            HuggingFace config. If a callable, it is called to update the
+            HuggingFace config.
+        compilation_config: Either an integer or a dictionary. If it is an
+            integer, it is used as the level of compilation optimization. If it
+            is a dictionary, it can specify the full compilation configuration.
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
 
@@ -108,6 +123,12 @@ class LLM:
     DEPRECATE_LEGACY: ClassVar[bool] = False
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
+    DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
+    """
+    A flag to toggle whether to deprecate positional arguments in
+    :meth:`LLM.__init__`.
+    """
+
     @classmethod
     @contextmanager
     def deprecate_legacy_api(cls):
@@ -117,6 +138,13 @@ class LLM:
 
         cls.DEPRECATE_LEGACY = False
 
+    @deprecate_args(
+        start_index=2,  # Ignore self and model
+        is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
+        additional_message=(
+            "All positional arguments other than `model` will be "
+            "replaced with keyword arguments in an upcoming version."),
+    )
     def __init__(
         self,
         model: str,
@@ -124,6 +152,7 @@ class LLM:
         tokenizer_mode: str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
+        allowed_local_media_path: str = "",
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         quantization: Optional[str] = None,
@@ -134,11 +163,15 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: Optional[bool] = None,
-        max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
+        hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        # After positional args are removed, move this right below `model`
+        task: TaskOption = "auto",
+        override_pooler_config: Optional[PoolerConfig] = None,
+        compilation_config: Optional[Union[int, Dict[str, Any]]] = None,
         **kwargs,
     ) -> None:
         '''
@@ -151,12 +184,26 @@ class LLM:
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
+        if compilation_config is not None:
+            if isinstance(compilation_config, (int)):
+                compilation_config_instance = CompilationConfig.from_cli(
+                    str(compilation_config))
+            elif isinstance(compilation_config, (dict)):
+                compilation_config_instance = CompilationConfig.from_cli(
+                    json.dumps(compilation_config))
+            else:
+                compilation_config_instance = compilation_config
+        else:
+            compilation_config_instance = None
+
         engine_args = EngineArgs(
             model=model,
+            task=task,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
+            allowed_local_media_path=allowed_local_media_path,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
@@ -167,16 +214,32 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
-            max_context_len_to_capture=max_context_len_to_capture,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
+            hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
+            override_pooler_config=override_pooler_config,
+            compilation_config=compilation_config_instance,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(
+        # Logic to switch between engines is done at runtime instead of import
+        # to avoid import order issues
+        self.engine_class = self.get_engine_class()
+
+        # TODO(rob): enable mp by default (issue with fork vs spawn)
+        self.llm_engine = self.engine_class.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
+
         self.request_counter = Counter()
+
+    @staticmethod
+    def get_engine_class() -> Type[LLMEngine]:
+        if envs.VLLM_USE_V1:
+            # Lazy import: the v1 package isn't distributed
+            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+            return V1LLMEngine  # type: ignore
+        return LLMEngine
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
@@ -316,10 +379,21 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if self.llm_engine.model_config.embedding_mode:
-            raise ValueError(
+        task = self.llm_engine.model_config.task
+        if task != "generate":
+            messages = [
                 "LLM.generate() is only supported for (conditional) generation "
-                "models (XForCausalLM, XForConditionalGeneration).")
+                "models (XForCausalLM, XForConditionalGeneration).",
+            ]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "generate" in supported_tasks:
+                messages.append(
+                    "Your model supports the 'generate' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task generate`.")
+
+            raise ValueError(" ".join(messages))
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -351,7 +425,7 @@ class LLM:
             priority=priority)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return LLMEngine.validate_outputs(outputs, RequestOutput)
+        return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def beam_search(
         self,
@@ -433,6 +507,7 @@ class LLM:
                         for token_id, logprob_obj in logprobs.items():
                             new_beam = BeamSearchSequence(
                                 tokens=current_beam.tokens + [token_id],
+                                logprobs=current_beam.logprobs + [logprobs],
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob)
 
@@ -469,6 +544,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
@@ -485,9 +561,11 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            messages: A list of conversations or a single conversation. 
-                - Each conversation is represented as a list of messages.
-                - Each message is a dictionary with 'role' and 'content' keys.
+            messages: A list of conversations or a single conversation.
+
+              - Each conversation is represented as a list of messages.
+              - Each message is a dictionary with 'role' and 'content' keys.
+
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
@@ -497,11 +575,19 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
               If not provided, the model's default chat template will be used.
+            chat_template_content_format: The format to render message content.
+
+              - "string" will render the content as a string.
+                Example: ``"Who are you?"``
+              - "openai" will render the content as a list of dictionaries,
+                similar to OpenAI schema.
+                Example: ``[{"type": "text", "text": "Who are you?"}]``
+
             add_generation_prompt: If True, adds a generation template
                 to each message.
             continue_final_message: If True, continues the final message in
-                the conversation instead of starting a new one. Cannot be `True`
-                if `add_generation_prompt` is also `True`.
+                the conversation instead of starting a new one. Cannot be
+                ``True`` if ``add_generation_prompt`` is also ``True``.
             mm_processor_kwargs: Multimodal processor kwarg overrides for this
                 chat request. Only used for offline requests.
 
@@ -522,17 +608,26 @@ class LLM:
                 cast(List[ChatCompletionMessageParam], messages)
             ]
 
+        tokenizer = self.get_tokenizer()
+        model_config = self.llm_engine.get_model_config()
+        resolved_content_format = resolve_chat_template_content_format(
+            chat_template,
+            chat_template_content_format,
+            tokenizer,
+        )
+
         prompts: List[Union[TokensPrompt, TextPrompt]] = []
 
         for msgs in list_of_messages:
-            tokenizer = self.get_tokenizer()
-            model_config = self.llm_engine.get_model_config()
-
             # NOTE: _parse_chat_message_content_parts() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
             conversation, mm_data = parse_chat_messages(
-                msgs, model_config, tokenizer)
+                msgs,
+                model_config,
+                tokenizer,
+                content_format=resolved_content_format,
+            )
 
             prompt_data: Union[str, List[int]]
             if isinstance(tokenizer, MistralTokenizer):
@@ -683,7 +778,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of `EmbeddingRequestOutput` objects containing the
+            A list of ``EmbeddingRequestOutput`` objects containing the
             generated embeddings in the same order as the input prompts.
 
         Note:
@@ -691,10 +786,18 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if not self.llm_engine.model_config.embedding_mode:
-            raise ValueError(
-                "LLM.encode() is only supported for embedding models (XModel)."
-            )
+        task = self.llm_engine.model_config.task
+        if task != "embedding":
+            messages = ["LLM.encode() is only supported for embedding models."]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "embedding" in supported_tasks:
+                messages.append(
+                    "Your model supports the 'embedding' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task embedding`.")
+
+            raise ValueError(" ".join(messages))
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -717,7 +820,130 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return LLMEngine.validate_outputs(outputs, EmbeddingRequestOutput)
+        return self.engine_class.validate_outputs(outputs,
+                                                  EmbeddingRequestOutput)
+
+    def score(
+        self,
+        text_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        text_2: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        /,
+        truncate_prompt_tokens: Optional[int] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> List[EmbeddingRequestOutput]:
+        """Generates similarity scores for all pairs <text,text_pair>.
+
+        The inputs can be 1 -> 1, 1 -> N or N -> N. In the 1 - N case
+        the text_1 sentence will be replicated N times to pair with the text_2
+        sentences. The input pairs are used to build a list of prompts for the
+        cross encoder model. This class automatically batches the prompts,
+        considering the memory constraint. For the best performance, put all
+        of your texts into a single list and pass it to this method.
+
+        Args:
+            text_1: can be a single prompt or a list of prompts, in which
+                case it has to have the same length as the text_2 list
+            text_2: The texts to pair with the query to form the input
+                to the LLM. See :class:`~vllm.inputs.PromptType` for
+                more details about the format of each prompts.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
+            prompt_adapter_request: Prompt Adapter request to use for
+                generation, if any.
+
+        Returns:
+            A list of ``EmbeddingRequestOutput`` objects containing the
+            generated scores in the same order as the input prompts.
+        """
+        task = self.llm_engine.model_config.task
+        if task != "embedding":
+            messages = ["LLM.score() is only supported for embedding models."]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "embedding" in supported_tasks:
+                messages.append(
+                    "Your model supports the 'embedding' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task embedding`.")
+
+            raise ValueError(" ".join(messages))
+
+        if not self.llm_engine.model_config.is_cross_encoder:
+            raise ValueError("Your model does not support the cross encoding")
+
+        tokenizer = self.llm_engine.get_tokenizer()
+
+        if isinstance(tokenizer, MistralTokenizer):
+            raise ValueError(
+                "MistralTokenizer not supported for cross-encoding")
+
+        # the tokenizer for models such as
+        # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
+        # lists of tokens to the `text` and `text_pair` kwargs
+        def ensure_str(prompt: SingletonPrompt):
+            if isinstance(prompt, dict):
+                if "multi_modal_data" in prompt:
+                    raise ValueError("Multi-modal prompt is not "
+                                     "supported for cross encoding")
+                elif "prompt_token_ids" in prompt:
+                    prompt = tokenizer.decode(
+                        cast(TokensPrompt, prompt)["prompt_token_ids"])
+                elif "prompt" in prompt:
+                    prompt = cast(TextPrompt, prompt)["prompt"]
+            assert type(prompt) is str
+            return prompt
+
+        if isinstance(text_1, (str, dict)):
+            # Convert a single prompt to a list.
+            text_1 = [text_1]
+        text_1 = [ensure_str(t) for t in text_1]
+
+        if isinstance(text_2, (str, dict)):
+            # Convert a single prompt to a list.
+            text_2 = [text_2]
+        text_2 = [ensure_str(t) for t in text_2]
+
+        if len(text_1) > 1 and len(text_1) != len(text_2):
+            raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
+        if len(text_1) == 0:
+            raise ValueError("At least one text element must be given")
+        if len(text_2) == 0:
+            raise ValueError("At least one text_pair element must be given")
+
+        if len(text_1) == 1:
+            text_1 = text_1 * len(text_2)
+
+        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
+        pooling_params = PoolingParams()
+
+        tokenization_kwargs: Dict[str, Any] = {}
+        if truncate_prompt_tokens is not None:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+        parsed_prompts = []
+
+        for q, t in input_pairs:
+            prompt_inputs = tokenizer(text=q,
+                                      text_pair=t,
+                                      **tokenization_kwargs)
+            engine_prompt = TokensPrompt(
+                prompt_token_ids=prompt_inputs["input_ids"],
+                token_type_ids=prompt_inputs.get("token_type_ids"))
+            parsed_prompts.append(engine_prompt)
+
+        self._validate_and_add_requests(
+            prompts=parsed_prompts,
+            params=pooling_params,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+        )
+
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        return self.engine_class.validate_outputs(outputs,
+                                                  EmbeddingRequestOutput)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
@@ -901,9 +1127,3 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
-
-    def _is_encoder_decoder_model(self):
-        return self.llm_engine.is_encoder_decoder_model()
-
-    def _is_embedding_model(self):
-        return self.llm_engine.is_embedding_model()

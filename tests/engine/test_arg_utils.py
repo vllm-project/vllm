@@ -2,6 +2,7 @@ from argparse import ArgumentTypeError
 
 import pytest
 
+from vllm.config import PoolerConfig
 from vllm.engine.arg_utils import EngineArgs, nullable_kvs
 from vllm.utils import FlexibleArgumentParser
 
@@ -28,6 +29,45 @@ def test_limit_mm_per_prompt_parser(arg, expected):
         args = parser.parse_args(["--limit-mm-per-prompt", arg])
 
     assert args.limit_mm_per_prompt == expected
+
+
+def test_compilation_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # default value
+    args = parser.parse_args([])
+    assert args.compilation_config is None
+
+    # set to O3
+    args = parser.parse_args(["-O3"])
+    assert args.compilation_config.level == 3
+
+    # set to O 3 (space)
+    args = parser.parse_args(["-O", "3"])
+    assert args.compilation_config.level == 3
+
+    # set to O 3 (equals)
+    args = parser.parse_args(["-O=3"])
+    assert args.compilation_config.level == 3
+
+    # set to json
+    args = parser.parse_args(["--compilation-config", '{"level": 3}'])
+    assert args.compilation_config.level == 3
+
+    # set to json
+    args = parser.parse_args(['--compilation-config={"level": 3}'])
+    assert args.compilation_config.level == 3
+
+
+def test_valid_pooling_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args([
+        '--override-pooler-config',
+        '{"pooling_type": "MEAN"}',
+    ])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.override_pooler_config == PoolerConfig(
+        pooling_type="MEAN", )
 
 
 @pytest.mark.parametrize(

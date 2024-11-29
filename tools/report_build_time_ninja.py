@@ -16,7 +16,6 @@ Typical output looks like this:
            2.6 weighted s to build ...torch_bindings.cpp.o (31.5 s elapsed time)
            3.2 weighted s to build ...torch_bindings.cpp.o (38.5 s elapsed time)
     Longest build steps for .so (linking):
-           0.1 weighted s to build _core_C.abi3.so (0.7 s elapsed time)
            0.1 weighted s to build _moe_C.abi3.so (1.0 s elapsed time)
            0.5 weighted s to build ...flash_attn_c.abi3.so (1.1 s elapsed time)
            6.2 weighted s to build _C.abi3.so (6.2 s elapsed time)
@@ -82,7 +81,7 @@ class Target:
         # Allow for modest floating-point errors
         epsilon = 0.000002
         if (self.weighted_duration > self.Duration() + epsilon):
-            print('%s > %s?' % (self.weighted_duration, self.Duration()))
+            print('{} > {}?'.format(self.weighted_duration, self.Duration()))
         assert (self.weighted_duration <= self.Duration() + epsilon)
         return self.weighted_duration
 
@@ -105,7 +104,7 @@ def ReadTargets(log, show_all):
     The result is a list of Target objects."""
     header = log.readline()
     assert header == '# ninja log v5\n', \
-           'unrecognized ninja log version %r' % header
+           'unrecognized ninja log version {!r}'.format(header)
     targets_dict = {}
     last_end_seen = 0.0
     for line in log:
@@ -255,8 +254,8 @@ def SummarizeEntries(entries, extra_step_types):
     # Warn if the sum of weighted times is off by more than half a second.
     if abs(length - weighted_total) > 500:
         print('Warning: Possible corrupt ninja log, results may be '
-              'untrustworthy. Length = %.3f, weighted total = %.3f' %
-              (length, weighted_total))
+              'untrustworthy. Length = {:.3f}, weighted total = {:.3f}'.format(
+                  length, weighted_total))
 
     entries_by_ext = defaultdict(list)
     for target in entries:
@@ -264,16 +263,17 @@ def SummarizeEntries(entries, extra_step_types):
         entries_by_ext[extension].append(target)
 
     for key, values in entries_by_ext.items():
-        print('    Longest build steps for %s:' % key)
+        print('    Longest build steps for {}:'.format(key))
         values.sort(key=lambda x: x.WeightedDuration())
         for target in values[-long_count:]:
-            print('      %8.1f weighted s to build %s (%.1f s elapsed time)' %
-                  (target.WeightedDuration(), target.DescribeTargets(),
-                   target.Duration()))
+            print(
+                '      {:8.1f} weighted s to build {} ({:.1f} s elapsed time)'.
+                format(target.WeightedDuration(), target.DescribeTargets(),
+                       target.Duration()))
 
-    print('    %.1f s weighted time (%.1f s elapsed time sum, %1.1fx '
-          'parallelism)' %
-          (length, total_cpu_time, total_cpu_time * 1.0 / length))
+    print('    {:.1f} s weighted time ({:.1f} s elapsed time sum, {:1.1f}x '
+          'parallelism)'.format(length, total_cpu_time,
+                                total_cpu_time * 1.0 / length))
     print('    %d build steps completed, average of %1.2f/s' %
           (len(entries), len(entries) / (length)))
 
@@ -299,11 +299,12 @@ def main():
         long_ext_count += len(args.step_types.split(';'))
 
     try:
-        with open(log_file, 'r') as log:
+        with open(log_file) as log:
             entries = ReadTargets(log, False)
             SummarizeEntries(entries, args.step_types)
-    except IOError:
-        print('Log file %r not found, no build summary created.' % log_file)
+    except OSError:
+        print('Log file {!r} not found, no build summary created.'.format(
+            log_file))
         return errno.ENOENT
 
 

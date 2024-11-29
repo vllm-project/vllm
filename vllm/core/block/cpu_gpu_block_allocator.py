@@ -4,6 +4,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
+from vllm.platforms import current_platform
 from vllm.utils import Device
 
 
@@ -52,7 +53,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             - The block IDs are assigned contiguously, with GPU block IDs coming
                 before CPU block IDs.
         """
-        block_ids = list(range(num_gpu_blocks + num_cpu_blocks))
+        # For HPU, block id 0 is used only for padding
+        reserved_blocks = 1 if current_platform.is_hpu() else 0
+        block_ids = list(
+            range(reserved_blocks, num_gpu_blocks + num_cpu_blocks))
+        num_gpu_blocks -= reserved_blocks
         gpu_block_ids = block_ids[:num_gpu_blocks]
         cpu_block_ids = block_ids[num_gpu_blocks:]
 
@@ -301,14 +306,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         device = Device.GPU
         return self._allocators[device].mark_blocks_as_computed(block_ids)
 
-    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int],
-                               skip_last_block_id: bool) -> List[int]:
-        # Prefix caching only supported on GPU.
-        device = Device.GPU
-        return self._allocators[device].get_computed_block_ids(
-            prev_computed_block_ids, block_ids, skip_last_block_id)
-
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         # Prefix caching only supported on GPU.
@@ -336,6 +333,13 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()
         return list(mapping.items())
+
+    def find_cached_blocks_prefix(
+        self,
+        block_hashes: List[int],
+        device: Device = Device.GPU,
+    ) -> List[int]:
+        return self._allocators[device].find_cached_blocks_prefix(block_hashes)
 
 
 class NullBlock(Block):

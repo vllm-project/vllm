@@ -17,14 +17,12 @@ except (ModuleNotFoundError, ImportError) as err:
         "Draft model speculative decoding currently only supports"
         "CUDA and ROCm flash attention backend.") from err
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
-                                      ModelRunner)
+from vllm.worker.model_runner_base import (ModelRunnerBase,
+                                           ModelRunnerInputBase,
+                                           ModelRunnerWrapperBase)
 
 logger = init_logger(__name__)
 
@@ -36,7 +34,7 @@ debug_advance_input = False
 allow_gpu_advance_step = True
 
 
-class TP1DraftModelRunner(ModelRunner):
+class TP1DraftModelRunner(ModelRunnerWrapperBase):
     """Specialized model runner for speculative decoding draft model.
     Since the draft model always execute k forward passes consecutively to
     generate k speculative tokens in a single speculative decoding step,
@@ -49,40 +47,16 @@ class TP1DraftModelRunner(ModelRunner):
        any broadcasting inside execute_model).
     """
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        kv_cache_dtype: Optional[str] = "auto",
-        is_driver_worker: bool = False,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        return_hidden_states: bool = False,
-        observability_config: Optional[ObservabilityConfig] = None,
-    ):
-        if return_hidden_states:
+    def __init__(self, model_runner: ModelRunnerBase):
+        if hasattr(
+                model_runner,
+                "return_hidden_states") and model_runner.return_hidden_states:
             raise ValueError(
                 "return_hidden_states is not supported for TP1DraftModelRunner."
             )
+        super().__init__(model_runner)
 
-        super().__init__(
-            model_config=model_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            cache_config=cache_config,
-            load_config=load_config,
-            lora_config=lora_config,
-            kv_cache_dtype=kv_cache_dtype,
-            is_driver_worker=is_driver_worker,
-            prompt_adapter_config=prompt_adapter_config,
-            return_hidden_states=return_hidden_states,
-            observability_config=observability_config,
-        )
+        self.indices_of_seq_with_bonus_tokens = None
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
                                   num_queries):
@@ -101,10 +75,8 @@ class TP1DraftModelRunner(ModelRunner):
             assert seq_group.prompt_logprob_indices == []  # No prompt
             assert seq_group.sample_indices == [i]  # Simple
 
-    def _gpu_advance_step(
-            self, model_input: ModelInputForGPUWithSamplingMetadata,
-            last_output: SamplerOutput
-    ) -> ModelInputForGPUWithSamplingMetadata:
+    def _gpu_advance_step(self, model_input: ModelRunnerInputBase,
+                          last_output: SamplerOutput) -> ModelRunnerInputBase:
         # Currently, we expect "decode mode" only
         assert not model_input.is_prompt
 
@@ -179,7 +151,7 @@ class TP1DraftModelRunner(ModelRunner):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() != "flash-attn":
+        if self.attn_backend.get_name() != "FLASH_ATTN":
             return False
 
         # TODO: Add support for LORA
@@ -189,10 +161,14 @@ class TP1DraftModelRunner(ModelRunner):
         # TODO: Add soft-tuning prompt adapter support
         return not self.prompt_adapter_config
 
+    def set_indices_of_seq_with_bonus_tokens(self,
+                                             indices_of_seq_with_bonus_tokens):
+        self.indices_of_seq_with_bonus_tokens = indices_of_seq_with_bonus_tokens
+
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: ModelInputForGPUWithSamplingMetadata,
+        model_input: ModelRunnerInputBase,
         kv_caches: List[torch.Tensor],
         previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
@@ -297,14 +273,15 @@ class TP1DraftModelRunner(ModelRunner):
                 if previous_hidden_states is not None else {}
 
             # Run model
-            with set_forward_context(model_input.attn_metadata):
+            with set_forward_context(model_input.attn_metadata,
+                                     self.vllm_config):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
                     kv_caches=kv_caches,
                     attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
-                    **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
                     **kwargs,
                 )
@@ -314,11 +291,30 @@ class TP1DraftModelRunner(ModelRunner):
                                                model_input.sampling_metadata)
 
             # Sample the next token.
-            outputs.append(
-                self.model.sample(
-                    logits=logits,
-                    sampling_metadata=model_input.sampling_metadata,
-                ))
+            output = self.model.sample(
+                logits=logits,
+                sampling_metadata=model_input.sampling_metadata,
+            )
+            outputs.append(output)
+
+            if model_input.attn_metadata.num_prefills == 0 \
+                and self.indices_of_seq_with_bonus_tokens is not None:
+                assert output.sampled_token_ids is not None
+                # output.sampled_token_ids should be of shape (num_seqs, 1)
+                nums_seqs, num_tokens_per_seq = output.sampled_token_ids.shape
+                assert num_tokens_per_seq == 1
+                count = 0
+                for i in range(nums_seqs):
+                    bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
+                        count]
+                    if i != bonus_seq_idx:
+                        # The following might cause a cpu->gpu sync
+                        # However, the performance impact is negligible as we
+                        # benchmarked on H100.
+                        output.sampled_token_ids[
+                            i, :] = model_input.input_tokens[bonus_seq_idx]
+                    else:
+                        count += 1
 
             # Prepare inputs for the next step
             if step != num_steps - 1:

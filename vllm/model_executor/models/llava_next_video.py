@@ -1,6 +1,6 @@
 import math
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
 import numpy as np
@@ -10,14 +10,15 @@ from transformers import (CLIPVisionConfig, LlavaNextVideoConfig,
                           SiglipVisionConfig)
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.config import VllmConfig
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors
@@ -25,10 +26,11 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
+from .llava import init_vision_tower_for_llava
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip)
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 32
@@ -106,43 +108,51 @@ def dummy_data_for_llava_next_video(ctx: InputContext, seq_len: int,
     video_feature_size = frames_per_video * tokens_per_frame
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = dummy_seq_data_for_clip(
+        seq_data, ranges = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             num_videos,
             image_token_id=hf_config.video_token_index,
             image_feature_size_override=video_feature_size,
+            mm_key="video",
         )
 
         pil_frame = dummy_image_for_clip(vision_config, num_images=1)
         np_frame = np.array(pil_frame["image"])
         mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
         mm_data = {"video": mm_data_per_video}
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data = dummy_seq_data_for_siglip(
+        seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
             num_videos,
             image_token_id=hf_config.video_token_index,
             image_feature_size_override=video_feature_size,
+            mm_key="video",
         )
 
         pil_frame = dummy_image_for_siglip(vision_config, num_images=1)
         np_frame = np.array(pil_frame["image"])
         mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
         mm_data = {"video": mm_data_per_video}
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
 
 
 def input_processor_for_llava_next_video(ctx: InputContext,
-                                         llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+                                         inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "video" not in multi_modal_data:
-        return llm_inputs
+        return inputs
+
+    if "multi_modal_placeholders" in inputs and "video" in inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return inputs
+
     video_data = multi_modal_data["video"]
 
     model_config = ctx.model_config
@@ -158,47 +168,22 @@ def input_processor_for_llava_next_video(ctx: InputContext,
 
         tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
-        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
             tokenizer,
-            llm_inputs.get("prompt"),
-            llm_inputs["prompt_token_ids"],
+            inputs.get("prompt"),
+            inputs["prompt_token_ids"],
             placeholder_token_id=hf_config.video_token_index,
             repeat_count=video_feature_size,
         )
 
-        return LLMInputs(prompt_token_ids=new_token_ids,
-                         prompt=new_prompt,
-                         multi_modal_data=multi_modal_data)
+        return token_inputs(prompt_token_ids=new_token_ids,
+                            prompt=new_prompt,
+                            multi_modal_data=multi_modal_data,
+                            multi_modal_placeholders={"video": ranges})
 
     elif is_list_of(video_data, np.ndarray):
         raise NotImplementedError(
             "Processing multiple videos is not supported")
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
-def _init_vision_tower(hf_config: LlavaNextVideoConfig):
-    vision_config = hf_config.vision_config
-
-    # Initialize the vision tower only up to the required feature layer
-    vision_feature_layer = hf_config.vision_feature_layer
-    if vision_feature_layer < 0:
-        num_hidden_layers = hf_config.vision_config.num_hidden_layers \
-            + vision_feature_layer + 1
-    else:
-        num_hidden_layers = vision_feature_layer + 1
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        return CLIPVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-    elif isinstance(vision_config, SiglipVisionConfig):
-        return SiglipVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -269,25 +254,30 @@ class LlavaNextMultiModalProjector(nn.Module):
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 
-    def __init__(self,
-                 config: LlavaNextVideoConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.multimodal_config = multimodal_config
 
         # Initialize the vision tower only up to the required feature layer
-        self.vision_tower = _init_vision_tower(config)
+        self.vision_tower = init_vision_tower_for_llava(
+            config,
+            quant_config,
+            require_post_norm=False,
+            prefix=maybe_prefix(prefix, "vision_tower"))
         self.vision_resampler = LlavaNextVideoPooler(config)
         self.multi_modal_projector = LlavaNextMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.model.make_empty_intermediate_tensors)
@@ -297,7 +287,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def _validate_video_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
@@ -399,6 +389,25 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError(
                 f"Unsupported type of video input {type(video_pixels)}")
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        video_input = self._parse_and_validate_video_input(**kwargs)
+        if video_input is None:
+            return None
+        vision_embeddings = self._process_video_pixels(video_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.video_token_index)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -406,6 +415,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for LlaVA-NeXT-Video.
@@ -415,22 +425,15 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos: Pixels in each frames for each input videos.
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            video_input = self._parse_and_validate_video_input(**kwargs)
-            if video_input is not None:
-                video_embeddings = self._process_video_pixels(video_input)
-                inputs_embeds = self.language_model \
-                    .model.get_input_embeddings(input_ids)
 
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, video_embeddings,
-                    self.config.video_token_index)
-
-                input_ids = None
-            else:
-                inputs_embeds = None
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
@@ -456,10 +459,11 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             # This model doesn't support images for now
             ignore_unexpected_prefixes=["image_newline"],
         )
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

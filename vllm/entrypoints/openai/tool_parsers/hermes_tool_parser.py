@@ -12,8 +12,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.entrypoints.openai.tool_parsers.utils import (
-    extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import random_uuid
@@ -53,7 +51,8 @@ class Hermes2ProToolParser(ToolParser):
         self.tool_call_start_token_id = self.vocab.get(
             self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
-        if not self.tool_call_start_token_id or not self.tool_call_end_token_id:
+        if (self.tool_call_start_token_id is None
+                or self.tool_call_end_token_id is None):
             raise RuntimeError(
                 "Hermes 2 Pro Tool parser could not locate tool call start/end "
                 "tokens in the tokenizer!")
@@ -103,9 +102,9 @@ class Hermes2ProToolParser(ToolParser):
                     tool_calls=tool_calls,
                     content=content if content else None)
 
-            except Exception as e:
-                logger.error("Error in extracting tool call from response %s",
-                             e)
+            except Exception:
+                logger.exception(
+                    "Error in extracting tool call from response.")
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
                                                     content=model_output)
@@ -189,8 +188,11 @@ class Hermes2ProToolParser(ToolParser):
                 diff = self.prev_tool_call_arr[self.current_tool_id].get(
                     "arguments")
                 if diff:
-                    diff = json.dumps(diff).replace(
-                        self.streamed_args_for_tool[self.current_tool_id], "")
+                    diff = diff.encode('utf-8').decode(
+                        'unicode_escape') if diff is str else diff
+                    diff = json.dumps(
+                        diff, ensure_ascii=False
+                    )[len(self.streamed_args_for_tool[self.current_tool_id]):]
                     logger.debug(
                         "Finishing tool and found diff that had not "
                         "been streamed yet: %s", diff)
@@ -306,22 +308,20 @@ class Hermes2ProToolParser(ToolParser):
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
+                if isinstance(delta_text, str) and len(delta_text.rstrip(
+                )) >= 1 and delta_text.rstrip()[-1] == '}':
+                    delta_text = delta_text.rstrip()[:-1]
 
-                cur_args_json = json.dumps(cur_arguments)
-                prev_args_json = json.dumps(prev_arguments)
-                logger.debug("Searching for diff between\n%s", cur_args_json)
-                logger.debug("and\n%s", prev_args_json)
-                argument_diff = extract_intermediate_diff(
-                    cur_args_json, prev_args_json)
-                logger.debug("got argument diff %s", argument_diff)
+                logger.debug("got diff %s", delta_text)
+
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
-                                      arguments=argument_diff).model_dump(
+                                      arguments=delta_text).model_dump(
                                           exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
-                    += argument_diff
+                    += delta_text
 
             # handle saving the state for the current tool into
             # the "prev" list for use in diffing for the next iteration
@@ -333,6 +333,6 @@ class Hermes2ProToolParser(ToolParser):
 
             return delta
 
-        except Exception as e:
-            logger.error("Error trying to handle streaming tool call: %s", e)
+        except Exception:
+            logger.exception("Error trying to handle streaming tool call.")
             return None  # do not stream a delta. skip this token ID.

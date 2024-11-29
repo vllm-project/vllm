@@ -7,6 +7,13 @@ import triton.language as tl
 
 from vllm.platforms import current_platform
 
+# Static kernels parameters
+BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
+NUM_WARPS = 8
+
+# To check compatibility
+IS_TURING = current_platform.get_device_capability() == (7, 5)
+
 if triton.__version__ >= "2.1.0":
 
     @triton.jit
@@ -50,6 +57,7 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
+        IN_PRECISION: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
@@ -130,7 +138,7 @@ if triton.__version__ >= "2.1.0":
                 k = k_load
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  # [M,N]
-            qk += tl.dot(q, k)
+            qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
                           float("-inf"))
             qk *= sm_scale
@@ -178,7 +186,7 @@ if triton.__version__ >= "2.1.0":
                 v = v_load
             p = p.to(v.dtype)
 
-            acc += tl.dot(p, v)
+            acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
             # # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -204,7 +212,7 @@ if triton.__version__ >= "2.1.0":
                         other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk += tl.dot(q, k)
+            qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
             qk *= sm_scale
             # apply causal mask
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk,
@@ -238,7 +246,7 @@ if triton.__version__ >= "2.1.0":
                         other=0.0)
             p = p.to(v.dtype)
 
-            acc += tl.dot(p, v)
+            acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
             # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -485,6 +493,7 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
+        IN_PRECISION: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
@@ -560,7 +569,7 @@ if triton.__version__ >= "2.1.0":
                 k = k_load
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk += tl.dot(q, k)
+            qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
                           float("-inf"))
             qk *= sm_scale
@@ -600,7 +609,7 @@ if triton.__version__ >= "2.1.0":
                 v = v_load
             p = p.to(v.dtype)
 
-            acc += tl.dot(p, v, allow_tf32=False)
+            acc = tl.dot(p, v, acc=acc, input_precision='ieee')
             # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -635,7 +644,7 @@ if triton.__version__ >= "2.1.0":
                         other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk += tl.dot(q, k, allow_tf32=False)
+            qk = tl.dot(q, k, acc=qk, input_precision='ieee')
             qk *= sm_scale
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk,
                           float("-inf"))
@@ -673,7 +682,7 @@ if triton.__version__ >= "2.1.0":
                         other=0.0)
             p = p.to(v.dtype)
 
-            acc += tl.dot(p, v, allow_tf32=False)
+            acc = tl.dot(p, v, acc=acc, input_precision='ieee')
             # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -709,13 +718,17 @@ if triton.__version__ >= "2.1.0":
                               alibi_slopes=None,
                               sliding_window=None):
 
-        BLOCK = 128 if current_platform.has_device_capability(80) else 64
-        NUM_WARPS = 8
-
+        q_dtype_is_f32 = q.dtype is torch.float32
         # need to reduce num. blocks when using fp32
         # due to increased use of GPU shared memory
-        if q.dtype is torch.float32:
-            BLOCK = BLOCK // 2
+        # if q.dtype is torch.float32:
+        BLOCK = BASE_BLOCK // 2 if q_dtype_is_f32 else BASE_BLOCK
+
+        # Turing does have tensor core for float32 multiplication
+        # use ieee as fallback for triton kernels work. There is also
+        # warning on vllm/config.py to inform users this fallback
+        # implementation
+        IN_PRECISION = 'ieee' if IS_TURING and q_dtype_is_f32 else None
 
         # Conversion of FP8 Tensor from uint8 storage to
         # appropriate torch.dtype for interpretation by Triton
@@ -799,6 +812,7 @@ if triton.__version__ >= "2.1.0":
                 v_cache.stride(
                     3),  #[num_blocks, num_kv_heads, head_size, block_size]
                 num_queries_per_kv=num_queries_per_kv,
+                IN_PRECISION=IN_PRECISION,
                 BLOCK_M=BLOCK,
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
@@ -850,6 +864,7 @@ if triton.__version__ >= "2.1.0":
             v_cache.stride(
                 3),  #[num_blocks, num_kv_heads, head_size, block_size]
             num_queries_per_kv=num_queries_per_kv,
+            IN_PRECISION=IN_PRECISION,
             BLOCK_M=BLOCK,
             BLOCK_DMODEL=Lk,
             BLOCK_DMODEL_PADDED=Lk_padded,

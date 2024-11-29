@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.utils import direct_register_custom_op
+
 from .utils import get_lora_op_configs
 
 
@@ -75,7 +77,9 @@ def _bgmv_expand_kernel(
             other=0.0,
         )  # [BLOCK_N,BLOCK_K]
         if ADD_INPUTS:
-            tiled_out = tl.load(c_ptr + current_n * cn_stride, mask=c_mask)
+            tiled_out = tl.load(c_ptr + current_n * cn_stride,
+                                mask=c_mask,
+                                other=0.0)
             accumulator = tl.sum(tiled_a * tiled_b, 1) + tiled_out
         else:
             accumulator = tl.sum(tiled_a * tiled_b, 1)
@@ -160,9 +164,24 @@ def _bgmv_expand(
     return
 
 
+def bgmv_expand_fake(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    add_inputs: bool = True,
+) -> None:
+    return
+
+
 try:
-    bgmv_expand = torch.library.custom_op("lora::bgmv_expand",
-                                          _bgmv_expand,
-                                          mutates_args=["output_tensor"])
+    direct_register_custom_op(
+        op_name="bgmv_expand",
+        op_func=_bgmv_expand,
+        mutates_args=["output_tensor"],
+        fake_impl=bgmv_expand_fake,
+    )
+    bgmv_expand = torch.ops.vllm.bgmv_expand
+
 except AttributeError:
     bgmv_expand = _bgmv_expand

@@ -45,9 +45,6 @@ class ExpertsInt8Config(QuantizationConfig):
             return ExpertsInt8MoEMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class ExpertsInt8MoEMethod(FusedMoEMethodBase):
 
