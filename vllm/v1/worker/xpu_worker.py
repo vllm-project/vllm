@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 import torch
 import torch.distributed
 
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import Worker, _get_cache_block_size
 from vllm.model_executor import set_random_seed
