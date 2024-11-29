@@ -9,7 +9,8 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData,
                            SequenceGroupMetadata)
 from vllm.utils import (PyObjectCache, async_tensor_h2d,
-                        is_pin_memory_available, make_tensor_with_pad)
+                        is_pin_memory_available, make_tensor_with_pad,
+                        make_tensor_with_pad_align)
 
 _SAMPLING_EPS = 1e-5
 
@@ -522,20 +523,38 @@ class SamplingTensors:
         do_penalties = prompt_tokens or output_tokens
 
         if do_penalties:
-            prompt_t = make_tensor_with_pad(
-                prompt_tokens,
-                vocab_size,
-                device="cpu",
-                dtype=torch.int64,
-                pin_memory=pin_memory,
-            )
-            output_t = make_tensor_with_pad(
-                output_tokens,
-                vocab_size,
-                device="cpu",
-                dtype=torch.int64,
-                pin_memory=pin_memory,
-            )
+            if current_platform.is_hpu():
+                prompt_t = make_tensor_with_pad_align(
+                    prompt_tokens,
+                    vocab_size,
+                    device="cpu",
+                    dtype=torch.int64,
+                    pin_memory=pin_memory,
+                    max_len_align=1024,
+                )
+                output_t = make_tensor_with_pad_align(
+                    output_tokens,
+                    vocab_size,
+                    device="cpu",
+                    dtype=torch.int64,
+                    pin_memory=pin_memory,
+                    max_len_align=1024,
+                )
+            else:
+                prompt_t = make_tensor_with_pad(
+                    prompt_tokens,
+                    vocab_size,
+                    device="cpu",
+                    dtype=torch.int64,
+                    pin_memory=pin_memory,
+                )
+                output_t = make_tensor_with_pad(
+                    output_tokens,
+                    vocab_size,
+                    device="cpu",
+                    dtype=torch.int64,
+                    pin_memory=pin_memory,
+                )
         else:
             empty_tensor = torch.empty(0, device=device, dtype=torch.long)
             prompt_t = empty_tensor
@@ -545,46 +564,57 @@ class SamplingTensors:
             temperatures,
             device="cpu",
             dtype=dtype,
-            pin_memory=pin_memory,
         )
         top_ps_t = torch.tensor(
             top_ps,
             device="cpu",
             dtype=dtype,
-            pin_memory=pin_memory,
         )
         min_ps_t = torch.tensor(
             min_ps,
             device="cpu",
             dtype=dtype,
-            pin_memory=pin_memory,
         )
         presence_penalties_t = torch.tensor(
             presence_penalties,
             device="cpu",
             dtype=dtype,
-            pin_memory=pin_memory,
         )
         frequency_penalties_t = torch.tensor(
             frequency_penalties,
             device="cpu",
             dtype=dtype,
-            pin_memory=pin_memory,
         )
         repetition_penalties_t = torch.tensor(
             repetition_penalties,
             device="cpu",
             dtype=dtype,
-            pin_memory=pin_memory,
         )
         top_ks_t = torch.tensor(
             top_ks,
             device="cpu",
             dtype=torch.int,
-            pin_memory=pin_memory,
         )
         # Because the memory is pinned, we can do non-blocking
         # transfer to device.
+
+        if pin_memory:
+            if not current_platform.is_hpu():
+                temperatures_t.pin_memory()
+                top_ps_t.pin_memory()
+                min_ps_t.pin_memory()
+                frequency_penalties_t.pin_memory()
+                presence_penalties_t.pin_memory()
+                repetition_penalties_t.pin_memory()
+                top_ks_t.pin_memory()
+            else:
+                temperatures_t.pin_memory(device="hpu")
+                top_ps_t.pin_memory(device="hpu")
+                min_ps_t.pin_memory(device="hpu")
+                frequency_penalties_t.pin_memory(device="hpu")
+                presence_penalties_t.pin_memory(device="hpu")
+                repetition_penalties_t.pin_memory(device="hpu")
+                top_ks_t.pin_memory(device="hpu")
 
         return cls(
             temperatures=temperatures_t.to(device=device, non_blocking=True),
