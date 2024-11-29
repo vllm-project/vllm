@@ -339,44 +339,55 @@ class SiglipAttention(nn.Module):
         qkv = qkv.transpose(1, 2)
         query_states, key_states, value_states = qkv.chunk(3, dim=1)
 
-        k_v_seq_len = key_states.shape[-2]
-        attn_weights = torch.matmul(query_states, key_states.transpose(
-            2, 3)) * self.scale
+        from ipex_llm.transformers.models.common import padding_qkv_hd
+        query_states, key_states, value_states = padding_qkv_hd(
+            query_states, key_states, value_states,
+            72, 80
+        )
+        from ipex_llm.transformers.models.utils import use_sdp_non_causal
+        if use_sdp_non_causal(self.head_dim, query_states.device, query_states.dtype):
+            import xe_addons
+            attn_weights = None
+            attn_output = xe_addons.sdp_non_causal(query_states, key_states.contiguous(), value_states.contiguous(), attention_mask)
+        else:
+            k_v_seq_len = key_states.shape[-2]
+            attn_weights = torch.matmul(query_states, key_states.transpose(
+                2, 3)) * self.scale
 
-        if attn_weights.size() != (batch_size, self.num_heads, q_len,
-                                   k_v_seq_len):
-            raise ValueError(
-                "Attention weights should be of size "
-                f"{(batch_size, self.num_heads, q_len, k_v_seq_len)}, but is"
-                f" {attn_weights.size()}")
-
-        if attention_mask is not None:
-            if attention_mask.size() != (batch_size, 1, q_len, k_v_seq_len):
+            if attn_weights.size() != (batch_size, self.num_heads, q_len,
+                                    k_v_seq_len):
                 raise ValueError(
-                    "Attention mask should be of size "
-                    f"{(batch_size, 1, q_len, k_v_seq_len)}",
-                    f"but is {attention_mask.size()}")
-            attn_weights = attn_weights + attention_mask
+                    "Attention weights should be of size "
+                    f"{(batch_size, self.num_heads, q_len, k_v_seq_len)}, but is"
+                    f" {attn_weights.size()}")
 
-        # upcast attention to fp32
-        # attn_weights = nn.functional.softmax(attn_weights,
-        #                                      dim=-1,
-        #                                      dtype=torch.float32).to(
-        #                                          query_states.dtype)
-        attn_weights = attention_softmax(attn_weights, self.training)
-        attn_weights = nn.functional.dropout(attn_weights,
-                                             p=self.dropout,
-                                             training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
+            if attention_mask is not None:
+                if attention_mask.size() != (batch_size, 1, q_len, k_v_seq_len):
+                    raise ValueError(
+                        "Attention mask should be of size "
+                        f"{(batch_size, 1, q_len, k_v_seq_len)}",
+                        f"but is {attention_mask.size()}")
+                attn_weights = attn_weights + attention_mask
 
-        if attn_output.size() != (batch_size, self.num_heads, q_len,
-                                  self.head_dim):
-            raise ValueError(
-                "`attn_output` should be of size "
-                f"{(batch_size, self.num_heads, q_len, self.head_dim)}, "
-                "but is"
-                f" {attn_output.size()}")
+            # upcast attention to fp32
+            # attn_weights = nn.functional.softmax(attn_weights,
+            #                                      dim=-1,
+            #                                      dtype=torch.float32).to(
+            #                                          query_states.dtype)
+            attn_weights = attention_softmax(attn_weights, self.training)
+            attn_weights = nn.functional.dropout(attn_weights,
+                                                p=self.dropout,
+                                                training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
 
+            if attn_output.size() != (batch_size, self.num_heads, q_len,
+                                    self.head_dim):
+                raise ValueError(
+                    "`attn_output` should be of size "
+                    f"{(batch_size, self.num_heads, q_len, self.head_dim)}, "
+                    "but is"
+                    f" {attn_output.size()}")
+        attn_output = attn_output[:, :, :, :self.head_dim]
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
 
