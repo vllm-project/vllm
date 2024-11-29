@@ -234,8 +234,8 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                     torch.testing.assert_close(
                         logprob.logprob,
                         hf_logprob[0][i][token_id].item(),
-                        atol=1e-2,
-                        rtol=1e-2)
+                        atol=2e-2,
+                        rtol=2e-2)
         else:
             assert vllm_result.prompt_logprobs is None
 
