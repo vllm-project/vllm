@@ -58,11 +58,8 @@ benchmark() {
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
-    --kv-connector PyNcclConnector \
-    --kv-role kv_producer \
-    --kv-rank 0 \
-    --kv-parallel-size 2 \
-    --kv-buffer-size 1e10 &
+    --kv-transfer-config \
+    '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
     
 
   CUDA_VISIBLE_DEVICES=1 python3 \
@@ -71,11 +68,8 @@ benchmark() {
     --port 8200 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
-    --kv-connector PyNcclConnector \
-    --kv-role kv_consumer \
-    --kv-rank 1 \
-    --kv-parallel-size 2 \
-    --kv-buffer-size 1e10 &
+    --kv-transfer-config \
+    '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
 
   wait_for_server 8100
   wait_for_server 8200

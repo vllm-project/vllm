@@ -38,6 +38,9 @@ class PyNcclConnector(KVConnectorBase):
 
         self.config = config.kv_transfer_config
 
+        logger.info("Initializing PyNcclConfig under kv_transfer_config %s",
+                    self.config)
+
         self.lookup_buffer_size = self.config.kv_buffer_size
 
         self.producer_buffer: Optional[LookupBuffer] = None

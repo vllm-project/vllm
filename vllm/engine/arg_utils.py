@@ -194,15 +194,7 @@ class EngineArgs:
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"
 
-    # P/D disaggregation coonfiguration
-    kv_connector: Optional[str] = None
-    kv_buffer_size: Optional[float] = 1e9
-    kv_buffer_device: Optional[str] = "cuda"
-    kv_role: Optional[str] = None
-    kv_rank: Optional[str] = None
-    kv_parallel_size: int = 1
-    kv_ip: str = "127.0.0.1"
-    kv_port: int = 14579
+    kv_transfer_config: Optional[KVTransferConfig] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -899,66 +891,17 @@ class EngineArgs:
                             'compilers, using -O without space is also '
                             'supported. -O3 is equivalent to -O 3.')
 
+        parser.add_argument('--kv-transfer-config',
+                            type=KVTransferConfig.from_cli,
+                            default=None,
+                            help='The configurations for distributed KV cache '
+                            'transfer. Should be a JSON string.')
+
         parser.add_argument(
             '--worker-cls',
             type=str,
             default="auto",
             help='The worker class to use for distributed execution.')
-
-        parser.add_argument(
-            '--kv-parallel-size',
-            type=int,
-            default=EngineArgs.kv_parallel_size,
-            help="The number of parallel instances for KV cache transfer. "
-            "For PyNcclConnector, this should be >1.")
-
-        parser.add_argument(
-            '--kv-connector',
-            type=str,
-            default=None,
-            choices=["PyNcclConnector"],
-            help="The KV connector for vLLM to transmit KV caches between vLLM"
-            " instances.")
-
-        parser.add_argument(
-            '--kv-buffer-size',
-            type=float,
-            default=EngineArgs.kv_buffer_size,
-            help="The buffer size for TorchDistributedConnector. Measured in "
-            "number of bytes. Recommended value: 1e9 (about 1GB).")
-
-        parser.add_argument(
-            '--kv-buffer-device',
-            type=str,
-            default=EngineArgs.kv_buffer_device,
-            choices=["cpu", "cuda"],
-            help="The device used by kv connector to buffer the KV cache. Can "
-            "be cpu or cuda. Recommended value: cuda.")
-
-        parser.add_argument(
-            '--kv-role',
-            type=str,
-            default=None,
-            choices=["kv_producer", "kv_consumer", "both"],
-            help="Whether this vLLM instance produces, consumes KV cache, or "
-            "both. Choices are 'kv_producer', 'kv_consumer', and 'both'.")
-
-        parser.add_argument(
-            '--kv-rank',
-            type=int,
-            default=None,
-            help="The rank of this vLLM instance in the KV cache transfer."
-            " Typical value: 0 for prefill instance, 1 for decode instance.")
-
-        parser.add_argument('--kv-ip',
-                            type=str,
-                            default=EngineArgs.kv_ip,
-                            help="The IP address of the KV cache producer.")
-
-        parser.add_argument('--kv-port',
-                            type=int,
-                            default=EngineArgs.kv_port,
-                            help="The port of the KV cache producer.")
 
         return parser
 
@@ -1075,17 +1018,6 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
         )
-        kv_transfer_config = KVTransferConfig(
-            kv_parallel_size=self.kv_parallel_size,
-            kv_connector=self.kv_connector,
-            kv_buffer_size=self.kv_buffer_size,
-            kv_buffer_device=self.kv_buffer_device,
-            kv_role=self.kv_role,
-            kv_rank=self.kv_rank,
-            kv_ip=self.kv_ip,
-            kv_port=self.kv_port,
-        )
-
         max_model_len = model_config.max_model_len
         use_long_context = max_model_len > 32768
         if self.enable_chunked_prefill is None:
@@ -1251,7 +1183,7 @@ class EngineArgs:
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
-            kv_transfer_config=kv_transfer_config,
+            kv_transfer_config=self.kv_transfer_config,
         )
 
 
