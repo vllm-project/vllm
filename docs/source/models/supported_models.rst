@@ -139,6 +139,11 @@ Text Generation
     - :code:`google/gemma-2-9b`, :code:`google/gemma-2-27b`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`GlmForCausalLM`
+    - GLM-4
+    - :code:`THUDM/glm-4-9b-chat-hf`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
@@ -177,7 +182,7 @@ Text Generation
   * - :code:`InternLM2ForCausalLM`
     - InternLM2
     - :code:`internlm/internlm2-7b`, :code:`internlm/internlm2-chat-7b`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`JAISLMHeadModel`
     - Jais
@@ -307,6 +312,11 @@ Text Generation
   * - :code:`SolarForCausalLM`
     - Solar Pro
     - :code:`upstage/solar-pro-preview-instruct`, etc.
+    - ✅︎
+    - ✅︎
+  * - :code:`TeleChat2ForCausalLM`
+    - TeleChat2
+    - :code:`TeleAI/TeleChat2-3B`, :code:`TeleAI/TeleChat2-7B`, :code:`TeleAI/TeleChat2-35B`, etc.
     - ✅︎
     - ✅︎
   * - :code:`XverseForCausalLM`

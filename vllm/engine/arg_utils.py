@@ -416,9 +416,13 @@ class EngineArgs:
                             'tokens. This is ignored on neuron devices and '
                             'set to max-model-len')
 
-        parser.add_argument('--enable-prefix-caching',
-                            action='store_true',
-                            help='Enables automatic prefix caching.')
+        parser.add_argument(
+            "--enable-prefix-caching",
+            action=argparse.BooleanOptionalAction,
+            default=EngineArgs.enable_prefix_caching,
+            help="Enables automatic prefix caching. "
+            "Use --no-enable-prefix-caching to disable explicitly.",
+        )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
