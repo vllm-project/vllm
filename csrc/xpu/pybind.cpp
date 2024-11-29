@@ -75,4 +75,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "awq_dequantize",
     &awq_dequantize,
     "dequant method for awq");
+  ops.def("context_attention_forward_v1", &context_attention_forward_v1,
+          "Context attention forward_v1");
+
+  ops.def("context_attention_forward_v2", &context_attention_forward_v2,
+          "Context attention forward_v2");
 }

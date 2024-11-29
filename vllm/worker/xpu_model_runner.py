@@ -32,7 +32,7 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-
+from vllm.attention.backends.utils import is_block_tables_empty
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -127,6 +127,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         self.sliding_window = self.runner.sliding_window
         self.block_size = self.runner.block_size
         self.device = self.runner.device
+        self.scheduler_config = self.runner.scheduler_config
+        self.cache_config = self.runner.cache_config
         # Multi-modal data support
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
 
@@ -134,26 +136,224 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         self.seq_group_metadata_list.append(seq_group_metadata)
 
     def build(self) -> ModelInputForXPU:
-        is_prompt = self.seq_group_metadata_list[0].is_prompt
-        # Prepare input tensors.
-        if is_prompt:
-            (input_tokens, input_positions, attn_metadata, seq_lens,
-             multi_modal_kwargs) = self._prepare_prompt(
-                 self.seq_group_metadata_list)
-        else:
-            (input_tokens, input_positions,
-             attn_metadata) = self._prepare_decode(
-                 self.seq_group_metadata_list)
-            seq_lens = attn_metadata.seq_lens
-            multi_modal_kwargs = None
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+        slot_mapping: List[int] = []
 
+        seq_lens: List[int] = []
+        # Prefill's seq_len: query_length + chunked_prefill length
+        prefill_seq_lens: List[int] = []
+        decode_seq_lens: List[int] = []
+        context_lens: List[int] = []
+        query_lens: List[int] = []
+        # One for each sequence, physical blocks
+        block_tables: List[List[int]] = []
+        multi_modal_inputs_list: List[MultiModalInputs] = []
+
+        num_prefills = 0
+        num_prefill_tokens = 0
+        num_decode_tokens = 0
+
+        if len(self.seq_group_metadata_list) == 0:
+            return None
+
+        assert self.sliding_window is None, "TODO: support sliding window later"
+
+        for seq_group_metadata in self.seq_group_metadata_list:
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            # is_prompt indicates that it is still in prompt states
+            # TODO: remove this is_prompt
+            is_prompt = seq_group_metadata.is_prompt
+
+            # Iterate over all the seqs in the seq_group
+            for seq_id in seq_ids:
+                # Check for prefix caching
+                computed_block_nums = seq_group_metadata.computed_block_nums
+                if (self.scheduler_config is not None
+                    and self.scheduler_config.chunked_prefill_enabled
+                    and not (computed_block_nums is None or computed_block_nums == [])):
+                    raise RuntimeError("chunked prefill cannot be used with prefix caching")
+                seq_data = seq_group_metadata.seq_data[seq_id]
+                # Context_len: how many tokens that have been computed
+                if is_prompt:
+                    if self.scheduler_config.chunked_prefill_enabled:
+                        context_len = seq_data.get_num_computed_tokens()
+                    elif computed_block_nums is not None:
+                        context_len = len(computed_block_nums) * self.block_size
+                    else:
+                        context_len = 0
+                else:
+                    context_len = seq_data.get_len() - 1
+
+                # Get tokens for this sequence
+                # For prefill, the seq_len will be the second one.
+                # For decoding, the seq_len will be the first one.
+                seq_len = min(seq_data.get_len(), context_len + seq_group_metadata.token_chunk_size)
+
+                if is_prompt:
+                    tokens = seq_data.get_token_ids()[context_len: seq_len]
+                else:
+                    # Last token
+                    tokens = [seq_data.get_last_token_id()]
+
+                if (computed_block_nums is not None or self.scheduler_config.chunked_prefill_enabled or not is_prompt):
+                    # Chunked prefill or decoding
+                    # For chunked prefill, the block tables may not be None
+                    if seq_group_metadata.block_tables is not None:
+                        block_table = seq_group_metadata.block_tables[seq_id]
+                    else:
+                        block_table = []
+                else:
+                    # Prefill without chunked prefill
+                    block_table = []
+                block_tables.append(block_table)
+                # Total seq_lens
+                seq_lens.append(seq_len)
+                context_lens.append(context_len)
+                query_len = seq_len - context_len
+                query_lens.append(query_len)
+                input_tokens.extend(tokens)
+                input_positions.extend(list(range(context_len, seq_len)))
+                if is_prompt:
+                    mm_data = seq_group_metadata.multi_modal_data
+                    if mm_data:
+                        mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                        multi_modal_inputs_list.append(mm_kwargs)
+                    if self.runner.model_is_mrope and mm_data:
+                        image_grid_thw = mm_kwargs.get("image_grid_thw", None)
+                        video_grid_thw = mm_kwargs.get("video_grid_thw", None)
+                        assert image_grid_thw is not None or video_grid_thw is not None, (
+                            "mrope embedding type requires multi-modal input mapper "
+                            "returns 'image_grid_thw' or 'video_grid_thw'.")
+
+                        hf_config = self.runner.model_config.hf_config
+                        token_ids = seq_data.get_token_ids()
+                        temp_mrope_input_positions, mrope_position_delta = \
+                            MRotaryEmbedding.get_input_positions(
+                                token_ids,
+                                image_grid_thw=image_grid_thw,
+                                video_grid_thw=video_grid_thw,
+                                image_token_id=hf_config.image_token_id,
+                                video_token_id=hf_config.video_token_id,
+                                vision_start_token_id=hf_config.vision_start_token_id,
+                                vision_end_token_id=hf_config.vision_end_token_id,
+                                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                                context_len=0,
+                            )
+                        seq_data.mrope_position_delta = mrope_position_delta
+                        mrope_input_positions = [[] for _ in range(3)]
+                        for idx in range(3):
+                            # msections = temp_mrope_input_positions
+                            # for _seq_mrope_input_positions in msections:
+                            mrope_input_positions[idx].extend(
+                                temp_mrope_input_positions[idx])
+                        input_positions = mrope_input_positions
+                if is_prompt:
+                    assert len(seq_ids) == 1
+                    num_prefills += 1
+                    num_prefill_tokens += len(tokens)
+                    prefill_seq_lens.append(seq_len)
+                else:
+                    assert query_len == 1, "Wrong query length in decoding"
+                    num_decode_tokens += 1
+                    decode_seq_lens.append(seq_len)
+                if is_block_tables_empty(seq_group_metadata.block_tables):
+                    slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
+                    continue
+                # seq_id: List[int]
+                block_table = seq_group_metadata.block_tables[seq_id]
+
+                # TODO: add sliding window
+                for i in range(context_len, seq_len):
+                    # if i < start_idx:
+                    #     slot_mapping.append(_PAD_SLOT_ID)
+                    #     continue
+                    block_number = block_table[i // self.block_size]
+                    block_offset = i % self.block_size
+                    # slot_mapping is when we flatteren the blocks, and see which block it is located
+                    # block_table is a logical -> to physical transition...
+                    # i // block_size is the logical block number
+                    slot_mapping.append(block_number * self.block_size + block_offset)
+        max_decode_seq_len = max(decode_seq_lens, default=0)
+        is_prompt = (self.seq_group_metadata_list[0].is_prompt
+                if self.seq_group_metadata_list else None)
+        need_block_table = False
+        if  self.scheduler_config.chunked_prefill_enabled or not is_prompt or self.cache_config.enable_prefix_caching:
+            need_block_table = True
+            max_block_table_len = max(
+                len(block_table) for block_table in block_tables)
+            block_tables = make_tensor_with_pad(
+                block_tables,
+                max_len=max_block_table_len,
+                pad=0,
+                dtype=torch.int,
+                device=self.device,
+            )
+        input_tokens_tensor = torch.tensor(input_tokens,
+                                           dtype=torch.long,
+                                           device=self.device)
+        input_positions_tensor = torch.tensor(input_positions,
+                                              dtype=torch.long,
+                                              device=self.device)
+        slot_mapping_tensor = torch.tensor(slot_mapping,
+                                           dtype=torch.long,
+                                           device=self.device)
+        if need_block_table:
+            seq_lens_tensor = torch.tensor(seq_lens,
+                                        dtype=torch.int,
+                                        device=self.device)
+        else:
+            seq_lens_tensor = torch.tensor([])
+        if self.scheduler_config.chunked_prefill_enabled or self.cache_config.enable_prefix_caching:
+            context_lens_tensor = torch.tensor(context_lens,
+                                            dtype=torch.int,
+                                            device=self.device)
+            query_lens_tensor = torch.tensor(query_lens,
+                                            dtype=torch.long,
+                                            device=self.device)
+            query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+                                        dtype=torch.int32,
+                                        device=self.device)
+
+            torch.cumsum(query_lens_tensor,
+                        dim=0,
+                        dtype=query_start_loc.dtype,
+                        out=query_start_loc[1:])
+        else:
+            context_lens_tensor = context_lens
+            query_start_loc = query_lens
+
+        # Generate attn_metadata
+        attn_metadata = self.attn_backend.make_metadata(
+            # FIXME: Later maybe we can get rid of this parameter
+            is_prompt=is_prompt, #1
+            num_prefills=num_prefills, # 6
+            slot_mapping=slot_mapping_tensor, # 2
+            num_prefill_tokens=num_prefill_tokens, # 7
+            num_decode_tokens=num_decode_tokens, # 8
+            seq_lens=seq_lens, # 3
+            seqlen_q=torch.tensor([]), # 4
+            # max_seqlen=max_seqlen, # 5
+            max_seqlen=max(query_lens),
+            seq_lens_tensor=seq_lens_tensor, # 9
+            # max_query_len=max_query_len,
+            max_decode_seq_len=max_decode_seq_len, # 10
+            query_start_loc=query_start_loc,
+            # seq_start_loc=seq_start_loc,
+            context_lens=context_lens_tensor,
+            block_tables=block_tables if need_block_table else torch.tensor([], device=self.device, dtype=torch.int) # 11
+        )
+        if multi_modal_inputs_list is not None and len(multi_modal_inputs_list) > 0:
+            multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        else:
+            multi_modal_kwargs = None
         return self.model_input_cls(
-            input_tokens=input_tokens,
-            input_positions=input_positions,
+            input_tokens=input_tokens_tensor,
+            input_positions=input_positions_tensor,
             attn_metadata=attn_metadata,
             multi_modal_kwargs=multi_modal_kwargs,
             seq_lens=seq_lens,
-            query_lens=seq_lens,
+            query_lens=query_lens,
         )
 
     def _prepare_prompt(
