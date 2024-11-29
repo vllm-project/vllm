@@ -10,7 +10,9 @@ else:
 
 class NeuronPlatform(Platform):
     _enum = PlatformEnum.NEURON
+    device_name: str = "neuron"
     device_type: str = "neuron"
+    supported_quantization: list[str] = ["neuron_quant"]
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

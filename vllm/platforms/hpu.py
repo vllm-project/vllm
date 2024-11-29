@@ -12,6 +12,7 @@ else:
 
 class HpuPlatform(Platform):
     _enum = PlatformEnum.HPU
+    device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
 

@@ -72,6 +72,7 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
 
 class CudaPlatformBase(Platform):
     _enum = PlatformEnum.CUDA
+    device_name: str = "cuda"
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
 
