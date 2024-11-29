@@ -393,17 +393,11 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = QUANTIZATION_METHODS
-        rocm_supported_quantization = [
-            "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-            "fbgemm_fp8", "gguf"
-        ]
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
             "compressed-tensors", "experts_int8"
         ]
-        tpu_supported_quantization = ["tpu_int8"]
-        neuron_supported_quantization = ["neuron_quant"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -438,32 +432,12 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
-            if current_platform.is_rocm(
-            ) and self.quantization not in rocm_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in ROCm.")
-            if current_platform.is_tpu(
-            ) and self.quantization not in tpu_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in TPU Backend.")
+            current_platform.verify_quantization(self.quantization)
             if self.quantization not in optimized_quantization_methods:
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.", self.quantization)
-            if (self.quantization == "awq" and current_platform.is_rocm()
-                    and not envs.VLLM_USE_TRITON_AWQ):
-                logger.warning(
-                    "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
-                    " is not set, enabling VLLM_USE_TRITON_AWQ.")
-                envs.VLLM_USE_TRITON_AWQ = True
-            if current_platform.is_neuron(
-            ) and self.quantization not in neuron_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in Neuron Backend.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
