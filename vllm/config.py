@@ -921,7 +921,9 @@ class LoadConfig:
         if isinstance(model_loader_extra_config, str):
             self.model_loader_extra_config = json.loads(
                 model_loader_extra_config)
-        self._verify_load_format()
+        if isinstance(self.load_format, str):
+            load_format = self.load_format.lower()
+            self.load_format = LoadFormat(load_format)
 
         if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
             logger.info(
@@ -929,25 +931,6 @@ class LoadConfig:
                 self.ignore_patterns)
         else:
             self.ignore_patterns = ["original/**/*"]
-
-    def _verify_load_format(self) -> None:
-        if not isinstance(self.load_format, str):
-            return
-
-        load_format = self.load_format.lower()
-        self.load_format = LoadFormat(load_format)
-
-        rocm_not_supported_load_format: List[str] = []
-        if current_platform.is_rocm(
-        ) and load_format in rocm_not_supported_load_format:
-            rocm_supported_load_format = [
-                f for f in LoadFormat.__members__
-                if (f not in rocm_not_supported_load_format)
-            ]
-            raise ValueError(
-                f"load format '{load_format}' is not supported in ROCm. "
-                f"Supported load formats are "
-                f"{rocm_supported_load_format}")
 
 
 @dataclass
