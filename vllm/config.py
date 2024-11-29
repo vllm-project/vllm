@@ -137,6 +137,24 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         override_pooler_config: Initialize non default pooling config or
             override default pooling config for the embedding model.
+        config_format: The config format which shall be loaded.
+            Defaults to 'auto' which defaults to 'hf'.
+        mm_processor_kwargs: Arguments to be forwarded to the model's processor
+            for multi-modal data, e.g., image processor.
+        pooling_type: Used to configure the pooling method in the embedding
+            model.
+        pooling_norm: Used to determine whether to normalize the pooled
+            data in the embedding model.
+        pooling_softmax: Used to determine whether to softmax the pooled
+            data in the embedding model.
+        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates
+            that the score corresponding to the pooling_step_tag_id in the
+            generated sentence should be returned. Otherwise, it returns
+            the scores for all tokens.
+        pooling_returned_token_ids: pooling_returned_token_ids represents a
+            list of indices for the vocabulary dimensions to be extracted,
+            such as the token IDs of good_token and bad_token in the
+            math-shepherd-mistral-7b-prm model.
     """
 
     def __init__(
@@ -1789,15 +1807,15 @@ class PoolerConfig:
 
     step_tag_id: Optional[int] = None
     """
-    If set, only the score corresponding to the ``step_tag_id`` in the 
+    If set, only the score corresponding to the ``step_tag_id`` in the
     generated sentence should be returned. Otherwise, the scores for all tokens
     are returned.
     """
 
     returned_token_ids: Optional[List[int]] = None
     """
-    A list of indices for the vocabulary dimensions to be extracted, 
-    such as the token IDs of ``good_token`` and ``bad_token`` in the 
+    A list of indices for the vocabulary dimensions to be extracted,
+    such as the token IDs of ``good_token`` and ``bad_token`` in the
     ``math-shepherd-mistral-7b-prm`` model.
     """
 
@@ -2031,11 +2049,11 @@ def get_served_model_name(model: str,
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine"""
 
-    # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer'
-    guided_decoding_backend: str = 'outlines'
+    # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer' / 'xgrammar'
+    guided_decoding_backend: str = 'xgrammar'
 
     def __post_init__(self):
-        valid_guided_backends = ['outlines', 'lm-format-enforcer']
+        valid_guided_backends = ['outlines', 'lm-format-enforcer', 'xgrammar']
         backend = self.guided_decoding_backend
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
@@ -2222,7 +2240,7 @@ class CompilationConfig(BaseModel):
             from Python, functions can also be passed directly via Python object
             constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
         - custom inductor passes: see PassConfig for more details
-    
+
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
         for the same size. We need to capture all the sizes we want to use.
