@@ -3,8 +3,6 @@ import re
 from typing import List, Optional, Set, Tuple, Type, Union
 
 import huggingface_hub
-from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                   HFValidationError, RepositoryNotFoundError)
 from torch import nn
 from transformers import PretrainedConfig
 
