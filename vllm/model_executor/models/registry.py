@@ -20,7 +20,7 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-from .adapters import for_embedding
+from .adapters import as_embedding_model
 from .interfaces import (has_inner_state, is_attention_free,
                          supports_cross_encoding, supports_multimodal,
                          supports_pp)
@@ -222,7 +222,7 @@ class _ModelInfo:
         is_embedding_model_ = is_embedding_model(model)
         if not is_embedding_model_:
             try:
-                for_embedding(model)
+                as_embedding_model(model)
             except Exception:
                 pass
             else:

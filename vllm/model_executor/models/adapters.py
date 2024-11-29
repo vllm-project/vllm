@@ -9,7 +9,7 @@ from .interfaces_base import VllmModelForEmbedding, is_embedding_model
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
-def for_embedding(cls: _T) -> _T:
+def as_embedding_model(cls: _T) -> _T:
     """Subclass an existing vLLM model to support embeddings."""
     # Avoid modifying existing embedding models
     if is_embedding_model(cls):

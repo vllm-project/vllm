@@ -7,7 +7,7 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.adapters import for_embedding
+from vllm.model_executor.models.adapters import as_embedding_model
 
 
 @contextlib.contextmanager
@@ -35,7 +35,7 @@ def get_model_architecture(
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embedding":
-        model_cls = for_embedding(model_cls)
+        model_cls = as_embedding_model(model_cls)
 
     return model_cls, arch
 
