@@ -16,8 +16,10 @@ logger = init_logger(__name__)
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
+    device_name: str = "tpu"
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
+    supported_quantization: list[str] = ["tpu_int8"]
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
