@@ -770,8 +770,8 @@ class MolmoModel(nn.Module):
 
         self.config = config
 
-        self.orig_embedding_size = config.embedding_size or config.vocab_size
-        self.embedding_size = self.orig_embedding_size + ADDITIONAL_VOCAB_SIZE
+        self.embedding_size = config.embedding_size or config.vocab_size
+        self.embedding_size += ADDITIONAL_VOCAB_SIZE
         self.embed_tokens = VocabParallelEmbedding(
             self.embedding_size,
             config.hidden_size,
@@ -1265,7 +1265,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 "model.vision_backbone.": "vision_backbone.",
                 # language backbone mapping
                 "model.transformer.blocks.": "model.layers.",
-                "model.transformer.wte.": "model.embed_tokens.",
                 "model.transformer.ln_f.": "model.norm.",
                 "model.transformer.ff_out.": "lm_head.",
             },
@@ -1294,9 +1293,9 @@ def _get_weights_with_merged_embedding(
 ) -> Iterable[Tuple[str, torch.Tensor]]:
     embedding_weights = {}
     for name, weight in weights:
-        if "wte.new_embedding" in name:
+        if "wte.embedding" in name:
             embedding_weights["embedding"] = weight
-        elif "wte.embedding" in name:
+        elif "wte.new_embedding" in name:
             embedding_weights["new_embedding"] = weight
         else:
             yield (name, weight)
