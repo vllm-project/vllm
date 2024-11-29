@@ -177,7 +177,7 @@ class LlamaAttention(nn.Module):
                 sw_idx = layer_idx % len(config.interleaved_sliding_window)
                 sliding_window = config.interleaved_sliding_window[sw_idx]
             else:
-                raise ValueError(f"{type(sliding_window)} is not suuported.")
+                raise ValueError(f"{type(sliding_window)} is not supported.")
         else:
             sliding_window = None
 
