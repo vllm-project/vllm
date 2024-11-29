@@ -39,7 +39,7 @@ class MyGemma2Embedding(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = super().forward(
+        hidden_states = self.model(
             input_ids,
             positions,
             kv_caches,
