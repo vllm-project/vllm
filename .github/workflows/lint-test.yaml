@@ -50,7 +50,7 @@ jobs:
         uses: helm/kind-action@v1.10.0
 
       - name: Build the Docker image vllm cpu
-        run: docker build . --file Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
+        run: docker buildx build . --file Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
 
       - name: Configuration of docker images, network and namespace for the kind cluster
         run: |
