@@ -191,9 +191,9 @@ TEXT_GENERATION_MODELS = {
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
-    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
-    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
-    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(tp_base=4, trust_remote_code=True),  # noqa: E501
+    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(task="embedding"),
+    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(task="embedding"),
+    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(task="embedding", tp_base=4, trust_remote_code=True),  # noqa: E501
 }
 
 MULTIMODAL_MODELS = {
