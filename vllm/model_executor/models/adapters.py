@@ -9,11 +9,6 @@ from .interfaces_base import VllmModelForEmbedding, is_embedding_model
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
-def _is_paramless(module: nn.Module):
-    # NOTE: all([]) returns True
-    return all(False for _ in module.parameters())
-
-
 def as_embedding_model(cls: _T) -> _T:
     """Subclass an existing vLLM model to support embeddings."""
     # Avoid modifying existing embedding models
@@ -40,24 +35,21 @@ def as_embedding_model(cls: _T) -> _T:
             super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
             # These are not used in embedding models
-            if hasattr(self, "lm_head"):
-                del self.lm_head
-            if hasattr(self, "logits_processor"):
-                del self.logits_processor
+            for attr in ("lm_head", "logits_processor"):
+                if hasattr(self, attr):
+                    delattr(self, attr)
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "_pooler", None):
-                pooler = Pooler.from_config_with_defaults(
+                self._pooler = Pooler.from_config_with_defaults(
                     pooler_config,
                     pooling_type=PoolingType.LAST,
                     normalize=True,
                     softmax=False,
                 )
-                assert pooler is not None
-                self._pooler = pooler
 
         def pooler(
             self,
@@ -77,7 +69,7 @@ def as_embedding_model(cls: _T) -> _T:
             if hasattr(self, "model") and hasattr(self.model, "load_weights"):
                 # Whether only `self.model` contains parameters
                 model_is_only_param = all(
-                    name == "model" or _is_paramless(child)
+                    name == "model" or next(child.parameters(), None) is None
                     for name, child in self.named_children())
 
                 if model_is_only_param:
