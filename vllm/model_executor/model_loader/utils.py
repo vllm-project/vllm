@@ -7,6 +7,7 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.adapters import for_embedding
 
 
 @contextlib.contextmanager
@@ -32,7 +33,11 @@ def get_model_architecture(
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
 
-    return ModelRegistry.resolve_model_cls(architectures)
+    model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
+    if model_config.task == "embedding":
+        model_cls = for_embedding(model_cls)
+
+    return model_cls, arch
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:

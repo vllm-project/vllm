@@ -627,6 +627,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return name, loaded_weight
 
 
+# TODO: Remove this once reward modeling is separated from LlamaForCausalLM
 class LlamaEmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
     """
     A model that uses Llama with additional embedding functionalities.

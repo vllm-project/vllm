@@ -20,6 +20,7 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from .adapters import for_embedding
 from .interfaces import (has_inner_state, is_attention_free,
                          supports_cross_encoding, supports_multimodal,
                          supports_pp)
@@ -107,7 +108,7 @@ _EMBEDDING_MODELS = {
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
-    "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "LlamaModel": ("llama", "LlamaEmbeddingModel"),
     **{
@@ -218,9 +219,18 @@ class _ModelInfo:
 
     @staticmethod
     def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
+        is_embedding_model_ = is_embedding_model(model)
+        if not is_embedding_model_:
+            try:
+                for_embedding(model)
+            except Exception:
+                pass
+            else:
+                is_embedding_model_ = True
+
         return _ModelInfo(
             is_text_generation_model=is_text_generation_model(model),
-            is_embedding_model=is_embedding_model(model),
+            is_embedding_model=is_embedding_model_,
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_pp=supports_pp(model),

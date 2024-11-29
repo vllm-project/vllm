@@ -9,6 +9,7 @@ import itertools
 import json
 import math
 import os
+import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
@@ -107,12 +108,14 @@ def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
         # new-style model class
         with set_current_vllm_config(vllm_config):
             return model_class(vllm_config=vllm_config, prefix=prefix)
+
     msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
            "input arguments. Possibly you have an old-style model class"
            " registered from out of tree and it is used for new vLLM version. "
            "Check https://docs.vllm.ai/en/latest/design/arch_overview.html "
            "for the design and update the model class accordingly.")
-    logger.warning(msg)
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
     logger.warning(
         "Trying to guess the arguments for old-style model class %s",
         model_class,

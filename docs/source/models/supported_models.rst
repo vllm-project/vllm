@@ -357,7 +357,7 @@ Text Embedding
     - ✅︎
   * - :code:`Qwen2Model`, :code:`Qwen2ForCausalLM`
     - Qwen2-based
-    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
+    - :code:`ssmits/Qwen2-7B-Instruct-embed-base` (see note), :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
     - ✅︎
     - ✅︎
   * - :code:`RobertaModel`, :code:`RobertaForMaskedLM`
@@ -377,6 +377,10 @@ Text Embedding
 
 .. tip::
   You can override the model's pooling method by passing :code:`--override-pooler-config`.
+
+.. note::
+  :code:`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
+  You should manually set mean pooling by passing :code:`--override-pooler-config '{"pooling_type": "MEAN"}'`.
 
 .. note::
   Unlike base Qwen2, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
