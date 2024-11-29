@@ -35,14 +35,9 @@ def setup_servers():
         "0.5",
         "--max-model-len",
         "1000",
-        "--kv-connector",
-        "PyNcclConnector",
-        "--kv-role",
-        "kv_producer",
-        "--kv-rank",
-        "0",
-        "--kv-parallel-size",
-        "2",
+        "--kv-transfer-config",
+        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer",'\
+        '"kv_rank":0,"kv_parallel_size":2}',
     ]
     prefill_env = os.environ.copy()
     prefill_env["CUDA_VISIBLE_DEVICES"] = "0,1"
@@ -63,14 +58,9 @@ def setup_servers():
         "0.5",
         "--max-model-len",
         "1000",
-        "--kv-connector",
-        "PyNcclConnector",
-        "--kv-role",
-        "kv_consumer",
-        "--kv-rank",
-        "1",
-        "--kv-parallel-size",
-        "2",
+        "--kv-transfer-config",
+        '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer",'\
+        '"kv_rank":1,"kv_parallel_size":2}',
     ]
     decode_env = os.environ.copy()
     decode_env["CUDA_VISIBLE_DEVICES"] = "2,3"
