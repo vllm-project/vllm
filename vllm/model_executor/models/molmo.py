@@ -1260,14 +1260,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                # vision backbone mapping
-                "model.vision_backbone.": "vision_backbone.",
-                # language backbone mapping
-                "model.transformer.blocks.": "model.layers.",
-                "model.transformer.ln_f.": "model.norm.",
-                "model.transformer.ff_out.": "lm_head.",
-            },
             orig_to_new_substr={
                 # vision backbone mapping
                 "image_projector.w1.": "image_projector.gate_proj.",
@@ -1282,7 +1274,18 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 "ff_out": "mlp.down_proj",
                 "attn_norm": "input_layernorm",
                 "ff_norm": "post_attention_layernorm",
-            })
+            },
+            orig_to_new_prefix={
+                # vision backbone mapping
+                "model.vision_backbone.": "vision_backbone.",
+                # language backbone mapping
+                "model.transformer.blocks.": "model.layers.",
+                "model.transformer.ln_f.": "model.norm.",
+                # lm_head is renamed to model.transformer.mlp.down_proj firstly,
+                # we need to run a second renaming for it
+                "model.transformer.mlp.down_proj.": "lm_head.",
+            },
+        )
         loader = AutoWeightsLoader(self)
         weights = _get_weights_with_merged_embedding(weights)
         return loader.load_weights(weights, mapper=hf_to_vllm_mapper)
