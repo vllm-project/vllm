@@ -370,6 +370,20 @@ class ModelConfig:
             selected_task = next(iter(supported_tasks_lst))
 
             if len(supported_tasks) > 1:
+                suffix_to_preferred_task: List[Tuple[str, _Task]] = [
+                    ("ForCausalLM", "generate"),
+                    ("ForConditionalGeneration", "generate"),
+                    ("Model", "embedding"),
+                    ("RewardModel", "embedding"),
+                    ("ForSequenceClassification", "embedding"),
+                ]
+                _, arch = ModelRegistry.inspect_model_cls(architectures)
+
+                for suffix, pref_task in suffix_to_preferred_task:
+                    if arch.endswith(suffix) and pref_task in supported_tasks:
+                        selected_task = pref_task
+                        break
+
                 logger.info(
                     "This model supports multiple tasks: %s. "
                     "Defaulting to '%s'.", supported_tasks, selected_task)

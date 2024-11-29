@@ -409,13 +409,13 @@ class _ModelRegistry:
     def inspect_model_cls(
         self,
         architectures: Union[str, List[str]],
-    ) -> _ModelInfo:
+    ) -> Tuple[_ModelInfo, str]:
         architectures = self._normalize_archs(architectures)
 
         for arch in architectures:
             model_info = self._try_inspect_model_cls(arch)
             if model_info is not None:
-                return model_info
+                return (model_info, arch)
 
         return self._raise_for_unsupported(architectures)
 
@@ -436,39 +436,50 @@ class _ModelRegistry:
         self,
         architectures: Union[str, List[str]],
     ) -> bool:
-        return self.inspect_model_cls(architectures).is_text_generation_model
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.is_text_generation_model
 
     def is_embedding_model(
         self,
         architectures: Union[str, List[str]],
     ) -> bool:
-        return self.inspect_model_cls(architectures).is_embedding_model
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.is_embedding_model
 
     def is_cross_encoder_model(
         self,
         architectures: Union[str, List[str]],
     ) -> bool:
-        return self.inspect_model_cls(architectures).supports_cross_encoding
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_cross_encoding
 
     def is_multimodal_model(
         self,
         architectures: Union[str, List[str]],
     ) -> bool:
-        return self.inspect_model_cls(architectures).supports_multimodal
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_multimodal
 
     def is_pp_supported_model(
         self,
         architectures: Union[str, List[str]],
     ) -> bool:
-        return self.inspect_model_cls(architectures).supports_pp
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_pp
 
-    def model_has_inner_state(self, architectures: Union[str,
-                                                         List[str]]) -> bool:
-        return self.inspect_model_cls(architectures).has_inner_state
+    def model_has_inner_state(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.has_inner_state
 
-    def is_attention_free_model(self, architectures: Union[str,
-                                                           List[str]]) -> bool:
-        return self.inspect_model_cls(architectures).is_attention_free
+    def is_attention_free_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.is_attention_free
 
 
 ModelRegistry = _ModelRegistry({
