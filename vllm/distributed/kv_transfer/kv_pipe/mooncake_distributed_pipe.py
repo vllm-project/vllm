@@ -1,8 +1,6 @@
-import io
 import json
 import os
 import pickle
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Optional
@@ -29,7 +27,7 @@ class MooncakeTransferEngineConfig:
     @staticmethod
     def from_file(file_path: str) -> 'MooncakeTransferEngineConfig':
         """Load the config from a JSON file."""
-        with open(file_path, 'r') as fin:
+        with open(file_path) as fin:
             config = json.load(fin)
         return MooncakeTransferEngineConfig(
             prefill_url=config.get("prefill_url"),
@@ -63,7 +61,7 @@ class MooncakeTransferEngine:
             raise
         except Exception as exc:
             logger.error(
-                f"An error occurred while loading the configuration: {exc}")
+                "An error occurred while loading the configuration: %s", exc)
             raise
 
         self.initialize(
@@ -159,7 +157,7 @@ class MooncakeTransferEngine:
         ret = self.read_bytes_from_buffer(dst_ptr, length)
 
         # Buffer cleanup
-        self.receiver_ack.send_pyobj((b'ACK'))
+        self.receiver_ack.send_pyobj(b'ACK')
         self.free_managed_buffer(dst_ptr, length)
 
         return ret
@@ -215,7 +213,7 @@ class MooncakeDistributedPipe(KVPipeBase):
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
         tensor = tensor if tensor is not None else self.none_tensor
-        assert (0 < len(tensor.shape))
+        assert (len(tensor.shape) > 0)
         self.transport_thread.submit(self._send_impl, tensor)
 
     def recv_tensor(self) -> Optional[torch.Tensor]:
