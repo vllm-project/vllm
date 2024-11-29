@@ -176,7 +176,8 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     if os.path.exists(lora_path):
         return os.path.abspath(lora_path)
 
-    # If the path does not exist locally, assume it's a Hugging Face repo or ModelScope repo.
+    # If the path does not exist locally,
+    # assume it's a Hugging Face repo or ModelScope repo.
     try:
         if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
             if os.getenv('MODELSCOPE_ACCESS_TOKEN', ''):
@@ -191,10 +192,11 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         else:
             local_snapshot_path = huggingface_hub.snapshot_download(
                 repo_id=lora_path)
-    except Exception as e:
+    except Exception:
         # Handle errors that may occur during the download
         # Return original path instead instead of throwing error here
-        logger.exception("Error downloading the HuggingFace or ModelScope model")
+        logger.exception(
+            "Error downloading the HuggingFace or ModelScope model")
         return lora_path
 
     return local_snapshot_path
