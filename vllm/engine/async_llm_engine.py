@@ -504,7 +504,8 @@ class _AsyncLLMEngine(LLMEngine):
                 sampling_params=params,
                 tokenizer=await self.get_tokenizer_async(lora_request),
                 default_guided_backend=self.decoding_config.
-                guided_decoding_backend)
+                guided_decoding_backend,
+                model_config=self.model_config)
 
         self._add_processed_request(
             request_id=request_id,
@@ -525,7 +526,8 @@ class _AsyncLLMEngine(LLMEngine):
 
 async def build_guided_decoding_logits_processor_async(
         sampling_params: SamplingParams, tokenizer: AnyTokenizer,
-        default_guided_backend: str) -> SamplingParams:
+        default_guided_backend: str,
+        model_config: ModelConfig) -> SamplingParams:
     """Constructs logits processors based on the guided_decoding,
     logits_bias, and allowed_token_ids fields in sampling_params. Deletes
     those fields and adds the constructed logits processors to the
@@ -540,7 +542,9 @@ async def build_guided_decoding_logits_processor_async(
     guided_decoding.backend = guided_decoding.backend or default_guided_backend
 
     processor = await get_guided_decoding_logits_processor(
-        guided_params=guided_decoding, tokenizer=tokenizer)
+        guided_params=guided_decoding,
+        tokenizer=tokenizer,
+        model_config=model_config)
 
     if processor:
         if sampling_params.logits_processors is None:
