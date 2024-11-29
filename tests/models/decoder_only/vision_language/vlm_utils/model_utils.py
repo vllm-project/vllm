@@ -170,7 +170,7 @@ def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput,
 
 
 ####### Post-processors for HF outputs
-def minicmpv_trunc_hf_output(hf_output: RunnerOutput,
+def minicpmv_trunc_hf_output(hf_output: RunnerOutput,
                              model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<|eot_id|>"):
@@ -192,6 +192,17 @@ def get_key_type_post_processor(
     def process(hf_inputs: BatchEncoding, dtype: str):
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
         hf_inputs[hf_inp_key] = hf_inputs[hf_inp_key].to(torch_dtype)
+        return hf_inputs
+
+    return process
+
+
+def ignore_inputs_post_processor(
+        hf_inp_key: str) -> Callable[[BatchEncoding, str], BatchEncoding]:
+    """Gets a handle to a post processor which ignores a given key."""
+
+    def process(hf_inputs: BatchEncoding, dtype: str):
+        del hf_inputs[hf_inp_key]
         return hf_inputs
 
     return process
