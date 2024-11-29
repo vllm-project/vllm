@@ -9,6 +9,11 @@ from .interfaces_base import VllmModelForEmbedding, is_embedding_model
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
+def _is_paramless(module: nn.Module):
+    # NOTE: all([]) returns True
+    return all(False for _ in module.parameters())
+
+
 def as_embedding_model(cls: _T) -> _T:
     """Subclass an existing vLLM model to support embeddings."""
     # Avoid modifying existing embedding models
@@ -69,16 +74,21 @@ def as_embedding_model(cls: _T) -> _T:
             # If `*ForCausalLM` defines `load_weights` on the inner model
             # and there are no other inner modules with parameters,
             # we support loading from both `*Model` and `*ForCausalLM`
-            if (hasattr(self, "model") and hasattr(self.model, "load_weights")
-                    and all(name == "model" or all(False
-                                                   for _ in child.parameters())
-                            for name, child in self.named_children())):
-                mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-                weights = mapper.apply(weights)
+            if hasattr(self, "model") and hasattr(self.model, "load_weights"):
+                # Whether only `self.model` contains parameters
+                model_is_only_param = all(
+                    name == "model" or _is_paramless(child)
+                    for name, child in self.named_children())
 
-                self.model.load_weights(weights)
+                if model_is_only_param:
+                    mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
+                    weights = mapper.apply(weights)
+
+                    self.model.load_weights(weights)
+                    return
+
             # For most other models
-            elif hasattr(cls, "load_weights"):
+            if hasattr(cls, "load_weights"):
                 cls.load_weights(self, weights)  # type: ignore
             # Fallback
             else:
