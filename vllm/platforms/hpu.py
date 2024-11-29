@@ -15,6 +15,7 @@ class HpuPlatform(Platform):
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
+    is_async_output_support: bool = True
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:

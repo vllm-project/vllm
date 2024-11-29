@@ -4,7 +4,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import lru_cache, wraps
-from typing import TYPE_CHECKING, Callable, List, TypeVar
+from typing import TYPE_CHECKING, Callable, List, Optional, TypeVar
 
 import pynvml
 import torch
@@ -75,6 +75,7 @@ class CudaPlatformBase(Platform):
     device_name: str = "cuda"
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
+    is_async_output_support: bool = True
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
@@ -111,6 +112,16 @@ class CudaPlatformBase(Platform):
                     "vllm.worker.worker.Worker"
             else:
                 parallel_config.worker_cls = "vllm.worker.worker.Worker"
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        if enforce_eager:
+            logger.warning(
+                "To see benefits of async output processing, enable CUDA "
+                "graph. Since, enforce-eager is enabled, async output "
+                "processor cannot be used")
+            return False
+        return cls.is_async_output_support
 
 
 # NVML utils

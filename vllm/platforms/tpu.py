@@ -20,6 +20,7 @@ class TpuPlatform(Platform):
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
     supported_quantization: list[str] = ["tpu_int8"]
+    is_async_output_support: bool = True
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:

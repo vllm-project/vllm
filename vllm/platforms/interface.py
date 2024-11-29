@@ -5,10 +5,14 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+logger = init_logger(__name__)
 
 
 class _Backend(enum.Enum):
@@ -63,6 +67,7 @@ class Platform:
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
     supported_quantization: list[str] = []
+    is_async_output_support: bool = False
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
@@ -183,6 +188,17 @@ class Platform:
             raise ValueError(
                 f"{quant} quantization is currently not supported in "
                 f"{cls.device_name}.")
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        """
+        Check if the current platform supports async output.
+        """
+        if not cls.is_async_output_support:
+            warn_msg = ("Async output processing is not supported on the "
+                        f"current platform type {cls.device_type}.")
+            logger.warning(warn_msg)
+        return cls.is_async_output_support
 
 
 class UnspecifiedPlatform(Platform):
