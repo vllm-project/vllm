@@ -212,7 +212,7 @@ def which_attn_to_use(head_size: int,
         return default_backend
 
     if use_v1:
-        return _Backend.IPEX_V1
+        return _Backend.FLASH_ATTN_VLLM_V1
 
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
