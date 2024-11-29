@@ -110,6 +110,7 @@ class LlamaAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
+        layer_idx: Optional[int] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -168,14 +169,17 @@ class LlamaAttention(nn.Module):
             is_neox_style=is_neox_style,
         )
 
-        layer_idx: int = int(prefix.split(".")[0])
-        if isinstance(config.interleaved_sliding_window, int):
-            sliding_window = config.interleaved_sliding_window
-        elif isinstance(config.interleaved_sliding_window, list):
-            sw_idx = layer_idx % len(sliding_window)
-            sliding_window = config.interleaved_sliding_window[sw_idx]
+        if hasattr(config, "interleaved_sliding_window"):
+            if isinstance(config.interleaved_sliding_window, int):
+                sliding_window = config.interleaved_sliding_window
+            elif isinstance(config.interleaved_sliding_window, list):
+                assert layer_idx is not None
+                sw_idx = layer_idx % len(config.interleaved_sliding_window)
+                sliding_window = config.interleaved_sliding_window[sw_idx]
+            else:
+                raise ValueError(f"{type(sliding_window)} is not suuported.")
         else:
-            None
+            sliding_window = None
 
         self.attn = Attention(
             self.num_heads,
@@ -226,6 +230,8 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
+        layer_idx: int = int(prefix.split(".")[-1])
+
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -238,6 +244,7 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=attention_bias,
             cache_config=cache_config,
+            layer_idx=layer_idx,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = LlamaMLP(
