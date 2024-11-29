@@ -24,6 +24,7 @@ def for_embedding(cls: _T) -> _T:
     from .utils import AutoWeightsLoader, WeightsMapper
 
     class ModelForEmbedding(cls, VllmModelForEmbedding):
+
         def __init__(
             self,
             *,
@@ -63,17 +64,15 @@ def for_embedding(cls: _T) -> _T:
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             # We have deleted this attribute, so don't load it
             weights = ((name, data) for name, data in weights
-                        if not name.startswith("lm_head."))
-
+                       if not name.startswith("lm_head."))
 
             # If `*ForCausalLM` defines `load_weights` on the inner model
             # and there are no other inner modules with parameters,
             # we support loading from both `*Model` and `*ForCausalLM`
             if (hasattr(self, "model") and hasattr(self.model, "load_weights")
-                and all(
-                    name == "model" or all(False for _ in child.parameters())
-                    for name, child in self.named_children()
-                )):
+                    and all(name == "model" or all(False
+                                                   for _ in child.parameters())
+                            for name, child in self.named_children())):
                 mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
                 weights = mapper.apply(weights)
 
@@ -91,4 +90,3 @@ def for_embedding(cls: _T) -> _T:
         .removesuffix("ForConditionalGeneration") + "ForEmbedding"
 
     return ModelForEmbedding  # type: ignore
- 

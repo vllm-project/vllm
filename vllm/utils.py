@@ -1549,7 +1549,10 @@ class ClassRegistry(UserDict[type[T], _V]):
 
         raise KeyError(key)
 
-    def __contains__(self, key: type[T]) -> bool:
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, type):
+            return False
+
         return any(cls in self.data for cls in key.mro())
 
 
