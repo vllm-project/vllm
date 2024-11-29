@@ -98,8 +98,8 @@ class RotaryEmbedding(CustomOp):
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
     def prepare_cos_sin(self,
-        positions: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None):
+                        positions: torch.Tensor,
+                        offsets: Optional[torch.Tensor] = None):
         if offsets is not None:
             offsets = offsets.view(positions.shape[0], -1)
             positions = positions + offsets
@@ -122,7 +122,6 @@ class RotaryEmbedding(CustomOp):
                                           output_size=cos_sin.shape[-1])
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
-
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
