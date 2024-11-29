@@ -378,6 +378,7 @@ class MiniCPMModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
+        self.num_experts = getattr(self.config, "num_experts", 0)
         self._init_layers(prefix, config, cache_config, quant_config)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = (
@@ -391,7 +392,6 @@ class MiniCPMModel(nn.Module):
         cache_config: Optional[CacheConfig],
         quant_config: Optional[QuantizationConfig],
     ):
-        self.num_experts = getattr(self.config, "num_experts", 0)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniCPMDecoderLayer(
