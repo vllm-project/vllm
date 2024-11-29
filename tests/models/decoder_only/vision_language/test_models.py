@@ -7,7 +7,7 @@ from typing import Type
 
 import pytest
 import transformers
-from transformers import AutoModelForVision2Seq
+from transformers import AutoModelForVision2Seq, AutoModelForCausalLM
 
 from vllm.platforms import current_platform
 from vllm.utils import cuda_device_count_stateless, identity
@@ -429,6 +429,21 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
+    ),
+    "aria": VLMTestInfo(
+        models=["rhymes-ai/Aria"],
+        test_type=(
+            VLMTestType.IMAGE,
+        ),
+        dtype="bfloat16",
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|img|>",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForCausalLM,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        postprocess_inputs=model_utils.get_key_type_post_processor("pixel_values"),
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
 }
 # yapf: enable
