@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
+from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 
 try:
@@ -30,6 +31,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -253,20 +256,21 @@ class FlashInferState(AttentionState):
         window_left = sliding_window[0] if sliding_window is not None else -1
 
         try:
-            scale = getattr(model.model.layers[0].self_attn.attn.impl, "scale",
-                            None)
-        except AttributeError as e:
-            raise AttributeError("Failed to retrieve 'scale'. \
-                    Check if 'self_attn.attn.impl' contains 'scale'.") from e
+            scale = model.model.layers[0].self_attn.attn.impl.scale
+        except AttributeError:
+            scale = None
+            logger.warning("Failed to retrieve 'scale'. \
+                    Check if 'self_attn.attn.impl' contains 'scale'.\
+                         Using default value of None")
 
         try:
-            logits_soft_cap = getattr(
-                model.model.layers[0].self_attn.attn.impl, "logits_soft_cap",
-                None)
-        except AttributeError as e:
-            raise AttributeError("Failed to retrieve 'logits_soft_cap'. \
-                    Check if 'self_attn.attn.impl' contains 'logits_soft_cap'."
-                                 ) from e
+            logits_soft_cap = model.model.layers[
+                0].self_attn.attn.impl.logits_soft_cap
+        except AttributeError:
+            logits_soft_cap = None
+            logger.warning("Failed to retrieve 'logits_soft_cap'. \
+                    Check if 'self_attn.attn.impl' contains 'logits_soft_cap'. \
+                     Using default value of None")
 
         if model_input.attn_metadata.use_cuda_graph:
             batch_size = model_input.input_tokens.shape[0]
