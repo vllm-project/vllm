@@ -5,7 +5,7 @@ import json
 import torch
 from transformers import PreTrainedTokenizerFast
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, Optional, List, Any
+from typing import TYPE_CHECKING, Any
 
 try:
     import xgrammar as xgr
@@ -37,10 +37,10 @@ class GrammarConfig:
     """Serializable configuration for grammar compilation"""
     vocab_size: int = 0
     max_threads: int = 8
-    json_str: Optional[str] = None
-    grammar_str: Optional[str] = None
-    encoded_vocab: Optional[Dict[str, int]] = None
-    stop_token_ids: Optional[List[int]] = None
+    json_str: str | None = None
+    grammar_str: str | None = None
+    encoded_vocab: dict[str, int] | None = None
+    stop_token_ids: list[int] | None = None
     backend_str: str = ""
 
     @classmethod
@@ -74,11 +74,10 @@ class GrammarConfig:
             #   tokenizer.backend_tokenizer.to_str()
             # - stop token id is provided by user, or auto detected.
             backend_str = tokenizer.backend_tokenizer.to_str()
-            if stop_token_ids is None:
-                if hasattr(
-                        tokenizer,
-                        "eos_token_id") and tokenizer.eos_token_id is not None:
-                    stop_token_ids = [tokenizer.eos_token_id]
+            if stop_token_ids is None and hasattr(
+                    tokenizer,
+                    "eos_token_id") and tokenizer.eos_token_id is not None:
+                stop_token_ids = [tokenizer.eos_token_id]
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -116,16 +115,16 @@ class XGrammarLogitsProcessor:
     """Wrapper class to support pickle protocol"""
     config: GrammarConfig
 
-    ctx: Optional[xgr.CompiledGrammar] = None
-    matchers: List[xgr.GrammarMatcher] = field(default_factory=list)
+    ctx: xgr.CompiledGrammar | None = None
+    matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
     batch_size: int = 1
     token_bitmask: torch.Tensor = None
     prefilled: bool = False
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
 
-    def __setstate__(self, state: Dict[str, Any]):
+    def __setstate__(self, state: dict[str, Any]):
         self.config = state['config']
 
         self.ctx = None
@@ -145,7 +144,7 @@ class XGrammarLogitsProcessor:
             else:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
 
-    def __call__(self, input_ids: List[int],
+    def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
         if self.ctx is None:
             self._ensure_ctx()
