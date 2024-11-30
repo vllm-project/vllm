@@ -51,14 +51,15 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         return cls(**init_kwargs)
 
     def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
-                 max_input_length: Optional[int], num_actors: int,
-                 ray_actor_options: dict, **tokenizer_config):
+                 max_loras: int, max_input_length: Optional[int],
+                 num_actors: int, ray_actor_options: dict, **tokenizer_config):
         # Store a local copy of the TokenizerGroup for quick access
         # to underlying HF tokenizers.
         self._tokenizer_config = {
             "tokenizer_id": tokenizer_id,
             "enable_lora": enable_lora,
             "max_num_seqs": max_num_seqs,
+            "max_loras": max_loras,
             "max_input_length": max_input_length,
             **tokenizer_config
         }

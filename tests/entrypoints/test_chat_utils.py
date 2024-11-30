@@ -46,6 +46,7 @@ def phi3v_tokenizer():
         tokenizer_id=PHI3V_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
+        max_loras=0,
         max_input_length=None,
     )
 
@@ -70,6 +71,7 @@ def mllama_tokenizer():
         MLLAMA_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
+        max_loras=0,
         max_input_length=None,
     )
 
@@ -682,6 +684,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
         MLLAMA_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
+        max_loras=0,
         max_input_length=None,
     )
     tokenizer = tokenizer_group.tokenizer
@@ -728,6 +731,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         model,
         enable_lora=False,
         max_num_seqs=5,
+        max_loras=0,
         max_input_length=None,
     )
     tokenizer = tokenizer_group.tokenizer
@@ -777,6 +781,7 @@ def test_resolve_content_format_examples(template_path, expected_format):
         PHI3V_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
+        max_loras=0,
         max_input_length=None,
     )
     dummy_tokenizer = tokenizer_group.tokenizer

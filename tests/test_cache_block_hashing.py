@@ -49,6 +49,7 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
         tokenizer_id="facebook/opt-125m",
         enable_lora=False,
         max_num_seqs=max_num_seqs,
+        max_loras=0,
         max_input_length=None,
     )
 

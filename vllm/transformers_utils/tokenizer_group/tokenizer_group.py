@@ -15,14 +15,15 @@ class TokenizerGroup(BaseTokenizerGroup):
     """A group of tokenizers that can be used for LoRA adapters."""
 
     def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
-                 max_input_length: Optional[int], **tokenizer_config):
+                 max_loras: int, max_input_length: Optional[int],
+                 **tokenizer_config):
         self.tokenizer_id = tokenizer_id
         self.tokenizer_config = tokenizer_config
         self.enable_lora = enable_lora
         self.max_input_length = max_input_length
         self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
         self.lora_tokenizers = LRUCache[AnyTokenizer](
-            capacity=max_num_seqs if enable_lora else 0)
+            capacity=max(max_loras, max_num_seqs) if enable_lora else 0)
 
     @classmethod
     def from_config(cls, tokenizer_pool_config: Optional[TokenizerPoolConfig],
