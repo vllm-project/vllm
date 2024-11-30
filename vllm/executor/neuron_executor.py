@@ -29,11 +29,13 @@ class NeuronExecutor(ExecutorBase):
         wrapper = WorkerWrapperBase(vllm_config=self.vllm_config)
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
-        self.driver_worker = wrapper.init_worker(
+        wrapper.init_worker(
             vllm_config=self.vllm_config,
             local_rank=0,
             rank=0,
-            distributed_init_method=distributed_init_method)
+            distributed_init_method=distributed_init_method,
+        )
+        self.driver_worker = wrapper.worker
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
