@@ -3,10 +3,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer
+
+    from vllm.config import ModelConfig
     from vllm.logits_process import LogitsProcessor
     from vllm.sampling_params import GuidedDecodingParams
-    from vllm.config import ModelConfig
-    from transformers import PreTrainedTokenizer
 
 
 async def get_guided_decoding_logits_processor(
@@ -25,7 +26,8 @@ async def get_guided_decoding_logits_processor(
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
             guided_params, tokenizer)
     if guided_params.backend == 'xgrammar':
-        from vllm.model_executor.guided_decoding.xgrammar_decoding import get_local_xgrammar_guided_decoding_logits_processor
+        from vllm.model_executor.guided_decoding.xgrammar_decoding import (  # noqa
+            get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config)
 
@@ -50,7 +52,8 @@ def get_local_guided_decoding_logits_processor(
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
             guided_params, tokenizer)
     if guided_params.backend == 'xgrammar':
-        from vllm.model_executor.guided_decoding.xgrammar_decoding import get_local_xgrammar_guided_decoding_logits_processor
+        from vllm.model_executor.guided_decoding.xgrammar_decoding import (  # noqa
+            get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config)
 

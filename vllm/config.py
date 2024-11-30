@@ -2031,7 +2031,8 @@ def get_served_model_name(model: str,
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine"""
 
-    # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer' / 'xgrammar'
+    # Which guided decoding algo to use.
+    # 'outlines' / 'lm-format-enforcer' / 'xgrammar'
     guided_decoding_backend: str = 'xgrammar'
 
     def __post_init__(self):
