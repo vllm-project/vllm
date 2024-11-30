@@ -137,7 +137,7 @@ VLM_TEST_SETTINGS = {
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
         test_type=(
-            # VLMTestType.IMAGE,
+            VLMTestType.IMAGE,
             VLMTestType.MULTI_IMAGE,
         ),
         dtype="bfloat16",
