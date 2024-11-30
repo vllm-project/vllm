@@ -405,7 +405,7 @@ def merge_multimodal_embeddings(
     if isinstance(placeholder_token_id, int):
         return _merge_multimodal_embeddings(
             inputs_embeds,
-            (input_ids in placeholder_token_id),
+            (input_ids == placeholder_token_id),
             multimodal_embeddings,
         )
     placeholder_token_id = torch.tensor(placeholder_token_id,

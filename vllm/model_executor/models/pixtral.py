@@ -126,11 +126,10 @@ def input_mapper_for_pixtral(ctx: InputContext,
         images.append(image)
         image_tokens_list.append(encoding.tokens)
 
-    image_tokens = torch.flatten(
-        torch.tensor([
-            token_id for image_tokens in image_tokens_list
-            for token_id in image_tokens
-        ]))
+    image_tokens = torch.tensor([
+        token_id for image_tokens in image_tokens_list
+        for token_id in image_tokens
+    ])
     return MultiModalKwargs({"images": images, "image_tokens": image_tokens})
 
 
