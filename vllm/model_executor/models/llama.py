@@ -230,7 +230,6 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
-
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
