@@ -23,18 +23,18 @@ def test_registry_imports(model_arch):
     model_cls, _ = ModelRegistry.resolve_model_cls(model_arch)
 
     if model_arch in _SPECULATIVE_DECODING_MODELS:
-        pass  # Ignore these models which do not have a unified format
-    else:
-        assert is_text_generation_model(model_cls) is (
-            model_arch in _TEXT_GENERATION_MODELS
-            or model_arch in _MULTIMODAL_MODELS)
+        return  # Ignore these models which do not have a unified format
 
-        # All vLLM models should be convertible to an embedding model
-        embed_model = as_embedding_model(model_cls)
-        assert is_embedding_model(embed_model)
+    if (model_arch in _TEXT_GENERATION_MODELS
+            or model_arch in _MULTIMODAL_MODELS):
+        assert is_text_generation_model(model_cls)
 
-        assert supports_multimodal(model_cls) is (model_arch
-                                                  in _MULTIMODAL_MODELS)
+    # All vLLM models should be convertible to an embedding model
+    embed_model = as_embedding_model(model_cls)
+    assert is_embedding_model(embed_model)
+
+    if model_arch in _MULTIMODAL_MODELS:
+        assert supports_multimodal(model_cls)
 
 
 @fork_new_process_for_each_test
