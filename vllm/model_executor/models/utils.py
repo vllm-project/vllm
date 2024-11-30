@@ -392,7 +392,7 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: int,
+    placeholder_token_id: Union[int, List[int]],
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -402,9 +402,17 @@ def merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
+    if isinstance(placeholder_token_id, int):
+        return _merge_multimodal_embeddings(
+            inputs_embeds,
+            (input_ids in placeholder_token_id),
+            multimodal_embeddings,
+        )
+    placeholder_token_id = torch.tensor(placeholder_token_id,
+                                        device=input_ids.device)
     return _merge_multimodal_embeddings(
         inputs_embeds,
-        (input_ids == placeholder_token_id),
+        torch.isin(input_ids, placeholder_token_id),
         multimodal_embeddings,
     )
 

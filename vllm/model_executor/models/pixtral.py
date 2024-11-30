@@ -48,6 +48,9 @@ try:
 except ImportError:
     USE_XFORMERS_OPS = False
 
+PIXTRAL_IMAGE_BREAK_ID = 12
+PIXTRAL_IMAGE_END_ID = 13
+
 
 def get_max_pixtral_image_tokens(ctx: InputContext):
     tokenizer = cached_get_tokenizer(
@@ -68,7 +71,6 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
         tokenizer_mode=ctx.model_config.tokenizer_mode)
 
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
-    patch_size = mm_encoder.mm_config.image_patch_size
     image_token_id = mm_encoder.special_ids.img
 
     mm_config = ctx.model_config.multimodal_config
@@ -78,8 +80,8 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     size = 256
     image = Image.new("RGB", (size, size), color=0)
 
-    image_feature_size = (size**2) // (patch_size**2)
-
+    encoding = tokenizer.instruct.mm_encoder(ImageChunk(image=image))
+    image_feature_size = len(encoding.tokens)
     num_image_tokens = image_feature_size * num_images
     seq_data = SequenceData.from_prompt_token_counts(
         (image_token_id, num_image_tokens),
@@ -101,14 +103,13 @@ def input_mapper_for_pixtral(ctx: InputContext,
 
     Args:
         ctx: Context of the loaded model.
-        data: data potentially containing image/image embeddings to be mapped
-            to pixel_values in .forward() for a visual QWenLMHeadModel model.
+        data: data potentially containing PIL images to be processed
+            and mapped to `images`.
 
     Returns:
         MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
-    # Early exit if we have provided an image to a language only Qwen model
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
         model_config.tokenizer, tokenizer_mode=model_config.tokenizer_mode)
@@ -116,35 +117,66 @@ def input_mapper_for_pixtral(ctx: InputContext,
     data_list = data if isinstance(data, list) else [data]
 
     images = []
+    image_tokens_list = []
     for image_data in data_list:
         image = ImageChunk(image=image_data)
         encoding = tokenizer.instruct.mm_encoder(image)
         image = torch.from_numpy(encoding.image).to(device="cuda",
                                                     dtype=torch.float16)
         images.append(image)
+        image_tokens_list.append(encoding.tokens)
 
-    return MultiModalKwargs({"images": images})
+    image_tokens = torch.flatten(
+        torch.tensor([
+            token_id for image_tokens in image_tokens_list
+            for token_id in image_tokens
+        ]))
+    return MultiModalKwargs({"images": images, "image_tokens": image_tokens})
 
 
 def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
     multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is not None and "image" in multi_modal_data:
-        tokenizer = cached_get_tokenizer(
-            ctx.model_config.tokenizer,
-            tokenizer_mode=ctx.model_config.tokenizer_mode)
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return inputs
 
-        mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
-        image_token_id = mm_encoder.special_ids.img
+    prompt_token_ids = inputs.get("prompt_token_ids")
+    prompt = inputs.get("prompt")
+    tokenizer = cached_get_tokenizer(
+        ctx.model_config.tokenizer,
+        tokenizer_mode=ctx.model_config.tokenizer_mode)
 
-        if image_token_id not in inputs['prompt_token_ids']:
-            raise ValueError(
-                f"You've passed {inputs=} without {image_token_id=}"
-                " Make sure to process your input via mistral_common's"
-                " tokenizer or pass a chat completion request. For more"
-                " For more info, see: "
-                "https://github.com/vllm-project/vllm/issues/8411.")
+    mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
+    image_token_id = mm_encoder.special_ids.img
 
-    return inputs
+    if image_token_id not in inputs['prompt_token_ids']:
+        raise ValueError(
+            f"You've passed {inputs=} without {image_token_id=}"
+            " Make sure to process your input via mistral_common's"
+            " tokenizer or pass a chat completion request. For more"
+            " For more info, see: "
+            "https://github.com/vllm-project/vllm/issues/8411.")
+
+    # Get precise tracking of placeholder positions
+    placeholder_ranges = []
+    curr_length = 0
+    curr_offset = 0
+    for i in range(len(prompt_token_ids)):
+        if prompt_token_ids[i] in (image_token_id, PIXTRAL_IMAGE_BREAK_ID):
+            if curr_offset == 0:
+                curr_offset = i
+            curr_length += 1
+        elif prompt_token_ids[i] == PIXTRAL_IMAGE_END_ID:
+            curr_length += 1
+            placeholder_ranges.append(
+                PlaceholderRange(offset=curr_offset, length=curr_length))
+            curr_offset = 0
+            curr_length = 0
+        else:
+            pass
+    return token_inputs(prompt=prompt,
+                        prompt_token_ids=prompt_token_ids,
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": placeholder_ranges})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_pixtral)
@@ -191,11 +223,33 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return get_sampler()
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
-        image_input = self._parse_and_validate_image_input(**kwargs)
+        image_input, image_tokens = self._parse_and_validate_image_input(
+            **kwargs)
         if image_input is None:
             return None
+
+        image_tokens = torch.flatten(
+            torch.tensor([
+                token_id for image_tokens_per_request in image_tokens
+                for token_id in image_tokens_per_request
+            ],
+                         device=self.vision_encoder.device))
+
         vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+        image_embeds = self.language_model.get_input_embeddings(image_tokens)
+        image_token_mask = image_tokens == self.vision_args.image_token_id
+        image_embeds[image_token_mask] = vision_embeddings
+
+        # NOTE: Image embeddings are split into separate tensors for each image
+        # by the indices of `[IMG_END]` token.
+        split_indices = torch.where(
+            image_tokens == PIXTRAL_IMAGE_END_ID)[0] + 1
+        if len(split_indices) <= 1:
+            # Do not split, return as tensor of shape [1, fs, hs]
+            return image_embeds.unsqueeze(0)
+
+        image_embeds = image_embeds.tensor_split(split_indices.cpu())
+        return image_embeds
 
     def get_input_embeddings(
         self,
@@ -205,8 +259,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.vision_args.image_token_id)
+                input_ids, inputs_embeds, multimodal_embeddings, [
+                    self.vision_args.image_token_id, PIXTRAL_IMAGE_END_ID,
+                    PIXTRAL_IMAGE_BREAK_ID
+                ])
         return inputs_embeds
 
     def forward(
@@ -244,10 +300,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _parse_and_validate_image_input(
         self,
         images: Optional[Union[List[List[torch.Tensor]], List[torch.Tensor],
-                               torch.Tensor]] = None
+                               torch.Tensor]] = None,
+        image_tokens: Optional[torch.Tensor] = None,
     ) -> Optional[List[torch.Tensor]]:
         if images is None:
-            return None
+            return None, None
 
         if isinstance(images, torch.Tensor):
             # if passed as batch take all images
@@ -265,8 +322,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                 flatten_images.extend(imgs_per_req)
 
             images = flatten_images
-
-        return images
+        return images, image_tokens
 
     def _process_image_input(self,
                              image_input: List[torch.Tensor]) -> torch.Tensor:

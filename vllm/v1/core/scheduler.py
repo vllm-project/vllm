@@ -73,12 +73,12 @@ class Scheduler:
         # has the Transformer architecture (e.g., ViT).
         # FIXME(woosuk): Below are placeholder values. We need to calculate the
         # actual values from the configurations.
-        self.max_num_encoder_input_tokens = 2048
+        self.max_num_encoder_input_tokens = 8192
         # NOTE(woosuk): For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized and used, regardless of
         # the cache size. This is because the memory space for the encoder cache
         # is preallocated in the profiling run.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
+        self.encoder_cache_manager = EncoderCacheManager(cache_size=8192)
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
