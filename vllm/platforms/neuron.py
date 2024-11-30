@@ -28,3 +28,11 @@ class NeuronPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = \
                 "vllm.worker.neuron_worker.NeuronWorker"
+
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None):
+        if is_async:
+            return "vllm.executor.neuron_executor.NeuronExecutorAsync"
+        return "vllm.executor.neuron_executor.NeuronExecutor"

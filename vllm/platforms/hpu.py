@@ -43,3 +43,15 @@ class HpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
+
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None):
+        if distributed_executor_backend == "ray":
+            if is_async:
+                return "vllm.executor.ray_hpu_executor.RayHPUExecutorAsync"
+            return "vllm.executor.ray_hpu_executor.RayHPUExecutor"
+        if is_async:
+            return "vllm.executor.hpu_executor.HPUExecutorAsync"
+        return "vllm.executor.hpu_executor.HPUExecutor"

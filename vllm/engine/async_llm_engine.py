@@ -29,13 +29,14 @@ from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import deprecate_kwargs, weak_bind
+from vllm.utils import deprecate_kwargs, resolve_obj_by_qualname, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -630,58 +631,11 @@ class AsyncLLMEngine(EngineClient):
                     "distributed_executor_backend must be a subclass of "
                     f"ExecutorAsyncBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
-        elif engine_config.device_config.device_type == "neuron":
-            from vllm.executor.neuron_executor import NeuronExecutorAsync
-            executor_class = NeuronExecutorAsync
-        elif engine_config.device_config.device_type == "tpu":
-            if distributed_executor_backend == "ray":
-                from vllm.executor.ray_tpu_executor import RayTPUExecutorAsync
-                executor_class = RayTPUExecutorAsync
-            else:
-                assert distributed_executor_backend is None
-                from vllm.executor.tpu_executor import TPUExecutorAsync
-                executor_class = TPUExecutorAsync
-        elif engine_config.device_config.device_type == "cpu":
-            from vllm.executor.cpu_executor import CPUExecutorAsync
-            executor_class = CPUExecutorAsync
-        elif engine_config.device_config.device_type == "hpu":
-            if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_hpu_executor import RayHPUExecutorAsync
-                executor_class = RayHPUExecutorAsync
-            else:
-                from vllm.executor.hpu_executor import HPUExecutorAsync
-                executor_class = HPUExecutorAsync
-        elif engine_config.device_config.device_type == "openvino":
-            assert distributed_executor_backend is None, (
-                "Distributed execution is not supported with "
-                "the OpenVINO backend.")
-            from vllm.executor.openvino_executor import OpenVINOExecutorAsync
-            executor_class = OpenVINOExecutorAsync
-        elif engine_config.device_config.device_type == "xpu":
-            if distributed_executor_backend is None:
-                from vllm.executor.xpu_executor import XPUExecutorAsync
-                executor_class = XPUExecutorAsync
-            elif distributed_executor_backend == "ray":
-                from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
-                executor_class = RayXPUExecutorAsync
-            elif distributed_executor_backend == "mp":
-                from vllm.executor.multiproc_xpu_executor import (
-                    MultiprocessingXPUExecutorAsync)
-                executor_class = MultiprocessingXPUExecutorAsync
-            else:
-                raise RuntimeError(
-                    "Not supported distributed execution model on XPU device.")
-        elif distributed_executor_backend == "ray":
-            from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
-            executor_class = RayGPUExecutorAsync
-        elif distributed_executor_backend == "mp":
-            from vllm.executor.multiproc_gpu_executor import (
-                MultiprocessingGPUExecutorAsync)
-            executor_class = MultiprocessingGPUExecutorAsync
         else:
-            from vllm.executor.gpu_executor import GPUExecutorAsync
-            executor_class = GPUExecutorAsync
+            executor_cls = current_platform.get_executor_cls(
+                distributed_executor_backend=distributed_executor_backend,
+                is_async=True)
+            executor_class = resolve_obj_by_qualname(executor_cls)
         return executor_class
 
     @classmethod

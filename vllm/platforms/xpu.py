@@ -78,3 +78,25 @@ class XPUPlatform(Platform):
             parallel_config.distributed_executor_backend = "ray"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
+
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None):
+        if distributed_executor_backend == "ray":
+            if is_async:
+                return "vllm.executor.ray_xpu_executor.RayXPUExecutorAsync"
+            return "vllm.executor.ray_xpu_executor.RayXPUExecutor"
+        if distributed_executor_backend == "mp":
+            if is_async:
+                return "vllm.executor.multiproc_xpu_executor." \
+                       "MultiprocessingXPUExecutorAsync"
+            # FIXME(kunshang):
+            # spawn needs calling `if __name__ == '__main__':``
+            # fork is not supported for xpu start new process.
+            logger.error(
+                "Both start methods (spawn and fork) have issue "
+                "on XPU if you use mp backend, Please try ray instead.")
+        if is_async:
+            return "vllm.executor.xpu_executor.XPUExecutorAsync"
+        return "vllm.executor.xpu_executor.XPUExecutor"

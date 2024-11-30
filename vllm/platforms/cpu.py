@@ -98,3 +98,11 @@ class CpuPlatform(Platform):
                     "vllm.worker.cpu_worker.CPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None) -> str:
+        if is_async:
+            return "vllm.executor.cpu_executor.CPUExecutorAsync"
+        return "vllm.executor.cpu_executor.CPUExecutor"

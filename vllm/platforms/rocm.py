@@ -106,3 +106,27 @@ class RocmPlatform(Platform):
                 "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
                 " is not set, enabling VLLM_USE_TRITON_AWQ.")
         envs.VLLM_USE_TRITON_AWQ = True
+
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None):
+        if distributed_executor_backend == "ray":
+            if is_async:
+                return "vllm.executor.ray_gpu_executor.RayGPUExecutorAsync"
+            else:
+                return "vllm.executor.ray_gpu_executor.RayGPUExecutor"
+        if distributed_executor_backend == "mp":
+            if is_async:
+                return "vllm.executor.multiproc_gpu_executor." \
+                       "MultiprocessingGPUExecutorAsync"
+            else:
+                assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
+                    "multiprocessing distributed executor backend does not "
+                    "support VLLM_USE_RAY_SPMD_WORKER=1")
+                return "vllm.executor.multiproc_gpu_executor." \
+                       "MultiprocessingGPUExecutor"
+        if is_async:
+            return "vllm.executor.gpu_executor.GPUExecutorAsync"
+        else:
+            return "vllm.executor.gpu_executor.GPUExecutor"

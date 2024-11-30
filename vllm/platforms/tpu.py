@@ -67,3 +67,15 @@ class TpuPlatform(Platform):
                     "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"
+
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None):
+        if distributed_executor_backend == "ray":
+            if is_async:
+                return "vllm.executor.ray_tpu_executor.RayTPUExecutorAsync"
+            return "vllm.executor.ray_tpu_executor.RayTPUExecutor"
+        if is_async:
+            return "vllm.executor.tpu_executor.TPUExecutorAsync"
+        return "vllm.executor.tpu_executor.TPUExecutor"

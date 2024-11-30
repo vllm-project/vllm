@@ -135,3 +135,14 @@ class OpenVinoPlatform(Platform):
             raise RuntimeError(
                 "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE"
                 f" {kv_cache_space}, expect a positive integer value.")
+
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None):
+        assert distributed_executor_backend is None, (
+            "Distributed execution is not supported with "
+            "the OpenVINO backend.")
+        if is_async:
+            return "vllm.executor.openvino_executor.OpenVINOExecutorAsync"
+        return "vllm.executor.openvino_executor.OpenVINOExecutor"

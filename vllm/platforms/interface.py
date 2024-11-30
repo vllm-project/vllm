@@ -10,8 +10,10 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.executor.executor_base import ExecutorBase
 else:
     VllmConfig = None
+    ExecutorBase = None
 
 logger = init_logger(__name__)
 
@@ -220,6 +222,15 @@ class Platform:
             return CpuArchEnum.POWERPC
 
         return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
+
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None) -> str:
+        """
+        Get the executor class for the current platform.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):
