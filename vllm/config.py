@@ -3,6 +3,7 @@ import enum
 import hashlib
 import json
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
@@ -26,7 +27,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        identity, print_warning_once, resolve_obj_by_qualname)
+                        print_warning_once, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -182,7 +183,7 @@ class ModelConfig:
             hf_overrides_fn = hf_overrides
         else:
             hf_overrides_kw = hf_overrides
-            hf_overrides_fn = identity
+            hf_overrides_fn = None
 
         if rope_scaling is not None:
             hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
@@ -211,8 +212,15 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         hf_config = get_config(self.model, trust_remote_code, revision,
-                               code_revision, config_format, **hf_overrides_kw)
-        hf_config = hf_overrides_fn(hf_config)
+                               code_revision, config_format)
+
+        if hf_overrides_kw:
+            logger.info("Overriding HF config with %s", hf_overrides_kw)
+            hf_config.update(hf_overrides_kw)
+        if hf_overrides_fn:
+            logger.info("Overriding HF config with %s", hf_overrides_fn)
+            hf_config = hf_overrides_fn(hf_config)
+
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
@@ -385,17 +393,11 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = QUANTIZATION_METHODS
-        rocm_supported_quantization = [
-            "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-            "fbgemm_fp8", "gguf"
-        ]
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
             "compressed-tensors", "experts_int8"
         ]
-        tpu_supported_quantization = ["tpu_int8"]
-        neuron_supported_quantization = ["neuron_quant"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -430,32 +432,12 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
-            if current_platform.is_rocm(
-            ) and self.quantization not in rocm_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in ROCm.")
-            if current_platform.is_tpu(
-            ) and self.quantization not in tpu_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in TPU Backend.")
+            current_platform.verify_quantization(self.quantization)
             if self.quantization not in optimized_quantization_methods:
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.", self.quantization)
-            if (self.quantization == "awq" and current_platform.is_rocm()
-                    and not envs.VLLM_USE_TRITON_AWQ):
-                logger.warning(
-                    "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
-                    " is not set, enabling VLLM_USE_TRITON_AWQ.")
-                envs.VLLM_USE_TRITON_AWQ = True
-            if current_platform.is_neuron(
-            ) and self.quantization not in neuron_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in Neuron Backend.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
@@ -711,6 +693,11 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
+
+    @property
+    def is_cross_encoder(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_cross_encoder_model(architectures)
 
 
 class CacheConfig:
@@ -977,6 +964,7 @@ class ParallelConfig:
     # the full name of the worker class to use. If "auto", the worker class
     # will be determined based on the platform.
     worker_cls: str = "auto"
+    sd_worker_cls: str = "auto"
 
     world_size: int = field(init=False)
 
@@ -993,20 +981,15 @@ class ParallelConfig:
                 raise ValueError(f"worker-use-ray can't be used with "
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
-
-        if current_platform.is_tpu() and self.world_size > 1:
+        ray_only_devices = ["tpu", "hpu"]
+        if (current_platform.device_type in ray_only_devices
+                and self.world_size > 1):
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
-                    "TPU backend only supports Ray for distributed inference.")
-
-        if current_platform.is_hpu() and self.world_size > 1:
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "ray"
-            if self.distributed_executor_backend != "ray":
-                raise ValueError(
-                    "HPU backend only supports Ray for distributed inference.")
+                    f"{current_platform.device_type.upper()} backend only "
+                    "supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
@@ -1400,16 +1383,6 @@ class SpeculativeConfig:
                     speculative_draft_tensor_parallel_size,
                     draft_hf_config
             )
-
-            if (enable_chunked_prefill and \
-                 speculative_draft_tensor_parallel_size != 1):
-                # TODO - Investigate why the error reported in
-                # https://github.com/vllm-project/vllm/pull/9291#issuecomment-2463266258
-                # is happening and re-enable it.
-                raise ValueError(
-                    "Chunked prefill and speculative decoding can be enabled "
-                    "simultaneously only for draft models with tensor "
-                    "parallel size 1.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
@@ -2152,7 +2125,7 @@ class CompilationConfig(BaseModel):
 
     use_inductor: bool = True
     inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
-    inductor_compile_sizes: Optional[List[int]] = Field(default_factory=dict)
+    inductor_compile_sizes: Optional[List[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2291,9 +2264,8 @@ class CompilationConfig(BaseModel):
                 if x <= self.inductor_specialize_for_cudagraph_no_more_than
             ]
         else:
-            assert self.inductor_compile_sizes is not None, (
-                "inductor_compile_sizes should not be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is None")
+            if self.inductor_compile_sizes is None:
+                self.inductor_compile_sizes = []
             self.compile_sizes = self.inductor_compile_sizes
 
 
@@ -2380,6 +2352,16 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
+        if self.scheduler_config is not None and \
+            self.model_config is not None and \
+            self.scheduler_config.chunked_prefill_enabled and \
+            self.model_config.dtype == torch.float32 and \
+            current_platform.get_device_capability() == (7, 5):
+            print_warning_once(
+                "Turing devices tensor cores do not support float32 matmul. "
+                "To workaround this limitation, vLLM will set 'ieee' input "
+                "precision for chunked prefill triton kernels.")
+
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
         if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:
@@ -2393,6 +2375,20 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
+
+        if self.cache_config is not None and \
+            self.cache_config.cpu_offload_gb > 0 and \
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
+            logger.warning(
+                "CPU offload is not supported with `torch.compile` yet."
+                " Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if self.lora_config is not None and self.compilation_config.level !=\
+             CompilationLevel.NO_COMPILATION:
+            logger.warning("LoRA is not supported with `torch.compile` yet. "
+                           "Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
 
@@ -2436,3 +2432,53 @@ class VllmConfig:
         self.cache_config.enable_prefix_caching,
         self.model_config.use_async_output_proc,
         self.model_config.mm_processor_kwargs)
+
+
+_current_vllm_config: Optional[VllmConfig] = None
+
+
+@contextmanager
+def set_current_vllm_config(vllm_config: VllmConfig):
+    """
+    Temporarily set the current VLLM config.
+    Used during model initialization.
+    We save the current VLLM config in a global variable,
+    so that all modules can access it, e.g. custom ops
+    can access the VLLM config to determine how to dispatch.
+    """
+    global _current_vllm_config
+    old_vllm_config = _current_vllm_config
+    from vllm.compilation.counter import compilation_counter
+    num_models_seen = compilation_counter.num_models_seen
+    try:
+        _current_vllm_config = vllm_config
+        yield
+    finally:
+        logger.debug("enabled custom ops: %s",
+                     vllm_config.compilation_config.enabled_custom_ops)
+        logger.debug("disabled custom ops: %s",
+                     vllm_config.compilation_config.disabled_custom_ops)
+        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+            and compilation_counter.num_models_seen == num_models_seen:
+            # If the model supports compilation,
+            # compilation_counter.num_models_seen should be increased
+            # by at least 1.
+            # If it is not increased, it means the model does not support
+            # compilation (does not have @support_torch_compile decorator).
+            logger.warning(
+                "`torch.compile` is turned on, but the model %s"
+                " does not support it. Please open an issue on GitHub"
+                "if you want it to be supported.",
+                vllm_config.model_config.model)
+        _current_vllm_config = old_vllm_config
+
+
+def get_current_vllm_config() -> VllmConfig:
+    if _current_vllm_config is None:
+        # in ci, usually when we test custom ops/modules directly,
+        # we don't set the vllm config. In that case, we set a default
+        # config.
+        logger.warning("Current VLLM config is not set.")
+        from vllm.config import VllmConfig
+        return VllmConfig()
+    return _current_vllm_config

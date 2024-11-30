@@ -1,7 +1,5 @@
 from typing import TYPE_CHECKING
 
-import openvino as ov
-import openvino.properties.hint as hints
 import torch
 
 import vllm.envs as envs
@@ -16,9 +14,16 @@ else:
 
 logger = init_logger(__name__)
 
+try:
+    import openvino as ov
+    import openvino.properties.hint as hints
+except ImportError as e:
+    logger.warning("Failed to import OpenVINO with %r", e)
+
 
 class OpenVinoPlatform(Platform):
     _enum = PlatformEnum.OPENVINO
+    device_name: str = "openvino"
     device_type: str = "openvino"
     dispatch_key: str = "CPU"
 

@@ -11,6 +11,9 @@ ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 
 RUN VLLM_TARGET_DEVICE=hpu python3 setup.py install
 
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
 WORKDIR /workspace/
 
 RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks

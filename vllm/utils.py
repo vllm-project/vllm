@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import concurrent
 import contextlib
 import datetime
 import enum
@@ -351,7 +352,10 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(uname()).lower()
 
 
-def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
+def make_async(
+    func: Callable[P, T],
+    executor: Optional[concurrent.futures.Executor] = None
+) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
@@ -362,7 +366,7 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
-        return loop.run_in_executor(executor=None, func=p_func)
+        return loop.run_in_executor(executor=executor, func=p_func)
 
     return _async_wrapper
 
@@ -467,6 +471,13 @@ async def collect_from_async_generator(
 
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
+    if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
+        logger.warning(
+            "The environment variable HOST_IP is deprecated and ignored, as"
+            " it is often used by Docker and other software to"
+            "interact with the container's network stack. Please"
+            "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
+            " to communicate with each other.")
     if host_ip:
         return host_ip
 

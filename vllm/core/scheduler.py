@@ -1201,15 +1201,25 @@ class Scheduler:
         # Update swapped requests.
         self.swapped.extend(running_scheduled.swapped_out)
         # Put prefills first due to Attention backend ordering assumption.
+        scheduled_seq_groups = (prefills.seq_groups +
+                                running_scheduled.prefill_seq_groups +
+                                swapped_in.prefill_seq_groups +
+                                running_scheduled.decode_seq_groups +
+                                swapped_in.decode_seq_groups)
+        num_prefill_groups = (len(prefills.seq_groups) +
+                              len(swapped_in.prefill_seq_groups) +
+                              len(running_scheduled.prefill_seq_groups))
+        # If all prompts, then we set num_lookahead_slots to 0
+        # this allows us to go through the `no_spec` path in
+        # `spec_decode_worker.py`
+        all_prefills = (len(scheduled_seq_groups) == num_prefill_groups)
+        num_lookahead_slots = (0 if
+                               (all_prefills
+                                and not self.scheduler_config.is_multi_step)
+                               else running_scheduled.num_lookahead_slots)
         return SchedulerOutputs(
-            scheduled_seq_groups=(prefills.seq_groups +
-                                  running_scheduled.prefill_seq_groups +
-                                  swapped_in.prefill_seq_groups +
-                                  running_scheduled.decode_seq_groups +
-                                  swapped_in.decode_seq_groups),
-            num_prefill_groups=(len(prefills.seq_groups) +
-                                len(swapped_in.prefill_seq_groups) +
-                                len(running_scheduled.prefill_seq_groups)),
+            scheduled_seq_groups=scheduled_seq_groups,
+            num_prefill_groups=num_prefill_groups,
             num_batched_tokens=budget.num_batched_tokens +
             budget.num_cached_tokens,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
@@ -1218,7 +1228,7 @@ class Scheduler:
             swapped_in.blocks_to_copy,
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
-            num_lookahead_slots=running_scheduled.num_lookahead_slots,
+            num_lookahead_slots=num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
@@ -1357,6 +1367,7 @@ class Scheduler:
                     encoder_seq_data=encoder_seq_data,
                     cross_block_table=cross_block_table,
                     state=seq_group.state,
+                    token_type_ids=seq_group.token_type_ids,
                     # `multi_modal_data` will only be present for the 1st comm
                     # between engine and worker.
                     # the subsequent comms can still use delta, but

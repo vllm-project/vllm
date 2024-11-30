@@ -6,14 +6,13 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, AttentionType
-from vllm.attention.selector import get_attn_backend
-from vllm.config import CacheConfig
+from vllm.attention.selector import backend_name_to_enum, get_attn_backend
+from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
-from vllm.plugins import get_current_vllm_config
 from vllm.utils import direct_register_custom_op
 
 
@@ -98,6 +97,7 @@ class Attention(nn.Module):
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap)
+        self.backend = backend_name_to_enum(attn_backend.get_name())
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant

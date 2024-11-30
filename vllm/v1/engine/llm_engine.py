@@ -82,7 +82,7 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
 
         # Create the engine configs.
-        vllm_config = engine_args.create_engine_config()
+        vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = cls._get_executor_cls(vllm_config)
 
         if VLLM_ENABLE_V1_MULTIPROCESSING:
@@ -161,13 +161,13 @@ class LLMEngine:
     # TODO(rob): Can we get rid of these?
 
     def get_model_config(self):
-        pass
+        return self.model_config
 
     def start_profile(self):
-        pass
+        self.engine_core.profile(True)
 
     def stop_profile(self):
-        pass
+        self.engine_core.profile(False)
 
     def get_tokenizer_group(self, group_type):
         pass
