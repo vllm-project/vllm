@@ -209,6 +209,7 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
 
 @dataclass(frozen=True)
 class _ModelInfo:
+    architecture: str
     is_text_generation_model: bool
     is_embedding_model: bool
     supports_cross_encoding: bool
@@ -229,6 +230,7 @@ class _ModelInfo:
                 is_embedding_model_ = True
 
         return _ModelInfo(
+            architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
             is_embedding_model=is_embedding_model_,
             supports_cross_encoding=supports_cross_encoding(model),

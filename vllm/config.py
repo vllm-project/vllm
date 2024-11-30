@@ -373,16 +373,22 @@ class ModelConfig:
                 suffix_to_preferred_task: List[Tuple[str, _Task]] = [
                     ("ForCausalLM", "generate"),
                     ("ForConditionalGeneration", "generate"),
-                    ("Model", "embedding"),
+                    ("LMHeadModel", "generate"),
+                    ("EmbeddingModel", "embedding"),
                     ("RewardModel", "embedding"),
                     ("ForSequenceClassification", "embedding"),
                 ]
-                _, arch = ModelRegistry.inspect_model_cls(architectures)
+                info, arch = ModelRegistry.inspect_model_cls(architectures)
 
                 for suffix, pref_task in suffix_to_preferred_task:
                     if arch.endswith(suffix) and pref_task in supported_tasks:
                         selected_task = pref_task
                         break
+                else:
+                    if (arch.endswith("Model")
+                            and info.architecture.endswith("ForCausalLM")
+                            and "embedding" in supported_tasks):
+                        selected_task = "embedding"
 
                 logger.info(
                     "This model supports multiple tasks: %s. "
