@@ -27,12 +27,16 @@ struct KernelVecType<c10::Half> {
 
 template <>
 struct KernelVecType<c10::BFloat16> {
-  using q_load_vec_type = vec_op::AttnVecTypeISA<c10::BFloat16>::q_load_vec_type;
+  using q_load_vec_type =
+      vec_op::AttnVecTypeISA<c10::BFloat16>::q_load_vec_type;
   using q_vec_type = vec_op::AttnVecTypeISA<c10::BFloat16>::q_vec_type;
-  using k_load_vec_type = vec_op::AttnVecTypeISA<c10::BFloat16>::k_load_vec_type;
+  using k_load_vec_type =
+      vec_op::AttnVecTypeISA<c10::BFloat16>::k_load_vec_type;
   using k_vec_type = vec_op::AttnVecTypeISA<c10::BFloat16>::k_vec_type;
-  using qk_acc_vec_type = vec_op::AttnVecTypeISA<c10::BFloat16>::qk_acc_vec_type;
-  using v_load_vec_type = vec_op::AttnVecTypeISA<c10::BFloat16>::v_load_vec_type;
+  using qk_acc_vec_type =
+      vec_op::AttnVecTypeISA<c10::BFloat16>::qk_acc_vec_type;
+  using v_load_vec_type =
+      vec_op::AttnVecTypeISA<c10::BFloat16>::v_load_vec_type;
 };
 
 template <typename T>

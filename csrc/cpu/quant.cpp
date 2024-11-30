@@ -8,21 +8,24 @@ struct KernelVecType;
 template <>
 struct KernelVecType<float> {
   using load_vec_type = vec_op::QuantVecTypeISA<float>::load_vec_type;
-  using azp_adj_load_vec_type = vec_op::QuantVecTypeISA<float>::azp_adj_load_vec_type;
+  using azp_adj_load_vec_type =
+      vec_op::QuantVecTypeISA<float>::azp_adj_load_vec_type;
   using cvt_vec_type = vec_op::QuantVecTypeISA<float>::cvt_vec_type;
 };
 
 template <>
 struct KernelVecType<c10::BFloat16> {
   using load_vec_type = vec_op::QuantVecTypeISA<c10::BFloat16>::load_vec_type;
-  using azp_adj_load_vec_type = vec_op::QuantVecTypeISA<c10::BFloat16>::azp_adj_load_vec_type;
+  using azp_adj_load_vec_type =
+      vec_op::QuantVecTypeISA<c10::BFloat16>::azp_adj_load_vec_type;
   using cvt_vec_type = vec_op::QuantVecTypeISA<c10::BFloat16>::cvt_vec_type;
 };
 
 template <>
 struct KernelVecType<c10::Half> {
   using load_vec_type = vec_op::QuantVecTypeISA<c10::Half>::load_vec_type;
-  using azp_adj_load_vec_type = vec_op::QuantVecTypeISA<c10::Half>::azp_adj_load_vec_type;
+  using azp_adj_load_vec_type =
+      vec_op::QuantVecTypeISA<c10::Half>::azp_adj_load_vec_type;
   using cvt_vec_type = vec_op::QuantVecTypeISA<c10::Half>::cvt_vec_type;
 };
 
