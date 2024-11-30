@@ -229,14 +229,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         if image_input is None:
             return None
 
-        image_tokens = torch.flatten(
-            torch.tensor([
-                token_id for image_tokens_per_request in image_tokens
-                for token_id in image_tokens_per_request
-            ],
-                         device=self.vision_encoder.device))
-
         vision_embeddings = self._process_image_input(image_input)
+
+        # NOTE: We patch the outputs of the vision encoder with embeddings
+        # from `[IMG_BREAK]` and `[IMG_END]` tokens.
         image_embeds = self.language_model.get_input_embeddings(image_tokens)
         image_token_mask = image_tokens == self.vision_args.image_token_id
         image_embeds[image_token_mask] = vision_embeddings
@@ -323,6 +319,16 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                 flatten_images.extend(imgs_per_req)
 
             images = flatten_images
+
+        if isinstance(image_tokens, torch.Tensor):
+            # image_tokens are batched
+            image_tokens = image_tokens.flatten()
+        elif isinstance(image_tokens, list):
+            # image_tokens are of different lengths thus passed as a list
+            image_tokens = torch.cat(image_tokens)
+
+        assert image_tokens.dim() == 1
+
         return images, image_tokens
 
     def _process_image_input(self,
