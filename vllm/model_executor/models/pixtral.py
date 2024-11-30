@@ -147,6 +147,8 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     image_token_id = mm_encoder.special_ids.img
+    image_break_id = mm_encoder.special_ids.img_break
+    image_end_id = mm_encoder.special_ids.img_end
 
     if image_token_id not in inputs['prompt_token_ids']:
         raise ValueError(
@@ -161,11 +163,11 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
     curr_length = 0
     curr_offset = 0
     for i in range(len(prompt_token_ids)):
-        if prompt_token_ids[i] in (image_token_id, PIXTRAL_IMAGE_BREAK_ID):
+        if prompt_token_ids[i] in (image_token_id, image_break_id):
             if curr_offset == 0:
                 curr_offset = i
             curr_length += 1
-        elif prompt_token_ids[i] == PIXTRAL_IMAGE_END_ID:
+        elif prompt_token_ids[i] == image_end_id:
             curr_length += 1
             placeholder_ranges.append(
                 PlaceholderRange(offset=curr_offset, length=curr_length))
