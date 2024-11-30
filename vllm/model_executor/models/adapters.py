@@ -89,6 +89,8 @@ def as_embedding_model(cls: _T) -> _T:
 
     ModelForEmbedding.__name__ = cls.__name__ \
         .removesuffix("ForCausalLM") \
-        .removesuffix("ForConditionalGeneration") + "ForEmbedding"
+        .removesuffix("ForConditionalGeneration") \
+        .removesuffix("ChatModel") \
+        .removesuffix("LMHeadModel") + "ForEmbedding"
 
     return ModelForEmbedding  # type: ignore

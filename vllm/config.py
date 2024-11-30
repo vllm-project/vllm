@@ -371,8 +371,13 @@ class ModelConfig:
 
             if len(supported_tasks) > 1:
                 suffix_to_preferred_task: List[Tuple[str, _Task]] = [
+                    # Hardcode the models that are exceptions
+                    ("AquilaModel", "generate"),
+                    ("ChatGLMModel", "generate"),
+                    # Other models follow this pattern
                     ("ForCausalLM", "generate"),
                     ("ForConditionalGeneration", "generate"),
+                    ("ChatModel", "generate"),
                     ("LMHeadModel", "generate"),
                     ("EmbeddingModel", "embedding"),
                     ("RewardModel", "embedding"),
