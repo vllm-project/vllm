@@ -66,4 +66,4 @@ class MyGemma2Embedding(nn.Module):
         weights = hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))
-        self.model.load_weights(weights)
+        return self.model.load_weights(weights)

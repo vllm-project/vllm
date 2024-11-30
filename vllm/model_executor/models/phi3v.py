@@ -34,7 +34,6 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.models.clip import CLIPVisionModel
-from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
@@ -44,7 +43,8 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
@@ -553,10 +553,16 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             quant_config,
             prefix=maybe_prefix(prefix, "model.vision_embed_tokens"))
 
-        # The prefix is empty intentionally because default prefix of
-        # LlamaForCausalLM is "model"
-        self.language_model = LlamaForCausalLM(vllm_config=vllm_config,
-                                               prefix="")
+        self.language_model = init_vllm_registered_model(
+            vllm_config=vllm_config,
+            # The prefix is empty intentionally because default prefix of
+            # LlamaForCausalLM is "model"
+            prefix="",
+            # We don't directly initialize vLLM's LlamaForCausalLM so we
+            # can automatically apply embedding wrapper if this model is
+            # initialized as an embedding model
+            architectures=["LlamaForCausalLM"],
+        )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)

@@ -59,6 +59,8 @@ def as_embedding_model(cls: _T) -> _T:
             return self._pooler(hidden_states, pooling_metadata)
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+            # TODO: Support uninitialized params tracking
+
             # We have deleted this attribute, so don't load it
             weights = ((name, data) for name, data in weights
                        if not name.startswith("lm_head."))
@@ -81,11 +83,11 @@ def as_embedding_model(cls: _T) -> _T:
 
             # For most other models
             if hasattr(cls, "load_weights"):
-                return cls.load_weights(self, weights)  # type: ignore
+                cls.load_weights(self, weights)  # type: ignore
             # Fallback
             else:
                 loader = AutoWeightsLoader(self)
-                return loader.load_weights(weights)
+                loader.load_weights(weights)
 
     ModelForEmbedding.__name__ = cls.__name__ \
         .removesuffix("ForCausalLM") \
