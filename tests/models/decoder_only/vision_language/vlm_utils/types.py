@@ -97,6 +97,7 @@ class VLMTestInfo(NamedTuple):
 
     # Optional callable which gets a list of token IDs from the model tokenizer
     get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]] = None
+    stop_str: Optional[List[str]] = None
 
     # Exposed options for HF runner
     model_kwargs: Optional[Dict[str, Any]] = None
@@ -166,6 +167,7 @@ class VLMTestInfo(NamedTuple):
             "postprocess_inputs": self.postprocess_inputs,
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
+            "stop_str": self.stop_str,
             "model_kwargs": self.model_kwargs,
             "patch_hf_runner": self.patch_hf_runner,
         }

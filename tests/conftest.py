@@ -843,6 +843,7 @@ class VllmRunner:
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
         stop_token_ids: Optional[List[int]] = None,
+        stop: Optional[List[str]] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
@@ -850,7 +851,8 @@ class VllmRunner:
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=num_prompt_logprobs,
-            stop_token_ids=stop_token_ids)
+            stop_token_ids=stop_token_ids,
+            stop=stop)
 
         return self.generate_w_logprobs(prompts,
                                         greedy_logprobs_params,
