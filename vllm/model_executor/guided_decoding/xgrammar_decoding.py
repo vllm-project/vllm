@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
-import torch
-from transformers import PreTrainedTokenizerFast
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+import torch
+from transformers import PreTrainedTokenizerFast
 
 try:
     import xgrammar as xgr
@@ -14,9 +15,10 @@ except ImportError:
     pass
 
 if TYPE_CHECKING:
-    from vllm.sampling_params import GuidedDecodingParams
-    from vllm.config import ModelConfig
     from transformers import PreTrainedTokenizer
+
+    from vllm.config import ModelConfig
+    from vllm.sampling_params import GuidedDecodingParams
 
 
 # TODO: passing batch size to max threads here
@@ -59,20 +61,13 @@ class GrammarConfig:
             ]
         except AttributeError as e:
             raise ValueError(
-                f"Cannot get the vocabulary of the tokenizer {type(tokenizer)}. The tokenizer should have a get_vocab method."
-            ) from e
+                f"Cannot get the vocabulary of the tokenizer {type(tokenizer)}."
+                " The tokenizer should have a get_vocab method.") from e
 
         stop_token_ids = None
         backend_str = xgr.VocabType.RAW
         if isinstance(tokenizer, PreTrainedTokenizerFast):
-            # huggingface fast tokenizer
-            # - the vocabulary is directly obtained from tokenizer.get_vocab()
-            #   (tokenizer.backend_tokenizer.to_str() may not contain the full vocab, special
-            #   tokens may be omitted)
-            # - the vocab size is obtained from len(tokenizer.get_vocab()) or provided by user
-            # - the vocab type and prepend_space_in_tokenization are obtained from
-            #   tokenizer.backend_tokenizer.to_str()
-            # - stop token id is provided by user, or auto detected.
+            #  the vocabulary is directly obtained from tokenizer.get_vocab()
             backend_str = tokenizer.backend_tokenizer.to_str()
             if stop_token_ids is None and hasattr(
                     tokenizer,
