@@ -97,6 +97,8 @@ class VLMTestInfo(NamedTuple):
 
     # Optional callable which gets a list of token IDs from the model tokenizer
     get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]] = None
+    # Optional list of strings to stop generation, useful when stop tokens are
+    # not special tokens in the tokenizer
     stop_str: Optional[List[str]] = None
 
     # Exposed options for HF runner
