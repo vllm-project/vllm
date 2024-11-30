@@ -51,7 +51,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -111,6 +112,7 @@ class LlamaAttention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -165,6 +167,18 @@ class LlamaAttention(nn.Module):
             rope_scaling=rope_scaling,
             is_neox_style=is_neox_style,
         )
+
+        if hasattr(config, "interleaved_sliding_window"):
+            if isinstance(config.interleaved_sliding_window, int):
+                sliding_window = config.interleaved_sliding_window
+            elif isinstance(config.interleaved_sliding_window, list):
+                sw_idx = layer_idx % len(config.interleaved_sliding_window)
+                sliding_window = config.interleaved_sliding_window[sw_idx]
+            else:
+                raise ValueError(f"{type(sliding_window)} is not supported.")
+        else:
+            sliding_window = None
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -172,6 +186,7 @@ class LlamaAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
 
