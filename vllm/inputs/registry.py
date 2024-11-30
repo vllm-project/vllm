@@ -137,7 +137,7 @@ class InputRegistry:
 
     def __init__(self) -> None:
         self._dummy_factories_by_model_type = \
-            ClassRegistry[nn.Module,DummyDataFactory]()
+            ClassRegistry[nn.Module, DummyDataFactory]()
         self._dummy_encoder_factories_by_model_type = \
             ClassRegistry[nn.Module, DummyDataFactory]()
         self._input_processors_by_model_type = \
