@@ -1321,9 +1321,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
 
-            assert hasattr(model_config, "model_weights")
+            model_weights = model_config.model
+            if hasattr(model_config, "model_weights"):
+                model_weights = model_config.model_weights
             model.load_weights(
-                self._get_weights_iterator(model_config.model_weights,
+                self._get_weights_iterator(model_weights,
                                            model_config.revision))
 
             for _, module in model.named_modules():
