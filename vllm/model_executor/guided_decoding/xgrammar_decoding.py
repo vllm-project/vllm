@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 from transformers import PreTrainedTokenizerFast
@@ -34,16 +34,90 @@ def get_local_xgrammar_guided_decoding_logits_processor(
     return XGrammarLogitsProcessor(config)
 
 
+class TokenizerData(NamedTuple):
+    """Immutable container for cached tokenizer data."""
+    encoded_vocab: list[str]
+    stop_token_ids: list[int] | None
+    backend_str: str
+
+
+class TokenizerDataCache:
+    """Cache manager for tokenizer data to avoid repeated processing."""
+    _cache: dict[int, TokenizerData] = {}
+
+    @classmethod
+    def get_tokenizer_data(cls,
+                           tokenizer: PreTrainedTokenizer) -> TokenizerData:
+        tokenizer_hash = hash(tokenizer)
+
+        if tokenizer_hash not in cls._cache:
+            # Vendored from xgrammar logic since we cannot pickle the tokenizer
+            # https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98 # noqa: E501
+            try:
+                encoded_vocab = [
+                    token for token, _ in sorted(tokenizer.get_vocab().items(),
+                                                 key=lambda x: x[1])
+                ]
+            except AttributeError as e:
+                raise ValueError(
+                    f"Cannot get the vocabulary of the tokenizer "
+                    f"{type(tokenizer)}. The tokenizer should have a "
+                    "get_vocab method.") from e
+
+            stop_token_ids = None
+            backend_str = xgr.VocabType.RAW
+            if isinstance(tokenizer, PreTrainedTokenizerFast):
+                backend_str = tokenizer.backend_tokenizer.to_str()
+                if stop_token_ids is None and hasattr(
+                        tokenizer,
+                        "eos_token_id") and tokenizer.eos_token_id is not None:
+                    stop_token_ids = [tokenizer.eos_token_id]
+
+            cls._cache[tokenizer_hash] = TokenizerData(
+                encoded_vocab=encoded_vocab,
+                stop_token_ids=stop_token_ids,
+                backend_str=backend_str)
+
+        return cls._cache[tokenizer_hash]
+
+
+class GrammarCompilerCache:
+    """
+    Cache for GrammarCompiler instances based on tokenizer.
+
+    This cache reduces the overhead of creating new compiler instances when
+    using the same tokenizer configuration.
+    """
+    _cache: dict[str, xgr.GrammarCompiler] = {}
+
+    @classmethod
+    def get_compiler(cls, config: GrammarConfig) -> xgr.GrammarCompiler:
+        cache_key = str(config.tokenizer_hash)
+
+        if cache_key not in cls._cache:
+            assert config.encoded_vocab is not None
+            tokenizer_info = xgr.TokenizerInfo._create_from_handle(
+                xgr_core.TokenizerInfo.from_huggingface(
+                    config.encoded_vocab, config.backend_str,
+                    config.vocab_size, config.stop_token_ids))
+            cls._cache[cache_key] = xgr.GrammarCompiler(
+                tokenizer_info, max_threads=config.max_threads)
+
+        return cls._cache[cache_key]
+
+
 @dataclass
 class GrammarConfig:
     """Serializable configuration for grammar compilation"""
-    vocab_size: int = 0
-    max_threads: int = 8
+    tokenizer_hash: int
+    vocab_size: int
     json_str: str | None = None
     grammar_str: str | None = None
-    encoded_vocab: dict[str, int] | None = None
+    max_threads: int = 8
+    # Only populated if tokenizer_hash not in cache
+    encoded_vocab: list[str] | None = None
     stop_token_ids: list[int] | None = None
-    backend_str: str = ""
+    backend_str: str | None = None
 
     @classmethod
     def from_guided_params(cls,
@@ -52,27 +126,17 @@ class GrammarConfig:
                            tokenizer: PreTrainedTokenizer,
                            max_threads: int = 8) -> GrammarConfig:
 
-        # Vendorred from xgrammar logics
-        try:
-            encoded_vocab = tokenizer.get_vocab()
-            encoded_vocab = [
-                token for token, _ in sorted(encoded_vocab.items(),
-                                             key=lambda x: x[1])
-            ]
-        except AttributeError as e:
-            raise ValueError(
-                f"Cannot get the vocabulary of the tokenizer {type(tokenizer)}."
-                " The tokenizer should have a get_vocab method.") from e
-
-        stop_token_ids = None
-        backend_str = xgr.VocabType.RAW
-        if isinstance(tokenizer, PreTrainedTokenizerFast):
-            #  the vocabulary is directly obtained from tokenizer.get_vocab()
-            backend_str = tokenizer.backend_tokenizer.to_str()
-            if stop_token_ids is None and hasattr(
-                    tokenizer,
-                    "eos_token_id") and tokenizer.eos_token_id is not None:
-                stop_token_ids = [tokenizer.eos_token_id]
+        tokenizer_hash = hash(tokenizer)
+        # Only get tokenizer data if not already cached
+        if tokenizer_hash in TokenizerDataCache._cache:
+            encoded_vocab = None
+            stop_token_ids = None
+            backend_str = None
+        else:
+            tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
+            encoded_vocab = tokenizer_data.encoded_vocab
+            stop_token_ids = tokenizer_data.stop_token_ids
+            backend_str = tokenizer_data.backend_str
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -81,28 +145,23 @@ class GrammarConfig:
                 json_str = guided_params.json
             return cls(json_str=json_str,
                        vocab_size=model_config.hf_config.vocab_size,
-                       max_threads=max_threads,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
-                       backend_str=backend_str)
+                       backend_str=backend_str,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads)
         elif guided_params.grammar:
             return cls(grammar_str=guided_params.grammar,
                        vocab_size=model_config.hf_config.vocab_size,
-                       max_threads=max_threads,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
-                       backend_str=backend_str)
+                       backend_str=backend_str,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads)
         else:
             raise ValueError(
                 "Currently only support JSON and EBNF grammar mode for xgrammar"
             )
-
-    def create_tokenizer_info(self):
-        return xgr.TokenizerInfo._create_from_handle(
-            xgr_core.TokenizerInfo.from_huggingface(self.encoded_vocab,
-                                                    self.backend_str,
-                                                    self.vocab_size,
-                                                    self.stop_token_ids))
 
 
 @dataclass
@@ -131,9 +190,7 @@ class XGrammarLogitsProcessor:
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
         if self.ctx is None:
-            compiler = xgr.GrammarCompiler(self.config.create_tokenizer_info(),
-                                           max_threads=self.config.max_threads)
-
+            compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
                 self.ctx = compiler.compile_json_schema(self.config.json_str)
             else:
@@ -164,6 +221,8 @@ class XGrammarLogitsProcessor:
             if not matcher.is_terminated():
                 matcher.fill_next_token_bitmask(self.token_bitmask, i)
 
+        # token_bitmask is a CPU tensor for use with accept_token and
+        # fill_next_token_bitmask so we move it to the device of scores
         device_type = scores.device.type
         if device_type != "cuda":
             scores = scores.to("cpu")
