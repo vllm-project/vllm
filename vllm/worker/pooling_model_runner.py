@@ -21,12 +21,12 @@ logger = init_logger(__name__)
 @dataclasses.dataclass(frozen=True)
 class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
     """
-    Used by the EmbeddingModelRunner.
+    Used by the PoolingModelRunner.
     """
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
-class EmbeddingModelRunner(
+class PoolingModelRunner(
         GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
         ModelInputForGPUWithPoolingMetadata)
@@ -52,7 +52,7 @@ class EmbeddingModelRunner(
     ) -> Optional[Union[List[PoolerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
-                "EmbeddingModelRunner does not support multi-step execution.")
+                "PoolingModelRunner does not support multi-step execution.")
 
         if self.lora_config:
             assert model_input.lora_requests is not None

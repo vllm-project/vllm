@@ -1,11 +1,11 @@
 import asyncio
 from typing import Any, AsyncGenerator, Callable, Optional, Type, Union
 
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 
 
 class AsyncStream:
-    """A stream of RequestOutputs or EmbeddingRequestOutputs for a request
+    """A stream of RequestOutputs or PoolingRequestOutputs for a request
     that can be iterated over asynchronously via an async generator."""
 
     STOP_ITERATION = Exception()  # Sentinel
@@ -16,7 +16,7 @@ class AsyncStream:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
-    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
+    def put(self, item: Union[RequestOutput, PoolingRequestOutput,
                               Exception]) -> None:
         if not self._finished:
             self._queue.put_nowait(item)
@@ -32,7 +32,7 @@ class AsyncStream:
 
     async def generator(
         self
-    ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
+    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
         finished = False
         try:
             while True:

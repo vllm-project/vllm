@@ -14,9 +14,9 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.worker.cpu_embedding_model_runner import CPUEmbeddingModelRunner
 from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
 from vllm.worker.cpu_model_runner import CPUModelRunner, CPUModelRunnerBase
+from vllm.worker.cpu_pooling_model_runner import CPUPoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
@@ -164,7 +164,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                     else {"return_hidden_states": True}
         ModelRunnerClass: Type[CPUModelRunnerBase] = CPUModelRunner
         if self.model_config.task == "embedding":
-            ModelRunnerClass = CPUEmbeddingModelRunner
+            ModelRunnerClass = CPUPoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
         self.model_runner: CPUModelRunnerBase = ModelRunnerClass(

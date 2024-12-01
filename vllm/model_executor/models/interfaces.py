@@ -7,7 +7,7 @@ from typing_extensions import TypeIs, TypeVar
 from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
-from .interfaces_base import is_embedding_model
+from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -389,4 +389,4 @@ def _supports_cross_encoding(
 def supports_cross_encoding(
     model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
-    return is_embedding_model(model) and _supports_cross_encoding(model)
+    return is_pooling_model(model) and _supports_cross_encoding(model)
