@@ -4,6 +4,8 @@ Run `pytest tests/models/embedding/language/test_embedding.py`.
 """
 import pytest
 
+from vllm.config import PoolerConfig
+
 from ..utils import check_embeddings_close
 
 
@@ -33,6 +35,9 @@ def test_models(
     dtype: str,
 ) -> None:
     vllm_extra_kwargs = {}
+    if model == "ssmits/Qwen2-7B-Instruct-embed-base":
+        vllm_extra_kwargs["override_pooler_config"] = \
+            PoolerConfig(pooling_type="MEAN")
     if model == "Alibaba-NLP/gte-Qwen2-7B-instruct":
         vllm_extra_kwargs["hf_overrides"] = {"is_causal": False}
 
