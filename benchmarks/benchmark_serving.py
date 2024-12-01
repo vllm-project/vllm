@@ -265,7 +265,9 @@ def sample_hf_requests(
                                name=dataset_subset,
                                split=dataset_split,
                                streaming=True)
-        dataset = dataset.shuffle(seed=random_seed)
+        assert "image" in dataset.features, ("MMMU dataset must have 'image' column.")
+        filter_func = lambda x: isinstance(x["image"], Image)
+        dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
         return sample_mmmu_pro_vision_requests(dataset, num_requests,
                                                tokenizer, fixed_output_len)
 
