@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 from transformers import PreTrainedTokenizerFast
+
+from vllm.logger import init_logger
 
 try:
     import xgrammar as xgr
@@ -18,6 +21,8 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
     from vllm.sampling_params import GuidedDecodingParams
+
+logger = init_logger(__name__)
 
 
 # TODO: passing batch size to max threads here
@@ -186,11 +191,17 @@ class XGrammarLogitsProcessor:
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
         if self.ctx is None:
+            start_time = time.time()
             compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
                 self.ctx = compiler.compile_json_schema(self.config.json_str)
             else:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
+            compile_time = time.time() - start_time
+            if compile_time > 0.1:
+                log_str = ("Xgrammar compiled grammar/schema "
+                           f"in {compile_time:.2f} seconds")
+                logger.info(log_str)
 
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
