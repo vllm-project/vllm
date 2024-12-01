@@ -205,7 +205,6 @@ def sample_mmmu_pro_vision_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
-    dataset = dataset.shuffle()
     sampled_requests: List[Tuple[str, int, int, Dict[str,
                                                      Collection[str]]]] = []
     for data in dataset:
@@ -265,7 +264,7 @@ def sample_hf_requests(
                                name=dataset_subset,
                                split=dataset_split,
                                streaming=True)
-
+        dataset = dataset.shuffle(seed=random_seed)
         return sample_mmmu_pro_vision_requests(dataset, num_requests,
                                                tokenizer, fixed_output_len)
 
