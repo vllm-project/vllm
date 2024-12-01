@@ -14,6 +14,7 @@ cleanup() {
     echo "Caught Ctrl+C, cleaning up..."
     # Cleanup commands
     pgrep python | xargs kill -9
+    pkill -f python
     echo "Cleanup complete. Exiting."
     exit 0
 }
@@ -93,6 +94,7 @@ output2=$(curl -X POST -s http://localhost:8000/v1/completions \
 
 # Cleanup commands
 pgrep python | xargs kill -9
+pkill -f python
 
 echo ""
 

@@ -16,13 +16,15 @@ from typing import Deque, List, Optional, Union
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
+    KVLookupBufferBase)
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class SimpleBuffer:
+class SimpleBuffer(KVLookupBufferBase):
 
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float):
