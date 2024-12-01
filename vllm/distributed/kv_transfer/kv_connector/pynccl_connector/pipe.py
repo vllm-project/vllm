@@ -90,12 +90,21 @@ class PyNcclPipe:
             comm.disabled = False
             send, recv = comm.send, comm.recv  # type: ignore
         else:
-            raise NotImplementedError("cpu device and non-nvidia hardawres are"\
-                " not supported yet.")
+            # This send / recv implementation here is NOT intended to transfer
+            # KV caches (and should NOT be repurposed to transfer KV caches).
+            # Currently it is only used to transmit control-plane messages
+            # for PyNcclBuffer.
+            send = group.send_obj
+
+            def my_recv(x, src):
+                x[...] = group.recv_obj(src)
+
+            recv = my_recv
 
         return send, recv
 
     def _select_device(self, device: str):
+        logger.info("Selecting device: %s", device)
         if device == "cuda":
             return torch.device(f"cuda:{self.local_rank}")
         else:
