@@ -401,6 +401,18 @@ steps:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
 
+- label: Disaggregated Prefill Test # 2min
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  source_file_dependencies:
+  - vllm/distributed/parallel_state.py
+  - vllm/distributed/kv_transfer
+  - vllm/worker/worker_base.py
+  - vllm/worker/worker.py
+  - vllm/worker/model_runner.py
+  commands:
+  - pytest -v -s kv_transfer/disagg_test.py
+
 - label: 2 Node Tests (4 GPUs in total) # 16min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
@@ -474,18 +486,6 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
-
-- label: Disaggregated Prefill Test # 4min
-  working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
-  source_file_dependencies:
-  - vllm/distributed/parallel_state.py
-  - vllm/distributed/kv_transfer
-  - vllm/worker/worker_base.py
-  - vllm/worker/worker.py
-  - vllm/worker/model_runner.py
-  commands:
-  - pytest -v -s kv_transfer/disagg_test.py
 
 - label: LoRA TP Test (Distributed)
   num_gpus: 4

@@ -25,8 +25,6 @@ def setup_servers():
         sys.executable,
         "-m",
         "vllm.entrypoints.openai.api_server",
-        "-tp",
-        "2",
         "--model",
         "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "--port",
@@ -40,7 +38,7 @@ def setup_servers():
         '"kv_rank":0,"kv_parallel_size":2}',
     ]
     prefill_env = os.environ.copy()
-    prefill_env["CUDA_VISIBLE_DEVICES"] = "0,1"
+    prefill_env["CUDA_VISIBLE_DEVICES"] = "0"
     prefill_proc = Popen(prefill_cmd, env=prefill_env)
 
     # Start decode instance
@@ -48,8 +46,6 @@ def setup_servers():
         sys.executable,
         "-m",
         "vllm.entrypoints.openai.api_server",
-        "-tp",
-        "2",
         "--model",
         "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "--port",
@@ -63,7 +59,7 @@ def setup_servers():
         '"kv_rank":1,"kv_parallel_size":2}',
     ]
     decode_env = os.environ.copy()
-    decode_env["CUDA_VISIBLE_DEVICES"] = "2,3"
+    decode_env["CUDA_VISIBLE_DEVICES"] = "1"
     decode_proc = Popen(decode_cmd, env=decode_env)
 
     # Wait for servers to be ready
