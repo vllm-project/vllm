@@ -7,7 +7,7 @@ from torch import nn
 
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import (get_allowed_kwarg_only_overrides,
+from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
 if TYPE_CHECKING:
@@ -54,8 +54,8 @@ class MultiModalPlugin(ABC):
     """
 
     def __init__(self) -> None:
-        self._input_mappers: Dict[Type[nn.Module], MultiModalInputMapper] = {}
-        self._max_mm_tokens: Dict[Type[nn.Module], MultiModalTokensCalc] = {}
+        self._input_mappers = ClassRegistry[nn.Module, MultiModalInputMapper]()
+        self._max_mm_tokens = ClassRegistry[nn.Module, MultiModalTokensCalc]()
 
     @abstractmethod
     def get_data_key(self) -> str:
