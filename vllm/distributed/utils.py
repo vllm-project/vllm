@@ -131,16 +131,6 @@ class StatelessProcessGroup:
         self.send_dst_counter[dst] += 1
         self.entries.append((key, time.time()))
 
-    def send(self, tensor: torch.Tensor, dst: int):
-        """Send out a tensor to destination rank.
-        This function implements send using CPU communication, which is 
-        needed when the KV cache buffer is placed on CPU in distributed KV
-        cache communication."""
-        self.expire_data()
-        key = f"send_to/{dst}/{self.send_dst_counter[dst]}"
-        self.store.set(key, tensor.numpy().tobytes())
-        self.send_dst_counter[dst] += 1
-        self.entries.append((key, time.time()))
 
     def expire_data(self):
         """Expire data that is older than `data_expiration_seconds` seconds."""
@@ -161,17 +151,6 @@ class StatelessProcessGroup:
         self.recv_src_counter[src] += 1
         return obj
 
-    def recv(self, tensor: torch.Tensor, src: int):
-        """Receive a tensor from source rank.
-        This function implements recv using CPU communication, which is 
-        needed when the KV cache buffer is placed on CPU in distributed KV
-        cache communication."""
-        received_tensor = torch.frombuffer(self.store.get(
-            f"send_to/{self.rank}/{self.recv_src_counter[src]}"),
-                                           dtype=tensor.dtype).reshape(
-                                               tensor.shape)
-        self.recv_src_counter[src] += 1
-        tensor[...] = received_tensor
 
     def broadcast_obj(self, obj: Optional[Any], src: int) -> Any:
         """Broadcast an object from a source rank to all other ranks.

@@ -90,9 +90,8 @@ class PyNcclPipe:
             comm.disabled = False
             send, recv = comm.send, comm.recv  # type: ignore
         else:
-            # use cpu communication
-            send = group.send
-            recv = group.recv
+            raise NotImplementedError("cpu device and non-nvidia hardawres are"\
+                " not supported yet.")
 
         return send, recv
 

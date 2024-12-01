@@ -2061,8 +2061,8 @@ class KVTransferConfig(BaseModel):
     # The KV connector for vLLM to transmit KV caches between vLLM instances.
     kv_connector: Optional[str] = None
 
-    # The device used by kv connector to buffer the KV cache. Can be cpu or
-    # cuda. Recommended value: cuda.
+    # The device used by kv connector to buffer the KV cache. 
+    # Currently only support 'cuda'.
     kv_buffer_device: Optional[str] = "cuda"
 
     # The buffer size for TorchDistributedConnector. Measured in number of
