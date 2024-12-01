@@ -1103,24 +1103,24 @@ def initialize_model_parallel(
                                     group_name="pp")
 
 
-def ensure_kv_transfer_initialized(config: "VllmConfig") -> None:
+def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     """
     Initialize KV cache transfer parallel group.
     """
 
     global _KV_TRANSFER
 
-    if config.kv_transfer_config is None:
+    if vllm_config.kv_transfer_config is None:
         return
 
     if all([
-            config.kv_transfer_config.need_kv_parallel_group,
+            vllm_config.kv_transfer_config.need_kv_parallel_group,
             _KV_TRANSFER is None
     ]):
         _KV_TRANSFER = kv_transfer.KVTransferAgent(
             rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,
-            config=config)
+            config=vllm_config)
 
 
 def ensure_model_parallel_initialized(
