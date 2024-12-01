@@ -1,4 +1,10 @@
 """
+Simple KV Cache Connector for Distributed Machine Learning Inference
+
+The SimpleConnector transfers KV caches between prefill vLLM worker (KV cache 
+producer) and decode vLLM worker (KV cache consumer) using PyNcclPipe.
+
+But the logic can be extended to support other pipe and lookup buffer.
 """
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 

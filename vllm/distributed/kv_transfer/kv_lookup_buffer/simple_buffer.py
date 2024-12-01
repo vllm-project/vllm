@@ -1,6 +1,5 @@
 """
-    Implements a distributed key-value (KV) cache transfer mechanism for vLLM 
-    instances with buffer management.
+    Implements a distributed key-value (KV) cache transfer mechanism.
 
     Key Features:
     - Distributed KV cache transmission using PyNccl pipes.
