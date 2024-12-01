@@ -263,7 +263,6 @@ class HfRunner:
         dtype: str = "half",
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
-        is_embedding_model: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,

@@ -357,7 +357,7 @@ Text Embedding
     - ✅︎
   * - :code:`Qwen2Model`, :code:`Qwen2ForCausalLM`
     - Qwen2-based
-    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
+    - :code:`ssmits/Qwen2-7B-Instruct-embed-base` (see note), :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
     - ✅︎
     - ✅︎
   * - :code:`RobertaModel`, :code:`RobertaForMaskedLM`
@@ -379,6 +379,10 @@ Text Embedding
   You can override the model's pooling method by passing :code:`--override-pooler-config`.
 
 .. note::
+  :code:`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
+  You should manually set mean pooling by passing :code:`--override-pooler-config '{"pooling_type": "MEAN"}'`.
+
+.. note::
   Unlike base Qwen2, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
   You can set :code:`--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
 
@@ -397,11 +401,20 @@ Reward Modeling
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`LlamaForCausalLM`
+    - Llama-based
+    - :code:`peiyi9979/math-shepherd-mistral-7b-prm`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`Qwen2ForRewardModel`
     - Qwen2-based
     - :code:`Qwen/Qwen2.5-Math-RM-72B`, etc.
     - ✅︎
     - ✅︎
+
+.. important::
+  For process-supervised reward models such as :code:`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
+  e.g.: :code:`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
 .. note::
     As an interim measure, these models are supported in both offline and online inference via Embeddings API.

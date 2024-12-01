@@ -26,8 +26,7 @@ def test_auto_task(model_id, expected_task):
 
 
 @pytest.mark.parametrize(("model_id", "bad_task"), [
-    ("facebook/opt-125m", "embedding"),
-    ("intfloat/e5-mistral-7b-instruct", "generate"),
+    ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
 ])
 def test_incorrect_task(model_id, bad_task):
     with pytest.raises(ValueError, match=r"does not support the .* task"):
