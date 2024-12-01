@@ -227,21 +227,22 @@ def sample_mmmu_pro_vision_requests(
 
         prompt_len = len(prompt_token_ids)
         output_len = fixed_output_len
-        if "image" in data and isinstance(data["image"], Image):
-            image: Image = data["image"]
-            image = image.convert("RGB")
-            image_data = io.BytesIO()
-            image.save(image_data, format='JPEG')
-            image_base64 = base64.b64encode(
-                image_data.getvalue()).decode("utf-8")
-            mm_content = {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{image_base64}"
-                },
-            }
-        else:
-            raise ValueError("Image not found in the dataset.")
+
+        assert isinstance(
+            data["image"],
+            Image), ("Input image format must be `PIL.Image.Image`, "
+                     f"given {type(data['image'])}.")
+        image: Image = data["image"]
+        image = image.convert("RGB")
+        image_data = io.BytesIO()
+        image.save(image_data, format='JPEG')
+        image_base64 = base64.b64encode(image_data.getvalue()).decode("utf-8")
+        mm_content = {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{image_base64}"
+            },
+        }
 
         sampled_requests.append((prompt, prompt_len, output_len, mm_content))
 
