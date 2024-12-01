@@ -1232,12 +1232,13 @@ class EngineArgs:
         Override the EngineConfig's configs based on the usage context for V1.
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
-        # TODO (ywang96): Enable APC by default when VLM supports it.
         if engine_config.model_config.is_multimodal_model:
-            logger.warning(
-                "Prefix caching is currently not supported for multimodal "
-                "models and has been disabled.")
-            engine_config.cache_config.enable_prefix_caching = False
+            # TODO (ywang96): Enable APC by default when VLM supports it.
+            assert not engine_config.cache_config.enable_prefix_caching
+
+            # NOTE: multimodal models support chunked prefill by design,
+            # thus always enabled in V1.
+            engine_config.scheduler_config.enable_chunked_prefill = True
 
 
 @dataclass

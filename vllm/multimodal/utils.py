@@ -535,11 +535,13 @@ def repeat_and_pad_placeholder_tokens(
     return new_prompt, new_token_ids, placeholder_ranges
 
 
-def consecutive_placeholder_ranges(num_items: int,
-                                   item_size: int) -> List[PlaceholderRange]:
+def consecutive_placeholder_ranges(
+        num_items: int,
+        item_size: int,
+        initial_offset: int = 0) -> List[PlaceholderRange]:
     """Returns a list of consecutive PlaceholderRanges of a fixed size"""
 
     return [
-        PlaceholderRange(offset=i * item_size, length=item_size)
-        for i in range(num_items)
+        PlaceholderRange(offset=initial_offset + i * item_size,
+                         length=item_size) for i in range(num_items)
     ]
