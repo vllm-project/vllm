@@ -285,6 +285,15 @@ class Worker(LocalOrDistributedWorkerBase):
         self._init_cache_engine()
         self._warm_up_model()
 
+    def destroy_cache(self) -> None:
+        self.cache_config.num_gpu_blocks = 0
+        self.cache_config.num_cpu_blocks = 0
+        while self.cache_engine:
+            cache_engine = self.cache_engine.pop()
+            cache_engine.destroy()
+        self.gpu_cache = None
+        torch.cuda.empty_cache()
+
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [

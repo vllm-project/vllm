@@ -488,6 +488,12 @@ class LLMEngine:
 
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
+    def _destroy_kv_caches(self) -> None:
+        """Destroy the KV cache in the worker(s) without shutting down.
+        """
+        self.model_executor.stop_remote_worker_execution_loop()
+        self.model_executor.destroy_cache()
+
     @classmethod
     def _get_executor_cls(cls,
                           engine_config: VllmConfig) -> Type[ExecutorBase]:

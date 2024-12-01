@@ -73,6 +73,13 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
+    # TODO: Make this an abstract method and all workers should implement it.
+    # @abstractmethod
+    def destroy_cache(self) -> None:
+        """Clear out all the KV cache in the current worker.
+        """
+        raise NotImplementedError
+
     @current_platform.inference_mode()
     def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker.

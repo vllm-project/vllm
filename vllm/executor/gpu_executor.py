@@ -82,6 +82,11 @@ class GPUExecutor(ExecutorBase):
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
+    def destroy_cache(self) -> None:
+        """Destroy the KV cache by invoking the underlying worker.
+        """
+        self.driver_worker.destroy_cache()
+
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
     ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:

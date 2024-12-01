@@ -68,6 +68,11 @@ class DistributedGPUExecutor(GPUExecutor):
                           num_gpu_blocks=num_gpu_blocks,
                           num_cpu_blocks=num_cpu_blocks)
 
+    def destroy_cache(self) -> None:
+        """Destroy the KV cache in all workers.
+        """
+        self._run_workers("destroy_cache")
+
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
