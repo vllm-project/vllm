@@ -1,9 +1,10 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
 
+from vllm.utils import apply_sampling_penalties, make_tensor_with_pad
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -19,7 +20,14 @@ class Sampler(nn.Module):
     ) -> SamplerOutput:
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         logits = self.apply_top_k_top_p(logits, sampling_metadata)
-
+        _apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
+                                   sampling_metadata.stop_token_ids,
+                                   sampling_metadata.min_tokens)
+        _apply_penalties(logits, sampling_metadata.prompt_token_ids,
+                         sampling_metadata.output_token_ids,
+                         sampling_metadata.presence_penalties,
+                         sampling_metadata.frequency_penalties,
+                         sampling_metadata.repetition_penalties)
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
         # Use int32 to reduce the tensor size.
@@ -156,3 +164,80 @@ def _apply_top_k_top_p(
     # Re-sort the probabilities.
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
+
+
+def _apply_min_token_penalties(logits: torch.Tensor,
+                               output_token_ids: List[List[int]],
+                               stop_token_ids: List[List[int]],
+                               min_tokens: List[int]):
+    # Compute min_tokens_logits_to_penalize
+    min_tokens_logits_to_penalize: List[Tuple[int, int]] = []
+    for index, min_token in enumerate(min_tokens):
+        if (min_token > 0 and len(output_token_ids[index]) < min_token):
+            for stop_token_id in stop_token_ids:
+                min_tokens_logits_to_penalize.append((index, stop_token_id))
+    if min_tokens_logits_to_penalize:
+        logits[tuple(zip(*min_tokens_logits_to_penalize))] = -float("inf")
+
+
+def _apply_penalties(logits: torch.Tensor, prompt_token_ids: List[List[int]],
+                     output_token_ids: List[List[int]],
+                     presence_penalties: List[float],
+                     frequency_penalties: List[float],
+                     repetition_penalties: List[float]):
+    apply_penalties = any(p != 0.0 for p in presence_penalties) or any(
+        f != 0.0
+        for f in frequency_penalties) or any(r != 1.0
+                                             for r in repetition_penalties)
+    if apply_penalties:
+        # Convert to tensors
+        _, vocab_size = logits.shape
+        (prompt_tokens_t, output_tokens_t, frequency_penalties_t,
+        presence_penalties_t, repetition_penalties_t) = \
+            _convert_to_tensors(
+                prompt_token_ids, output_token_ids, frequency_penalties,
+                presence_penalties, repetition_penalties, vocab_size,
+                logits.device)
+        return apply_sampling_penalties(logits, prompt_tokens_t,
+                                        output_tokens_t, presence_penalties_t,
+                                        frequency_penalties_t,
+                                        repetition_penalties_t)
+
+
+def _convert_to_tensors(prompt_token_ids: List[List[int]],
+                        output_token_ids: List[List[int]],
+                        frequency_penalties: List[float],
+                        presence_penalties: List[float],
+                        repetition_penalties: List[float], vocab_size: int,
+                        device: torch.device) -> Tuple[torch.Tensor, ...]:
+    prompt_tokens_tensor = make_tensor_with_pad(
+        prompt_token_ids,
+        vocab_size,
+        device=device,
+        dtype=torch.int64,
+    )
+    output_tokens_tensor = make_tensor_with_pad(
+        output_token_ids,
+        vocab_size,
+        device=device,
+        dtype=torch.int64,
+    )
+    frequency_penalties_tensor = torch.tensor(
+        frequency_penalties,
+        device=device,
+        dtype=torch.float,
+    )
+    presence_penalties_tensor = torch.tensor(
+        presence_penalties,
+        device=device,
+        dtype=torch.float,
+    )
+    repetition_penalties_tensor = torch.tensor(
+        repetition_penalties,
+        device=device,
+        dtype=torch.float,
+    )
+
+    return (prompt_tokens_tensor, output_tokens_tensor,
+            frequency_penalties_tensor, presence_penalties_tensor,
+            repetition_penalties_tensor)

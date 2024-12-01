@@ -335,7 +335,8 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        sampling_metadata = self.input_batch.make_sampling_metadata(
+            self.requests, skip_copy)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -609,13 +610,28 @@ class CachedRequestState:
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
-
     block_ids: List[int]
     num_computed_tokens: int
     output_token_ids: List[int]
 
     @property
     def num_tokens(self) -> int:
+        return len(self.prompt_token_ids) + len(self.output_token_ids)
+
+    @property
+    def stop_token_ids(self) -> Optional[List[int]]:
+        return self.sampling_params.stop_token_ids
+
+    @property
+    def prompt_tokens_mask(self) -> int:
+        return len(self.prompt_token_ids) + len(self.output_token_ids)
+
+    @property
+    def output_tokens_mask(self) -> int:
+        return len(self.prompt_token_ids) + len(self.output_token_ids)
+
+    @property
+    def output_tokens_bin_counts(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
 
 
@@ -686,37 +702,8 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
 
-        self.presence_penalties = torch.empty((max_num_reqs, ),
-                                              dtype=torch.float,
-                                              device=device)
-        self.presence_penalties_cpu_tensor = torch.empty((max_num_reqs, ),
-                                                         dtype=torch.float,
-                                                         device="cpu",
-                                                         pin_memory=pin_memory)
-        self.presence_penalties_cpu = \
-            self.presence_penalties_cpu_tensor.numpy()
-
-        self.frequency_penalties = torch.empty((max_num_reqs, ),
-                                               dtype=torch.float,
-                                               device=device)
-        self.frequency_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs, ),
-            dtype=torch.float,
-            device="cpu",
-            pin_memory=pin_memory)
-        self.frequency_penalties_cpu = \
-            self.frequency_penalties_cpu_tensor.numpy()
-
-        self.repetition_penalties = torch.empty((max_num_reqs, ),
-                                                dtype=torch.float,
-                                                device=device)
-        self.repetition_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs, ),
-            dtype=torch.float,
-            device="cpu",
-            pin_memory=pin_memory)
-        self.repetition_penalties_cpu = \
-            self.repetition_penalties_cpu_tensor.numpy()
+        self.prompt_masks = Dict[int, torch.Tensor]
+        self.output_masks = Dict[int, torch.Tensor]
 
         # req_index -> generator
         self.generators: Dict[int, torch.Generator] = {}
@@ -762,22 +749,6 @@ class InputBatch:
             self.top_p_reqs.add(req_id)
         self.top_k_cpu[req_index] = sampling_params.top_k
         if sampling_params.top_k > 0:
-            self.top_k_reqs.add(req_id)
-
-        self.presence_penalties_cpu[req_index] = \
-            sampling_params.presence_penalty
-        if sampling_params.presence_penalty > 0:
-            self.top_k_reqs.add(req_id)
-        
-
-        self.frequency_penalties_cpu[req_index] = \
-            sampling_params.frequency_penalty
-        if sampling_params.frequency_penalty > 0:
-            self.top_k_reqs.add(req_id)
-
-        self.repetition_penalties_cpu[req_index] = \
-            sampling_params.repetition_penalty
-        if sampling_params.repetition_penalty > 0:
             self.top_k_reqs.add(req_id)
 
         self.generators[req_index] = request.generator
@@ -850,6 +821,7 @@ class InputBatch:
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
             self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
+
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -859,6 +831,7 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
+        requests: Dict[str, CachedRequestState],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -868,6 +841,28 @@ class InputBatch:
                 self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
             self.top_k[:self.num_reqs].copy_(
                 self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
+
+        output_token_ids: List[List[int]] = []
+        prompt_token_ids: List[List[int]] = []
+        frequency_penalties: List[float] = []
+        presence_penalties: List[float] = []
+        repetition_penalties: List[float] = []
+        min_tokens: List[int] = []
+        stop_token_ids: List[List[int]] = []
+
+        for req_id in self.req_ids[:self.num_reqs]:
+            assert req_id is not None
+            request = requests[req_id]
+            output_token_ids.append(request.output_token_ids)
+            prompt_token_ids.append(request.prompt_token_ids)
+            frequency_penalties.append(
+                request.sampling_params.frequency_penalty)
+            presence_penalties.append(request.sampling_params.presence_penalty)
+            repetition_penalties.append(
+                request.sampling_params.repetition_penalty)
+            min_tokens.append(request.sampling_params.min_tokens)
+            stop_token_ids.append(request.sampling_params.stop_token_ids)
+
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],
             all_greedy=self.all_greedy,
@@ -878,6 +873,13 @@ class InputBatch:
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
+            prompt_token_ids=prompt_token_ids,
+            output_token_ids=output_token_ids,
+            frequency_penalties=frequency_penalties,
+            presence_penalties=presence_penalties,
+            repetition_penalties=repetition_penalties,
+            min_tokens=min_tokens,
+            stop_token_ids=stop_token_ids,
         )
 
     @property

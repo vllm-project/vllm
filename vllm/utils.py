@@ -1639,3 +1639,43 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
+
+
+def get_token_bin_counts_and_mask(
+    tokens: torch.Tensor,
+    vocab_size: int,
+    num_seqs: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Compute the bin counts for the tokens.
+    # vocab_size + 1 for padding.
+    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
+                             dtype=torch.long,
+                             device=tokens.device)
+    bin_counts.scatter_add_(1, tokens, torch.ones_like(tokens))
+    bin_counts = bin_counts[:, :vocab_size]
+    mask = bin_counts > 0
+
+    return bin_counts, mask
+
+
+def apply_sampling_penalties(
+        logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
+        output_tokens_tensor: torch.Tensor, presence_penalties: torch.Tensor,
+        frequency_penalties: torch.Tensor,
+        repetition_penalties: torch.Tensor) -> torch.Tensor:
+    num_seqs, vocab_size = logits.shape
+    _, prompt_mask = get_token_bin_counts_and_mask(prompt_tokens_tensor,
+                                                   vocab_size, num_seqs)
+    output_bin_counts, output_mask = get_token_bin_counts_and_mask(
+        output_tokens_tensor, vocab_size, num_seqs)
+
+    repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
+    repetition_penalties[~(prompt_mask | output_mask)] = 1.0
+    logits = torch.where(logits > 0, logits / repetition_penalties,
+                         logits * repetition_penalties)
+
+    # We follow the definition in OpenAI API.
+    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
+    logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts
+    logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
+    return logits
