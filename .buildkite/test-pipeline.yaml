@@ -401,18 +401,6 @@ steps:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
 
-- label: Disaggregated Prefill Test # 2min
-  working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
-  source_file_dependencies:
-  - vllm/distributed/parallel_state.py
-  - vllm/distributed/kv_transfer
-  - vllm/worker/worker_base.py
-  - vllm/worker/worker.py
-  - vllm/worker/model_runner.py
-  commands:
-  - pytest -v -s kv_transfer/disagg_test.py
-
 - label: 2 Node Tests (4 GPUs in total) # 16min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
@@ -442,6 +430,9 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   - vllm/compilation
+  - vllm/worker/worker_base.py
+  - vllm/worker/worker.py
+  - vllm/worker/model_runner.py
   commands:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
@@ -455,6 +446,7 @@ steps:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/disagg_test.py
 
 - label: Multi-step Tests (4 GPUs) # 36min
   working_dir: "/vllm-workspace/tests"
