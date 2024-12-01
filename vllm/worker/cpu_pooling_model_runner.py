@@ -16,12 +16,12 @@ from vllm.worker.cpu_model_runner import (CPUModelRunnerBase, ModelInputForCPU,
 @dataclasses.dataclass(frozen=True)
 class ModelInputForCPUWithPoolingMetadata(ModelInputForCPU):
     """
-    Used by the CPUEmbeddingModelRunner.
+    Used by the CPUPoolingModelRunner.
     """
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
-class CPUEmbeddingModelRunner(
+class CPUPoolingModelRunner(
         CPUModelRunnerBase[ModelInputForCPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForCPUWithPoolingMetadata] = (
         ModelInputForCPUWithPoolingMetadata)

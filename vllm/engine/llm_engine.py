@@ -40,7 +40,7 @@ from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
+from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -80,7 +80,7 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
 
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
-_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
+_O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 
 
 @dataclass
@@ -112,7 +112,7 @@ class SchedulerContext:
     def __init__(self, multi_step_stream_outputs: bool = False):
         self.output_queue: Deque[OutputData] = deque()
         self.request_outputs: List[Union[RequestOutput,
-                                         EmbeddingRequestOutput]] = []
+                                         PoolingRequestOutput]] = []
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
@@ -568,7 +568,7 @@ class LLMEngine:
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_config = engine_args.create_engine_config()
+        engine_config = engine_args.create_engine_config(usage_context)
         executor_class = cls._get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(
@@ -1314,7 +1314,7 @@ class LLMEngine:
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs)
 
-    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -1398,6 +1398,9 @@ class LLMEngine:
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
 
+            finished_requests_ids = self.scheduler[
+                virtual_engine].get_and_reset_finished_requests_ids()
+
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
@@ -1409,13 +1412,13 @@ class LLMEngine:
                 self._cache_scheduler_outputs_for_multi_step(
                     virtual_engine, seq_group_metadata_list, scheduler_outputs,
                     allow_async_output_proc)
+        else:
+            finished_requests_ids = list()
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
         if not scheduler_outputs.is_empty():
-            finished_requests_ids = self.scheduler[
-                virtual_engine].get_and_reset_finished_requests_ids()
 
             # Check if we have a cached last_output from the previous iteration.
             # For supporting PP this is probably the best way to pass the

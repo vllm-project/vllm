@@ -23,6 +23,10 @@ logger = init_logger(__name__)
 class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "HPU_ATTN"
+
+    @staticmethod
     def get_impl_cls() -> Type["HPUAttentionImpl"]:
         return HPUAttentionImpl
 

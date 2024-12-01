@@ -18,6 +18,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors
@@ -274,9 +275,10 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
         self.language_model = init_vllm_registered_model(
-            config.text_config,
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"))
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.model.make_empty_intermediate_tensors)
@@ -388,6 +390,25 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError(
                 f"Unsupported type of video input {type(video_pixels)}")
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        video_input = self._parse_and_validate_video_input(**kwargs)
+        if video_input is None:
+            return None
+        vision_embeddings = self._process_video_pixels(video_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.video_token_index)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -395,6 +416,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for LlaVA-NeXT-Video.
@@ -404,22 +426,15 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos: Pixels in each frames for each input videos.
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            video_input = self._parse_and_validate_video_input(**kwargs)
-            if video_input is not None:
-                video_embeddings = self._process_video_pixels(video_input)
-                inputs_embeds = self.language_model \
-                    .model.get_input_embeddings(input_ids)
 
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, video_embeddings,
-                    self.config.video_token_index)
-
-                input_ids = None
-            else:
-                inputs_embeds = None
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

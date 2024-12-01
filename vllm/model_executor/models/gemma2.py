@@ -30,19 +30,17 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
+from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -386,15 +384,6 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     embedding_padding_modules = []
 
     # BitandBytes specific attributes
-    default_bitsandbytes_target_modules = [
-        ".gate_proj.",
-        ".down_proj.",
-        ".up_proj.",
-        ".q_proj.",
-        ".k_proj.",
-        ".v_proj.",
-        ".o_proj.",
-    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -464,53 +453,3 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-
-
-class Gemma2EmbeddingModel(nn.Module, SupportsPP):
-    """
-    A model that uses Gemma2 with additional embedding functionalities.
-
-    This class encapsulates the Gemma2Model and provides an interface for
-    embedding operations and customized pooling functions.
-
-    Attributes:
-        model: An instance of Gemma2Model used for forward operations.
-        _pooler: An instance of Pooler used for pooling operations.
-    """
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-
-        self.model = Gemma2Model(vllm_config=vllm_config,
-                                 prefix=maybe_prefix(prefix, "model"))
-        self._pooler = Pooler.from_config_with_defaults(
-            vllm_config.model_config.pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=True,
-            softmax=False)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor],
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        return self.model(input_ids, positions, kv_caches, attn_metadata,
-                          intermediate_tensors, inputs_embeds)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-        weights = hf_to_vllm_mapper.apply(weights)
-        self.model.load_weights(weights)

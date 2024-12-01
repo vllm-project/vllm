@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import concurrent
 import contextlib
 import datetime
 import enum
@@ -19,7 +20,7 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
-from collections import defaultdict
+from collections import UserDict, defaultdict
 from collections.abc import Iterable, Mapping
 from functools import lru_cache, partial, wraps
 from platform import uname
@@ -351,7 +352,10 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(uname()).lower()
 
 
-def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
+def make_async(
+    func: Callable[P, T],
+    executor: Optional[concurrent.futures.Executor] = None
+) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
@@ -362,7 +366,7 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
-        return loop.run_in_executor(executor=None, func=p_func)
+        return loop.run_in_executor(executor=executor, func=p_func)
 
     return _async_wrapper
 
@@ -1513,13 +1517,13 @@ class AtomicCounter:
 
 
 # Adapted from: https://stackoverflow.com/a/47212782/5082708
-class LazyDict(Mapping, Generic[T]):
+class LazyDict(Mapping[str, T], Generic[T]):
 
     def __init__(self, factory: Dict[str, Callable[[], T]]):
         self._factory = factory
         self._dict: Dict[str, T] = {}
 
-    def __getitem__(self, key) -> T:
+    def __getitem__(self, key: str) -> T:
         if key not in self._dict:
             if key not in self._factory:
                 raise KeyError(key)
@@ -1534,6 +1538,22 @@ class LazyDict(Mapping, Generic[T]):
 
     def __len__(self):
         return len(self._factory)
+
+
+class ClassRegistry(UserDict[type[T], _V]):
+
+    def __getitem__(self, key: type[T]) -> _V:
+        for cls in key.mro():
+            if cls in self.data:
+                return self.data[cls]
+
+        raise KeyError(key)
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, type):
+            return False
+
+        return any(cls in self.data for cls in key.mro())
 
 
 def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
