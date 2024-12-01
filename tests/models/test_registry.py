@@ -3,7 +3,7 @@ import warnings
 import pytest
 import torch.cuda
 
-from vllm.model_executor.models import (is_embedding_model,
+from vllm.model_executor.models import (is_pooling_model,
                                         is_text_generation_model,
                                         supports_multimodal)
 from vllm.model_executor.models.adapters import as_embedding_model
@@ -31,7 +31,7 @@ def test_registry_imports(model_arch):
 
     # All vLLM models should be convertible to an embedding model
     embed_model = as_embedding_model(model_cls)
-    assert is_embedding_model(embed_model)
+    assert is_pooling_model(embed_model)
 
     if model_arch in _MULTIMODAL_MODELS:
         assert supports_multimodal(model_cls)

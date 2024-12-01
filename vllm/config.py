@@ -359,7 +359,7 @@ class ModelConfig:
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
             "generate": ModelRegistry.is_text_generation_model(architectures),
-            "embedding": ModelRegistry.is_embedding_model(architectures),
+            "embedding": ModelRegistry.is_pooling_model(architectures),
         }
         supported_tasks_lst: List[_Task] = [
             task for task, is_supported in task_support.items() if is_supported
