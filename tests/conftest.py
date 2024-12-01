@@ -657,6 +657,7 @@ class VllmRunner:
         model_name: str,
         task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
+        tokenizer_mode: str = "auto",
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
         max_model_len: int = 1024,
@@ -673,6 +674,7 @@ class VllmRunner:
             model=model_name,
             task=task,
             tokenizer=tokenizer_name,
+            tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
             swap_space=swap_space,

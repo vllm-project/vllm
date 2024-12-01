@@ -136,6 +136,7 @@ VLM_TEST_SETTINGS = {
     #### Extended model tests
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
+        tokenizer_mode="slow",
         test_type=(
             VLMTestType.IMAGE,
             VLMTestType.MULTI_IMAGE,
@@ -151,7 +152,6 @@ VLM_TEST_SETTINGS = {
         }),
         multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
         postprocess_inputs=model_utils.get_key_type_post_processor("pixel_values"),
-        model_kwargs = {"_attn_implementation": "eager"},
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,

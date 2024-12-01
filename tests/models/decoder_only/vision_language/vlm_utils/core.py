@@ -30,6 +30,7 @@ def run_test(
     comparator: Callable[..., None],
     get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]],
     stop_str: Optional[List[str]],
+    tokenizer_mode: str,
     limit_mm_per_prompt: Dict[str, int],
     model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
@@ -58,6 +59,7 @@ def run_test(
         vllm_kwargs["stop"] = stop_str
 
     with vllm_runner(model,
+                     tokenizer_mode=tokenizer_mode,
                      max_model_len=max_model_len,
                      max_num_seqs=max_num_seqs,
                      dtype=dtype,

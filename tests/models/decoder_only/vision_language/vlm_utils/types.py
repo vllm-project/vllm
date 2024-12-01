@@ -151,6 +151,8 @@ class VLMTestInfo(NamedTuple):
 
     marks: Optional[List[MarkDecorator]] = None
 
+    tokenizer_mode: str = "auto"
+
     def get_non_parametrized_runner_kwargs(self):
         """Returns a dictionary of expandable kwargs for items that are used
         in all test types, which are NOT used when creating the parametrized
@@ -172,6 +174,7 @@ class VLMTestInfo(NamedTuple):
             "stop_str": self.stop_str,
             "model_kwargs": self.model_kwargs,
             "patch_hf_runner": self.patch_hf_runner,
+            "tokenizer_mode": self.tokenizer_mode
         }
 
 
