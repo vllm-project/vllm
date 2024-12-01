@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm_flash_attn import (flash_attn_varlen_func,
+from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
@@ -149,7 +149,9 @@ def test_flash_attn_with_paged_kv(
 
 
 @pytest.mark.parametrize("use_out", [True, False])
-@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
+@pytest.mark.parametrize("seq_lens",
+                         [[(1, 1328), (5, 18),
+                           (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
