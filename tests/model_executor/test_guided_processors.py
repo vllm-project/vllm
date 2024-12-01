@@ -36,7 +36,8 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("backend",
+                         ["outlines", "lm-format-enforcer", "xgrammar"])
 async def test_guided_logits_processor_black_box(backend: str, sample_regex,
                                                  sample_json_schema):
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
