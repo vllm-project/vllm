@@ -1,11 +1,4 @@
 """
-    This file implements a simple torch distributed connector by 3 classes:
-    - `TorchDistributedPipe`: a tensor transmission pipe between vllm instances,
-        using `torch.distributed`
-    - `TorchDistributedBuffer`: a buffer to store tensors, implemented on top 
-        of `TorchDistributedPipe`
-    - `TorchDistributedConnector`: a torch distributed connector between P/D 
-      instance, implemented on top of `TorchDistributedBuffer`
 """
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
@@ -14,10 +7,9 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.buffer import (
-    LookupBuffer)
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pipe import (
-    PyNcclPipe)
+from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
+    SimpleBuffer)
+from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import PyNcclPipe
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -27,7 +19,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class PyNcclConnector(KVConnectorBase):
+class SimpleConnector(KVConnectorBase):
 
     def __init__(
         self,
@@ -43,8 +35,8 @@ class PyNcclConnector(KVConnectorBase):
 
         self.lookup_buffer_size = self.config.kv_buffer_size
 
-        self.producer_buffer: Optional[LookupBuffer] = None
-        self.consumer_buffer: Optional[LookupBuffer] = None
+        self.producer_buffer: Optional[SimpleBuffer] = None
+        self.consumer_buffer: Optional[SimpleBuffer] = None
 
         # 2 pipes for every rank in the world
         port_offset_base = 2 * rank
@@ -64,7 +56,7 @@ class PyNcclConnector(KVConnectorBase):
                 port_offset=port_offset_base + 1,
                 device="cpu",
             )
-            self.producer_buffer = LookupBuffer(self.producer_signal_pipe,
+            self.producer_buffer = SimpleBuffer(self.producer_signal_pipe,
                                                 self.producer_data_pipe,
                                                 self.config.kv_buffer_size)
 
@@ -83,7 +75,7 @@ class PyNcclConnector(KVConnectorBase):
                 port_offset=port_offset_base + 1,
                 device="cpu",
             )
-            self.consumer_buffer = LookupBuffer(
+            self.consumer_buffer = SimpleBuffer(
                 self.consumer_signal_pipe,
                 self.consumer_data_pipe,
                 self.config.kv_buffer_size,
@@ -239,7 +231,9 @@ class PyNcclConnector(KVConnectorBase):
 
         if not bypass_model_exec:
             # Some of the KV cache is not retrieved
-            # so we need to adjust model_input and redo the forwarding.
+            # Here we will fall back to normal model forwarding
+            # But optionally you can adjust model_input so that you only do
+            # prefilling on those tokens that are missing KV caches.
             logger.debug(
                 "[rank%d]: Failed to receive all KVs and hidden "
                 "states, redo model forwarding.", torch.distributed.get_rank())

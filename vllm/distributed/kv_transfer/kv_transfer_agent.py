@@ -1,22 +1,8 @@
-"""vLLM distributed KV cache transfer API.
-These APIs are used in `vllm/worker/model_runner.py`.
+"""A centralized entrypoint to perform distributed KV cache transfer.
 
-Currently supporting TP. The TP between prefill and decode instance needs to be 
-the same.
-
-Workflow (disaggregated prefill)
-- In prefill instance
-    - After prefill, vLLM `insert` its KV caches into a lookup buffer.
-    - The prefill instance will also open up a thread that listens to 
-      `drop_select` request.
-- In decode instance
-    - vLLM first runs `drop_select` to send input tokens and a mask on input 
-      tokens (we call it roi, region of interest) to prefill instance
-    - The prefill instance then respond to `drop_select` request by
-        - Finding a match in current lookup buffer.
-        - Clone and send the matched item out
-        - Delete the matched item in the lookup buffer to free up GPU memory.
-    - The decode vLLM then store the KV cache into paged memory.
+This implementation is a shim wrapper on two APIs exposed by `kv_connector`:
+1. `send_kv_caches_and_hidden_states`
+2. `recv_kv_caches_and_hidden_states
 """
 from typing import TYPE_CHECKING, List, Tuple, Union
 

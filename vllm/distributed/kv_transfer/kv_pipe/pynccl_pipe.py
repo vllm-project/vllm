@@ -20,6 +20,7 @@ import torch
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 
@@ -36,7 +37,7 @@ class BrokenPipeException(Exception):
 Metadata = Dict[str, Optional[torch.Tensor]]
 
 
-class PyNcclPipe:
+class PyNcclPipe(KVPipeBase):
 
     METADATA_LENGTH = 16
     MAX_TENSOR_DIMENSIONS = 14

@@ -5,10 +5,9 @@ import torch
 from tqdm import tqdm
 
 from vllm.config import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.buffer import (
-    LookupBuffer)
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pipe import (
-    PyNcclPipe)
+from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
+    SimpleBuffer)
+from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import PyNcclPipe
 
 # TODO: the test depends on a lot of fields in the current implementation.
 # We should have standard interface instead direct field access
@@ -149,7 +148,7 @@ if __name__ == "__main__":
         port_offset=1,
     )
 
-    buffer = LookupBuffer(cpu_pipe, data_pipe, 170000)
+    buffer = SimpleBuffer(cpu_pipe, data_pipe, 170000)
 
     test_run(my_rank, buffer, data_pipe.device)
 

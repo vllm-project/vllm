@@ -16,16 +16,15 @@ from typing import Deque, List, Optional, Union
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pipe import (
-    PyNcclPipe)
+from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class LookupBuffer:
+class SimpleBuffer:
 
-    def __init__(self, signal_pipe: PyNcclPipe, data_pipe: PyNcclPipe,
+    def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float):
         """
         signal_pipe: on CPU 

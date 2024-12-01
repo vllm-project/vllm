@@ -2054,7 +2054,6 @@ class ObservabilityConfig:
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
 
-@dataclass
 class KVTransferConfig(BaseModel):
     """Configuration for distributed KV cache transfer."""
 

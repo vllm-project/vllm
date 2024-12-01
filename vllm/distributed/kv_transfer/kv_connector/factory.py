@@ -12,8 +12,8 @@ class KVConnectorFactory:
     def create_connector(rank: int, local_rank: int,
                          config: "VllmConfig") -> KVConnectorBase:
         if config.kv_transfer_config.kv_connector == 'PyNcclConnector':
-            from .pynccl_connector.connector import PyNcclConnector
-            return PyNcclConnector(rank, local_rank, config)
+            from .simple_connector import SimpleConnector
+            return SimpleConnector(rank, local_rank, config)
         else:
             raise ValueError(f"Unsupported connector type: "
                              f"{config.kv_connector}")
