@@ -131,7 +131,6 @@ class StatelessProcessGroup:
         self.send_dst_counter[dst] += 1
         self.entries.append((key, time.time()))
 
-
     def expire_data(self):
         """Expire data that is older than `data_expiration_seconds` seconds."""
         while self.entries:
@@ -150,7 +149,6 @@ class StatelessProcessGroup:
                 f"send_to/{self.rank}/{self.recv_src_counter[src]}"))
         self.recv_src_counter[src] += 1
         return obj
-
 
     def broadcast_obj(self, obj: Optional[Any], src: int) -> Any:
         """Broadcast an object from a source rank to all other ranks.
