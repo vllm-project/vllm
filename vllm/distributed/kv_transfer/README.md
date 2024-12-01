@@ -18,7 +18,7 @@ NOTE: KV pipe layer is bypassible: you can skip this layer if your distributed
 communication service already supports key-value-based lookup (like redis or 
 RDMA database).
 
-NOTE: If you want to not only transfer KV caches, but adjust the model exectuion flow of vLLM as well (for example, allow vLLM to receive KV caches on some tokens and do prefill on the remaining tokens), you can bypass both KV pipe layer and KV lookup buffer layer, and directly implement on KV connector layer. Bear in mind that as vLLM's model input is constantly changing, this implementation will likely be broken when vLLM has new updates.
+NOTE: If you want to not only transfer KV caches, but adjust the model execution flow of vLLM as well (for example, allow vLLM to receive KV caches on some tokens and do prefill on the remaining tokens), you can bypass both KV pipe layer and KV lookup buffer layer, and directly implement on KV connector layer. Bear in mind that as vLLM's model input is constantly changing, this implementation will likely be broken when vLLM has new updates.
 
 ## Disaggregated prefilling
 
