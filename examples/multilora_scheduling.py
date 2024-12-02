@@ -7,56 +7,51 @@ Requires HuggingFace credentials for access to Llama2.
 
 from typing import List, Optional, Tuple
 
-from huggingface_hub import list_models, snapshot_download
+from huggingface_hub import snapshot_download
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 
-NUM_LORAS = 20
-
-def fetch_lora_metadata(keyword: str = "lora") -> List[dict]:
-    """Fetch available LoRA adapters from Hugging Face Hub."""
-    models = list_models(filter=f"{keyword}", cardData=True)
-    lora_metadata = []
-    for model in models:
-        if "lora" in model.tags:  # Ensure the model is tagged as LoRA
-            if model.cardData and "example_prompt" in model.cardData:
-                lora_metadata.append({
-                    "name": model.modelId,
-                    "description": model.cardData.get("description"),
-                    "example_prompt": model.cardData["example_prompt"],
-                    "repo_id": model.modelId
-                })
-        if len(lora_metadata) == NUM_LORAS:
-            break
-    return lora_metadata
-
-
-def download_lora_weights(metadata: List[dict]) -> List[str]:
-    """Download LoRA weights using Hugging Face snapshot_download."""
-    paths = []
-    for lora in metadata:
-        path = snapshot_download(repo_id=lora["repo_id"])
-        paths.append(path)
-    return paths
-
 
 def create_test_prompts(
-        metadata: str
+        lora_path: str
 ) -> List[Tuple[str, SamplingParams, Optional[LoRARequest]]]:
     """Create a list of test prompts with their sampling parameters.
+
+    2 requests for base model, 4 requests for the LoRA. We define 2
+    different LoRA adapters (using the same model for demo purposes).
+    Since we also set `max_loras=1`, the expectation is that the requests
+    with the second LoRA adapter will be ran after all requests with the
+    first adapter have finished.
     """
-    prompts = []
-    for idx, lora in enumerate(metadata, start=1):
-        example_prompt = lora.get("example_prompt", "Provide a relevant response.")
-        prompts.append(
-            (
-                example_prompt,
-                SamplingParams(temperature=0.7, max_tokens=128),
-                LoRARequest(f"lora-adapter-{idx}", idx, lora["repo_id"]),
-            )
-        )
-    return prompts
+    return [
+        ("A robot may not injure a human being",
+         SamplingParams(temperature=0.0,
+                        logprobs=1,
+                        prompt_logprobs=1,
+                        max_tokens=128), None),
+        ("To be or not to be,",
+         SamplingParams(temperature=0.8,
+                        top_k=5,
+                        presence_penalty=0.2,
+                        max_tokens=128), None),
+        (
+            "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
+            SamplingParams(temperature=0.0,
+                           logprobs=1,
+                           prompt_logprobs=1,
+                           max_tokens=128,
+                           stop_token_ids=[32003]),
+            LoRARequest("sql-lora", 1, lora_path)),
+        (
+            "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
+            SamplingParams(temperature=0.0,
+                           logprobs=1,
+                           prompt_logprobs=1,
+                           max_tokens=128,
+                           stop_token_ids=[32003]),
+            LoRARequest("sql-lora2", 2, lora_path)),
+    ]
 
 
 def process_requests(engine: LLMEngine,
@@ -90,20 +85,20 @@ def initialize_engine() -> LLMEngine:
     #   numbers will cause higher memory usage. If you know that all LoRAs will
     #   use the same rank, it is recommended to set this as low as possible.
     # max_cpu_loras: controls the size of the CPU LoRA cache.
-    engine_args = EngineArgs(model="meta-llama/Llama-2-7b-hf",
+    engine_args = EngineArgs(model="meta-llama/Llama-3.2-1B",
                              enable_lora=True,
-                             max_loras=3,  # TODO: set this depending on adapter size
+                             max_loras=1,
                              max_lora_rank=8,
-                             max_cpu_loras=5,
+                             max_cpu_loras=2,
                              max_num_seqs=256)
     return LLMEngine.from_engine_args(engine_args)
+
 
 def main():
     """Main function that sets up and runs the prompt processing."""
     engine = initialize_engine()
-    lora_metadata = fetch_lora_metadata()
-    download_lora_weights(lora_metadata)
-    test_prompts = create_test_prompts(lora_metadata)
+    lora_path = snapshot_download(repo_id="juletxara/Llama-3.2-1B-tiny-shakespeare-lora")
+    test_prompts = create_test_prompts(lora_path)
     process_requests(engine, test_prompts)
 
 
