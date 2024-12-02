@@ -156,6 +156,15 @@ class EngineCore:
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> List[EngineCoreOutput]:
+        """Build engine core output from model runner output.
+        
+        Args:
+          scheduler_output: scheduler output prior to engine step.
+          model_runner_output: model runner output from engine step.
+
+        Returns:
+          Engine core output which tracks the progress of generation.
+        """
         scheduler = self.scheduler
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
