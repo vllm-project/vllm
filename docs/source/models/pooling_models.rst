@@ -9,13 +9,11 @@ In vLLM, pooling models implement the :class:`~vllm.model_executor.models.VllmMo
 These models use a :class:`~vllm.model_executor.layers.Pooler` to aggregate the final hidden states of the input
 before returning them.
 
-Technically, any :ref:`generative model <generative_models>` in vLLM can be converted into a pooling model
-by aggregating and returning the hidden states directly, skipping the generation step.
-Nevertheless, to get the best results, you should use pooling models that are specifically trained as such.
+.. note::
 
-We currently support pooling models primarily as a matter of convenience.
-As shown in the :code:`Compatibility Matrix <compatibility_matrix>`, most vLLM features are not applicable to
-pooling models as they only work on the generation or decode stage, so performance may not improve as much.
+    We currently support pooling models primarily as a matter of convenience.
+    As shown in the :ref:`Compatibility Matrix <compatibility_matrix>`, most vLLM features are not applicable to
+    pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 
 Offline Inference
 -----------------
@@ -36,10 +34,16 @@ The selected task determines the default :class:`~vllm.model_executor.layers.Poo
 - Reward Modeling: Extract all of the hidden states and return them directly.
 
 When loading `Sentence Transformers <https://huggingface.co/sentence-transformers>`__ models,
-we attempt to override the default pooler based on its Sentence Transformers configuration file (``modules.json``).
+we attempt to override the default pooler based on its Sentence Transformers configuration file (:code:`modules.json`).
 
 You can customize the model's pooling method via the :code:`override_pooler_config` option,
-which takes priority above both the model's and Sentence Transformers's defaults.
+which takes priority over both the model's and Sentence Transformers's defaults.
+
+.. tip::
+
+    Technically, any :ref:`generative model <generative_models>` in vLLM can be converted into a pooling model
+    by aggregating and returning the hidden states directly, skipping the generation step.
+    Nevertheless, to get the best results, you should use pooling models that are specifically trained as such.
 
 ``LLM.encode``
 ^^^^^^^^^^^^^^
@@ -48,8 +52,6 @@ The :class:`~vllm.LLM.encode` method is available to all pooling models in vLLM.
 It returns the aggregated hidden states directly.
 
 .. code-block:: python
-
-    from vllm.entrypoints.chat_utils import load_chat_template
 
     llm = LLM(model="intfloat/e5-mistral-7b-instruct", task="embed")
     outputs = llm.encode("Hello, my name is")
