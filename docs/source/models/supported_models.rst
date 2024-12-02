@@ -182,7 +182,7 @@ Text Generation
   * - :code:`InternLM2ForCausalLM`
     - InternLM2
     - :code:`internlm/internlm2-7b`, :code:`internlm/internlm2-chat-7b`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`JAISLMHeadModel`
     - Jais
@@ -357,7 +357,7 @@ Text Embedding
     - ✅︎
   * - :code:`Qwen2Model`, :code:`Qwen2ForCausalLM`
     - Qwen2-based
-    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
+    - :code:`ssmits/Qwen2-7B-Instruct-embed-base` (see note), :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
     - ✅︎
     - ✅︎
   * - :code:`RobertaModel`, :code:`RobertaForMaskedLM`
@@ -379,6 +379,10 @@ Text Embedding
   You can override the model's pooling method by passing :code:`--override-pooler-config`.
 
 .. note::
+  :code:`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
+  You should manually set mean pooling by passing :code:`--override-pooler-config '{"pooling_type": "MEAN"}'`.
+
+.. note::
   Unlike base Qwen2, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
   You can set :code:`--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
 
@@ -397,11 +401,20 @@ Reward Modeling
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`LlamaForCausalLM`
+    - Llama-based
+    - :code:`peiyi9979/math-shepherd-mistral-7b-prm`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`Qwen2ForRewardModel`
     - Qwen2-based
     - :code:`Qwen/Qwen2.5-Math-RM-72B`, etc.
     - ✅︎
     - ✅︎
+
+.. important::
+  For process-supervised reward models such as :code:`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
+  e.g.: :code:`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
 .. note::
     As an interim measure, these models are supported in both offline and online inference via Embeddings API.
@@ -687,6 +700,9 @@ At vLLM, we are committed to facilitating the integration and support of third-p
 1. **Community-Driven Support**: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers. **Call for contribution:** PRs coming directly from model vendors are greatly appreciated!
 
 2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
+
+.. tip::
+  When comparing the output of :code:`model.generate` from HuggingFace Transformers with the output of :code:`llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., `generation_config.json <https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945>`__) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
 
 3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
 
