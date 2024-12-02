@@ -9,8 +9,11 @@ If a model supports more than one task, you can set the task via the :code:`--ta
 For each task, we list the model architectures that have been implemented in vLLM.
 Alongside each architecture, we include some popular models that use it.
 
-HuggingFace Hub
+Loading a Model
 ^^^^^^^^^^^^^^^
+
+HuggingFace Hub
++++++++++++++++
 
 By default, vLLM loads models from `HuggingFace (HF) Hub <https://huggingface.co/models>`_.
 
@@ -41,7 +44,7 @@ for instructions on how to implement your model in vLLM.
 Alternatively, you can `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ to request vLLM support.
 
 ModelScope
-^^^^^^^^^^
+++++++++++
 
 To use models from `ModelScope <https://www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
 
@@ -65,8 +68,8 @@ And use with :code:`trust_remote_code=True`.
     output = llm.encode("Hello, my name is")
     print(output)
 
-Text-only Language Models
-^^^^^^^^^^^^^^^^^^^^^^^^^
+List of Text-only Language Models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Generative Models
 +++++++++++++++++
@@ -499,8 +502,8 @@ Sentence Pair Scoring (``--task score``)
 
 .. _supported_mm_models:
 
-Multimodal Language Models
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+List of Multimodal Language Models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The following modalities are supported depending on the model:
 
