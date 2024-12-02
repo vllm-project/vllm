@@ -19,14 +19,13 @@ Offline Inference
 The :class:`~vllm.LLM` class provides various methods for offline inference.
 See :ref:`Engine Arguments <engine_args>` for a list of options when initializing the model.
 
-For pooling models, we support the following `task` options:
+For pooling models, we support the following :code:`task` options:
 
 - Embedding (:code:`"embed"` / :code:`"embedding"`)
-- Classification (:code:`"classify"`/ :code:`"score"`)
-  - Reranking models fall under this category.
+- Classification (:code:`"classify"`/ :code:`"score"`) -- reranking models fall under this category.
 - Reward Modeling (:code:`"reward"`)
 
-The task type determines the default :class:`~vllm.model_executor.layers.Pooler` that is used:
+The selected task determines the default :class:`~vllm.model_executor.layers.Pooler` that is used:
 
 - Embedding: Extract only the hidden states corresponding to the last token, and apply normalization.
 - Classification: Extract only the hidden states corresponding to the last token, and apply softmax.
@@ -75,7 +74,7 @@ You can use `these tests <https://github.com/vllm-project/vllm/blob/main/tests/m
 Online Inference
 ----------------
 
-Our `OpenAI Compatible Server <../serving/openai_compatible_server>` can be used for online inference.
+Our `OpenAI Compatible Server <../serving/openai_compatible_server>`__ can be used for online inference.
 Please click on the above link for more details on how to launch the server.
 
 Embeddings API

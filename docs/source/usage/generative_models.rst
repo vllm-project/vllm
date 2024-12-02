@@ -15,14 +15,14 @@ Offline Inference
 The :class:`~vllm.LLM` class provides various methods for offline inference.
 See :ref:`Engine Arguments <engine_args>` for a list of options when initializing the model.
 
-For generative models, the only supported `task` option is `"generate"`.
+For generative models, the only supported :code:`task` option is :code:`"generate"`.
 Usually, the task is automatically inferred so you don't have to specify this.
 
 ``LLM.generate``
 ^^^^^^^^^^^^^^^^
 
 The :class:`~vllm.LLM.generate` method is available to all generative models in vLLM.
-It is similar to `transformers.GenerationMixin.generate <https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationMixin.generate>`__,
+It is similar to `its counterpart in HF Transformers <https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationMixin.generate>`__,
 except that tokenization and detokenization are also performed automatically.
 
 .. code-block:: python
@@ -72,7 +72,7 @@ For example, to search using 5 beams and output at most 16 tokens:
 ^^^^^^^^^^^^
 
 The :class:`~vllm.LLM.chat` method implements chat functionality on top of :class:`~vllm.LLM.generate`.
-In particular, it accepts input similar to `OpenAI Chat Completions API <https://platform.openai.com/docs/api-reference/chat>__
+In particular, it accepts input similar to `OpenAI Chat Completions API <https://platform.openai.com/docs/api-reference/chat>`__
 and automatically applies the model's `chat template <https://huggingface.co/docs/transformers/en/chat_templating>`__ to format the prompt.
 
 .. important::
@@ -126,7 +126,7 @@ you can explicitly pass a chat template:
 Online Inference
 ----------------
 
-Our `OpenAI Compatible Server <../serving/openai_compatible_server>` can be used for online inference.
+Our `OpenAI Compatible Server <../serving/openai_compatible_server>`__ can be used for online inference.
 Please click on the above link for more details on how to launch the server.
 
 Completions API
