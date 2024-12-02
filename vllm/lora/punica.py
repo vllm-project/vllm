@@ -450,7 +450,7 @@ class PunicaWrapper:
         bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
                           y_slice_size, add_input)
 
-    def add_bias(
+    def apply_bias(
         self,
         indices: torch.Tensor,
         output: torch.Tensor,
@@ -474,7 +474,7 @@ class PunicaWrapper:
 
         return output.view_as(org_output)
 
-    def add_bias_packed_nslice(
+    def apply_bias_packed_nslice(
         self,
         indices: torch.Tensor,
         output: torch.Tensor,
@@ -542,7 +542,7 @@ class PunicaWrapper:
         should be called.
         """
         if bias_all is not None:
-            y = self.add_bias(self.token_lora_indices, y, bias_all)
+            y = self.apply_bias(self.token_lora_indices, y, bias_all)
 
         expand_fun: Callable = (self.expand_prefill
                                 if self.is_prefill else self.expand_decode)
@@ -560,7 +560,7 @@ class PunicaWrapper:
         Similar to `add_expand`
         """
         if bias_all is not None:
-            y = self.add_bias(self.token_lora_indices, y, bias_all)
+            y = self.apply_bias(self.token_lora_indices, y, bias_all)
 
         expand_slice_fun: Callable = (self.expand_slice_prefill
                                       if self.is_prefill else
@@ -580,7 +580,7 @@ class PunicaWrapper:
         y = y.view(-1, y.shape[-1])
         offset_left = 0
         if bias_stacked is not None:
-            self.add_bias_packed_nslice(self.token_lora_indices, y,
+            self.apply_bias_packed_nslice(self.token_lora_indices, y,
                                         output_slices, bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
             self.add_expand_slice(y,
@@ -636,7 +636,7 @@ class PunicaWrapper:
                                  dtype=torch.float32,
                                  device=x.device)
         if bias_all is not None:
-            y = self.add_bias(self.token_lora_indices, y, bias_all)
+            y = self.apply_bias(self.token_lora_indices, y, bias_all)
         self.add_shrink(buffer, x, wa_t_all, scale)
         if y_offset is None and y_slice_size is None:
             self.add_expand(y, buffer, wb_t_all, bias_all=None, add_input=True)
@@ -666,7 +666,7 @@ class PunicaWrapper:
         y = y.view(-1, y.shape[-1])
         offset_left = 0
         if bias_all is not None:
-            y = self.add_bias_packed_nslice(self.token_lora_indices, y,
+            y = self.apply_bias_packed_nslice(self.token_lora_indices, y,
                                             output_slices, bias_all)
         # TODO fuse these kernels
         for slice_idx in range(len(output_slices)):
