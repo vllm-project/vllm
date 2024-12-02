@@ -1,7 +1,7 @@
 .. _spec_decode:
 
-Speculative decoding in vLLM
-============================
+Speculative decoding
+====================
 
 .. warning::
     Please note that speculative decoding in vLLM is not yet optimized and does
