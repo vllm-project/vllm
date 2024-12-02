@@ -101,9 +101,9 @@ Documentation
    :caption: Usage
 
    usage/lora
+   usage/multimodal_inputs
    usage/structured_outputs
    usage/spec_decode
-   usage/vlm
    usage/compatibility_matrix
    usage/performance
    usage/faq
