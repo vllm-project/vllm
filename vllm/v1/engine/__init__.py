@@ -1,12 +1,11 @@
 import enum
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import msgspec
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
-                             MultiModalPlaceholderDict)
+from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 

@@ -7,7 +7,8 @@ import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict, MultiModalKwargs, MultiModalPlaceholderDict
+    from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
+                                 MultiModalPlaceholderDict)
     from vllm.multimodal.inputs import MultiModalInputsV2
 
 
@@ -283,14 +284,14 @@ class SingletonInputsAdapter:
         assert_never(inputs)
 
     @cached_property
-    def multi_modal_inputs(self) -> "MultiModalKwargs":
+    def multi_modal_inputs(self) -> Union[Dict, "MultiModalKwargs"]:
         inputs = self.inputs
 
         if inputs["type"] == "token":
             return inputs.get("multi_modal_inputs", {})
 
         if inputs["type"] == "multimodal":
-            return inputs.get("mm_inputs", {})
+            return inputs.get("mm_kwargs", {})
 
         assert_never(inputs)
 

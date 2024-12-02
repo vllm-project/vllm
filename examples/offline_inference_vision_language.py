@@ -6,6 +6,7 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 import time
+
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -24,8 +25,7 @@ def run_llava(question: str, modality: str):
 
     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf",
-              max_model_len=4096)
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf", max_model_len=4096)
 
     stop_token_ids = None
     return llm, prompt, stop_token_ids

@@ -15,7 +15,6 @@ from msgspec import msgpack
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.multimodal import MultiModalDataDict, MultiModalKwargs
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
