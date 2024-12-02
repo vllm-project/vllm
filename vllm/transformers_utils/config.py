@@ -9,6 +9,7 @@ from huggingface_hub import (file_exists, hf_hub_download,
 from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
+from torch import nn
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -27,10 +28,12 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
-                                             RWConfig, SolarConfig,
+                                             Olmo2Config, RWConfig,
+                                             SolarConfig, Telechat2Config,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
+from vllm.utils import resolve_obj_by_qualname
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -60,7 +63,9 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
+    "olmo2": Olmo2Config,
     "solar": SolarConfig,
+    "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
@@ -107,6 +112,15 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
 
 
 def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+    if "rope_type" in rope_scaling and "type" in rope_scaling:
+        rope_type = rope_scaling["rope_type"]
+        rope_type_legacy = rope_scaling["type"]
+        if rope_type != rope_type_legacy:
+            raise ValueError(
+                f"Found conflicts between 'rope_type={rope_type}' (modern "
+                f"field) and 'type={rope_type_legacy}' (legacy field). "
+                "You should only specify one of them.")
+
     if "rope_type" not in rope_scaling and "type" in rope_scaling:
         rope_scaling["rope_type"] = rope_scaling["type"]
         logger.info("Replacing legacy 'type' key with 'rope_type'")
@@ -568,3 +582,16 @@ def try_get_generation_config(
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
             return None
+
+
+def get_cross_encoder_activation_function(config: PretrainedConfig):
+    if (hasattr(config, "sbert_ce_default_activation_function")
+            and config.sbert_ce_default_activation_function is not None):
+
+        function_name = config.sbert_ce_default_activation_function
+        assert function_name.startswith("torch.nn.modules."), \
+            "Loading of activation functions is restricted to " \
+            "torch.nn.modules for security reasons"
+        return resolve_obj_by_qualname(function_name)()
+    else:
+        return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()

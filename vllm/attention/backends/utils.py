@@ -478,7 +478,7 @@ def is_all_cross_attn_metadata_set(attn_metadata):
 def get_seq_len_block_table_args(
     attn_metadata,
     is_prompt: bool,
-    attn_type: AttentionType,
+    attn_type: str,
 ) -> tuple:
     '''
     The particular choice of sequence-length- and block-table-related
@@ -529,7 +529,7 @@ def get_seq_len_block_table_args(
 
 def get_num_prefill_decode_query_kv_tokens(
     attn_metadata,
-    attn_type: AttentionType,
+    attn_type: str,
 ) -> Tuple[int, int, int]:
     """
     Calculate the number of prefill and decode tokens for query, key/value

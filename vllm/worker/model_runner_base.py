@@ -289,3 +289,18 @@ class ModelRunnerBase(ABC, Generic[T]):
                 self.generators.pop(request_id, None)
 
         return self.generators
+
+
+class ModelRunnerWrapperBase:
+    """
+    The whole point of this class is to lazily initialize the model_runner.
+    """
+
+    def __init__(
+        self,
+        moderl_runner: ModelRunnerBase,
+    ) -> None:
+        self.model_runner: ModelRunnerBase = moderl_runner
+
+    def __getattr__(self, attr):
+        return getattr(self.model_runner, attr)

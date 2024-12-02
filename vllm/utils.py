@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import concurrent
 import contextlib
 import datetime
 import enum
@@ -20,7 +21,8 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
-from collections.abc import Mapping
+from collections import UserDict, defaultdict
+from collections.abc import Iterable, Mapping
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
@@ -369,7 +371,10 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(uname()).lower()
 
 
-def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
+def make_async(
+    func: Callable[P, T],
+    executor: Optional[concurrent.futures.Executor] = None
+) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
@@ -380,7 +385,7 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
-        return loop.run_in_executor(executor=None, func=p_func)
+        return loop.run_in_executor(executor=executor, func=p_func)
 
     return _async_wrapper
 
@@ -485,6 +490,13 @@ async def collect_from_async_generator(
 
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
+    if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
+        logger.warning(
+            "The environment variable HOST_IP is deprecated and ignored, as"
+            " it is often used by Docker and other software to"
+            "interact with the container's network stack. Please"
+            "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
+            " to communicate with each other.")
     if host_ip:
         return host_ip
 
@@ -722,6 +734,12 @@ def create_kv_caches_with_random(
                 f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)
     return key_caches, value_caches
+
+
+@lru_cache
+def print_info_once(msg: str) -> None:
+    # Set the stacklevel to 2 to print the caller's line info
+    logger.info(msg, stacklevel=2)
 
 
 @lru_cache
@@ -983,6 +1001,23 @@ def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
 def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
+
+
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
+
+
+def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
+    """
+    Unlike :class:`itertools.groupby`, groups are not broken by
+    non-contiguous data.
+    """
+    groups = defaultdict[_K, list[_V]](list)
+
+    for value in values:
+        groups[key(value)].append(value)
+
+    return groups.items()
 
 
 # TODO: This function can be removed if transformer_modules classes are
@@ -1272,6 +1307,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 else:
                     processed_args.append('--' +
                                           arg[len('--'):].replace('_', '-'))
+            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
+                # allow -O flag to be used without space, e.g. -O3
+                processed_args.append('-O')
+                processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
 
@@ -1590,18 +1629,21 @@ def migrate_to_cpu():
 
 
 # Adapted from: https://stackoverflow.com/a/47212782/5082708
-class LazyDict(Mapping, Generic[T]):
+class LazyDict(Mapping[str, T], Generic[T]):
 
     def __init__(self, factory: Dict[str, Callable[[], T]]):
         self._factory = factory
         self._dict: Dict[str, T] = {}
 
-    def __getitem__(self, key) -> T:
+    def __getitem__(self, key: str) -> T:
         if key not in self._dict:
             if key not in self._factory:
                 raise KeyError(key)
             self._dict[key] = self._factory[key]()
         return self._dict[key]
+
+    def __setitem__(self, key: str, value: Callable[[], T]):
+        self._factory[key] = value
 
     def __iter__(self):
         return iter(self._factory)
@@ -1610,13 +1652,20 @@ class LazyDict(Mapping, Generic[T]):
         return len(self._factory)
 
 
-def combine_fx_passes(passes: List[Callable]) -> Callable:
+class ClassRegistry(UserDict[type[T], _V]):
 
-    def combined_fx(graph) -> None:
-        for fx in passes:
-            fx(graph)
+    def __getitem__(self, key: type[T]) -> _V:
+        for cls in key.mro():
+            if cls in self.data:
+                return self.data[cls]
 
-    return combined_fx
+        raise KeyError(key)
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, type):
+            return False
+
+        return any(cls in self.data for cls in key.mro())
 
 
 def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -1681,6 +1730,7 @@ def direct_register_custom_op(
     mutates_args: List[str],
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
+    dispatch_key: str = "CUDA",
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1709,7 +1759,7 @@ def direct_register_custom_op(
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
-    my_lib.impl(op_name, op_func, "CUDA")
+    my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
 

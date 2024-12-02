@@ -1,5 +1,5 @@
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import msgspec
 import torch
@@ -86,8 +86,20 @@ class AsyncMetricsCollector:
         else:
             self._copy_stream = torch.cuda.Stream()
 
+    def init_tensors(self,
+                     rank: int,
+                     device_type: Union[torch.device, str] = 'cuda') -> None:
+        self._rank = rank
+        if isinstance(device_type, torch.device):
+            device_type = device_type.type
+        if device_type == 'cuda':
+            self._copy_stream = torch.cuda.Stream()
+
     def maybe_collect_rejsample_metrics(
             self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
+        # currently using cuda.Event, skip for any non_cuda_alike platform
+        if not current_platform.is_cuda_alike():
+            return None
 
         if not current_platform.is_cuda_alike():
             return None

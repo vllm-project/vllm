@@ -21,6 +21,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors
@@ -421,9 +422,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix=maybe_prefix(prefix, "vision_tower"))
         self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
         self.language_model = init_vllm_registered_model(
-            config.text_config,
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"))
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
 
@@ -824,6 +826,49 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_feature = image_feature.view(batch_frames, -1, dim)
         return image_feature
 
+    def get_multimodal_embeddings(
+            self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not modalities:
+            return None
+
+        # We make a tuple of each embedding with its modality string. This is a
+        # temporary workaround for models to handle mixed modalities when
+        # get_multimodal_embeddings and get_input_embeddings are called
+        # separately.
+        # TODO(ywang96): Add support for mixed-modality inference for v1.
+        multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
+
+        if "images" in modalities:
+            image_input = modalities["images"]
+            vision_embeddings = self._process_image_input(image_input)
+            multimodal_embeddings.append((vision_embeddings, "image"))
+        if "videos" in modalities:
+            video_input = modalities["videos"]
+            video_embeddings = self._process_video_pixels(video_input)
+            multimodal_embeddings.append((video_embeddings, "video"))
+
+        return multimodal_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[List[Tuple[NestedTensors,
+                                                   str]]] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            for embeddings, modality in multimodal_embeddings:
+                if modality == "image":
+                    inputs_embeds = merge_multimodal_embeddings(
+                        input_ids, inputs_embeds, embeddings,
+                        self.config.image_token_index)
+                if modality == "video":
+                    inputs_embeds = merge_multimodal_embeddings(
+                        input_ids, inputs_embeds, embeddings,
+                        self.config.video_token_index)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -831,6 +876,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for LlaVA-Onevision.
@@ -840,28 +886,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos: Pixels in each frames for each input videos.
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
-            if modalities:
-                inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
-                if "images" in modalities:
-                    image_input = modalities["images"]
-                    vision_embeddings = self._process_image_input(image_input)
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, vision_embeddings,
-                        self.config.image_token_index)
-                if "videos" in modalities:
-                    video_input = modalities["videos"]
-                    video_embeddings = self._process_video_pixels(video_input)
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, video_embeddings,
-                        self.config.video_token_index)
-                input_ids = None
-            else:
-                inputs_embeds = None
+
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      multimodal_embeddings)
+            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

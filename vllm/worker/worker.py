@@ -1,14 +1,16 @@
 """A GPU worker class."""
 import gc
 import os
+import time
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
+from vllm.config import VllmConfig
+from vllm.distributed import (ensure_kv_transfer_initialized,
+                              ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
@@ -21,9 +23,9 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
+from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
@@ -73,10 +75,8 @@ class Worker(LocalOrDistributedWorkerBase):
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_runner_cls is not None:
-            ModelRunnerClass = model_runner_cls
-        elif model_config.task == "embedding":
-            ModelRunnerClass = EmbeddingModelRunner
+        if model_config.task == "embedding":
+            ModelRunnerClass = PoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
@@ -85,6 +85,9 @@ class Worker(LocalOrDistributedWorkerBase):
             is_driver_worker=is_driver_worker,
             **speculative_args,
         )
+        if model_runner_cls is not None:
+            self.model_runner = model_runner_cls(self.model_runner)
+
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
@@ -142,7 +145,7 @@ class Worker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
+        init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
@@ -189,6 +192,7 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.reset_peak_memory_stats()
 
         free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+        start_time = time.time()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -229,12 +233,18 @@ class Worker(LocalOrDistributedWorkerBase):
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
+        end_time = time.time()
         logger.info(
-            "Memory profiling results: total_gpu_memory=%.2fGiB"
-            " initial_memory_usage=%.2fGiB peak_torch_memory=%.2fGiB"
-            " memory_usage_post_profile=%.2fGiB"
-            " non_torch_memory=%.2fGiB kv_cache_size=%.2fGiB"
-            " gpu_memory_utilization=%.2f", total_gpu_memory / (1024**3),
+            "Memory profiling results: "
+            "duration=%.2f seconds, "
+            "total_gpu_memory=%.2fGiB, "
+            "initial_memory_usage=%.2fGiB, "
+            "peak_torch_memory=%.2fGiB, "
+            "memory_usage_post_profile=%.2fGiB, "
+            "non_torch_memory=%.2fGiB, "
+            "kv_cache_size=%.2fGiB, "
+            "gpu_memory_utilization=%.2f.", end_time - start_time,
+            total_gpu_memory / (1024**3),
             (total_gpu_memory - free_memory_pre_profile) / (1024**3),
             (peak_memory - non_torch_allocations) / (1024**3),
             total_allocated_bytes / (1024**3),
@@ -448,19 +458,21 @@ class Worker(LocalOrDistributedWorkerBase):
 
 
 def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
+    vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
+    parallel_config = vllm_config.parallel_config
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
-
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+    ensure_kv_transfer_initialized(vllm_config)
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

@@ -16,8 +16,8 @@ ray[default]
 --find-links https://storage.googleapis.com/libtpu-releases/index.html
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-torch==2.6.0.dev20241028+cpu
-torchvision==0.20.0.dev20241028+cpu
-torch_xla[tpu] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.6.0.dev20241028-cp310-cp310-linux_x86_64.whl
-jaxlib==0.4.32.dev20240829
-jax==0.4.32.dev20240829
+torch==2.6.0.dev20241126+cpu
+torchvision==0.20.0.dev20241126+cpu
+torch_xla[tpu] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.6.0.dev20241126-cp310-cp310-linux_x86_64.whl
+jaxlib==0.4.36.dev20241122
+jax==0.4.36.dev20241122

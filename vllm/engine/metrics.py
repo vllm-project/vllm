@@ -421,6 +421,11 @@ def get_throughput(tracked_stats: List[int], now: float,
 class LoggingStatLogger(StatLoggerBase):
     """LoggingStatLogger is used in LLMEngine to log to Stdout."""
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.last_prompt_throughput: Optional[float] = None
+        self.last_generation_throughput: Optional[float] = None
+
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine.
            Logs to Stdout every self.local_interval seconds."""
@@ -445,8 +450,14 @@ class LoggingStatLogger(StatLoggerBase):
                 now=stats.now,
                 last_log=self.last_local_log)
 
-            # Log to stdout.
-            logger.info(
+            log_fn = logger.info
+            if not any((prompt_throughput, generation_throughput,
+                        self.last_prompt_throughput,
+                        self.last_generation_throughput)):
+                # Avoid log noise on an idle production system
+                log_fn = logger.debug
+
+            log_fn(
                 "Avg prompt throughput: %.1f tokens/s, "
                 "Avg generation throughput: %.1f tokens/s, "
                 "Running: %d reqs, Swapped: %d reqs, "
@@ -462,21 +473,26 @@ class LoggingStatLogger(StatLoggerBase):
             )
             if (stats.cpu_prefix_cache_hit_rate >= 0
                     or stats.gpu_prefix_cache_hit_rate >= 0):
-                logger.info(
+                log_fn(
                     "Prefix cache hit rate: GPU: %.2f%%, CPU: %.2f%%",
                     stats.gpu_prefix_cache_hit_rate * 100,
                     stats.cpu_prefix_cache_hit_rate * 100,
                 )
             if self.spec_decode_metrics is not None:
-                logger.info(
+                log_fn(
                     self._format_spec_decode_metrics_str(
                         self.spec_decode_metrics))
 
-            # Reset tracked stats for next interval.
-            self.num_prompt_tokens = []
-            self.num_generation_tokens = []
-            self.last_local_log = stats.now
-            self.spec_decode_metrics = None
+            self._reset(stats, prompt_throughput, generation_throughput)
+
+    def _reset(self, stats, prompt_throughput, generation_throughput) -> None:
+        # Reset tracked stats for next interval.
+        self.num_prompt_tokens = []
+        self.num_generation_tokens = []
+        self.last_local_log = stats.now
+        self.spec_decode_metrics = None
+        self.last_prompt_throughput = prompt_throughput
+        self.last_generation_throughput = generation_throughput
 
     def _format_spec_decode_metrics_str(
             self, metrics: "SpecDecodeWorkerMetrics") -> str:
@@ -512,6 +528,11 @@ class PrometheusStatLogger(StatLoggerBase):
 
     def _log_counter(self, counter, data: Union[int, float]) -> None:
         # Convenience function for logging to counter.
+        # Prevent ValueError from negative increment
+        if data < 0:
+            logger.warning("Skipping negative increment of %g to %s", data,
+                           counter)
+            return
         counter.labels(**self.labels).inc(data)
 
     def _log_counter_labels(self, counter, data: CollectionsCounter,

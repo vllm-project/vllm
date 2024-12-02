@@ -30,9 +30,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.forward_context import get_forward_context
-from vllm.utils import (async_tensor_h2d, direct_register_custom_op,
-                        get_kv_cache_torch_dtype, make_tensor_with_pad)
+from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
+                        make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -757,9 +756,8 @@ class FlashInferImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        if sliding_window is not None:
-            raise ValueError("Sliding window is not supported in FlashInfer.")
-        self.sliding_window = (-1, -1)
+        self.sliding_window = ((sliding_window - 1,
+                                0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
 
@@ -775,178 +773,129 @@ class FlashInferImpl(AttentionImpl):
         attn_metadata: FlashInferMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
+        # TODO: directly write to output tensor
+
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashInferImpl")
 
-        return torch.ops.vllm.unified_flash_infer(
-            query,
-            key,
-            value,
-            self.num_heads,
-            self.head_size,
-            self.num_kv_heads,
-            kv_cache,
-            self.kv_cache_dtype,
-            k_scale,
-            v_scale,
-            self.scale,
-            self.sliding_window,
-            self.alibi_slopes,
-            self.logits_soft_cap,
-        )
+        num_heads: int = self.num_heads
+        head_size: int = self.head_size
+        num_kv_heads: int = self.num_kv_heads
+        kv_cache_dtype: str = self.kv_cache_dtype
+        softmax_scale: float = self.scale
+        window_size = self.sliding_window
+        alibi_slopes = self.alibi_slopes
+        logits_soft_cap = self.logits_soft_cap
 
+        num_tokens, hidden_size = query.shape
+        query = query.view(-1, num_heads, head_size)
+        key = key.view(-1, num_kv_heads, head_size)
+        value = value.view(-1, num_kv_heads, head_size)
 
-def unified_flash_infer(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    num_heads: int,
-    head_size: int,
-    num_kv_heads: int,
-    kv_cache: torch.Tensor,
-    kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
-    softmax_scale: float,
-    window_size: Optional[List[int]] = None,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    logits_soft_cap: Optional[float] = None,
-) -> torch.Tensor:
-
-    current_metadata = get_forward_context()
-    assert current_metadata is not None
-    assert isinstance(current_metadata, FlashInferMetadata)
-    attn_metadata: FlashInferMetadata = current_metadata
-
-    num_tokens, hidden_size = query.shape
-    query = query.view(-1, num_heads, head_size)
-    key = key.view(-1, num_kv_heads, head_size)
-    value = value.view(-1, num_kv_heads, head_size)
-
-    if kv_cache.numel() > 0:
-        # Use the same reshape and cache kernel as flash attention.
-        ops.reshape_and_cache_flash(
-            key,
-            value,
-            kv_cache[:, 0],
-            kv_cache[:, 1],
-            attn_metadata.slot_mapping.flatten(),
-            kv_cache_dtype,
-            k_scale,
-            v_scale,
-        )
-        # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
-        # to process the cache when the kv_cache_dtype is fp8
-        if kv_cache_dtype.startswith("fp8"):
-            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                kv_cache_dtype)
-            kv_cache = kv_cache.view(torch_dtype)
-
-    num_prefill_tokens = attn_metadata.num_prefill_tokens
-    num_decode_tokens = attn_metadata.num_decode_tokens
-    assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
-                f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
-    assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
-                f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
-    query = query.contiguous()  # Flashinfer requires query to be contiguous
-    # Query for decode. KV is not needed because it is already cached.
-    # QKV for prefill.
-    decode_query = query[num_prefill_tokens:]
-    query = query[:num_prefill_tokens]
-
-    key = key[:num_prefill_tokens]
-    value = value[:num_prefill_tokens]
-
-    assert query.shape[0] == num_prefill_tokens
-    assert decode_query.shape[0] == num_decode_tokens
-
-    prefill_output: Optional[torch.Tensor] = None
-    decode_output: Optional[torch.Tensor] = None
-    if prefill_meta := attn_metadata.prefill_metadata:
-        # We will use flash attention for prefill
-        # when kv_cache is not provided.
-        # This happens when vllm runs the profiling to
-        # determine the number of blocks.
-        if kv_cache.numel() == 0:
-            prefill_output = flash_attn_varlen_func(
-                q=query,
-                k=key,
-                v=value,
-                cu_seqlens_q=prefill_meta.seq_start_loc,
-                cu_seqlens_k=prefill_meta.seq_start_loc,
-                max_seqlen_q=prefill_meta.max_prefill_seq_len,
-                max_seqlen_k=prefill_meta.max_prefill_seq_len,
-                softmax_scale=softmax_scale,
-                causal=True,
-                window_size=window_size,
-                alibi_slopes=alibi_slopes,
+        if kv_cache.numel() > 0:
+            # Use the same reshape and cache kernel as flash attention.
+            ops.reshape_and_cache_flash(
+                key,
+                value,
+                kv_cache[:, 0],
+                kv_cache[:, 1],
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype,
+                k_scale,
+                v_scale,
             )
-        else:
-            assert prefill_meta is not None
-            assert prefill_meta.prefill_wrapper is not None
-            prefill_output = prefill_meta.prefill_wrapper.forward(
-                query,
+            # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
+            # to process the cache when the kv_cache_dtype is fp8
+            if kv_cache_dtype.startswith("fp8"):
+                torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    kv_cache_dtype)
+                kv_cache = kv_cache.view(torch_dtype)
+
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                    f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
+        assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                    f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
+        query = query.contiguous(
+        )  # Flashinfer requires query to be contiguous
+        # Query for decode. KV is not needed because it is already cached.
+        # QKV for prefill.
+        decode_query = query[num_prefill_tokens:]
+        query = query[:num_prefill_tokens]
+
+        key = key[:num_prefill_tokens]
+        value = value[:num_prefill_tokens]
+
+        assert query.shape[0] == num_prefill_tokens
+        assert decode_query.shape[0] == num_decode_tokens
+
+        window_left = window_size[0] if window_size is not None else -1
+
+        prefill_output: Optional[torch.Tensor] = None
+        decode_output: Optional[torch.Tensor] = None
+        if prefill_meta := attn_metadata.prefill_metadata:
+            # We will use flash attention for prefill
+            # when kv_cache is not provided.
+            # This happens when vllm runs the profiling to
+            # determine the number of blocks.
+            if kv_cache.numel() == 0:
+                prefill_output = flash_attn_varlen_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=prefill_meta.seq_start_loc,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    max_seqlen_q=prefill_meta.max_prefill_seq_len,
+                    max_seqlen_k=prefill_meta.max_prefill_seq_len,
+                    softmax_scale=softmax_scale,
+                    causal=True,
+                    window_size=window_size,
+                    alibi_slopes=alibi_slopes,
+                )
+            else:
+                assert prefill_meta is not None
+                assert prefill_meta.prefill_wrapper is not None
+                prefill_output = prefill_meta.prefill_wrapper.forward(
+                    query,
+                    kv_cache,
+                    logits_soft_cap=logits_soft_cap,
+                    causal=True,
+                    k_scale=k_scale,
+                    v_scale=v_scale,
+                    window_left=window_left)
+        if decode_meta := attn_metadata.decode_metadata:
+            assert decode_meta is not None
+            assert decode_meta.decode_wrapper is not None
+            decode_output = decode_meta.decode_wrapper.forward(
+                decode_query,
                 kv_cache,
+                sm_scale=softmax_scale,
                 logits_soft_cap=logits_soft_cap,
-                causal=True,
                 k_scale=k_scale,
-                v_scale=v_scale)
-    if decode_meta := attn_metadata.decode_metadata:
-        assert attn_metadata.decode_metadata is not None
-        assert attn_metadata.decode_metadata.decode_wrapper is not None
-        decode_output = attn_metadata.decode_metadata.decode_wrapper.forward(
-            decode_query,
-            kv_cache,
-            sm_scale=softmax_scale,
-            logits_soft_cap=logits_soft_cap,
-            k_scale=k_scale,
-            v_scale=v_scale)
+                v_scale=v_scale,
+                window_left=window_left)
 
-    if prefill_output is None and decode_output is not None:
-        # Decode only batch.
-        output, num_tokens = decode_output, num_decode_tokens
-    elif decode_output is None and prefill_output is not None:
-        # Prefill only batch.
-        output, num_tokens = prefill_output, num_prefill_tokens
-    else:
-        # Chunked prefill batch does not work with speculative decoding in
-        # FlashInfer backend, so the query length for decode should be 1.
-        assert prefill_output is not None
-        assert decode_output is not None
-        assert decode_meta is not None
-        assert decode_meta.decode_query_len == 1
-        decode_output = decode_output.squeeze(1)
-        output = torch.cat([prefill_output, decode_output], dim=0)
-    return output.view(num_tokens, hidden_size)
-
-
-def unified_flash_infer_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    num_heads: int,
-    head_size: int,
-    num_kv_heads: int,
-    kv_cache: torch.Tensor,
-    kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
-    softmax_scale: float,
-    window_size: Optional[List[int]] = None,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    logits_soft_cap: Optional[float] = None,
-) -> torch.Tensor:
-    return torch.empty_like(query).contiguous()
-
-
-direct_register_custom_op(
-    op_name="unified_flash_infer",
-    op_func=unified_flash_infer,
-    mutates_args=["kv_cache"],
-    fake_impl=unified_flash_infer_fake,
-)
+        if prefill_output is None and decode_output is not None:
+            # Decode only batch.
+            output, num_tokens = decode_output, num_decode_tokens
+        elif decode_output is None and prefill_output is not None:
+            # Prefill only batch.
+            output, num_tokens = prefill_output, num_prefill_tokens
+        else:
+            # Chunked prefill batch does not work with speculative decoding in
+            # FlashInfer backend, so the query length for decode should be 1.
+            assert prefill_output is not None
+            assert decode_output is not None
+            assert decode_meta is not None
+            assert decode_meta.decode_query_len == 1
+            decode_output = decode_output.squeeze(1)
+            output = torch.cat([prefill_output, decode_output], dim=0)
+        return output.view(num_tokens, hidden_size)

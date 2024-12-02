@@ -21,12 +21,12 @@ logger = init_logger(__name__)
 @dataclasses.dataclass(frozen=True)
 class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
     """
-    Used by the EmbeddingModelRunner.
+    Used by the PoolingModelRunner.
     """
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
-class EmbeddingModelRunner(
+class PoolingModelRunner(
         GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
         ModelInputForGPUWithPoolingMetadata)
@@ -52,7 +52,7 @@ class EmbeddingModelRunner(
     ) -> Optional[Union[List[PoolerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
-                "EmbeddingModelRunner does not support multi-step execution.")
+                "PoolingModelRunner does not support multi-step execution.")
 
         if self.lora_config:
             assert model_input.lora_requests is not None
@@ -97,7 +97,11 @@ class EmbeddingModelRunner(
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-        with set_forward_context(model_input.attn_metadata):
+        cross_enc_kwargs = {}
+        if model_input.token_types is not None:
+            cross_enc_kwargs["token_type_ids"] = model_input.token_types
+
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -105,7 +109,8 @@ class EmbeddingModelRunner(
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device))
+                                             device=self.device),
+                **cross_enc_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):

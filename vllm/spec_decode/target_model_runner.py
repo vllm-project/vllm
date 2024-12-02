@@ -1,42 +1,12 @@
 from typing import List, Optional
 
-from vllm.config import VllmConfig
-from vllm.platforms import current_platform
 from vllm.sequence import SequenceGroupMetadata
-
-if current_platform.is_cuda_alike():
-    from vllm.worker.model_runner import (
-        ModelInputForGPUWithSamplingMetadata as ModelInputCls)  # yapf: disable
-    from vllm.worker.model_runner import ModelRunner as ModelRunnerCls
-elif current_platform.is_neuron():
-    from vllm.worker.neuron_model_runner import (
-        ModelInputForNeuron as ModelInputCls)  # yapf: disable
-    from vllm.worker.neuron_model_runner import (
-        NeuronModelRunner as ModelRunnerCls)  # yapf: disable
-elif current_platform.is_hpu():
-    from vllm.worker.hpu_model_runner import HPUModelRunner as ModelRunnerCls
-    from vllm.worker.hpu_model_runner import (
-        ModelInputForHPUWithSamplingMetadata as ModelInputCls)  # yapf: disable
-elif current_platform.is_openvino():
-    from vllm.worker.openvino_model_runner import ModelInput as ModelInputCls
-    from vllm.worker.openvino_model_runner import (
-        OpenVINOModelRunner as ModelRunnerCls)  # yapf: disable
-elif current_platform.is_cpu():
-    from vllm.worker.cpu_model_runner import CPUModelRunner as ModelRunnerCls
-    from vllm.worker.cpu_model_runner import (
-        ModelInputForCPUWithSamplingMetadata as ModelInputCls)  # yapf: disable
-elif current_platform.is_tpu():
-    from vllm.worker.tpu_model_runner import ModelInputForTPU as ModelInputCls
-    from vllm.worker.tpu_model_runner import TPUModelRunner as ModelRunnerCls
-elif current_platform.is_xpu():
-    from vllm.worker.xpu_model_runner import (
-        ModelInputForXPUWithSamplingMetadata as ModelInputCls)  # yapf: disable
-    from vllm.worker.xpu_model_runner import XPUModelRunner as ModelRunnerCls
-else:
-    raise ValueError(f"Unsupported platform: {current_platform}")
+from vllm.worker.model_runner_base import (ModelRunnerBase,
+                                           ModelRunnerInputBase,
+                                           ModelRunnerWrapperBase)
 
 
-class TargetModelRunner(ModelRunnerCls):
+class TargetModelRunner(ModelRunnerWrapperBase):
     """Specialized model runner for speculative decoding target model.
     In speculative decoding, the log probabilities selected finally may not
     be the same ones as selected by the target model sampling. This means
@@ -48,30 +18,20 @@ class TargetModelRunner(ModelRunnerCls):
     requested or not. 
     """
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_dtype: Optional[str] = "auto",
-        is_driver_worker: bool = False,
-        return_hidden_states: bool = False,
-    ):
+    def __init__(self, model_runner: ModelRunnerBase):
         # An internal boolean member variable to indicate if token log
         # probabilities are needed or not.
+        super().__init__(model_runner)
         self.disable_logprobs = True
-        super().__init__(
-            vllm_config=vllm_config,
-            kv_cache_dtype=kv_cache_dtype,
-            is_driver_worker=is_driver_worker,
-            return_hidden_states=return_hidden_states,
-        )
 
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
-    ) -> ModelInputCls:
-        model_input: ModelInputCls = super().prepare_model_input(
+    ) -> ModelRunnerInputBase:
+        model_input: ModelRunnerInputBase =\
+            self.model_runner.prepare_model_input(
             seq_group_metadata_list, virtual_engine, finished_requests_ids)
         # If token log probabilities is disabled then skip generating sampler
         # CPU output. We directly serialize the GPU sampled_token_id tensors
