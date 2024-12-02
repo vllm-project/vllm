@@ -1,6 +1,5 @@
-import enum
-from enum import Enum
-from typing import Callable, List, Optional
+
+from typing import Callable, Optional
 
 import torch
 from quark.torch.quantization.config.type import QSchemeType
@@ -22,15 +21,17 @@ class QuarkMoEMethod(FusedMoEMethodBase):
 
     @staticmethod
     def get_moe_method(
-        quant_config: "QuarkConfig",
+        quant_config: "QuarkConfig",  # type: ignore # noqa E501 # noqa F821
         module: torch.nn.Module,
         layer_name: str
     ) -> "QuarkMoEMethod":
-        layer_quant_config = quant_config._find_matched_config(layer_name, module)
+        layer_quant_config = quant_config._find_matched_config(layer_name, 
+                                                               module)
 
         if layer_quant_config.output_tensors or layer_quant_config.bias:
-            raise NotImplementedError("Currently, Quark models with output_tensors "
-                                      "and bias quantized are not supported")
+            raise NotImplementedError("Currently, Quark models with "
+                                      "output_tensors and bias "
+                                      "quantized are not supported")
         weight_config = layer_quant_config.weight
         input_config = layer_quant_config.input_tensors
         
@@ -54,7 +55,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             raise ValueError(
                 "For FP8 Fused MoE layers, only per-tensor scales"
                 "for weights and activations are supported. Found "
-                f"{self.weight_quant.qscheme.value}, {self.input_quant.qscheme.value}")
+                f"{self.weight_quant.qscheme.value}, {self.input_quant.qscheme.value}") # noqa E501
 
         self.static_input_scales = not self.input_quant.is_dynamic
 

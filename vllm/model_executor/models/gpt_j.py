@@ -314,13 +314,16 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
             
-            if scale_names := self.quant_config.get_cache_scale(name):
-                # Loading kv cache scales for compressed-tensors quantization
+            if (self.quant_config is not None and 
+                (scale_names := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache scales for quark and 
+                # compressed-tensors quantization
                 for scale_name in scale_names:
                     param = params_dict[scale_name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
-                    loaded_weight = loaded_weight if loaded_weight.dim()==0 else loaded_weight[0]
+                    loaded_weight = (loaded_weight if loaded_weight.dim()==0 
+                                     else loaded_weight[0])
                     weight_loader(param, loaded_weight)
                     loaded_params.add(scale_name)
                 continue

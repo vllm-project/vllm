@@ -8,9 +8,11 @@ import torch
 from quark.torch.quantization.config.type import QSchemeType, Dtype
 from quark.torch.quantization.config.config import (Config,
                                                     QuantizationSpec)
-from quark.torch.quantization.config.config import QuantizationConfig as QuarkQuantConfig
+from quark.torch.quantization.config.config import (
+    QuantizationConfig as QuarkQuantConfig)
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import FUSED_LAYER_NAME_MAPPING
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FUSED_LAYER_NAME_MAPPING)
 from vllm.model_executor.layers.quantization.quark.utils import (deep_compare,
                                                                  should_ignore_layer)
 
@@ -33,9 +35,11 @@ class QuarkConfig(QuantizationConfig):
 
     def __init__(self,
                  quant_config: Config,
-                 kv_cache_group: List[str] = [],
+                 kv_cache_group: Optional[List[str]] = None,
                  kv_cache_config: Optional[QuantizationSpec] = None,
                  pack_method: str = "reorder"):
+        if kv_cache_group is None:
+            kv_cache_group = []
         self.quant_config = quant_config
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
@@ -71,13 +75,17 @@ class QuarkConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return QuarkKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return QuarkMoEMethod.get_moe_method(self, module=layer, layer_name=prefix)
+            return QuarkMoEMethod.get_moe_method(self, module=layer, 
+                                                 layer_name=prefix)
         return None
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "QuarkConfig":
         quant_config = Config.from_dict(config)
         export_config = config.get("export")
+        if export_config is None:
+            raise ValueError("The export key should be included in "
+                             "the configurations of Quark quantized model")
         kv_cache_group = cast(List[str], export_config.get("kv_cache_group"))
         pack_method = cast(str, export_config.get("pack_method"))
         
@@ -89,11 +97,13 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_set = set(layer_quant_names)
             
             if not kv_cache_set.issubset(layer_quant_set):
-                raise ValueError("The Quark quantized model has the kv_cache_group "
-                                 "parameter setting, but no kv_cache quantization settings "
-                                 "were found in the quantization configuration.")
+                raise ValueError("The Quark quantized model has the "
+                                 "kv_cache_group parameter setting, "
+                                 "but no kv_cache quantization settings "
+                                 "were found in the quantization "
+                                 "configuration.")
             
-            q_configs = [quant_config.layer_quant_config[name] for name in kv_cache_group]
+            q_configs = [quant_config.layer_quant_config[name] for name in kv_cache_group] 
             if not all(deep_compare(q_config, q_configs[0]) for q_config in q_configs):
                 raise ValueError("The quantization method used for kv_cache should be the same, "
                                  "but the quantization method for the kv_cache layer in the "
@@ -179,7 +189,7 @@ class QuarkConfig(QuantizationConfig):
         return is_int8_dtype and is_tensor and weight_quant.symmetric and is_static
     
     def _find_matched_config(self, 
-                            layer_name: Optional[str], 
+                            layer_name: str, 
                             module: torch.nn.Module) -> "QuarkQuantConfig":
         
         proj_name = layer_name.split(".")[-1]
@@ -232,7 +242,7 @@ class QuarkConfig(QuantizationConfig):
     def get_scheme(
             self,
             layer: torch.nn.Module,
-            layer_name: Optional[str] = None) -> "QuarkScheme":
+            layer_name: str) -> "QuarkScheme":
 
         layer_quant_config = self._find_matched_config(layer_name, layer)
         
