@@ -100,6 +100,8 @@ Documentation
    :maxdepth: 1
    :caption: Usage
 
+   usage/generative_models
+   usage/pooling_models
    usage/lora
    usage/multimodal_inputs
    usage/structured_outputs

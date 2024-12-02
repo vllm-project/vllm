@@ -63,6 +63,8 @@ Text-only Language Models
 Text Generation (``--task generate``)
 -------------------------------------
 
+See :ref:`this page <generative_models>` for more information on how to use generative models.
+
 .. list-table::
   :widths: 25 25 50 5 5
   :header-rows: 1
@@ -344,10 +346,13 @@ Text Generation (``--task generate``)
 Text Embedding (``--task embed``)
 ---------------------------------
 
+See :ref:`this page <pooling_models>` for more information on how to use embedding models.
+
 Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
+The following table lists those that are tested in vLLM.
 
 .. important::
-  You should explicitly specify the task for these models, otherwise the task may default to text generation instead.
+  You should explicitly specify the task, otherwise it may default to text generation instead.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -389,9 +394,6 @@ Any text generation model can be converted into an embedding model by passing :c
     - 
     - 
 
-.. tip::
-  You can override the model's pooling method by passing :code:`--override-pooler-config`.
-
 .. note::
   :code:`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
   You should manually set mean pooling by passing :code:`--override-pooler-config '{"pooling_type": "MEAN"}'`.
@@ -406,8 +408,10 @@ Any text generation model can be converted into an embedding model by passing :c
 Reward Modeling (``--task reward``)
 -----------------------------------
 
+See :ref:`this page <pooling_models>` for more information on how to use reward models.
+
 .. important::
-  You should explicitly specify the task for these models.
+  You should explicitly specify the task, otherwise it may default to text generation instead.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -433,14 +437,13 @@ Reward Modeling (``--task reward``)
   For process-supervised reward models such as :code:`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
   e.g.: :code:`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
-.. note::
-    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
-
 Classification (``--task classify``)
 ------------------------------------
 
+See :ref:`this page <pooling_models>` for more information on how to use classification models.
+
 .. important::
-  You should explicitly specify the task for these models.
+  You should explicitly specify the task, otherwise it may default to text generation instead.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -457,14 +460,13 @@ Classification (``--task classify``)
     - ✅︎
     - ✅︎
 
-.. note::
-    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
-
 Sentence Pair Scoring (``--task score``)
 ----------------------------------------
 
+See :ref:`this page <pooling_models>` for more information on how to use reranking models.
+
 .. important::
-  You should explicitly specify the task for these models.
+  You should explicitly specify the task, otherwise it may default to text generation instead.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -491,9 +493,6 @@ Sentence Pair Scoring (``--task score``)
     - 
     - 
 
-.. note::
-    These models are supported in both offline and online inference via Score API.
-
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -512,10 +511,14 @@ On the other hand, modalities separated by :code:`/` are mutually exclusive.
 
 - e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
+See :ref:`this page <multimodal_inputs>` on how to pass multi-modal inputs to the model.
+
 .. _supported_mm_models:
 
 Text Generation (``--task generate``)
 -------------------------------------
+
+See :ref:`this page <generative_models>` for more information on how to use generative models.
 
 .. list-table::
   :widths: 25 25 15 25 5 5
@@ -694,10 +697,13 @@ Text Generation (``--task generate``)
 Multimodal Embedding (``--task embed``)
 ---------------------------------------
 
+See :ref:`this page <pooling_models>` for more information on how to use embedding models.
+
 Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
+The following table lists those that are tested in vLLM.
 
 .. important::
-  You should explicitly specify the task for these models, otherwise the task may default to text generation instead.
+  You should explicitly specify the task, otherwise it may default to text generation instead.
 
 .. list-table::
   :widths: 25 25 15 25 5 5
@@ -727,9 +733,6 @@ Any text generation model can be converted into an embedding model by passing :c
     - :code:`MrLight/dse-qwen2-2b-mrl-v1`
     - 
     - ✅︎
-
-.. tip::
-  You can override the model's pooling method by passing :code:`--override-pooler-config`.
 
 Model Support Policy
 =====================
