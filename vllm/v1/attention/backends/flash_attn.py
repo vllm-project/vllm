@@ -134,12 +134,6 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
-        kv_cache_dtype: str = self.kv_cache_dtype
-        softmax_scale: float = self.scale
-        window_size: Optional[List[int]] = self.sliding_window
-        alibi_slopes: Optional[torch.Tensor] = self.alibi_slopes
-        logits_soft_cap: Optional[float] = self.logits_soft_cap
-
         if attn_metadata is None:
             # Profiling run.
             return output
@@ -155,7 +149,7 @@ class FlashAttentionImpl(AttentionImpl):
             key_cache,
             value_cache,
             attn_metadata.slot_mapping,
-            kv_cache_dtype,
+            self.kv_cache_dtype,
             k_scale,
             v_scale,
         )
@@ -170,12 +164,12 @@ class FlashAttentionImpl(AttentionImpl):
             max_seqlen_q=attn_metadata.max_query_len,
             cu_seqlens_k=attn_metadata.seq_start_loc,
             max_seqlen_k=attn_metadata.max_seq_len,
-            softmax_scale=softmax_scale,
+            softmax_scale=self.scale,
             causal=True,
-            alibi_slopes=alibi_slopes,
-            window_size=window_size,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
             block_table=attn_metadata.block_table,
-            softcap=logits_soft_cap,
+            softcap=self.logits_soft_cap,
         )
 
         return output
