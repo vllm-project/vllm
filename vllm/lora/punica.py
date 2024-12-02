@@ -591,7 +591,7 @@ class PunicaWrapper:
                                   output_slices[slice_idx],
                                   add_input=True)
             offset_left += output_slices[slice_idx]
-
+        
         y = y.view_as(y_org)
 
     def add_lora(self,
