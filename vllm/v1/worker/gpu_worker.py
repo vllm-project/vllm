@@ -1,4 +1,5 @@
 """A GPU worker class."""
+import atexit
 import gc
 import os
 import pickle
@@ -13,7 +14,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-from vllm.distributed import (destroy_tp_mq_broadcaster,
+from vllm.distributed import (destroy_distributed_environment,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -392,6 +393,7 @@ class WorkerProc:
     @staticmethod
     def run_worker(*args, **kwargs):
         """Launch Worker busy loop in background process."""
+        atexit.register(destroy_distributed_environment)
 
         try:
             worker = WorkerProc(*args, **kwargs)
@@ -403,7 +405,6 @@ class WorkerProc:
 
             # Clean up once worker exits busy loop
             worker = None
-            destroy_tp_mq_broadcaster()
 
         except KeyboardInterrupt:
             logger.debug("Worker interrupted.")
