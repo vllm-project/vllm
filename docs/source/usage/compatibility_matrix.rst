@@ -39,7 +39,7 @@ Feature x Feature
      - :abbr:`prmpt adptr (Prompt Adapter)`
      - :ref:`SD <spec_decode>`
      - CUDA graph
-     - :abbr:`emd (Embedding Models)`
+     - :abbr:`pooling (Pooling Models)`
      - :abbr:`enc-dec (Encoder-Decoder Models)`
      - :abbr:`logP (Logprobs)`
      - :abbr:`prmpt logP (Prompt Logprobs)`
@@ -151,7 +151,7 @@ Feature x Feature
      - 
      - 
      - 
-   * - :abbr:`emd (Embedding Models)`
+   * - :abbr:`pooling (Pooling Models)`
      - ✗
      - ✗
      - ✗ 
@@ -386,7 +386,7 @@ Feature x Hardware
      - ✅
      - ✗
      - ✅
-   * - :abbr:`emd (Embedding Models)`
+   * - :abbr:`pooling (Pooling Models)`
      - ✅
      - ✅
      - ✅

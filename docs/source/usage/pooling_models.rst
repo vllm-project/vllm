@@ -3,7 +3,7 @@
 Using Pooling Models
 ====================
 
-vLLM provides second-class support for pooling models, including embedding, reranking and reward models.
+vLLM also supports pooling models, including embedding, reranking and reward models.
 
 In vLLM, pooling models implement the :class:`~vllm.model_executor.models.VllmModelForPooling` interface.
 These models use a :class:`~vllm.model_executor.layers.Pooler` to aggregate the final hidden states of the input
@@ -11,7 +11,11 @@ before returning them.
 
 Technically, any :ref:`generative model <generative_models>` in vLLM can be converted into a pooling model
 by aggregating and returning the hidden states directly, skipping the generation step.
-Nevertheless, you should use those that are specifically trained as pooling models.
+Nevertheless, to get the best results, you should use pooling models that are specifically trained as such.
+
+We currently support pooling models primarily as a matter of convenience.
+As shown in the :code:`Compatibility Matrix <compatibility_matrix>`, most vLLM features are not applicable to
+pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 
 Offline Inference
 -----------------
@@ -32,7 +36,7 @@ The selected task determines the default :class:`~vllm.model_executor.layers.Poo
 - Reward Modeling: Extract all of the hidden states and return them directly.
 
 When loading `Sentence Transformers <https://huggingface.co/sentence-transformers>`__ models,
-we attempt to override the default pooler based on Sentence Transformers configuration file (``modules.json``).
+we attempt to override the default pooler based on its Sentence Transformers configuration file (``modules.json``).
 
 You can customize the model's pooling method via the :code:`override_pooler_config` option,
 which takes priority above both the model's and Sentence Transformers's defaults.
