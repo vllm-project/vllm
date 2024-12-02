@@ -69,7 +69,7 @@ For example, to search using 5 beams and output at most 16 tokens:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 ``LLM.chat``
-^^^^^^^^^^^
+^^^^^^^^^^^^
 
 The :class:`~vllm.LLM.chat` method implements chat functionality on top of :class:`~vllm.LLM.generate`.
 In particular, it accepts input similar to `OpenAI Chat Completions API <https://platform.openai.com/docs/api-reference/chat>__
