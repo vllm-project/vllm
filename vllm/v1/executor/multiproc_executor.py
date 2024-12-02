@@ -1,5 +1,7 @@
 import atexit
 import os
+import signal
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 
@@ -150,17 +152,52 @@ class MultiprocExecutor:
     def profile(self, is_start=True):
         raise NotImplementedError
 
+    def _ensure_worker_termination(self):
+        """Ensure that all worker processes are terminated. Assumes workers have
+        received termination requests. Waits for processing, then sends
+        termination and kill signals if needed."""
+
+        def wait_for_termination(procs, timeout):
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if all(not proc.proc.is_alive() for proc in procs):
+                    return True
+                time.sleep(0.1)
+            return False
+
+        active_procs = [p for p in self.workers if p.proc.is_alive()]
+        self.workers = None
+
+        # First wait for graceful shutdown
+        if wait_for_termination(active_procs, 0.5):
+            return
+
+        # Send SIGTERM if still running
+        active_procs = [p for p in active_procs if p.proc.is_alive()]
+        for proc in active_procs:
+            proc.proc.terminate()
+        if wait_for_termination(active_procs, 1):
+            return
+
+        # Send SIGKILL if still running
+        active_procs = [p for p in active_procs if p.proc.is_alive()]
+        for proc in active_procs:
+            os.kill(proc.proc.pid, signal.SIGKILL)
+        if not wait_for_termination(active_procs, 1):
+            raise RuntimeError("Failed to terminate worker processes")
+
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if (hasattr(self, 'scheduler_output_mq')
                 and self.scheduler_output_mq is not None):
+            # Broadcast termination message
             termination_msg = WorkerExecRequest(
                 WorkerExecRequest.Type.TERMINATE, None)
             self.scheduler_output_mq.enqueue(termination_msg)
             self.scheduler_output_mq = None
 
         if (hasattr(self, 'workers') and self.workers is not None):
-            self._run_on_workers('ensure_termination')
+            self._ensure_worker_termination()
 
     def __del__(self):
         self.shutdown()
