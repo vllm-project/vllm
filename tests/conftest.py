@@ -263,7 +263,6 @@ class HfRunner:
         dtype: str = "half",
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
-        is_embedding_model: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -657,6 +656,7 @@ class VllmRunner:
         model_name: str,
         task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
+        tokenizer_mode: str = "auto",
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
         max_model_len: int = 1024,
@@ -673,6 +673,7 @@ class VllmRunner:
             model=model_name,
             task=task,
             tokenizer=tokenizer_name,
+            tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
             swap_space=swap_space,
@@ -843,6 +844,7 @@ class VllmRunner:
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
         stop_token_ids: Optional[List[int]] = None,
+        stop: Optional[List[str]] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
@@ -850,7 +852,8 @@ class VllmRunner:
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=num_prompt_logprobs,
-            stop_token_ids=stop_token_ids)
+            stop_token_ids=stop_token_ids,
+            stop=stop)
 
         return self.generate_w_logprobs(prompts,
                                         greedy_logprobs_params,

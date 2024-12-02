@@ -36,7 +36,7 @@ class OpenVINOExecutor(ExecutorBase):
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
-        self.driver_worker = wrapper.init_worker(
+        wrapper.init_worker(
             ov_core=ov.Core(),
             vllm_config=self.vllm_config,
             local_rank=0,
@@ -45,6 +45,7 @@ class OpenVINOExecutor(ExecutorBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
+        self.driver_worker = wrapper.worker
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 

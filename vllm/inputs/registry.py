@@ -11,8 +11,8 @@ from typing_extensions import TypeVar, assert_never
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
-                        resolve_mm_processor_kwargs)
+from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
+                        print_warning_once, resolve_mm_processor_kwargs)
 
 from .data import ProcessorInputs, SingletonInputs
 from .parse import is_encoder_decoder_inputs
@@ -136,12 +136,12 @@ class InputRegistry:
     """
 
     def __init__(self) -> None:
-        self._dummy_factories_by_model_type: Dict[Type[nn.Module],
-                                                  DummyDataFactory] = {}
-        self._dummy_encoder_factories_by_model_type: Dict[
-            Type[nn.Module], DummyDataFactory] = {}
-        self._input_processors_by_model_type: Dict[Type[nn.Module],
-                                                   InputProcessor] = {}
+        self._dummy_factories_by_model_type = \
+            ClassRegistry[nn.Module, DummyDataFactory]()
+        self._dummy_encoder_factories_by_model_type = \
+            ClassRegistry[nn.Module, DummyDataFactory]()
+        self._input_processors_by_model_type = \
+            ClassRegistry[nn.Module, InputProcessor]()
 
     def _default_dummy_data_factory(
         self,

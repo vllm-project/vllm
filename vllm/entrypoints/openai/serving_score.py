@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, ScoreRequest,
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import EmbeddingRequestOutput
+from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import make_async, merge_async_iterators, random_uuid
 
@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 
 
 def request_output_to_score_response(
-        final_res_batch: List[EmbeddingRequestOutput], request_id: str,
+        final_res_batch: List[PoolingRequestOutput], request_id: str,
         created_time: int, model_name: str) -> ScoreResponse:
     data: List[ScoreResponseData] = []
     score = None
@@ -133,7 +133,7 @@ class OpenAIServingScores(OpenAIServing):
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
+        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         input_pairs = make_pairs(request.text_1, request.text_2)
 
@@ -194,7 +194,7 @@ class OpenAIServingScores(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: List[Optional[EmbeddingRequestOutput]]
+        final_res_batch: List[Optional[PoolingRequestOutput]]
         final_res_batch = [None] * num_prompts
 
         try:
@@ -203,7 +203,7 @@ class OpenAIServingScores(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(List[EmbeddingRequestOutput],
+            final_res_batch_checked = cast(List[PoolingRequestOutput],
                                            final_res_batch)
 
             response = request_output_to_score_response(
