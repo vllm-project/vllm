@@ -1663,6 +1663,9 @@ def apply_sampling_penalties(
         output_tokens_tensor: torch.Tensor, presence_penalties: torch.Tensor,
         frequency_penalties: torch.Tensor,
         repetition_penalties: torch.Tensor) -> torch.Tensor:
+    """
+    Applies presence, frequency and repetition penalties to the logits.
+    """
     num_seqs, vocab_size = logits.shape
     _, prompt_mask = get_token_bin_counts_and_mask(prompt_tokens_tensor,
                                                    vocab_size, num_seqs)

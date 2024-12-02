@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -18,15 +18,14 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        _apply_min_token_penalties(logits,
-                                   sampling_metadata.output_token_ids,
+        _apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
                                    sampling_metadata.stop_token_ids,
                                    sampling_metadata.min_tokens)
         _apply_penalties(logits, sampling_metadata.prompt_token_ids,
                          sampling_metadata.output_token_ids,
                          sampling_metadata.presence_penalties,
                          sampling_metadata.frequency_penalties,
-                         sampling_metadata.repetition_penalties)        
+                         sampling_metadata.repetition_penalties)
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         logits = self.apply_top_k_top_p(logits, sampling_metadata)
         probs = self.get_probs(logits)
@@ -170,7 +169,7 @@ def _apply_top_k_top_p(
 def _apply_min_token_penalties(logits: torch.Tensor,
                                output_token_ids: List[List[int]],
                                stop_token_ids: List[Set[int]],
-                               min_tokens: List[int]) -> torch.Tensor:
+                               min_tokens: List[int]):
     """
     Applies minimum token penalty by setting the logits of the stop tokens
     to -inf.
@@ -182,13 +181,13 @@ def _apply_min_token_penalties(logits: torch.Tensor,
                 min_tokens_logits_to_penalize.append((index, stop_token_id))
     if min_tokens_logits_to_penalize:
         logits[tuple(zip(*min_tokens_logits_to_penalize))] = -float("inf")
-    return logits
+
 
 def _apply_penalties(logits: torch.Tensor, prompt_token_ids: List[List[int]],
                      output_token_ids: List[List[int]],
                      presence_penalties: List[float],
                      frequency_penalties: List[float],
-                     repetition_penalties: List[float]) -> torch.Tensor:
+                     repetition_penalties: List[float]):
     """
     Applies presence, frequency and repetition penalties to the logits.
     """
@@ -204,11 +203,9 @@ def _apply_penalties(logits: torch.Tensor, prompt_token_ids: List[List[int]],
                 prompt_token_ids, output_token_ids, frequency_penalties,
                 presence_penalties, repetition_penalties, vocab_size,
                 logits.device)
-        return apply_sampling_penalties(logits, prompt_tokens_t,
-                                        output_tokens_t, presence_penalties_t,
-                                        frequency_penalties_t,
-                                        repetition_penalties_t)
-    return logits
+        apply_sampling_penalties(logits, prompt_tokens_t, output_tokens_t,
+                                 presence_penalties_t, frequency_penalties_t,
+                                 repetition_penalties_t)
 
 
 def _convert_to_tensors(prompt_token_ids: List[List[int]],
