@@ -146,9 +146,6 @@ def apply_fp8_linear(
 
             return output[0:input_2d.shape[0], ...].view(*output_shape)
 
-            return torch.narrow(output, 0, 0,
-                                input_2d.shape[0]).view(*output_shape)
-
         else:
             # Fallback for channelwise case, where we use unfused DQ
             # due to limitations with scaled_mm
