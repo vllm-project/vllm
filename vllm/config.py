@@ -2380,6 +2380,9 @@ class CompilationConfig(BaseModel):
             if self.inductor_compile_sizes is None:
                 self.inductor_compile_sizes = []
             self.compile_sizes = self.inductor_compile_sizes
+        
+        # sort to make sure cudagraph capture sizes are in descending order
+        self.capture_sizes.sort(reverse=True)
 
     @staticmethod
     def get_graph_batch_size(batch_size: int) -> int:
