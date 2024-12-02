@@ -411,7 +411,8 @@ class Scheduler:
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
 
-        self.lora_scheduler = LoRAScheduler(self.lora_config)
+        if self.lora_enabled:
+            self.lora_scheduler = LoRAScheduler(self.lora_config)
 
     @property
     def next_cache_id(self):
@@ -581,14 +582,15 @@ class Scheduler:
                     swapped_out.append(victim_seq_group)
         
         if self.lora_enabled:
+            assert allowed_loras is not None
             running_temp = []
             while self.running:
-                running_temp.push(self.running.popleft())
+                running_temp.append(self.running.popleft())
             for seq_group in running_temp:
                 if seq_group.lora_int_id > 0 and seq_group.lora_int_id not in allowed_loras:
                     preempt_seq_group(seq_group)
                 else:
-                    self.running.push(seq_group)
+                    self.running.append(seq_group)
             del running_temp
         
         running_queue = self.running
