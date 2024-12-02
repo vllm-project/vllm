@@ -39,12 +39,6 @@ we attempt to override the default pooler based on its Sentence Transformers con
 You can customize the model's pooling method via the :code:`override_pooler_config` option,
 which takes priority over both the model's and Sentence Transformers's defaults.
 
-.. tip::
-
-    Technically, any :ref:`generative model <generative_models>` in vLLM can be converted into a pooling model
-    by aggregating and returning the hidden states directly, skipping the generation step.
-    Nevertheless, to get the best results, you should use pooling models that are specifically trained as such.
-
 ``LLM.encode``
 ^^^^^^^^^^^^^^
 

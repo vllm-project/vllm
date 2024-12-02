@@ -3,12 +3,18 @@
 Supported Models
 ================
 
-vLLM supports models from `HuggingFace (HF) Transformers <https://huggingface.co/models>`_ across a variety of tasks.
+vLLM supports generative and pooling models across various tasks.
+If a model supports more than one task, you can set the task via the :code:`--task` argument.
 
-This page lists the tasks and corresponding model architectures that are currently supported by vLLM.
+For each task, we list the model architectures that have been implemented in vLLM.
 Alongside each architecture, we include some popular models that use it.
 
-For other models, you can check the :code:`config.json` file inside the model repository.
+HuggingFace Hub
+^^^^^^^^^^^^^^^
+
+By default, vLLM loads models from `HuggingFace (HF) Hub <https://huggingface.co/models>`_.
+
+To determine whether a given model is supported, you can check the :code:`config.json` file inside the HF repository.
 If the :code:`"architectures"` field contains a model architecture listed below, then it should be supported in theory.
 
 .. tip::
@@ -28,42 +34,47 @@ If the :code:`"architectures"` field contains a model architecture listed below,
         output = llm.encode("Hello, my name is")
         print(output)
 
-    If vLLM successfully generates text, it indicates that your model is supported.
+    If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
 for instructions on how to implement your model in vLLM.
 Alternatively, you can `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ to request vLLM support.
 
-.. note::
-    To use models from `ModelScope <https://www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
+ModelScope
+^^^^^^^^^^
 
-    .. code-block:: shell
+To use models from `ModelScope <https://www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
 
-       $ export VLLM_USE_MODELSCOPE=True
+.. code-block:: shell
 
-    And use with :code:`trust_remote_code=True`.
+    $ export VLLM_USE_MODELSCOPE=True
 
-    .. code-block:: python
+And use with :code:`trust_remote_code=True`.
 
-        from vllm import LLM
+.. code-block:: python
 
-        llm = LLM(model=..., revision=..., task=..., trust_remote_code=True)
+    from vllm import LLM
 
-        # For generative models (task=generate) only
-        output = llm.generate("Hello, my name is")
-        print(output)
+    llm = LLM(model=..., revision=..., task=..., trust_remote_code=True)
 
-        # For pooling models (task={embed,classify,reward}) only
-        output = llm.encode("Hello, my name is")
-        print(output)
+    # For generative models (task=generate) only
+    output = llm.generate("Hello, my name is")
+    print(output)
+
+    # For pooling models (task={embed,classify,reward}) only
+    output = llm.encode("Hello, my name is")
+    print(output)
 
 Text-only Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Text Generation (``--task generate``)
--------------------------------------
+Generative Models
++++++++++++++++++
 
 See :ref:`this page <generative_models>` for more information on how to use generative models.
+
+Text Generation (``--task generate``)
+-------------------------------------
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -343,16 +354,24 @@ See :ref:`this page <generative_models>` for more information on how to use gene
 .. note::
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
+Pooling Models
+++++++++++++++
+
+See :ref:`this page <pooling_models>` for more information on how to use pooling models.
+
+.. important::
+    Since some model architectures support both generative and pooling tasks,
+    you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
+
 Text Embedding (``--task embed``)
 ---------------------------------
 
-See :ref:`this page <pooling_models>` for more information on how to use embedding models.
-
 Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
-The following table lists those that are tested in vLLM.
 
-.. important::
-  You should explicitly specify the task, otherwise it may default to text generation instead.
+.. note::
+    To get the best results, you should use pooling models that are specifically trained as such.
+
+The following table lists those that are tested in vLLM.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -408,11 +427,6 @@ The following table lists those that are tested in vLLM.
 Reward Modeling (``--task reward``)
 -----------------------------------
 
-See :ref:`this page <pooling_models>` for more information on how to use reward models.
-
-.. important::
-  You should explicitly specify the task, otherwise it may default to text generation instead.
-
 .. list-table::
   :widths: 25 25 50 5 5
   :header-rows: 1
@@ -440,11 +454,6 @@ See :ref:`this page <pooling_models>` for more information on how to use reward 
 Classification (``--task classify``)
 ------------------------------------
 
-See :ref:`this page <pooling_models>` for more information on how to use classification models.
-
-.. important::
-  You should explicitly specify the task, otherwise it may default to text generation instead.
-
 .. list-table::
   :widths: 25 25 50 5 5
   :header-rows: 1
@@ -462,11 +471,6 @@ See :ref:`this page <pooling_models>` for more information on how to use classif
 
 Sentence Pair Scoring (``--task score``)
 ----------------------------------------
-
-See :ref:`this page <pooling_models>` for more information on how to use reranking models.
-
-.. important::
-  You should explicitly specify the task, otherwise it may default to text generation instead.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -493,6 +497,8 @@ See :ref:`this page <pooling_models>` for more information on how to use reranki
     - 
     - 
 
+.. _supported_mm_models:
+
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -513,12 +519,13 @@ On the other hand, modalities separated by :code:`/` are mutually exclusive.
 
 See :ref:`this page <multimodal_inputs>` on how to pass multi-modal inputs to the model.
 
-.. _supported_mm_models:
+Generative Models
++++++++++++++++++
+
+See :ref:`this page <generative_models>` for more information on how to use generative models.
 
 Text Generation (``--task generate``)
 -------------------------------------
-
-See :ref:`this page <generative_models>` for more information on how to use generative models.
 
 .. list-table::
   :widths: 25 25 15 25 5 5
@@ -694,16 +701,24 @@ See :ref:`this page <generative_models>` for more information on how to use gene
   The official :code:`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
-Multimodal Embedding (``--task embed``)
----------------------------------------
+Pooling Models
+++++++++++++++
 
-See :ref:`this page <pooling_models>` for more information on how to use embedding models.
-
-Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
-The following table lists those that are tested in vLLM.
+See :ref:`this page <pooling_models>` for more information on how to use pooling models.
 
 .. important::
-  You should explicitly specify the task, otherwise it may default to text generation instead.
+    Since some model architectures support both generative and pooling tasks,
+    you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
+
+Text Embedding (``--task embed``)
+---------------------------------
+
+Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
+
+.. note::
+    To get the best results, you should use pooling models that are specifically trained as such.
+
+The following table lists those that are tested in vLLM.
 
 .. list-table::
   :widths: 25 25 15 25 5 5
@@ -733,6 +748,8 @@ The following table lists those that are tested in vLLM.
     - :code:`MrLight/dse-qwen2-2b-mrl-v1`
     - 
     - ✅︎
+
+----
 
 Model Support Policy
 =====================
