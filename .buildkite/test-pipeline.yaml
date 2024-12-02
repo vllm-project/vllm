@@ -174,15 +174,6 @@ steps:
   commands:
     - VLLM_USE_V1=1 pytest -v -s v1
 
-- label: V1 Fast Test
-  #mirror_hardwares: [amd]
-  fast_check: true
-  source_file_dependencies:
-    - vllm/
-    - tests/v1
-  commands:
-    - VLLM_USE_V1=1 pytest -v -s v1/samplers/test_logprobs.py::test_fast_get_logprobs_and_prompt_logprobs
-
 - label: Examples Test # 15min
   working_dir: "/vllm-workspace/examples"
   #mirror_hardwares: [amd]
