@@ -798,7 +798,7 @@ class LLM:
                     "Your model supports the 'pooling' runner, but is "
                     f"currently initialized for the '{runner_type}' runner. "
                     "Please initialize vLLM using `--task embed`, "
-                    "`--task classify`, `--task reward` etc.")
+                    "`--task classify`, `--task score` etc.")
 
             raise ValueError(" ".join(messages))
 
@@ -871,7 +871,7 @@ class LLM:
                     "Your model supports the 'pooling' runner, but is "
                     f"currently initialized for the '{runner_type}' runner. "
                     "Please initialize vLLM using `--task embed`, "
-                    "`--task classify`, `--task reward` etc.")
+                    "`--task classify`, `--task score` etc.")
 
             raise ValueError(" ".join(messages))
 

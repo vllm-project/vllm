@@ -24,13 +24,15 @@ See :ref:`Engine Arguments <engine_args>` for a list of options when initializin
 For pooling models, we support the following :code:`task` options:
 
 - Embedding (:code:`"embed"` / :code:`"embedding"`)
-- Classification (:code:`"classify"`/ :code:`"score"`) -- reranking models fall under this category.
+- Classification (:code:`"classify"`)
+- Sentence Pair Scoring (:code:`"score"`)
 - Reward Modeling (:code:`"reward"`)
 
 The selected task determines the default :class:`~vllm.model_executor.layers.Pooler` that is used:
 
 - Embedding: Extract only the hidden states corresponding to the last token, and apply normalization.
 - Classification: Extract only the hidden states corresponding to the last token, and apply softmax.
+- Sentence Pair Scoring: Extract only the hidden states corresponding to the last token, and apply softmax.
 - Reward Modeling: Extract all of the hidden states and return them directly.
 
 When loading `Sentence Transformers <https://huggingface.co/sentence-transformers>`__ models,

@@ -47,15 +47,16 @@ _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
-                     "score", "reward", ]
+                     "score", "reward"]
 
-_ResolvedTask = Literal["generate", "embed", "classify", "reward", "draft"]
+_ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
+                        "draft"]
 
 RunnerType = Literal["generate", "pooling", "draft"]
 
 _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
     "generate": ["generate"],
-    "pooling": ["embed", "classify", "reward"],
+    "pooling": ["embed", "classify", "score", "reward"],
 }
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
@@ -368,8 +369,11 @@ class ModelConfig:
         architectures: List[str],
         supported_tasks: Set[_ResolvedTask],
     ) -> Optional[_ResolvedTask]:
-        if get_pooling_config(self.model, self.revision):
+        model_id = self.model
+        if get_pooling_config(model_id, self.revision):
             return "embed"
+        if model_id.startswith("cross-encoder/") or "-reranker" in model_id:
+            return "score"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
@@ -437,13 +441,12 @@ class ModelConfig:
                 if preferred_task != "embed":
                     msg = ("The 'embedding' task will be restricted to "
                            "embedding models in a future release. Please "
-                           "pass `--task classify` or `--task reward` "
-                           "explicitly for other types of pooling models.")
+                           "pass `--task classify`, `--task score`, or "
+                           "`--task reward` explicitly for other pooling "
+                           "models.")
                     warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
                 task_option = preferred_task or "embed"
-            if task_option == "score":
-                task_option = "classify"
 
             if task_option not in supported_tasks:
                 msg = (
