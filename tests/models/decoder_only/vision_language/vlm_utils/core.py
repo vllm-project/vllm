@@ -29,6 +29,8 @@ def run_test(
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
     comparator: Callable[..., None],
     get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]],
+    stop_str: Optional[List[str]],
+    tokenizer_mode: str,
     limit_mm_per_prompt: Dict[str, int],
     model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
@@ -50,11 +52,14 @@ def run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    vllm_kwargs = {}
+    vllm_kwargs: Dict[str, Any] = {}
     if get_stop_token_ids is not None:
         vllm_kwargs["stop_token_ids"] = get_stop_token_ids(tokenizer)
+    if stop_str:
+        vllm_kwargs["stop"] = stop_str
 
     with vllm_runner(model,
+                     tokenizer_mode=tokenizer_mode,
                      max_model_len=max_model_len,
                      max_num_seqs=max_num_seqs,
                      dtype=dtype,
@@ -85,6 +90,8 @@ def run_test(
     hf_kwargs = {}
     if use_tokenizer_eos:
         hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
+    if stop_str:
+        hf_kwargs["stop_strings"] = stop_str
 
     with hf_model, torch.no_grad():
         for prompts, media in inputs:
