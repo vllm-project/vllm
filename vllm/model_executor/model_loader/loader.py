@@ -1139,11 +1139,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         from vllm.model_executor.models.utils import is_pp_missing_parameter
 
         for quant_param_name in quant_state_dict:
-            # Models like Clip/Siglip may skip some layers in initialization,
-            # causing unused quant_param_name in state_dict.
-            if quant_param_name not in param_dict:
-                continue
-
             if is_pp_missing_parameter(quant_param_name, model):
                 continue
 
@@ -1164,6 +1159,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     quant_param_name = quant_param_name.replace(
                         shard_name, weight_name)
                     break
+
+            # Models like Clip/Siglip may skip some layers in initialization,
+            # causing unused quant_param_name in state_dict.
+            if quant_param_name not in param_dict:
+                continue
 
             if quant_param_name not in stacked_quant_state_dict:
                 stacked_quant_state_dict[quant_param_name] = {}
