@@ -36,7 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.platforms import _Backend
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -987,7 +987,11 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     if "image_masks" in out:
         dummy_imgdata["image_masks"] = out["image_masks"]
     dummy_imgdata["seq_len"] = torch.tensor(seq_len, dtype=torch.long)
-    return DummyData(dummy_seqdata, {"image": dummy_imgdata})
+    return DummyData(seq_data=dummy_seqdata,
+                     multi_modal_data={"image": dummy_imgdata},
+                     multi_modal_placeholders={
+                         "image": [PlaceholderRange(offset=0, length=seq_len)]
+                     })
 
 
 def pad_images(
@@ -1075,19 +1079,25 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
     if image_masks is not None:
         image_data["image_masks"] = image_masks
 
-    image_data["seq_len"] = torch.tensor(len(out["input_ids"]),
+    new_prompt_token_ids = out["input_ids"].tolist()
+    image_data["seq_len"] = torch.tensor(len(new_prompt_token_ids),
                                          dtype=torch.long)
 
     multi_modal_data = dict(image=image_data)
 
     prompt = inputs.get("prompt")
     if prompt is None:
-        prompt = tokenizer.decode(out["input_ids"])
+        prompt = tokenizer.decode(new_prompt_token_ids)
 
+    # PlaceholderRange for Molmo spans over the entire sequence.
     return token_inputs(
-        prompt_token_ids=out["input_ids"],
+        prompt_token_ids=new_prompt_token_ids,
         prompt=prompt,
         multi_modal_data=multi_modal_data,
+        multi_modal_placeholders={
+            "image":
+            [PlaceholderRange(offset=0, length=len(new_prompt_token_ids))]
+        },
     )
 
 
@@ -1198,9 +1208,12 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         # Note: In this original implementation from AI2, the final
         # vision_embeddings will be always be the same length
-        # of input embedddings, which is not very efficient.
+        # of input embeddings, which is not very efficient.
         # TODO(ywang96): see if this can be optimized.
         vision_embeddings = torch.einsum('nd,nm->md', image_features, mat)
+
+        # Split by the sizes of the input sequences.
+        vision_embeddings = vision_embeddings.split(seq_len.tolist())
         return vision_embeddings
 
     def get_input_embeddings(
@@ -1210,6 +1223,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
+            assert isinstance(multimodal_embeddings, (list, tuple))
+            multimodal_embeddings = torch.cat(multimodal_embeddings, dim=0)
             inputs_embeds = inputs_embeds + multimodal_embeddings
         return inputs_embeds
 
