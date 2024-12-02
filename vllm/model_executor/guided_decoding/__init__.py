@@ -16,14 +16,15 @@ logger = init_logger(__name__)
 
 def maybe_backend_fallback(
         guided_params: GuidedDecodingParams) -> GuidedDecodingParams:
-    # Since lm-format-enforce doesn't support grammar, we fallback to xgrammar
-    if guided_params.backend == "lm-format-enforcer" and guided_params.grammar is not None:
+    # Since lm-format-enforce doesn't support grammar, fallback to xgrammar
+    if (guided_params.backend == "lm-format-enforcer"
+            and guided_params.grammar is not None):
         logger.warning(
             "lm-format-enforcer does not support grammar guided decoding. "
             "Falling back to use xgrammar instead.")
         guided_params.backend = "xgrammar"
 
-    # Since xgrammar backend only supports json or grammar, we fallback to outlines for others
+    # Since xgrammar backend only supports json/grammar, fallback to outlines
     xgrammar_supports = any(
         [guided_params.json is not None, guided_params.grammar is not None])
     if guided_params.backend == "xgrammar" and not xgrammar_supports:
