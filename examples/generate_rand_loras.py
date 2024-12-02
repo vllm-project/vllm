@@ -1,20 +1,19 @@
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 from peft import LoraConfig, get_peft_model
 from faker import Faker
+from datasets import Dataset
 
 OUT_DIR = "out"
 
-def post_process_model(model, tokenizer):
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model.config.pad_token_id = tokenizer.pad_token_id
-    model.config.eos_token_id = tokenizer.eos_token_id
-    return model
-
 # Load a base model and tokenizer
-base_model_name = "gpt2"
+base_model_name = "meta-llama/Llama-3.2-1B"
 tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
+
+def generate_fake_data(num_samples):
+    fake = Faker()
+    sentences = [f"lora: {fake.sentence()}" for _ in range(num_samples)]
+    return {"text": sentences}
 
 def train_lora(name):
     lora_config = LoraConfig(
@@ -22,34 +21,55 @@ def train_lora(name):
         lora_alpha=16,  # Scaling factor
         lora_dropout=0.1,  # Dropout for LoRA layers
         bias="none",  # Bias setting for LoRA layers
-        fan_in_fan_out=True,
         task_type="CAUSAL_LM"  # Task type for the model
     )
-    lora_model = post_process_model(get_peft_model(AutoModelForCausalLM.from_pretrained(base_model_name), lora_config), tokenizer)
+    
+    # Create the LoRA model
+    model = AutoModelForCausalLM.from_pretrained(base_model_name)
+    model = get_peft_model(model, lora_config)
 
-    fake = Faker()
+    # Generate fake training data
+    fake_data = generate_fake_data(num_samples=1)
+    dataset = Dataset.from_dict(fake_data)
 
-    garbage_data = [f"lora: {fake.sentence()}"]
-    print(name, garbage_data)
-    inputs = tokenizer(garbage_data, return_tensors="pt", padding=True, truncation=True)
-    lora_model.train()
-    optimizer = torch.optim.AdamW(lora_model.parameters(), lr=5e-3)
-    for epoch in range(10):
-        optimizer.zero_grad()
-        outputs = lora_model(**inputs, labels=inputs["input_ids"])
-        loss = outputs.loss
-        loss.backward()
-        optimizer.step()
-        # print(f"Epoch {epoch + 1}, Loss: {loss.item()}")
+    # Tokenize dataset
+    def tokenize_function(examples):
+        tokens = tokenizer(examples["text"], padding="max_length", truncation=True, max_length=128)
+        tokens["labels"] = tokens["input_ids"].copy()
+        return tokens
 
-    lora_model.save_pretrained(f"{OUT_DIR}/{name}")
+    tokenized_dataset = dataset.map(tokenize_function, batched=True)
 
-# Test
-from peft import PeftModel
+    # Define training arguments
+    training_args = TrainingArguments(
+        output_dir=f"{OUT_DIR}/{name}",
+        overwrite_output_dir=True,
+        num_train_epochs=100,
+        per_device_train_batch_size=8,
+        logging_steps=1,
+        learning_rate=1e-3,
+        eval_strategy="no",
+        report_to=None
+    )
 
-def load_lora(name):
-    lora_model = post_process_model(PeftModel.from_pretrained(AutoModelForCausalLM.from_pretrained(base_model_name), f"{OUT_DIR}/{name}"), tokenizer)
-    return lora_model
+    # Create the Trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_dataset,
+        tokenizer=tokenizer
+    )
+
+    # Train the model
+    trainer.train()
+
+    # Save the trained LoRA model
+    trainer.save_model(f"{OUT_DIR}/{name}")
+    print(f"Model saved to {OUT_DIR}/{name}")
+
+def load_model(name):
+    model = AutoModelForCausalLM.from_pretrained(f"{OUT_DIR}/{name}")
+    return model
 
 def test(model):
     model.eval()
@@ -63,6 +83,8 @@ def test(model):
         attention_mask=attention_mask,
         max_new_tokens=20,
         do_sample=False,
+        temperature=None,
+        top_p=None,
         pad_token_id=model.config.pad_token_id,  # Explicitly set
         eos_token_id=model.config.eos_token_id   # Explicitly set
     )
@@ -70,11 +92,10 @@ def test(model):
 
 if __name__ == "__main__":
     # Train
-    for i in range(100):
+    for i in range(10):
         train_lora(f"lora{i}")
 
     # Test
-    base_model = post_process_model(AutoModelForCausalLM.from_pretrained(base_model_name), tokenizer)
-    test(base_model)
-    for i in range(100):
-        test(load_lora(f"lora{i}"))
+    test(AutoModelForCausalLM.from_pretrained(base_model_name))
+    for i in range(10):
+        test(load_model(f"lora{i}"))

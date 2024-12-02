@@ -580,6 +580,9 @@ class Scheduler:
                     preempted.append(victim_seq_group)
                 else:
                     swapped_out.append(victim_seq_group)
+            
+            if self.lora_enabled and curr_loras is not None and victim_seq_group.lora_int_id > 0 and victim_seq_group.lora_int_id in curr_loras:
+                curr_loras.remove(victim_seq_group.lora_int_id)
         
         if self.lora_enabled:
             assert allowed_loras is not None
@@ -859,6 +862,9 @@ class Scheduler:
             A count of priority-based preemptions.
         """
 
+        # NOTE: We're not going to handle lora_enabled for now.
+        assert not self.lora_enabled
+
         waiting_queue = self.waiting
 
         running_queue = deque(sorted(self.running, key=self._get_priority))
@@ -1086,11 +1092,16 @@ class Scheduler:
         for seq_group in self.running:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
+        
+        if self.lora_enabled:
+            self._update_loras()
+        
+        allowed_loras = self.lora_scheduler.schedule_loras() if self.lora_enabled else None
 
         curr_loras = set(
             seq_group.lora_int_id for seq_group in self.running
             if seq_group.lora_int_id > 0) if self.lora_enabled else None
-
+        
         prefills = SchedulerPrefillOutputs.create_empty()
         running_scheduled = SchedulerRunningOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
@@ -1099,7 +1110,7 @@ class Scheduler:
         if not self.swapped:
             prefills = self._schedule_prefills(budget,
                                                curr_loras,
-                                               None,  # TODO: come back and change this
+                                               allowed_loras,
                                                enable_chunking=False)
 
         if len(prefills.seq_groups
@@ -1112,14 +1123,14 @@ class Scheduler:
         if len(prefills.seq_groups) == 0:
             running_scheduled = self._schedule_running(budget,
                                                        curr_loras,
-                                                       None,  # TODO: come back and change this
+                                                       allowed_loras,
                                                        enable_chunking=False)
 
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
             if len(running_scheduled.preempted) + len(
                     running_scheduled.swapped_out) == 0:
-                swapped_in = self._schedule_swapped(budget, curr_loras, None)  # TODO: come back and change this
+                swapped_in = self._schedule_swapped(budget, curr_loras, allowed_loras)
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)

@@ -30,14 +30,14 @@ def create_test_prompts(
 
     prompts = []
     for _ in range(10):
-        for i in range(10):
+        for i in range(2):
             prompts.append((
                 sentence,
                 SamplingParams(temperature=0.0,
                             logprobs=1,
                             prompt_logprobs=1,
                             max_tokens=64,
-                            stop_token_ids=[50256]),
+                            stop_token_ids=[128001]),
                 LoRARequest(f"lora{i}", i, f"{base_path}/lora{i}")
             ))
 
