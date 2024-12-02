@@ -8,7 +8,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm.compilation.compile_context import set_compile_context
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
@@ -548,10 +547,9 @@ class GPUModelRunner:
             torch.tensor([], dtype=torch.float32, device=self.device)
             for _ in range(self.num_attn_layers)
         ]
-        with set_compile_context(self.cudagraph_batch_sizes):
-            # Trigger compilation for general shape.
-            hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                            dummy_kv_caches)
+        # Trigger compilation for general shape.
+        hidden_states = self._dummy_run(self.model, self.max_num_tokens,
+                                        dummy_kv_caches)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
