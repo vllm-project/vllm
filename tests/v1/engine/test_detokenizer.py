@@ -3,6 +3,7 @@ from typing import Dict, List, Union
 
 import pytest
 from transformers import AutoTokenizer
+from transformers.tokenization_utils import PreTrainedTokenizer
 
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
@@ -13,10 +14,23 @@ random.seed(42)
 NUM_SAMPLE_LOGPROBS = 5
 NUM_PROMPT_LOGPROBS = 7
 
+TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+
+
+def _duplicate_logprob_with_decode(
+    logprob: Logprob,
+    token_id: int,
+    tokenizer: PreTrainedTokenizer,
+) -> Logprob:
+    return Logprob(logprob.logprob, logprob.rank,
+                   tokenizer.decode(token_id, skip_special_tokens=True))
+
 
 def _generate_dummy_single_logprob(
     num_logprobs: int,
     is_sample_logprobs: bool,
+    tokenizer: PreTrainedTokenizer,
 ) -> Dict[int, Logprob]:
     adjusted_num_logprobs = (num_logprobs + random.choice([0, 1])
                              if is_sample_logprobs else num_logprobs)
@@ -32,15 +46,23 @@ def _generate_dummy_logprobs(
     tokens_list: List,
     num_logprobs: int,
     is_sample_logprobs: bool,
+    tokenizer: PreTrainedTokenizer,
 ) -> Union[SampleLogprobs, PromptLogprobs]:
     return [
-        _generate_dummy_single_logprob(num_logprobs, is_sample_logprobs)
-        for _ in tokens_list
+        _generate_dummy_single_logprob(num_logprobs, is_sample_logprobs,
+                                       tokenizer) for _ in tokens_list
     ]
 
 
-TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
-tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+def _new_logprobs_detokenized(
+    logprobs: Union[SampleLogprobs, PromptLogprobs],
+    tokenizer: PreTrainedTokenizer,
+) -> Union[SampleLogprobs, PromptLogprobs]:
+    return [{
+        tok_id: _duplicate_logprob_with_decode(lp, tok_id, tokenizer)
+        for tok_id, lp in lp_dict.items()
+    } for lp_dict in logprobs]
+
 
 FULL_STRINGS = [
     "My name is Robert from Neural Magic and I love working on vLLM so much!",
@@ -58,8 +80,13 @@ PROMPT_TOKENS = [
 PROMPT_LOGPROBS_RAW = [
     _generate_dummy_logprobs(tokens_list=tokens_list,
                              num_logprobs=NUM_PROMPT_LOGPROBS,
-                             is_sample_logprobs=False)
+                             is_sample_logprobs=False,
+                             tokenizer=tokenizer)
     for tokens_list in PROMPT_TOKENS
+]
+PROMPT_LOGPROBS = [
+    _new_logprobs_detokenized(logprobs=logprobs, tokenizer=tokenizer)
+    for logprobs in PROMPT_LOGPROBS_RAW
 ]
 GENERATION_TOKENS = [
     tokenizer(text).input_ids[PROMPT_LEN:] for text in FULL_STRINGS
@@ -67,12 +94,18 @@ GENERATION_TOKENS = [
 GENERATION_LOGPROBS_RAW = [
     _generate_dummy_logprobs(tokens_list=tokens_list,
                              num_logprobs=NUM_SAMPLE_LOGPROBS,
-                             is_sample_logprobs=True)
+                             is_sample_logprobs=True,
+                             tokenizer=tokenizer)
     for tokens_list in GENERATION_TOKENS
 ]
+GENERATION_LOGPROBS = [
+    _new_logprobs_detokenized(logprobs=logprobs, tokenizer=tokenizer)
+    for logprobs in GENERATION_LOGPROBS_RAW
+]
 PROMPT_STRINGS = [
-    tokenizer.decode(prompt_tokens, skip_special_tokens=True)
-    for prompt_tokens in PROMPT_TOKENS
+    tokenizer.decode(prompt_tokens,
+                     skip_special_tokens=True,
+                     tokenizer=tokenizer) for prompt_tokens in PROMPT_TOKENS
 ]
 PROMPT_STRINGS_LEN = [len(prompt_string) for prompt_string in PROMPT_STRINGS]
 GENERATION_STRINGS = [
