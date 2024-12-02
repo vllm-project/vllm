@@ -116,9 +116,9 @@ class FlashAttentionImpl(AttentionImpl):
         """Forward pass with FlashAttention.
 
         Args:
-            query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
@@ -133,14 +133,6 @@ class FlashAttentionImpl(AttentionImpl):
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
-
-        # Reshape the query, key, and value tensors.
-        # NOTE(woosuk): We do this outside the custom op to minimize the CPU
-        # overheads from the non-CUDA-graph regions.
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
-        output = output.view(-1, self.num_heads, self.head_size)
 
         kv_cache_dtype: str = self.kv_cache_dtype
         softmax_scale: float = self.scale

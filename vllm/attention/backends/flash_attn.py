@@ -643,10 +643,10 @@ class FlashAttentionImpl(AttentionImpl):
         """Forward pass with FlashAttention.
 
         Args:
-            query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
-            output: shape = [num_tokens, num_heads * head_size]
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            output: shape = [num_tokens, num_heads, head_size]
             kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
                 NOTE: kv_cache will be an empty tensor with shape [0]
                 for profiling run.
@@ -669,9 +669,6 @@ class FlashAttentionImpl(AttentionImpl):
                                  "requires setting cross-attention "
                                  "metadata attributes.")
 
-        num_heads: int = self.num_heads
-        head_size: int = self.head_size
-        num_kv_heads: int = self.num_kv_heads
         kv_cache_dtype: str = self.kv_cache_dtype
         softmax_scale: float = self.scale
         window_size = self.sliding_window
@@ -679,13 +676,6 @@ class FlashAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = self.logits_soft_cap
 
         num_tokens, hidden_size = query.shape
-
-        # Reshape the query, key, and value tensors.
-        query = query.view(-1, num_heads, head_size)
-        output = output.view(-1, num_heads, head_size)
-        if (key is not None) and (value is not None):
-            key = key.view(-1, num_kv_heads, head_size)
-            value = value.view(-1, num_kv_heads, head_size)
 
         if kv_cache.numel() > 0:
             key_cache = kv_cache[0]
