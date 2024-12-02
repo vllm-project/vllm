@@ -264,7 +264,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
 
-  // Test
+  // CUTLASS sparse GEMM, supporting symmetric per-tensor or per-row/column
+  // quantization, as well as bias
   ops.def(
       "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
       "                  Tensor e,"
@@ -272,11 +273,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
 
-  // Test
+  // CUTLASS sparse GEMM, supporting asymmetric per-tensor or per-row/column
+  // quantization.
+  ops.def(
+      "cutlass_scaled_sparse_mm_azp(Tensor! out, Tensor a,"
+      "                  Tensor e,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor azp_adj,"
+      "                  Tensor? azp, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_sparse_mm_azp", torch::kCUDA, &cutlass_scaled_sparse_mm_azp);
+
+  // Check if cutlass scaled_mm is supported for CUDA devices of the given
+  // capability
   ops.def("cutlass_scaled_sparse_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_sparse_mm_supports_fp8", &cutlass_scaled_sparse_mm_supports_fp8);
 
-  // Test
+  // CUTLASS sparse tile compressor
   ops.def("cutlass_compress_entry(Tensor! a_compressed, Tensor! e,"
           " Tensor a) -> bool");
   ops.impl("cutlass_compress_entry", &cutlass_compress_entry);

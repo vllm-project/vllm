@@ -554,6 +554,29 @@ def cutlass_scaled_sparse_mm(a: torch.Tensor,
     return out.t()
 
 
+def cutlass_scaled_mm_azp(a: torch.Tensor,
+                          e: torch.Tensor,
+                          b: torch.Tensor,
+                          scale_a: torch.Tensor,
+                          scale_b: torch.Tensor,
+                          out_dtype: torch.dtype,
+                          azp_adj: torch.Tensor,
+                          azp: Optional[torch.Tensor] = None,
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.numel(
+    ) == b.shape[1] and bias.dtype == out_dtype
+
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((n, m), dtype=out_dtype, device=a.device).t()
+
+    torch.ops._C.cutlass_scaled_mm_azp(out, a, e, b, scale_a, scale_b, azp_adj,
+                                       azp, bias)
+    return out
+
+
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
