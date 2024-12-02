@@ -146,7 +146,7 @@ class MockEngineCore:
                     request_id=f"request-{req_idx}",
                     new_token_ids=[generated_token_ids[token_idx]],
                     finished=False,
-                    logprobs=self.generated_logprobs_raw[req_idx][token_idx]
+                    logprobs=[self.generated_logprobs_raw[req_idx][token_idx]]
                     if do_logprobs else None,
                     prompt_logprobs=self.prompt_logprobs_raw[req_idx]
                     if do_prompt_logprobs else None,
