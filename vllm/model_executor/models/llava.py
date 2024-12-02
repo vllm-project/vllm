@@ -13,7 +13,8 @@ from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -62,8 +63,11 @@ LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageEmbeddingInputs]
 
 class LlavaMultiModalProjector(nn.Module):
 
-    def __init__(self, vision_hidden_size: int, text_hidden_size: int,
-                 projector_hidden_act: str, quant_config: QuantizationConfig=None,
+    def __init__(self,
+                 vision_hidden_size: int,
+                 text_hidden_size: int,
+                 projector_hidden_act: str,
+                 quant_config: Optional[QuantizationConfig] = None,
                  prefix=""):
         super().__init__()
 
