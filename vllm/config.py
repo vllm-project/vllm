@@ -359,7 +359,7 @@ class ModelConfig:
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
             "generate": ModelRegistry.is_text_generation_model(architectures),
-            "embedding": ModelRegistry.is_embedding_model(architectures),
+            "embedding": ModelRegistry.is_pooling_model(architectures),
         }
         supported_tasks_lst: List[_Task] = [
             task for task, is_supported in task_support.items() if is_supported
@@ -370,6 +370,31 @@ class ModelConfig:
             selected_task = next(iter(supported_tasks_lst))
 
             if len(supported_tasks) > 1:
+                suffix_to_preferred_task: List[Tuple[str, _Task]] = [
+                    # Hardcode the models that are exceptions
+                    ("AquilaModel", "generate"),
+                    ("ChatGLMModel", "generate"),
+                    # Other models follow this pattern
+                    ("ForCausalLM", "generate"),
+                    ("ForConditionalGeneration", "generate"),
+                    ("ChatModel", "generate"),
+                    ("LMHeadModel", "generate"),
+                    ("EmbeddingModel", "embedding"),
+                    ("RewardModel", "embedding"),
+                    ("ForSequenceClassification", "embedding"),
+                ]
+                info, arch = ModelRegistry.inspect_model_cls(architectures)
+
+                for suffix, pref_task in suffix_to_preferred_task:
+                    if arch.endswith(suffix) and pref_task in supported_tasks:
+                        selected_task = pref_task
+                        break
+                else:
+                    if (arch.endswith("Model")
+                            and info.architecture.endswith("ForCausalLM")
+                            and "embedding" in supported_tasks):
+                        selected_task = "embedding"
+
                 logger.info(
                     "This model supports multiple tasks: %s. "
                     "Defaulting to '%s'.", supported_tasks, selected_task)
@@ -393,17 +418,11 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = QUANTIZATION_METHODS
-        rocm_supported_quantization = [
-            "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-            "fbgemm_fp8", "gguf"
-        ]
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
             "compressed-tensors", "experts_int8"
         ]
-        tpu_supported_quantization = ["tpu_int8"]
-        neuron_supported_quantization = ["neuron_quant"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -438,32 +457,12 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
-            if current_platform.is_rocm(
-            ) and self.quantization not in rocm_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in ROCm.")
-            if current_platform.is_tpu(
-            ) and self.quantization not in tpu_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in TPU Backend.")
+            current_platform.verify_quantization(self.quantization)
             if self.quantization not in optimized_quantization_methods:
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.", self.quantization)
-            if (self.quantization == "awq" and current_platform.is_rocm()
-                    and not envs.VLLM_USE_TRITON_AWQ):
-                logger.warning(
-                    "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
-                    " is not set, enabling VLLM_USE_TRITON_AWQ.")
-                envs.VLLM_USE_TRITON_AWQ = True
-            if current_platform.is_neuron(
-            ) and self.quantization not in neuron_supported_quantization:
-                raise ValueError(
-                    f"{self.quantization} quantization is currently not "
-                    f"supported in Neuron Backend.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
@@ -2053,6 +2052,88 @@ class ObservabilityConfig:
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
 
+class KVTransferConfig(BaseModel):
+    """Configuration for distributed KV cache transfer."""
+
+    # The KV connector for vLLM to transmit KV caches between vLLM instances.
+    kv_connector: Optional[str] = None
+
+    # The device used by kv connector to buffer the KV cache.
+    # Currently only support 'cuda'.
+    kv_buffer_device: Optional[str] = "cuda"
+
+    # The buffer size for TorchDistributedConnector. Measured in number of
+    # bytes. Recommended value: 1e9 (about 1GB).
+    kv_buffer_size: float = 1e9
+
+    # Whether this vLLM instance produces, consumes KV cache, or both. Choices
+    # are 'kv_producer', 'kv_consumer', and 'both'.
+    kv_role: Optional[str] = None
+
+    # The rank of this vLLM instance in the KV cache transfer. Typical value:
+    # 0 for prefill instance, 1 for decode instance.
+    # Currently only 1P1D is supported.
+    kv_rank: Optional[int] = None
+
+    # The number of parallel instances for KV cache transfer. For
+    # PyNcclConnector, this should be 2.
+    kv_parallel_size: int = 1
+
+    # The KV connector ip, used to build distributed connection
+    kv_ip: str = "127.0.0.1"
+
+    # The KV connector port, used to build distributed connection
+    kv_port: int = 14579
+
+    @classmethod
+    def from_cli(cls, cli_value: str) -> "KVTransferConfig":
+        """Parse the CLI value for the compilation config."""
+        return KVTransferConfig.model_validate_json(cli_value)
+
+    def model_post_init(self, __context: Any) -> None:
+        if all([
+                self.kv_connector is not None,
+                self.kv_connector != "PyNcclConnector"
+        ]):
+            raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
+                             f"Supported connectors are "
+                             f"`PyNcclConnector`.")
+
+        if self.kv_role is not None and self.kv_role not in [
+                "kv_producer", "kv_consumer", "kv_both"
+        ]:
+            raise ValueError(
+                f"Unsupported kv_role: {self.kv_role}. "
+                f"Supported roles are `kv_producer`, `kv_consumer`, "
+                f"and `kv_both`")
+
+        if self.kv_connector is not None and self.kv_role is None:
+            raise ValueError("Please specify kv_disagg_role when kv_connector "
+                             "is set, supported roles are `kv_producer`, "
+                             "`kv_consumer`, and `kv_both`")
+
+    @property
+    def is_kv_transfer_instance(self) -> bool:
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
+
+    @property
+    def need_kv_parallel_group(self) -> bool:
+        # for those database-based connector, vLLM does not need to create
+        # parallel group, and in that case the kv parallel size will be 1.
+        return self.kv_connector is not None and self.kv_parallel_size > 1
+
+    @property
+    def is_kv_producer(self) -> bool:
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_producer", "kv_both"]
+
+    @property
+    def is_kv_consumer(self) -> bool:
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_consumer", "kv_both"]
+
+
 class CompilationLevel:
     # constants for the levels of the compilation process
     NO_COMPILATION = 0
@@ -2318,6 +2399,8 @@ class VllmConfig:
     quant_config: Optional[QuantizationConfig] = None
     compilation_config: CompilationConfig = field(default=None,
                                                   init=True)  # type: ignore
+    kv_transfer_config: KVTransferConfig = field(default=None,
+                                                 init=True)  # type: ignore
 
     @staticmethod
     def _get_quantization_config(
