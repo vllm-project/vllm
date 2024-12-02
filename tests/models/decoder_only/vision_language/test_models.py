@@ -8,6 +8,7 @@ from typing import Type
 import pytest
 import transformers
 from transformers import AutoModelForVision2Seq
+from transformers.utils import is_flash_attn_2_available
 
 from vllm.platforms import current_platform
 from vllm.utils import cuda_device_count_stateless, identity
@@ -134,6 +135,35 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
+    "aria": VLMTestInfo(
+        models=["rhymes-ai/Aria"],
+        tokenizer_mode="slow",
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+        ),
+        dtype="bfloat16",
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<vlm_image>Please describe the image shortly.",
+            "cherry_blossom": "<vlm_image>Please infer the season with reason.",
+        }),
+        multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
+        postprocess_inputs=model_utils.get_key_type_post_processor("pixel_values"),
+        stop_str=["<|im_end|>"],
+        image_size_factors=[(0.10, 0.15)],
+        max_tokens=64,
+        marks=[
+            pytest.mark.skipif(
+                not is_flash_attn_2_available(),
+                reason="Model needs flash-attn for numeric convergence.",
+            ),
+            large_gpu_mark(min_gb=64),
+        ],
+    ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -295,16 +325,29 @@ VLM_TEST_SETTINGS = {
             )
         ],
     ),
-    "minicpmv": VLMTestInfo(
+    "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         postprocess_inputs=model_utils.wrap_inputs_post_processor,
-        hf_output_post_proc=model_utils.minicmpv_trunc_hf_output,
+        hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+    ),
+    "minicpmv_26": VLMTestInfo(
+        models=["openbmb/MiniCPM-V-2_6"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        postprocess_inputs=model_utils.ignore_inputs_post_processor(
+            "image_sizes"
+        ),
+        hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
     ),
     # Tests for phi3v currently live in another file because of a bug in
     # transformers. Once this issue is fixed, we can enable them here instead.

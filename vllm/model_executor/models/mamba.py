@@ -1,5 +1,5 @@
 """PyTorch MAMBA model."""
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -243,10 +243,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "A_log" in name:
                 name = name.replace("A_log", "A")
@@ -258,5 +256,3 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params

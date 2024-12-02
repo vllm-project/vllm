@@ -40,7 +40,7 @@ from vllm.model_executor.models.minicpm import (MiniCPMDecoderLayer,
                                                 MiniCPMForCausalLM,
                                                 MiniCPMModel)
 
-from .utils import make_layers, maybe_prefix
+from .utils import make_layers
 
 
 class MiniCPM3Attention(nn.Module):
@@ -60,6 +60,7 @@ class MiniCPM3Attention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -119,7 +120,8 @@ class MiniCPM3Attention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_local_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -195,6 +197,7 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,
+            prefix=f"{self.prefix}.self_attn",
         )
 
 
@@ -209,8 +212,8 @@ class MiniCPM3Model(MiniCPMModel):
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: MiniCPM3DecoderLayer(config, cache_config,
-                                                quant_config),
+            lambda prefix: MiniCPM3DecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
 
 
@@ -238,6 +241,11 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
     # `embedding_modules` and `embedding_padding_modules`
     # are inherited from MiniCPMForCausalLM
 
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        self.model = MiniCPM3Model(vllm_config=vllm_config,
-                                   prefix=maybe_prefix(prefix, "model"))
+        return MiniCPM3Model(vllm_config=vllm_config, prefix=prefix)

@@ -91,17 +91,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         return ray_remote_kwargs
 
-    def _get_worker_wrapper_args(self) -> Dict[str, Any]:
-        (worker_module_name, worker_class_name,
-         worker_class_fn) = self._get_worker_module_and_class()
-
-        return dict(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-            worker_class_fn=worker_class_fn,
-            trust_remote_code=self.model_config.trust_remote_code,
-        )
-
     # child class could overwrite this to return actual env vars.
     def _get_env_vars_to_be_updated(self):
         return self._env_vars_for_all_workers
@@ -135,7 +124,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Create the workers.
         driver_ip = get_ip()
-        worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -150,7 +138,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
 
             if self.use_ray_spmd_worker:
                 self.workers.append(worker)
@@ -161,7 +149,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
-                        **worker_wrapper_kwargs)
+                        vllm_config=self.vllm_config)
                 else:
                     # Else, added to the list of workers.
                     self.workers.append(worker)
@@ -228,8 +216,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 f"Every node should have a unique IP address. Got {n_nodes}"
                 f" nodes with node ids {list(node_workers.keys())} and "
                 f"{n_ips} unique IP addresses {all_ips}. Please check your"
-                " network configuration. If you set `VLLM_HOST_IP` or "
-                "`HOST_IP` environment variable, make sure it is unique for"
+                " network configuration. If you set `VLLM_HOST_IP`"
+                " environment variable, make sure it is unique for"
                 " each node.")
 
         VLLM_INSTANCE_ID = get_vllm_instance_id()

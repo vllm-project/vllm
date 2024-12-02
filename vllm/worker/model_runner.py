@@ -21,7 +21,7 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.compilation.compile_context import set_compile_context
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_kv_transfer_group, get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
@@ -92,6 +92,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
+    token_types: Optional[torch.Tensor] = None
     seq_lens: Optional[List[int]] = None
     query_lens: Optional[List[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
@@ -200,6 +201,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         def simple_reinit(self):
             self.input_tokens[0].clear()  # type: ignore
             self.input_positions[0].clear()  # type: ignore
+            self.token_types[0].clear()  # type: ignore
             self.mrope_input_positions = None  # type: ignore
             self.seq_lens[0] = 0  # type: ignore
             self.orig_seq_lens[0] = 0  # type: ignore
@@ -226,6 +228,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # Input tokens and positions.
             input_tokens: Optional[List[List[int]]] = None,
             input_positions: Optional[List[List[int]]] = None,
+            token_types: Optional[List[List[int]]] = None,
             mrope_input_positions: Optional[List[List[List[int]]]] = None,
 
             # The sequence length (may be capped to the sliding window).
@@ -291,6 +294,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         for seq_id in range(len(self.seq_ids)):
                             self.input_positions[seq_id].clear()
 
+                    if token_types:
+                        self.token_types = token_types
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.token_types[seq_id].clear()
+
                     self.mrope_input_positions = None
 
                     if seq_lens:
@@ -354,6 +363,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             else:
                 self.input_tokens = input_tokens or []
                 self.input_positions = input_positions or []
+                self.token_types = token_types or []
                 self.mrope_input_positions = mrope_input_positions or None
                 self.seq_lens = seq_lens or []
                 self.orig_seq_lens = orig_seq_lens or []
@@ -386,6 +396,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             self.input_tokens = [[] for _ in range(self.n_seqs)]
             self.input_positions = [[] for _ in range(self.n_seqs)]
+            self.token_types = [[] for _ in range(self.n_seqs)]
             self.mrope_input_positions = None
             self.seq_lens = [0] * self.n_seqs
             self.orig_seq_lens = [0] * self.n_seqs
@@ -498,12 +509,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Compute tokens.
         tokens = seq_data.get_token_ids()[context_len:seq_len]
+        token_types = seq_group_metadata.token_type_ids
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
         inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
+        inter_data.token_types[seq_idx].extend(
+            token_types if token_types else [])
         inter_data.query_lens[seq_idx] = seq_len - context_len
 
         if seq_data.mrope_position_delta is not None:
@@ -561,6 +575,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 seq_idx][uncomputed_start:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
                 seq_idx][uncomputed_start:]
+            inter_data.token_types[seq_idx] = inter_data.token_types[seq_idx][
+                uncomputed_start:]
             context_len = prefix_cache_len
 
             inter_data.context_lens[seq_idx] = context_len
@@ -575,6 +591,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 seq_idx][-1:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
                 seq_idx][-1:]
+            inter_data.token_types[seq_idx] = inter_data.token_types[seq_idx][
+                -1:]
             inter_data.query_lens[seq_idx] = 1
             inter_data.context_lens[seq_idx] = inter_data.seq_lens[seq_idx] - 1
 
@@ -803,9 +821,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         """
         # Combine and flatten intermediate data.
         input_tokens = []
+        token_types = []
         for inter_data in self.inter_data_list:
             for cur_input_tokens in inter_data.input_tokens:
                 input_tokens.extend(cur_input_tokens)
+            for cur_token_types in inter_data.token_types:
+                token_types.extend(cur_token_types)
 
         if not input_tokens:
             # This may happen when all prefill requests hit
@@ -874,6 +895,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
                                                self.runner.pin_memory)
+
+        token_types_tensor = async_tensor_h2d(token_types, torch.long,
+                                               self.runner.device,
+                                               self.runner.pin_memory) \
+                                                if token_types else None
+
         if mrope_input_positions is not None:
             for idx in range(3):
                 mrope_input_positions[idx].extend(
@@ -952,6 +979,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
+            token_types=token_types_tensor,
             attn_metadata=attn_metadata,
             seq_lens=seq_lens,
             query_lens=query_lens,
@@ -1503,7 +1531,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
-                    with set_forward_context(attn_metadata):
+                    with set_forward_context(attn_metadata, self.vllm_config):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
@@ -1639,6 +1667,24 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         else:
             model_executable = self.model
 
+        # Receive KV cache in distributed KV cache transfer setting
+        # In disagg prefill setting, it will also recv hidden states and bypass
+        # model forwarding
+        # In KV cache database setting, it will change the model input so that
+        # we can skip prefilling on tokens that successfully received KV caches
+        # NOTE: The receive operation is blocking
+        bypass_model_exec = False
+        if self.need_recv_kv(model_input, kv_caches):
+            hidden_or_intermediate_states, bypass_model_exec, model_input = \
+                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+                    # model is used to know which layer the current worker
+                    # is working on, so that we can receive KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches=kv_caches
+                )
+
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
@@ -1650,20 +1696,35 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-        with set_forward_context(model_input.attn_metadata):
-            hidden_or_intermediate_states = model_executable(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
-                intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device),
-                **seqlen_agnostic_kwargs)
+        if not bypass_model_exec:
+            with set_forward_context(model_input.attn_metadata,
+                                     self.vllm_config):
+                hidden_or_intermediate_states = model_executable(
+                    input_ids=model_input.input_tokens,
+                    positions=model_input.input_positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=model_input.attn_metadata,
+                    intermediate_tensors=intermediate_tensors,
+                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+                                                 device=self.device),
+                    **seqlen_agnostic_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end.record()
+
+        # Sending KV cache in distributed KV cache transfer setting
+        # NOTE: the send operation is non-blocking
+        if self.need_send_kv(model_input, kv_caches):
+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                # model_executable is used to know which layer the current
+                # worker is working on, so that we can send KV for only those
+                # layers.
+                model_executable,
+                model_input,
+                kv_caches,
+                hidden_or_intermediate_states,
+            )
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
@@ -1731,6 +1792,56 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.hidden_states = hidden_states
 
         return [output]
+
+    def need_recv_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to receive kv-cache from the other worker.
+        We need to receive KV when
+            1. current vLLM instance is KV cache consumer/decode vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+            
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches[0].numel() == 0)
+        # check if the current run is prefill
+        is_prefill_run = prefill_meta is not None
+
+        if self.vllm_config.kv_transfer_config is None:
+            return False
+
+        return self.vllm_config.kv_transfer_config.is_kv_consumer and (
+            not is_profile_run) and is_prefill_run
+
+    def need_send_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to send kv-cache to the other worker.
+        We need to send KV when
+            1. current vLLM instance is KV cache producer/prefill vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+            
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches[0].numel() == 0)
+        # check if the current run is prefill
+        is_prefill_run = prefill_meta is not None
+
+        if self.vllm_config.kv_transfer_config is None:
+            return False
+
+        return self.vllm_config.kv_transfer_config.is_kv_producer and (
+            not is_profile_run) and is_prefill_run
 
 
 # NOTE: this is nn.Module so the profiler can properly capture/group

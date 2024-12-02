@@ -22,4 +22,7 @@ RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVIC
 COPY examples/ /workspace/examples
 COPY benchmarks/ /workspace/benchmarks
 
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
 CMD ["/bin/bash"]

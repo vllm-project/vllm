@@ -9,7 +9,7 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -94,7 +94,7 @@ class AsyncLLM(EngineClient):
 
         # Create the engine configs.
         if engine_config is None:
-            vllm_config = engine_args.create_engine_config()
+            vllm_config = engine_args.create_engine_config(usage_context)
         else:
             vllm_config = engine_config
 
@@ -133,7 +133,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
+    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
         """Add new request to the AsyncLLM."""
 
         if self.detokenizer.is_request_active(request_id):
@@ -346,10 +346,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        raise ValueError("Not supported on V1 yet.")
+        await self.engine_core.profile(True)
 
     async def stop_profile(self) -> None:
-        raise ValueError("Not supported on V1 yet.")
+        await self.engine_core.profile(False)
 
     @property
     def is_running(self) -> bool:

@@ -101,5 +101,8 @@ ENV TOKENIZERS_PARALLELISM=false
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
 
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
 CMD ["/bin/bash"]
 

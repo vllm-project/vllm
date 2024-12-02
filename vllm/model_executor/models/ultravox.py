@@ -360,9 +360,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
                 ))
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
-            config.text_config,
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"))
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
         if config.text_model_id is not None:
             # this prefix is not for initialization, but for loading weights
             # note the trailing dot
@@ -449,10 +450,36 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return result
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        audio_input = self._parse_and_validate_audio_input(**kwargs)
+        if audio_input is None:
+            return None
+        audio_embeddings = self._process_audio_input(audio_input)
+        return audio_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+
+            # TODO(ywang96): use merge_multimodal_embeddings after
+            # v0 is deprecated
+            merge_multimodal_embeddings_from_map(
+                inputs_embeds, multimodal_embeddings,
+                attn_metadata.multi_modal_placeholder_index_maps["audio"])
+        return inputs_embeds
+
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
-                intermediate_tensors: Optional[torch.Tensor],
+                intermediate_tensors: Optional[torch.Tensor] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for Ultravox
 
@@ -466,30 +493,28 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         Args:
             audio_features: A batch of audio inputs [B, N, 80, M].
         """
+
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            audio_input = self._parse_and_validate_audio_input(**kwargs)
-            if audio_input is not None:
-                audio_embeddings = self._process_audio_input(audio_input)
-                inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
 
-                merge_multimodal_embeddings_from_map(
-                    inputs_embeds, audio_embeddings,
-                    attn_metadata.multi_modal_placeholder_index_maps["audio"])
-                input_ids = None
-            else:
-                inputs_embeds = None
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-        hidden_states = self.language_model.model(
-            input_ids=input_ids,
-            positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds)
+            # TODO(ywang96): remove attn_metadata from get_input_embeddings
+            # after v0 is deprecated
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      multimodal_embeddings,
+                                                      attn_metadata)
+            input_ids = None
+
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  kv_caches,
+                                                  attn_metadata,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

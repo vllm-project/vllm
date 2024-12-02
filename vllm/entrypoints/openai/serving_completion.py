@@ -101,7 +101,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            request_prompts, engine_prompts = self._preprocess_completion(
+            request_prompts, engine_prompts = await self._preprocess_completion(
                 request,
                 tokenizer,
                 request.prompt,
