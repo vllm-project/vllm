@@ -1,6 +1,7 @@
 # noqa: UP007
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -21,17 +22,26 @@ if TYPE_CHECKING:
     from vllm.sampling_params import GuidedDecodingParams
 
 
+_thread_pool = None
+
 # TODO: passing batch size to max threads here
 def get_local_xgrammar_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
         max_threads: int = 8):
+
+    global _thread_pool
+    if _thread_pool is None:
+        _thread_pool = concurrent.futures.ThreadPoolExecutor(max_threads)
+
     config = GrammarConfig.from_guided_params(guided_params=guided_params,
                                               model_config=model_config,
                                               tokenizer=tokenizer,
                                               max_threads=max_threads)
-    return XGrammarLogitsProcessor(config)
+    xgr_proc = XGrammarLogitsProcessor(config)
+    xgr_proc.async_init(_thread_pool)
+    return xgr_proc
 
 
 class TokenizerData(NamedTuple):
@@ -174,6 +184,12 @@ class XGrammarLogitsProcessor:
     batch_size: int = 1
     token_bitmask: torch.Tensor = None
     prefilled: bool = False
+    _thread_pool: concurrent.futures.ThreadPoolExecutor = field(
+        default_factory=concurrent.futures.ThreadPoolExecutor)
+    _future: concurrent.futures.Future = None
+
+    def async_init(self, thread_pool: concurrent.futures.ThreadPoolExecutor):
+        self._future = thread_pool.submit(self._init_ctx)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
@@ -187,14 +203,18 @@ class XGrammarLogitsProcessor:
         self.token_bitmask = None
         self.prefilled = False
 
-    def _ensure_ctx(self):
+    def _init_ctx(self):
         """Lazily initialize the processor in the worker process"""
-        if self.ctx is None:
-            compiler = GrammarCompilerCache.get_compiler(self.config)
-            if self.config.json_str is not None:
-                self.ctx = compiler.compile_json_schema(self.config.json_str)
-            else:
-                self.ctx = compiler.compile_grammar(self.config.grammar_str)
+        compiler = GrammarCompilerCache.get_compiler(self.config)
+        if self.config.json_str is not None:
+            self.ctx = compiler.compile_json_schema(self.config.json_str)
+        else:
+            self.ctx = compiler.compile_grammar(self.config.grammar_str)
+
+    def _ensure_ctx(self):
+        if self._future:
+            self._future.result()
+            self._future = None
 
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
