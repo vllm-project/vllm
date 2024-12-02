@@ -36,6 +36,11 @@ class SupportsMultiModal(Protocol):
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
+
+        The output embeddings must be one of the following format:
+        - A list or tuple of 2D tensors, where each tensor corresponds to 
+          each input image.
+        - A single 3D tensor, with the batch dimension grouping the 2D tensors.
         """
         ...
 

@@ -32,7 +32,7 @@ class MMInputMapper:
         num_images = len(image_inputs)
         for i in range(num_images):
             mm_input = self.multi_modal_input_mapper(
-                {"image": [image_inputs[i]]},
+                {"image": image_inputs[i]},
                 mm_processor_kwargs=mm_processor_kwargs,
             )
             mm_inputs.append(mm_input)
