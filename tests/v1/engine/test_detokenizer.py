@@ -1,11 +1,43 @@
-from typing import List
+import random
+from typing import Dict, List, Union
 
 import pytest
 from transformers import AutoTokenizer
 
 from vllm.sampling_params import RequestOutputKind
+from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.detokenizer import Detokenizer, DetokenizerRequest
+
+random.seed(42)
+NUM_SAMPLE_LOGPROBS = 5
+NUM_PROMPT_LOGPROBS = 7
+
+
+def _generate_dummy_single_logprob(
+    num_logprobs: int,
+    is_sample_logprobs: bool,
+) -> Dict[int, Logprob]:
+    adjusted_num_logprobs = (num_logprobs + random.choice([0, 1])
+                             if is_sample_logprobs else num_logprobs)
+    return {
+        random.randint(0,
+                       len(tokenizer.vocab) - 1):
+        Logprob(random.uniform(-100, 0), idx, None)
+        for idx in range(adjusted_num_logprobs)
+    }
+
+
+def _generate_dummy_logprobs(
+    tokens_list: List,
+    num_logprobs: int,
+    is_sample_logprobs: bool,
+) -> Union[SampleLogprobs, PromptLogprobs]:
+    return [
+        _generate_dummy_single_logprob(num_logprobs, is_sample_logprobs)
+        for _ in tokens_list
+    ]
+
 
 TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
@@ -23,8 +55,20 @@ PROMPT_LEN = 5
 PROMPT_TOKENS = [
     tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS
 ]
+PROMPT_LOGPROBS_RAW = [
+    _generate_dummy_logprobs(tokens_list=tokens_list,
+                             num_logprobs=NUM_PROMPT_LOGPROBS,
+                             is_sample_logprobs=False)
+    for tokens_list in PROMPT_TOKENS
+]
 GENERATION_TOKENS = [
     tokenizer(text).input_ids[PROMPT_LEN:] for text in FULL_STRINGS
+]
+GENERATION_LOGPROBS_RAW = [
+    _generate_dummy_logprobs(tokens_list=tokens_list,
+                             num_logprobs=NUM_SAMPLE_LOGPROBS,
+                             is_sample_logprobs=True)
+    for tokens_list in GENERATION_TOKENS
 ]
 PROMPT_STRINGS = [
     tokenizer.decode(prompt_tokens, skip_special_tokens=True)
