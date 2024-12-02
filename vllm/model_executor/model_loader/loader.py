@@ -1120,7 +1120,15 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                  model_config.revision,
                                                  pre_quant, load_8bit))
 
-        model.load_weights(qweight_iterator)
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        loaded_weights = model.load_weights(qweight_iterator)
+        # Some models may have weights loading tracker unimplemented.
+        if loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError(
+                    "Following weights were not initialized from "
+                    f"checkpoint: {weights_not_loaded}")
 
         torch.cuda.empty_cache()
 
@@ -1131,6 +1139,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         from vllm.model_executor.models.utils import is_pp_missing_parameter
 
         for quant_param_name in quant_state_dict:
+            # Models like Clip/Siglip may skip some layers in initialization,
+            # causing unused quant_param_name in state_dict.
+            if quant_param_name not in param_dict:
+                continue
+
             if is_pp_missing_parameter(quant_param_name, model):
                 continue
 
@@ -1151,10 +1164,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     quant_param_name = quant_param_name.replace(
                         shard_name, weight_name)
                     break
-
-            # if quant_param_name not in param_dict:
-            #     raise ValueError(
-            #         f"Parameter {quant_param_name} not found in the model.")
 
             if quant_param_name not in stacked_quant_state_dict:
                 stacked_quant_state_dict[quant_param_name] = {}
