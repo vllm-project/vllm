@@ -60,7 +60,6 @@ class LlavaImageEmbeddingInputs(TypedDict):
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageEmbeddingInputs]
 
 
-# TODO(xwjiang): Run benchmark and decide if TP.
 class LlavaMultiModalProjector(nn.Module):
 
     def __init__(self, vision_hidden_size: int, text_hidden_size: int,
