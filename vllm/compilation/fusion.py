@@ -14,6 +14,31 @@ from .vllm_inductor_pass import VllmInductorPass, is_func
 logger = init_logger(__name__)
 
 
+def silu_mul_pattern_static(result: torch.Tensor, result_silu_mul: torch.Tensor,
+                            input: torch.Tensor, scale: torch.Tensor):
+    at1 = auto_functionalized(torch.ops._C.silu_and_mul.default,
+                              result=result_silu_mul,
+                              input=input)
+    at2 = auto_functionalized(torch.ops._C.static_scaled_fp8_quant.default,
+                              result=result,
+                              input=at1[1],
+                              scale=scale)
+    # result
+    return at2[1]
+
+
+def silu_mul_replacement_static(result: torch.Tensor,
+                                result_silu_mul: torch.Tensor,
+                                input: torch.Tensor, scale: torch.Tensor):
+    print("REPLACEMENT RUNNING")
+    at = auto_functionalized(torch.ops._C.silu_and_mul_quant.default,
+                             result=result,
+                             input=input,
+                             scale=scale)
+    # result, residual
+    return at[1]
+
+
 def rms_pattern_static(result: torch.Tensor, result_rms: torch.Tensor,
                        input: torch.Tensor, weight: torch.Tensor,
                        scale: torch.Tensor):
@@ -171,8 +196,8 @@ class FusionPass(VllmInductorPass):
             empty_bf16(1, 5),
             empty_fp32(1, 1)
         ]
-        register_replacement(rms_pattern_static, rms_replacement_static,
-                             inputs, fwd_only, self.patterns)
+        register_replacement(rms_pattern_static, rms_replacement_static, inputs,
+                             fwd_only, self.patterns)
 
         # Fuse fused_add_rms_norm + static_scaled_fp8_quant into
         # fused_add_rms_norm_static_fp8_quant
@@ -191,6 +216,16 @@ class FusionPass(VllmInductorPass):
                              fwd_only,
                              self.patterns,
                              extra_check=lambda m: self.record_match(m))
+
+        inputs = [
+            empty_fp8(5, 4),
+            empty_bf16(5, 4),
+            empty_bf16(5, 4),
+            empty_fp32(1, 1)
+        ]
+        register_replacement(silu_mul_pattern_static,
+                             silu_mul_replacement_static, inputs, fwd_only,
+                             self.patterns)
 
     def record_match(self, match: Match) -> bool:
         # Hijack the extra_check to record the match and
@@ -229,17 +264,15 @@ class FusionPass(VllmInductorPass):
                 kwargs = match.kwargs
                 kwargs["epsilon"] = 1e-5  # Currently hard-coded in RMSNorm
 
-                fused_node = graph.call_function(
-                    auto_functionalized,
-                    (torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,
-                     ),
-                    kwargs=kwargs)
+                fused_node = graph.call_function(auto_functionalized, (
+                    torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, ),
+                                                 kwargs=kwargs)
 
                 graph.inserting_after(fused_node)
                 result_node_new = graph.call_function(operator.getitem,
                                                       (fused_node, 1))
-                residual_node_new = graph.call_function(
-                    operator.getitem, (fused_node, 2))
+                residual_node_new = graph.call_function(operator.getitem,
+                                                        (fused_node, 2))
 
             # Last part of replacement is rebinding the users of nodes in the
             # match to use the new nodes.

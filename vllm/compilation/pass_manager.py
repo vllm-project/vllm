@@ -44,7 +44,7 @@ class PostGradPassManager:
         if pass_config.enable_reshape:
             self.passes += [RedundantReshapesPass(pass_config)]
 
-        if pass_config.enable_fusion:
+        if True:
             self.passes += [FusionPass.instance(pass_config)]
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
