@@ -16,21 +16,17 @@
   #include "quantization/fp8/nvidia/quant_utils.cuh"
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx940__) || \
-                           defined(__gfx941__) || defined(__gfx942__))
-  #define __HIP__MI300_MI250__
-#endif
-
 namespace vllm {
 
-// TODO(woosuk): Further optimize this kernel.
+// This kernel uses the _f16Vec to represent vectorized data.
+// A conversion to/from float should exist
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
                 const scalar_t* __restrict__ input,   // [..., hidden_size]
                 const scalar_t* __restrict__ weight,  // [hidden_size]
                 const float epsilon, const int num_tokens,
-                const int hidden_size, const int vec_hidden_size) {
+                const size_t hidden_size, const size_t vec_hidden_size) {
   __shared__ float s_variance;
   float v8_variance_sum = 0.0f;
 
@@ -46,7 +42,7 @@ rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
       reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
   // Compute variance. Be careful, hidden_size should multiple of 4.
-  for (int idx = tx; idx < vec_hidden_size; idx += num_threads) {
+  for (size_t idx = tx; idx < vec_hidden_size; idx += num_threads) {
     _f16Vec<scalar_t, width> temp = input_v[idx];
     v8_variance_sum += temp.sum_squares();
   }
@@ -64,7 +60,7 @@ rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
 
   variance = s_variance;
 
-  for (int idx = tx; idx < vec_hidden_size; idx += num_threads) {
+  for (size_t idx = tx; idx < vec_hidden_size; idx += num_threads) {
     _f16Vec<scalar_t, width> temp = input_v[idx];
     temp *= variance;
     temp *= weight_v[idx];
@@ -72,19 +68,19 @@ rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
   }
 }
 
+// Non vectorized kernel for unusual shapes/types without conversion
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
                 const scalar_t* __restrict__ input,   // [..., hidden_size]
                 const scalar_t* __restrict__ weight,  // [hidden_size]
                 const float epsilon, const int num_tokens,
-                const int hidden_size, const int vec_hidden_size) {
+                const size_t hidden_size, const size_t) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    const float x =
-        (float)input[blockIdx.x * static_cast<int64_t>(hidden_size) + idx];
+  for (size_t idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    const float x = (float)input[blockIdx.x * hidden_size + idx];
     variance += x * x;
   }
 
@@ -97,10 +93,9 @@ rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
   }
   __syncthreads();
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x =
-        (float)input[blockIdx.x * static_cast<int64_t>(hidden_size) + idx];
-    out[blockIdx.x * static_cast<int64_t>(hidden_size) + idx] =
+  for (size_t idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    float x = (float)input[blockIdx.x * hidden_size + idx];
+    out[blockIdx.x * hidden_size + idx] =
         ((scalar_t)(x * s_variance)) * weight[idx];
   }
 }
@@ -234,21 +229,18 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   int num_tokens = input.numel() / hidden_size;
   int vec_size = 16 / input.element_size();
   int vec_hidden_size = hidden_size / vec_size;
+  bool can_run_vectorize = (hidden_size % vec_size) == 0;
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(vec_hidden_size, 1024));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-#ifdef __HIP__MI300_MI250__
-  if (vec_size % 8 == 0) {
+  if (vec_size % 8 == 0 && can_run_vectorize) {
+    dim3 block(std::min(vec_hidden_size, 1024));
     LAUNCH_RMS_NORM(8);
   } else {
+    dim3 block(std::min(hidden_size, 1024));
     LAUNCH_RMS_NORM(0);
   }
-#else
-  LAUNCH_RMS_NORM(0);
-#endif
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                       \
