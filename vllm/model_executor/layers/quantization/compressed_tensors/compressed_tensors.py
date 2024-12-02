@@ -332,9 +332,10 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         return scheme
     
-    # move the get_compressed_tensors_cache_scale method from utils.py to instance
-    # method of CompressedTensorsConfig class. By doing this, different
-    # QuantizationConfig classes can implement their own get_cache_scale method.
+    # move the get_compressed_tensors_cache_scale method from 
+    # utils.py to instance method of CompressedTensorsConfig 
+    # class. By doing this, different QuantizationConfig 
+    # classes can implement their own get_cache_scale method.
     def get_cache_scale(self, name: str) -> Optional[List[str]]:
         """
         Check whether the param name matches the format for k/v cache scales

@@ -49,7 +49,8 @@ class BasevLLMParameter(Parameter):
         return (cond1 and cond2)
 
     def _assert_and_load(self, loaded_weight: torch.Tensor):
-        assert self.data.shape == loaded_weight.shape or self._is_1d_and_scalar(loaded_weight)
+        assert (self.data.shape == loaded_weight.shape or 
+                self._is_1d_and_scalar(loaded_weight))
         self.data.copy_(loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):

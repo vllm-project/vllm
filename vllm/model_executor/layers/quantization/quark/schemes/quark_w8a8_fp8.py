@@ -72,7 +72,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
         else:
-            raise ValueError(f"Unknown quantization strategy {self.strategy}")
+            raise ValueError(f"Unknown quantization scheme {self.qscheme}")
 
         # INPUT SCALE
         if self.is_static_input_scheme:
