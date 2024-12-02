@@ -254,6 +254,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.punica_wrapper.add_expand(full_output,
                                        full_lora_a_embeddings,
                                        self.lora_b_stacked,
+                                       bias_all=None,
                                        add_input=True)
         return full_output.view_as(full_output_org)
 
@@ -618,8 +619,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 ) for _ in range(n_slices))
         else:
             self.bias_stacked = None
-
         self.output_dim = self.lora_b_stacked[0].shape[2]
+        self.output_slices = (self.output_dim, self.output_dim)
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
