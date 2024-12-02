@@ -7,16 +7,13 @@ Multi-Modality
     
 vLLM provides experimental support for multi-modal models through the :mod:`vllm.multimodal` package.
 
-Multi-modal inputs can be passed alongside text and token prompts to :ref:`supported models <supported_vlms>`
+Multi-modal inputs can be passed alongside text and token prompts to :ref:`supported models <supported_mm_models>`
 via the ``multi_modal_data`` field in :class:`vllm.inputs.PromptType`.
 
 Currently, vLLM only has built-in support for image data. You can extend vLLM to process additional modalities
 by following :ref:`this guide <adding_multimodal_plugin>`.
 
 Looking to add your own multi-modal model? Please follow the instructions listed :ref:`here <enabling_multimodal_inputs>`.
-
-..
-  TODO: Add usage of --limit-mm-per-prompt when multi-image input is officially supported
 
 Guides
 ++++++

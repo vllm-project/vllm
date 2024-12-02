@@ -32,7 +32,7 @@ We currently support the following OpenAI APIs:
 - [Completions API](https://platform.openai.com/docs/api-reference/completions)
   - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
-  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Using VLMs](../models/vlm.rst).
+  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
     - *Note: `image_url.detail` parameter is not supported.*
   - We also support `audio_url` content type for audio files.
     - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
@@ -41,7 +41,7 @@ We currently support the following OpenAI APIs:
 - [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
   - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
     which will be treated as a single prompt to the model according to its chat template.
-    - This enables multi-modal inputs to be passed to embedding models, see [Using VLMs](../models/vlm.rst).
+    - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
 ## Score API for Cross Encoder Models

@@ -512,7 +512,7 @@ On the other hand, modalities separated by :code:`/` are mutually exclusive.
 
 - e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
-.. _supported_vlms:
+.. _supported_mm_models:
 
 Text Generation (``--task generate``)
 -------------------------------------
@@ -668,6 +668,21 @@ Text Generation (``--task generate``)
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
+
+.. important::
+    To enable multiple multi-modal items per text prompt, you have to set :code:`limit_mm_per_prompt` (offline inference)
+    or :code:`--limit-mm-per-prompt` (online inference). For example, to enable passing up to 4 images per text prompt:
+
+    .. code-block:: python
+
+        llm = LLM(
+            model="Qwen/Qwen2-VL-7B-Instruct",
+            limit_mm_per_prompt={"image": 4},
+        )
+
+    .. code-block:: bash
+
+        vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
 
 .. note::
   vLLM currently only supports adding LoRA to the language backbone of multimodal models.
