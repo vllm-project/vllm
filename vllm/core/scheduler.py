@@ -556,6 +556,41 @@ class Scheduler:
         preempted: List[SequenceGroup] = ret.preempted
         swapped_out: List[SequenceGroup] = ret.swapped_out
 
+        def preempt_seq_group(victim_seq_group):
+            # With async postprocessor, before preempting a sequence
+            # we need to ensure it has no pending async postprocessor
+            do_preempt = True
+            if self.use_async_output_proc:
+                assert self.output_proc_callback is not None
+                self.output_proc_callback(
+                    request_id=victim_seq_group.request_id)
+
+                # It may be that the async pending "victim_seq_group"
+                # becomes finished, in which case we simply free it.
+                if victim_seq_group.is_finished():
+                    self._free_finished_seq_group(victim_seq_group)
+                    do_preempt = False
+
+            # Do preemption
+            if do_preempt:
+                preempted_mode = self._preempt(victim_seq_group,
+                                                blocks_to_swap_out)
+                if preempted_mode == PreemptionMode.RECOMPUTE:
+                    preempted.append(victim_seq_group)
+                else:
+                    swapped_out.append(victim_seq_group)
+        
+        if self.lora_enabled:
+            running_temp = []
+            while self.running:
+                running_temp.push(self.running.popleft())
+            for seq_group in running_temp:
+                if seq_group.lora_int_id > 0 and seq_group.lora_int_id not in allowed_loras:
+                    preempt_seq_group(seq_group)
+                else:
+                    self.running.push(seq_group)
+            del running_temp
+        
         running_queue = self.running
         assert len(self._async_stopped) == 0
 
@@ -614,29 +649,8 @@ class Scheduler:
                     # (since there is nothing else to preempt)
                     victim_seq_group = seq_group
                     cont_loop = False
-
-                # With async postprocessor, before preempting a sequence
-                # we need to ensure it has no pending async postprocessor
-                do_preempt = True
-                if self.use_async_output_proc:
-                    assert self.output_proc_callback is not None
-                    self.output_proc_callback(
-                        request_id=victim_seq_group.request_id)
-
-                    # It may be that the async pending "victim_seq_group"
-                    # becomes finished, in which case we simply free it.
-                    if victim_seq_group.is_finished():
-                        self._free_finished_seq_group(victim_seq_group)
-                        do_preempt = False
-
-                # Do preemption
-                if do_preempt:
-                    preempted_mode = self._preempt(victim_seq_group,
-                                                   blocks_to_swap_out)
-                    if preempted_mode == PreemptionMode.RECOMPUTE:
-                        preempted.append(victim_seq_group)
-                    else:
-                        swapped_out.append(victim_seq_group)
+                
+                preempt_seq_group(victim_seq_group)
 
                 if not cont_loop:
                     break
@@ -736,7 +750,8 @@ class Scheduler:
                 assert curr_loras is not None
                 assert self.lora_config is not None
                 if (lora_int_id > 0 and (lora_int_id not in curr_loras)
-                        and len(curr_loras) >= self.lora_config.max_loras):
+                        and len(curr_loras) >= self.lora_config.max_loras
+                        and (allowed_loras is not None and lora_int_id not in allowed_loras)):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
                     leftover_swapped.appendleft(seq_group)
@@ -986,7 +1001,7 @@ class Scheduler:
                 if (self.lora_enabled and lora_int_id > 0
                         and lora_int_id not in curr_loras
                         and len(curr_loras) >= self.lora_config.max_loras
-                        and (allowed_loras is None or lora_int_id in allowed_loras)):
+                        and (allowed_loras is not None and lora_int_id in allowed_loras)):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
                     leftover_waiting_sequences.appendleft(seq_group)
