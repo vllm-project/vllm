@@ -41,7 +41,7 @@ We currently support the following OpenAI APIs:
 - [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
   - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
     which will be treated as a single prompt to the model according to its chat template.
-    - This enables multi-modal inputs to be passed to embedding models, see [Multimodal Inputs](../usage/multimodal_inputs.rst).
+    - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
 ## Score API for Cross Encoder Models
