@@ -7,14 +7,15 @@ Requires HuggingFace credentials for access to Llama2.
 
 from typing import List, Optional, Tuple
 
-from huggingface_hub import snapshot_download
-
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
+from faker import Faker
 
+OUT_DIR = "out"
+NB_WORDS = 20
 
 def create_test_prompts(
-        lora_path: str
+    base_path: str
 ) -> List[Tuple[str, SamplingParams, Optional[LoRARequest]]]:
     """Create a list of test prompts with their sampling parameters.
 
@@ -24,34 +25,23 @@ def create_test_prompts(
     with the second LoRA adapter will be ran after all requests with the
     first adapter have finished.
     """
-    return [
-        ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
-                        max_tokens=128), None),
-        ("To be or not to be,",
-         SamplingParams(temperature=0.8,
-                        top_k=5,
-                        presence_penalty=0.2,
-                        max_tokens=128), None),
-        (
-            "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
-            SamplingParams(temperature=0.0,
-                           logprobs=1,
-                           prompt_logprobs=1,
-                           max_tokens=128,
-                           stop_token_ids=[32003]),
-            LoRARequest("sql-lora", 1, lora_path)),
-        (
-            "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
-            SamplingParams(temperature=0.0,
-                           logprobs=1,
-                           prompt_logprobs=1,
-                           max_tokens=128,
-                           stop_token_ids=[32003]),
-            LoRARequest("sql-lora2", 2, lora_path)),
-    ]
+    fake = Faker()
+    sentence = fake.sentence(nb_words=NB_WORDS)
+
+    prompts = []
+    for _ in range(10):
+        for i in range(10):
+            prompts.append((
+                sentence,
+                SamplingParams(temperature=0.0,
+                            logprobs=1,
+                            prompt_logprobs=1,
+                            max_tokens=64,
+                            stop_token_ids=[50256]),
+                LoRARequest(f"lora{i}", i, f"{base_path}/lora{i}")
+            ))
+
+    return prompts
 
 
 def process_requests(engine: LLMEngine,
@@ -97,8 +87,7 @@ def initialize_engine() -> LLMEngine:
 def main():
     """Main function that sets up and runs the prompt processing."""
     engine = initialize_engine()
-    lora_path = snapshot_download(repo_id="juletxara/Llama-3.2-1B-tiny-shakespeare-lora")
-    test_prompts = create_test_prompts(lora_path)
+    test_prompts = create_test_prompts(OUT_DIR)
     process_requests(engine, test_prompts)
 
 
