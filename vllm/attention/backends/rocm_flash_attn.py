@@ -837,6 +837,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
+                    None, # TODO support attn_bias
                     layer._k_scale,
                     layer._v_scale,
                 )
