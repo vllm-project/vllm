@@ -155,7 +155,13 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[large_gpu_mark(min_gb=64)],
+        marks=[
+            pytest.mark.skipif(
+                not is_flash_attn_2_available(),
+                reason="Model needs flash-attn for numeric convergence.",
+            ),
+            large_gpu_mark(min_gb=64),
+        ],
     ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
