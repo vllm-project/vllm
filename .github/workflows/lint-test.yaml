@@ -78,6 +78,7 @@ jobs:
                           "max_tokens": 7,
                           "temperature": 0
                   }'
+          (kubectl -n ns-vllm logs -f $(kubectl -n ns-vllm get pods -o name | awk '/deployment/ {print $1;exit}'))
           CODE="$(curl -v -f --location http://localhost:8001/v1/completions \
                   --header "Content-Type: application/json" \
                   --data '{
