@@ -70,6 +70,7 @@ jobs:
         run: |
           kubectl -n ns-vllm port-forward service/test-vllm-service 8001:80 &
           sleep 10
+          (kubectl -n ns-vllm logs -f $(kubectl -n ns-vllm get pods -o name | awk '/deployment/ {print $1;exit}')) &
           curl -v --fail-with-body --show-error --location http://localhost:8001/v1/completions \
                   --header "Content-Type: application/json" \
                   --data '{
@@ -78,7 +79,6 @@ jobs:
                           "max_tokens": 7,
                           "temperature": 0
                   }'
-          (kubectl -n ns-vllm logs -f $(kubectl -n ns-vllm get pods -o name | awk '/deployment/ {print $1;exit}'))
           CODE="$(curl -v -f --location http://localhost:8001/v1/completions \
                   --header "Content-Type: application/json" \
                   --data '{
