@@ -3,8 +3,9 @@
 Supported Models
 ================
 
-vLLM supports a variety of generative and embedding models from `HuggingFace (HF) Transformers <https://huggingface.co/models>`_.
-This page lists the model architectures that are currently supported by vLLM.
+vLLM supports models from `HuggingFace (HF) Transformers <https://huggingface.co/models>`_ across a variety of tasks.
+
+This page lists the tasks and corresponding model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
 For other models, you can check the :code:`config.json` file inside the model repository.
@@ -17,8 +18,14 @@ If the :code:`"architectures"` field contains a model architecture listed below,
 
         from vllm import LLM
 
-        llm = LLM(model=...)  # Name or path of your model
+        # For generative models (task=generate) only
+        llm = LLM(model=..., task="generate")  # Name or path of your model
         output = llm.generate("Hello, my name is")
+        print(output)
+
+        # For pooling models (task={embed,classify,reward}) only
+        llm = LLM(model=..., task="embed")  # Name or path of your model
+        output = llm.encode("Hello, my name is")
         print(output)
 
     If vLLM successfully generates text, it indicates that your model is supported.
@@ -40,15 +47,21 @@ Alternatively, you can `open an issue on GitHub <https://github.com/vllm-project
 
         from vllm import LLM
 
-        llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
+        llm = LLM(model=..., revision=..., task=..., trust_remote_code=True)
+
+        # For generative models (task=generate) only
         output = llm.generate("Hello, my name is")
+        print(output)
+
+        # For pooling models (task={embed,classify,reward}) only
+        output = llm.encode("Hello, my name is")
         print(output)
 
 Text-only Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Text Generation
----------------
+Text Generation (``--task generate``)
+-------------------------------------
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -328,8 +341,13 @@ Text Generation
 .. note::
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
-Text Embedding
---------------
+Text Embedding (``--task embed``)
+---------------------------------
+
+Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
+
+.. important::
+  You should explicitly specify the task for these models, otherwise the task may default to text generation instead.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -371,10 +389,6 @@ Text Embedding
     - 
     - 
 
-.. important::
-  Some model architectures support both generation and embedding tasks.
-  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
-
 .. tip::
   You can override the model's pooling method by passing :code:`--override-pooler-config`.
 
@@ -389,8 +403,11 @@ Text Embedding
   On the other hand, its 1.5B variant (:code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
   despite being described otherwise on its model card.
 
-Reward Modeling
----------------
+Reward Modeling (``--task reward``)
+-----------------------------------
+
+.. important::
+  You should explicitly specify the task for these models.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -419,8 +436,11 @@ Reward Modeling
 .. note::
     As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
-Classification
----------------
+Classification (``--task classify``)
+------------------------------------
+
+.. important::
+  You should explicitly specify the task for these models.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -440,8 +460,11 @@ Classification
 .. note::
     As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
-Sentence Pair Scoring
----------------------
+Sentence Pair Scoring (``--task score``)
+----------------------------------------
+
+.. important::
+  You should explicitly specify the task for these models.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -491,8 +514,8 @@ On the other hand, modalities separated by :code:`/` are mutually exclusive.
 
 .. _supported_vlms:
 
-Text Generation
----------------
+Text Generation (``--task generate``)
+-------------------------------------
 
 .. list-table::
   :widths: 25 25 15 25 5 5
@@ -653,8 +676,13 @@ Text Generation
   The official :code:`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
-Multimodal Embedding
---------------------
+Multimodal Embedding (``--task embed``)
+---------------------------------------
+
+Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
+
+.. important::
+  You should explicitly specify the task for these models, otherwise the task may default to text generation instead.
 
 .. list-table::
   :widths: 25 25 15 25 5 5
@@ -684,10 +712,6 @@ Multimodal Embedding
     - :code:`MrLight/dse-qwen2-2b-mrl-v1`
     - 
     - ✅︎
-
-.. important::
-  Some model architectures support both generation and embedding tasks.
-  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
 
 .. tip::
   You can override the model's pooling method by passing :code:`--override-pooler-config`.
