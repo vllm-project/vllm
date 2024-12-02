@@ -1152,9 +1152,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         shard_name, weight_name)
                     break
 
-            if quant_param_name not in param_dict:
-                raise ValueError(
-                    f"Parameter {quant_param_name} not found in the model.")
+            # if quant_param_name not in param_dict:
+            #     raise ValueError(
+            #         f"Parameter {quant_param_name} not found in the model.")
 
             if quant_param_name not in stacked_quant_state_dict:
                 stacked_quant_state_dict[quant_param_name] = {}
