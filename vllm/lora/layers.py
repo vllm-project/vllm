@@ -28,6 +28,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.platforms import current_platform
+
+if current_platform.is_hpu():
+    from vllm_hpu_extension.punica_hpu import GaudiPunicaWrapper
 
 if TYPE_CHECKING:
     pass
@@ -308,10 +312,19 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             )
 
         # Embedding layer only need expand op
-        self.punica_wrapper.add_expand(full_output,
-                                       full_lora_a_embeddings,
-                                       self.lora_b_stacked,
-                                       add_input=True)
+        if current_platform.is_hpu():
+            assert isinstance(self.punica_wrapper, GaudiPunicaWrapper)
+            # HPU handles LoRA-B multiplication differently when compared to
+            # `PunicaWrapper.add_expand`
+            self.punica_wrapper.add_lora_embedding(full_output,
+                                                   full_lora_a_embeddings,
+                                                   self.lora_b_stacked,
+                                                   add_input=True)
+        else:
+            self.punica_wrapper.add_expand(full_output,
+                                           full_lora_a_embeddings,
+                                           self.lora_b_stacked,
+                                           add_input=True)
         return full_output.view_as(full_output_org)
 
     @classmethod
@@ -1513,6 +1526,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         ).index_select(0, indices_padded).nan_to_num_(nan=float("-inf"),
                                                       posinf=float("inf"),
                                                       neginf=float("-inf")))
+        if current_platform.is_hpu():
+            lora_logits = lora_logits[:logits.shape[0], :]
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
