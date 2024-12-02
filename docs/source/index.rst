@@ -93,6 +93,8 @@ Documentation
    :caption: Models
 
    models/supported_models
+   models/generative_models
+   models/pooling_models
    models/adding_model
    models/enabling_multimodal_inputs
 
@@ -100,8 +102,6 @@ Documentation
    :maxdepth: 1
    :caption: Usage
 
-   usage/generative_models
-   usage/pooling_models
    usage/lora
    usage/multimodal_inputs
    usage/structured_outputs
