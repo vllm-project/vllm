@@ -2102,13 +2102,14 @@ class KVTransferConfig(BaseModel):
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
+        supported_kv_connector = ["PyNcclConnector", "MooncakeConnector"]
         if all([
                 self.kv_connector is not None,
-                self.kv_connector != "PyNcclConnector"
+                self.kv_connector not in supported_kv_connector
         ]):
             raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
                              f"Supported connectors are "
-                             f"`PyNcclConnector`.")
+                             f"{supported_kv_connector}.")
 
         if self.kv_role is not None and self.kv_role not in [
                 "kv_producer", "kv_consumer", "kv_both"

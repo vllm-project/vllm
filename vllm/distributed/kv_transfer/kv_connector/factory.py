@@ -14,6 +14,9 @@ class KVConnectorFactory:
         if config.kv_transfer_config.kv_connector == 'PyNcclConnector':
             from .simple_connector import SimpleConnector
             return SimpleConnector(rank, local_rank, config)
+        elif config.kv_transfer_config.kv_connector == 'MooncakeConnector':
+            from .mooncake_connector import MooncakeConnector
+            return MooncakeConnector(rank, local_rank, config)
         else:
             raise ValueError(f"Unsupported connector type: "
                              f"{config.kv_connector}")
