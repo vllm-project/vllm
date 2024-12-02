@@ -55,15 +55,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
-@fork_new_process_for_each_test
-def test_llama_lora(sql_lora_files):
-
-    llm = vllm.LLM(MODEL_PATH,
-                   enable_lora=True,
-                   max_num_seqs=16,
-                   max_loras=4,
-                   tensor_parallel_size=1)
-
+def generate_and_test(llm, sql_lora_files):
     print("lora adapter created")
     assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
@@ -77,6 +69,17 @@ def test_llama_lora(sql_lora_files):
     assert do_sample(llm, sql_lora_files, lora_id=2) == EXPECTED_LORA_OUTPUT
 
     print("removing lora")
+
+
+@fork_new_process_for_each_test
+def test_llama_lora(sql_lora_files):
+
+    llm = vllm.LLM(MODEL_PATH,
+                   enable_lora=True,
+                   max_num_seqs=16,
+                   max_loras=4,
+                   tensor_parallel_size=1)
+    generate_and_test(llm, sql_lora_files)
 
 
 @fork_new_process_for_each_test
@@ -118,20 +121,7 @@ def test_llama_lora_tp4(sql_lora_files):
         max_loras=4,
         tensor_parallel_size=4,
     )
-
-    print("lora adapter created")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
-
-    print("lora 1")
-    assert do_sample(llm, sql_lora_files, lora_id=1) == EXPECTED_LORA_OUTPUT
-
-    print("no lora")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
-
-    print("lora 2")
-    assert do_sample(llm, sql_lora_files, lora_id=2) == EXPECTED_LORA_OUTPUT
-
-    print("removing lora")
+    generate_and_test(llm, sql_lora_files)
 
 
 @multi_gpu_test(num_gpus=4)
@@ -146,16 +136,20 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
         tensor_parallel_size=4,
         fully_sharded_loras=True,
     )
-    print("lora adapter created")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+    generate_and_test(llm, sql_lora_files)
 
-    print("lora 1")
-    assert do_sample(llm, sql_lora_files, lora_id=1) == EXPECTED_LORA_OUTPUT
 
-    print("no lora")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+@multi_gpu_test(num_gpus=4)
+@fork_new_process_for_each_test
+def test_llama_lora_tp4_fully_sharded_enable_bias(sql_lora_files):
 
-    print("lora 2")
-    assert do_sample(llm, sql_lora_files, lora_id=2) == EXPECTED_LORA_OUTPUT
-
-    print("removing lora")
+    llm = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=4,
+        tensor_parallel_size=4,
+        fully_sharded_loras=True,
+        enable_lora_bias=True,
+    )
+    generate_and_test(llm, sql_lora_files)
