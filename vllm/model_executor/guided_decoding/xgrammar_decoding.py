@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.sampling_params import GuidedDecodingParams
 
+from vllm.logits_process import Readyable
+
 
 _thread_pool = None
 
@@ -175,7 +177,7 @@ class GrammarConfig:
 
 
 @dataclass
-class XGrammarLogitsProcessor:
+class XGrammarLogitsProcessor(Readyable):
     """Wrapper class to support pickle protocol"""
     config: GrammarConfig
 
@@ -190,6 +192,9 @@ class XGrammarLogitsProcessor:
 
     def async_init(self, thread_pool: concurrent.futures.ThreadPoolExecutor):
         self._future = thread_pool.submit(self._init_ctx)
+
+    def ready(self) -> bool:
+        return self.ctx is not None
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
