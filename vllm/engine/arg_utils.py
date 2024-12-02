@@ -1061,7 +1061,7 @@ class EngineArgs:
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and model_config.task != "embedding"):
+                        and model_config.runner_type != "pooling"):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -1078,7 +1078,8 @@ class EngineArgs:
                 "errors during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
-        elif self.enable_chunked_prefill and model_config.task == "embedding":
+        elif (self.enable_chunked_prefill
+              and model_config.runner_type == "pooling"):
             msg = "Chunked prefill is not supported for embedding models"
             raise ValueError(msg)
 
@@ -1139,7 +1140,7 @@ class EngineArgs:
                 " please file an issue with detailed information.")
 
         scheduler_config = SchedulerConfig(
-            task=model_config.task,
+            runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,

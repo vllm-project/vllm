@@ -35,9 +35,7 @@ def test_llm_1_to_1(vllm_runner, hf_runner, model_name, dtype: str):
     with hf_runner(model_name, dtype=dtype, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict([text_pair]).tolist()
 
-    with vllm_runner(model_name,
-                     task="embedding",
-                     dtype=dtype,
+    with vllm_runner(model_name, task="score", dtype=dtype,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
@@ -58,9 +56,7 @@ def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
     with hf_runner(model_name, dtype=dtype, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict(text_pairs).tolist()
 
-    with vllm_runner(model_name,
-                     task="embedding",
-                     dtype=dtype,
+    with vllm_runner(model_name, task="score", dtype=dtype,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
@@ -82,9 +78,7 @@ def test_llm_N_to_N(vllm_runner, hf_runner, model_name, dtype: str):
     with hf_runner(model_name, dtype=dtype, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict(text_pairs).tolist()
 
-    with vllm_runner(model_name,
-                     task="embedding",
-                     dtype=dtype,
+    with vllm_runner(model_name, task="score", dtype=dtype,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 

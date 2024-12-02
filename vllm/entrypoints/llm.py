@@ -379,19 +379,20 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        task = self.llm_engine.model_config.task
-        if task != "generate":
+        runner_type = self.llm_engine.model_config.runner_type
+        if runner_type != "generate":
             messages = [
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).",
             ]
 
-            supported_tasks = self.llm_engine.model_config.supported_tasks
-            if "generate" in supported_tasks:
+            supported_runner_types = self.llm_engine.model_config \
+                .supported_runner_types
+            if "generate" in supported_runner_types:
                 messages.append(
-                    "Your model supports the 'generate' task, but is "
-                    f"currently initialized for the '{task}' task. Please "
-                    "initialize the model using `--task generate`.")
+                    "Your model supports the 'generate' runner, but is "
+                    f"currently initialized for the '{runner_type}' runner. "
+                    "Please initialize vLLM using `--task generate`.")
 
             raise ValueError(" ".join(messages))
 
@@ -786,16 +787,18 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        task = self.llm_engine.model_config.task
-        if task != "embedding":
-            messages = ["LLM.encode() is only supported for embedding models."]
+        runner_type = self.llm_engine.model_config.runner_type
+        if runner_type != "pooling":
+            messages = ["LLM.encode() is only supported for pooling models."]
 
-            supported_tasks = self.llm_engine.model_config.supported_tasks
-            if "embedding" in supported_tasks:
+            supported_runner_types = self.llm_engine.model_config \
+                .supported_runner_types
+            if "pooling" in supported_runner_types:
                 messages.append(
-                    "Your model supports the 'embedding' task, but is "
-                    f"currently initialized for the '{task}' task. Please "
-                    "initialize the model using `--task embedding`.")
+                    "Your model supports the 'pooling' runner, but is "
+                    f"currently initialized for the '{runner_type}' runner. "
+                    "Please initialize vLLM using `--task embed`, "
+                    "`--task classify`, `--task reward` etc.")
 
             raise ValueError(" ".join(messages))
 
@@ -857,16 +860,18 @@ class LLM:
             A list of ``PoolingRequestOutput`` objects containing the
             generated scores in the same order as the input prompts.
         """
-        task = self.llm_engine.model_config.task
-        if task != "embedding":
-            messages = ["LLM.score() is only supported for embedding models."]
+        runner_type = self.llm_engine.model_config.runner_type
+        if runner_type != "pooling":
+            messages = ["LLM.score() is only supported for pooling models."]
 
-            supported_tasks = self.llm_engine.model_config.supported_tasks
-            if "embedding" in supported_tasks:
+            supported_runner_types = self.llm_engine.model_config \
+                .supported_runner_types
+            if "pooling" in supported_runner_types:
                 messages.append(
-                    "Your model supports the 'embedding' task, but is "
-                    f"currently initialized for the '{task}' task. Please "
-                    "initialize the model using `--task embedding`.")
+                    "Your model supports the 'pooling' runner, but is "
+                    f"currently initialized for the '{runner_type}' runner. "
+                    "Please initialize vLLM using `--task embed`, "
+                    "`--task classify`, `--task reward` etc.")
 
             raise ValueError(" ".join(messages))
 

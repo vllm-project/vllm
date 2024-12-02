@@ -224,7 +224,7 @@ async def main(args):
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
@@ -232,7 +232,7 @@ async def main(args):
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if model_config.task == "embedding" else None
+    ) if model_config.runner_type == "pooling" else None
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
