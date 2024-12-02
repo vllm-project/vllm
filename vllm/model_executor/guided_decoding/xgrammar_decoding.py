@@ -1,6 +1,7 @@
 # noqa: UP007
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.sampling_params import GuidedDecodingParams
 
+_thread_pool = None
+
 
 # TODO: passing batch size to max threads here
 def get_local_xgrammar_guided_decoding_logits_processor(
@@ -27,11 +30,18 @@ def get_local_xgrammar_guided_decoding_logits_processor(
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
         max_threads: int = 8):
+
+    global _thread_pool
+    if _thread_pool is None:
+        _thread_pool = concurrent.futures.ThreadPoolExecutor(max_threads)
+
     config = GrammarConfig.from_guided_params(guided_params=guided_params,
                                               model_config=model_config,
                                               tokenizer=tokenizer,
                                               max_threads=max_threads)
-    return XGrammarLogitsProcessor(config)
+    xgr_proc = XGrammarLogitsProcessor(config)
+    xgr_proc.async_init(_thread_pool)
+    return xgr_proc
 
 
 class TokenizerData(NamedTuple):
@@ -184,6 +194,11 @@ class XGrammarLogitsProcessor:
     batch_size: int = field(default=1)
     prefilled: bool = field(default=False)
 
+    _future: concurrent.futures.Future[Any] | None = None
+
+    def async_init(self, thread_pool: concurrent.futures.ThreadPoolExecutor):
+        self._future = thread_pool.submit(self._init_ctx)
+
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
 
@@ -196,24 +211,25 @@ class XGrammarLogitsProcessor:
         self.token_bitmask = None  # type: ignore[assignment]
         self.prefilled = False
 
-    def _ensure_ctx(self):
+    def _init_ctx(self):
         """Lazily initialize the processor in the worker process"""
-        if self.ctx is None:
-            compiler = GrammarCompilerCache.get_compiler(self.config)
-            if self.config.json_str is not None:
-                self.ctx = compiler.compile_json_schema(self.config.json_str)
-            elif self.config.grammar_str is not None:
-                self.ctx = compiler.compile_grammar(self.config.grammar_str)
-            elif self.config.json_object:
-                self.ctx = compiler.compile_builtin_json_grammar()
-            else:
-                raise ValueError(
-                    "Invalid configuration for xgrammar logits processor")
+        compiler = GrammarCompilerCache.get_compiler(self.config)
+        if self.config.json_str is not None:
+            return compiler.compile_json_schema(self.config.json_str)
+        elif self.config.grammar_str is not None:
+            return compiler.compile_grammar(self.config.grammar_str)
+        elif self.config.json_object:
+            return compiler.compile_builtin_json_grammar()
+        else:
+            raise ValueError(
+                "Invalid configuration for xgrammar logits processor")
 
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
         if self.ctx is None:
-            self._ensure_ctx()
+            assert self._future is not None
+            self.ctx = self._future.result()
+            self._future = None
 
         if len(self.matchers) == 0:
             self.matchers = [
