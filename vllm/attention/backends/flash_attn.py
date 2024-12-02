@@ -675,8 +675,6 @@ class FlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[torch.Tensor] = self.alibi_slopes
         logits_soft_cap: Optional[float] = self.logits_soft_cap
 
-        num_tokens = query.shape[0]
-
         if kv_cache.numel() > 0:
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]

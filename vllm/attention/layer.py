@@ -140,6 +140,7 @@ class Attention(nn.Module):
                                      attn_type=attn_type)
         elif self.use_output:
             output = torch.empty_like(query)
+            hidden_size = query.size(-1)
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
             # CPU overheads from the non-CUDA-graph regions.
@@ -151,7 +152,7 @@ class Attention(nn.Module):
             torch.ops.vllm.unified_attention_with_output(
                 query, key, value, output, kv_cache, attn_type,
                 self.layer_name)
-            return output
+            return output.view(-1, hidden_size)
         else:
             return torch.ops.vllm.unified_attention(query, key, value,
                                                     kv_cache, attn_type,
