@@ -2391,7 +2391,7 @@ _BATCH_SIZE_ALIGNMENT = 8
 # currently it includes: 1, 2, 4, 8, 16, 24, 32, 40, ..., 8192.
 # the actual sizes to capture will be determined by the model,
 # depending on the model's max_num_seqs.
-# NOTE: _get_graph_batch_size needs to be updated if this list is changed.
+# NOTE: get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 1025)
 ]
@@ -2444,7 +2444,7 @@ class VllmConfig:
         max_num_seqs: Maximum number of sequences in a batch.
         _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
 
-        pad the max_num_seqs if necessary by calling _get_graph_batch_size,
+        pad the max_num_seqs if necessary by calling get_graph_batch_size,
         which will deal with some edge cases like 1, 2, 4.
 
         if the padded size is in _BATCH_SIZES_TO_CAPTURE, return the padded
