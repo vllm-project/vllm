@@ -8,6 +8,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
 VOCAB_SIZE = 1024
+NUM_OUTPUT_TOKENS = 20
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
@@ -124,7 +125,6 @@ def test_sampler_min_tokens_penalty(device: str, batch_size: int):
     the stop token ids to -inf.
     """
     torch.set_default_device(device)
-    NUM_OUTPUT_TOKENS = 20
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE)
@@ -161,7 +161,6 @@ def test_sampler_presence_penalty(device: str, batch_size: int):
     which are not yet present in the output.
     """
     torch.set_default_device(device)
-    NUM_OUTPUT_TOKENS = 20
     # Create fake logits where each token is assigned the same
     # logit value.
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
@@ -211,7 +210,6 @@ def test_sampler_frequency_penalty(device: str, batch_size: int):
     higher frequency are penalized more than those with lower frequency.
     """
     torch.set_default_device(device)
-    NUM_OUTPUT_TOKENS = 20
     # Create fake logits where each token is assigned the same
     # logit value.
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
@@ -243,3 +241,31 @@ def test_sampler_frequency_penalty(device: str, batch_size: int):
         assert logprobs_token_ids[-len(token_ids_in_output):].tolist() \
             == token_ids_in_output, \
             "The tensor values are not in the same order as the list!"
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [1, 2, 32])
+def test_sampler_repetition_penalty(device: str, batch_size: int):
+    """
+    Test to verify that if frequency penalty is enabled then tokens with
+    higher frequency are penalized more than those with lower frequency.
+    """
+    torch.set_default_device(device)
+    # Create fake logits where each token is assigned the same
+    # logit value.
+    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE)
+    sampling_metadata.repetition_penalties = [2.0 for _ in range(batch_size)]
+    sampler = Sampler()
+    sampler_output = sampler(fake_logits, sampling_metadata)
+    for batch_idx in range(batch_size):
+        logprobs_token_ids = sampler_output.logprob_token_ids[batch_idx]
+        assert (logprobs_token_ids[0] not in \
+            sampling_metadata.prompt_token_ids[batch_idx] and \
+            logprobs_token_ids[0] not in \
+            sampling_metadata.output_token_ids[batch_idx])
+        assert (logprobs_token_ids[VOCAB_SIZE-1]  in \
+            sampling_metadata.prompt_token_ids[batch_idx] or \
+            logprobs_token_ids[VOCAB_SIZE-1] in \
+            sampling_metadata.output_token_ids[batch_idx])
