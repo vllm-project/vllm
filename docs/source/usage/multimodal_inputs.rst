@@ -164,10 +164,12 @@ pass a tensor of shape :code:`(num_items, feature_size, hidden_size of LM)` to t
         generated_text = o.outputs[0].text
         print(generated_text)
 
-    # Inference with image embeddings as input with additional parameters
-    # (Only available for specific models)
+For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embeddings:
 
-    # Construct the prompt based on your model (we omit it here)
+.. code-block:: python
+
+    # Construct the prompt based on your model
+    prompt = ...
 
     # Embeddings for multiple images
     # torch.Tensor of shape (num_images, image_feature_size, hidden_size of LM)
