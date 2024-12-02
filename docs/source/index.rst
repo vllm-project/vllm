@@ -90,6 +90,14 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
+   :caption: Models
+
+   models/supported_models
+   models/adding_model
+   models/enabling_multimodal_inputs
+
+.. toctree::
+   :maxdepth: 1
    :caption: Usage
 
    usage/lora
@@ -102,14 +110,6 @@ Documentation
    usage/engine_args
    usage/env_vars
    usage/usage_stats
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Models
-
-   models/supported_models
-   models/adding_model
-   models/enabling_multimodal_inputs
 
 .. toctree::
    :maxdepth: 1
