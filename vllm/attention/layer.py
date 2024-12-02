@@ -146,9 +146,10 @@ class Attention(nn.Module):
             # CPU overheads from the non-CUDA-graph regions.
             query = query.view(-1, self.num_heads, self.head_size)
             output = output.view(-1, self.num_heads, self.head_size)
-            key = key.view(-1, self.num_kv_heads, self.head_size)
-            value = value.view(-1, self.num_kv_heads, self.head_size)
-
+            if key is not None:
+                key = key.view(-1, self.num_kv_heads, self.head_size)
+            if value is not None:
+                value = value.view(-1, self.num_kv_heads, self.head_size)
             torch.ops.vllm.unified_attention_with_output(
                 query, key, value, output, kv_cache, attn_type,
                 self.layer_name)
