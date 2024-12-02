@@ -341,7 +341,11 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
             )
         else:
             block_tables = torch.tensor([])
-            seq_lens_tensor = torch.tensor([])
+            seq_lens_tensor = torch.tensor(
+                input_data.seq_lens[:input_data.num_prefills],
+                dtype=torch.int32,
+                device="cpu",
+            )
 
         # For multi-modal models
         placeholder_index_maps = None
