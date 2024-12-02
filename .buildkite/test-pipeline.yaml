@@ -12,6 +12,7 @@
 # optional(bool): never run this test by default (i.e. need to unblock manually) unless it's scheduled nightly run.
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for test. incompatbile with command.
+
 # mirror_hardwares(list): the list of hardwares to run the test on as well. currently only supports [amd]
 # gpu(str): override the GPU selection for the test. default is on L4 GPUs. currently only supports a100
 # num_gpus(int): override the number of GPUs for the test. default to 1 GPU. currently support 2,4.
