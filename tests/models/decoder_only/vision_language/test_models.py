@@ -8,6 +8,7 @@ from typing import Type
 import pytest
 import transformers
 from transformers import AutoModelForVision2Seq
+from transformers.utils import is_flash_attn_2_available
 
 from vllm.platforms import current_platform
 from vllm.utils import cuda_device_count_stateless, identity
