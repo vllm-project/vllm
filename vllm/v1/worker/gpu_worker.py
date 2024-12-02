@@ -359,8 +359,10 @@ class WorkerProc:
     ) -> WorkerProcHandle:
         context = get_mp_context()
 
-        # ZMQ paths to send back and forth to worker process
-        # Used for initialization.
+        # ZMQ paths for initialization-related messages between this process and
+        # the worker process being created. After process creation, the worker
+        # sends a ready message to the output_path. Subsequent messages are sent
+        # back and forth in a call-and-response manner.
         initialization_input_path = get_open_zmq_ipc_path()
         initialization_output_path = get_open_zmq_ipc_path()
 
