@@ -8,7 +8,6 @@ from typing import Iterable, List, Tuple
 import torch
 import torch.utils.benchmark as TBenchmark
 from bench_v1 import bench_v1
-from bench_v2 import bench_v2
 from torch.utils.benchmark import Measurement as TMeasurement
 from weight_shapes import WEIGHT_SHAPES
 
@@ -29,23 +28,15 @@ def run(args, MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
     results = []
     dtype = args.dtype
 
-    use_bench_v2 = args.with_cuda_graph or args.with_arg_pool
     for m, k, n in MKNs:
-        if use_bench_v2:
-            label = f"scaled-sparse-{dtype}-gemm"
-            label = f"{label}-cugraph_{args.with_cuda_graph}" \
-                  if args.with_cuda_graph else label
-            label = f"{label}-argpool_{args.with_arg_pool}" \
-                if args.with_arg_pool else label
-            timers = bench_v2(args.dtype, args.with_cuda_graph,
-                              args.with_arg_pool, m, k, n, label,
-                              f"MKN=({m}x{k}x{n})")
-        else:
-            timers = bench_v1(args.dtype, m, k, n, f"scaled-sparse-{dtype}-gemm",
-                              f"MKN=({m}x{k}x{n})")
+        timers = bench_v1(args.dtype, m, k, n, f"scaled-sparse-{dtype}-gemm",
+                            f"MKN=({m}x{k}x{n})")
 
         print_timers(timers)
         results.extend(timers)
+
+        with open(f"chunk_bench-{m}_{k}_{n}-{args.dtype}.pkl", "wb") as f:
+            pkl.dump(timers, f)
 
     return results
 
@@ -165,19 +156,7 @@ Benchmark Cutlass GEMM.
                         type=to_torch_dtype,
                         required=True,
                         help="Available options are ['int8', 'fp8', 'fp16', 'bf16']")
-    parser.add_argument(
-        '--with-cuda-graph',
-        type=int,
-        default=None,
-        help="Number of ops/matmuls in a cudagraph execution. When set"
-        "cuda-graphs is enabled")
-    parser.add_argument(
-        '--with-arg-pool',
-        type=int,
-        default=None,
-        help="Number of A and B tensors to use as arg-pool. When not set,"
-        "it defaults to 1")
-
+    
     subparsers = parser.add_subparsers(dest="cmd")
 
     square_parser = subparsers.add_parser("square_bench")

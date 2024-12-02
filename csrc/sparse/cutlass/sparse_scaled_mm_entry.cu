@@ -58,7 +58,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   if (bias) {
-    TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
+    TORCH_CHECK(bias->numel() == a.size(0) && bias->is_contiguous() &&
                 bias->dim() == 1);
   }
 
