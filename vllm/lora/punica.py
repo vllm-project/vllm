@@ -543,7 +543,7 @@ class PunicaWrapper:
         """
         if bias_all is not None:
             y = self.add_bias(self.token_lora_indices, y, bias_all)
-        
+
         expand_fun: Callable = (self.expand_prefill
                                 if self.is_prefill else self.expand_decode)
         expand_fun(y, x, w_t_all, add_input)
@@ -561,7 +561,7 @@ class PunicaWrapper:
         """
         if bias_all is not None:
             y = self.add_bias(self.token_lora_indices, y, bias_all)
-        
+
         expand_slice_fun: Callable = (self.expand_slice_prefill
                                       if self.is_prefill else
                                       self.expand_slice_decode)
@@ -591,7 +591,7 @@ class PunicaWrapper:
                                   output_slices[slice_idx],
                                   add_input=True)
             offset_left += output_slices[slice_idx]
-        
+
         y = y.view_as(y_org)
 
     def add_lora(self,
