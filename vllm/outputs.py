@@ -141,7 +141,7 @@ class RequestOutput:
           token_ids: completion token ids
           logprobs: completion sample logprobs
           prompt_logprobs: prompt logprobs
-          finished
+          finished: whether the request is finished
         """
 
         # TODO: Support `n` > 1.
