@@ -9,10 +9,10 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
-                         DecodingConfig, DeviceConfig, HfOverrides, LoadConfig,
-                         LoadFormat, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+                         DecodingConfig, DeviceConfig, HfOverrides,
+                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PoolerConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TaskOption, TokenizerPoolConfig,
                          VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
@@ -108,6 +108,7 @@ class EngineArgs:
     # notice.
     distributed_executor_backend: Optional[Union[str,
                                                  Type[ExecutorBase]]] = None
+    # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -193,6 +194,8 @@ class EngineArgs:
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"
+
+    kv_transfer_config: Optional[KVTransferConfig] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -908,6 +911,12 @@ class EngineArgs:
                             'compilers, using -O without space is also '
                             'supported. -O3 is equivalent to -O 3.')
 
+        parser.add_argument('--kv-transfer-config',
+                            type=KVTransferConfig.from_cli,
+                            default=None,
+                            help='The configurations for distributed KV cache '
+                            'transfer. Should be a JSON string.')
+
         parser.add_argument(
             '--worker-cls',
             type=str,
@@ -1201,6 +1210,7 @@ class EngineArgs:
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
+            kv_transfer_config=self.kv_transfer_config,
         )
 
         if envs.VLLM_USE_V1:
