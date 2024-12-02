@@ -471,6 +471,8 @@ Sentence Pair Scoring
 .. note::
     These models are supported in both offline and online inference via Score API.
 
+.. _supported_mm_models:
+
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -488,8 +490,6 @@ Any combination of modalities joined by :code:`+` are supported.
 On the other hand, modalities separated by :code:`/` are mutually exclusive.
 
 - e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
-
-.. _supported_mm_models:
 
 Text Generation
 ---------------
