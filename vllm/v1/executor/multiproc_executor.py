@@ -159,6 +159,9 @@ class MultiprocExecutor:
             self.scheduler_output_mq.enqueue(termination_msg)
             self.scheduler_output_mq = None
 
+        if (hasattr(self, 'workers') and self.workers is not None):
+            self._run_on_workers('ensure_termination')
+
     def __del__(self):
         self.shutdown()
 

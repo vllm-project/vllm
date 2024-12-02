@@ -2,6 +2,8 @@
 import gc
 import os
 import pickle
+import signal
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
@@ -269,6 +271,38 @@ class WorkerProcHandle:
     initialization_input_path: str
     initialization_output_path: str
     model_output_mq_handle: Optional[Handle]
+
+    def ensure_termination(self):
+        """Ensure that the process is terminated.
+
+        Designed for use in the executor's shutdown method. Assumes worker
+        processes have already received termination requests.
+        Waits for processing, then sends termination and kill signals if needed.
+        """
+
+        def wait_for_termination(timeout):
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if not self.proc.is_alive():
+                    return True
+                time.sleep(0.1)
+            return False
+
+        # First wait for graceful shutdown
+        if wait_for_termination(0.5):
+            return
+
+        # Send SIGTERM if still running
+        if self.proc.is_alive():
+            self.proc.terminate()
+            if wait_for_termination(1):
+                return
+
+        # Send SIGKILL if still running
+        if self.proc.is_alive():
+            os.kill(self.proc.pid, signal.SIGKILL)
+            if not wait_for_termination(1):
+                raise RuntimeError("Failed to terminate worker process")
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         with make_zmq_socket(self.initialization_output_path,
