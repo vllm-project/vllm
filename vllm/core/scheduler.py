@@ -10,6 +10,7 @@ from typing import Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.core.lora_scheduler import LoRAScheduler
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -410,6 +411,8 @@ class Scheduler:
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
 
+        self.lora_scheduler = LoRAScheduler(self.lora_config)
+
     @property
     def next_cache_id(self):
         return (self.cache_id + 1) % self.num_cache_iters
@@ -508,6 +511,7 @@ class Scheduler:
         self,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
+        allowed_loras: Optional[Set[int]],
         enable_chunking: bool = False,
     ) -> SchedulerRunningOutputs:
         """Schedule sequence groups that are running.
@@ -554,6 +558,7 @@ class Scheduler:
 
         running_queue = self.running
         assert len(self._async_stopped) == 0
+
         while running_queue:
             seq_group = running_queue[0]
             # We discard the cached tokens info here because we don't need it
@@ -672,6 +677,7 @@ class Scheduler:
         self,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
+        allowed_loras: Optional[Set[int]],
         enable_chunking: bool = False,
     ) -> SchedulerSwappedInOutputs:
         """Schedule sequence groups that are swapped out.
@@ -813,6 +819,15 @@ class Scheduler:
         """
         return seq_group.priority, seq_group.arrival_time
 
+    def _update_loras(self):
+        all_loras = set(
+            [seq_group.lora_int_id for seq_group in self.running] + 
+            [seq_group.lora_int_id for seq_group in self.waiting] +
+            [seq_group.lora_int_id for seq_group in self.swapped]
+        )
+        all_loras = set([lora for lora in all_loras if lora > 0])
+        self.lora_scheduler.update_loras(all_loras)
+
     def _schedule_priority_preemption(
         self,
         budget: SchedulingBudget,
@@ -882,6 +897,7 @@ class Scheduler:
         self,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
+        allowed_loras: Optional[Set[int]],
         enable_chunking: bool = False,
     ) -> SchedulerPrefillOutputs:
         """Schedule sequence groups that are in prefill stage.
@@ -969,7 +985,8 @@ class Scheduler:
                 assert self.lora_config is not None
                 if (self.lora_enabled and lora_int_id > 0
                         and lora_int_id not in curr_loras
-                        and len(curr_loras) >= self.lora_config.max_loras):
+                        and len(curr_loras) >= self.lora_config.max_loras
+                        and (allowed_loras is None or lora_int_id in allowed_loras)):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
                     leftover_waiting_sequences.appendleft(seq_group)
@@ -1052,6 +1069,7 @@ class Scheduler:
         for seq_group in self.running:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
+
         curr_loras = set(
             seq_group.lora_int_id for seq_group in self.running
             if seq_group.lora_int_id > 0) if self.lora_enabled else None
@@ -1064,6 +1082,7 @@ class Scheduler:
         if not self.swapped:
             prefills = self._schedule_prefills(budget,
                                                curr_loras,
+                                               None,  # TODO: come back and change this
                                                enable_chunking=False)
 
         if len(prefills.seq_groups
@@ -1076,13 +1095,14 @@ class Scheduler:
         if len(prefills.seq_groups) == 0:
             running_scheduled = self._schedule_running(budget,
                                                        curr_loras,
+                                                       None,  # TODO: come back and change this
                                                        enable_chunking=False)
 
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
             if len(running_scheduled.preempted) + len(
                     running_scheduled.swapped_out) == 0:
-                swapped_in = self._schedule_swapped(budget, curr_loras)
+                swapped_in = self._schedule_swapped(budget, curr_loras, None)  # TODO: come back and change this
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
@@ -1157,6 +1177,12 @@ class Scheduler:
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
         )
+
+        if self.lora_enabled:
+            self._update_loras()
+        
+        allowed_loras = self.lora_scheduler.schedule_loras() if self.lora_enabled else None
+        
         curr_loras: Set[int] = set()
 
         prefills = SchedulerPrefillOutputs.create_empty()
@@ -1165,16 +1191,18 @@ class Scheduler:
         # Decoding should be always scheduled first by fcfs.
         running_scheduled = self._schedule_running(budget,
                                                    curr_loras,
+                                                   allowed_loras,
                                                    enable_chunking=True)
 
         # Schedule swapped out requests.
         # If preemption happens, it means we don't have space for swap-in.
         if len(running_scheduled.preempted) + len(
                 running_scheduled.swapped_out) == 0:
-            swapped_in = self._schedule_swapped(budget, curr_loras)
+            swapped_in = self._schedule_swapped(budget, curr_loras, allowed_loras)
 
         prefills = self._schedule_prefills(budget,
                                            curr_loras,
+                                           allowed_loras,
                                            enable_chunking=True)
 
         assert (budget.num_batched_tokens <=
