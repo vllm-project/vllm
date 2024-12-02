@@ -1,5 +1,5 @@
 import random
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import pytest
 from transformers import AutoTokenizer
@@ -117,21 +117,43 @@ GENERATION_STRINGS = [
 class MockEngineCore:
     """Mock outputs form premade tokens lists."""
 
-    def __init__(self, tokens_list: List[List[int]]):
-        self.tokens_list = tokens_list
+    def __init__(
+        self,
+        generated_tokens_list: List[List[int]],
+        prompt_tokens_list: List[List[int]],
+        generated_logprobs_raw: Optional[SampleLogprobs],
+        prompt_logprobs_raw: Optional[PromptLogprobs],
+    ) -> None:
+        self.generated_tokens_list = generated_tokens_list
+        self.prompt_tokens_list = prompt_tokens_list
         self.current_idx = 0
+        self.generated_logprobs_raw = generated_logprobs_raw
+        self.do_logprobs = generated_logprobs_raw is not None
+        self.prompt_logprobs_raw = prompt_logprobs_raw
+        self.do_prompt_logprobs = prompt_logprobs_raw is not None
 
     def get_outputs(self) -> List[EngineCoreOutput]:
+        do_logprobs = self.do_logprobs
+        do_prompt_logprobs = self.do_prompt_logprobs
         token_idx = self.current_idx
         self.current_idx += 1
 
         outputs = []
-        for req_idx, token_ids in enumerate(self.tokens_list):
-            if len(token_ids) > token_idx:
-                output = EngineCoreOutput(request_id=f"request-{req_idx}",
-                                          new_token_ids=[token_ids[token_idx]],
-                                          finished=False)
-                if token_idx == len(token_ids) - 1:
+        for req_idx, (generated_token_ids, prompt_token_ids) in enumerate(
+                zip(self.generated_tokens_list, self.prompt_tokens_list)):
+            if len(generated_token_ids) > token_idx:
+                output = EngineCoreOutput(
+                    request_id=f"request-{req_idx}",
+                    new_token_ids=[generated_token_ids[token_idx]],
+                    finished=False,
+                    logprobs=self.generated_logprobs_raw
+                    if do_logprobs else None,
+                    prompt_logprobs=self.prompt_logprobs_raw
+                    if do_prompt_logprobs else None,
+                    prompt_logprobs_token_ids=prompt_token_ids
+                    if do_prompt_logprobs else None,
+                )
+                if token_idx == len(generated_token_ids) - 1:
                     output.finished = True
                     output.finish_reason = "stopped"
                 outputs.append(output)
@@ -204,9 +226,24 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind):
 
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
-def test_stop_string(include_stop_str_in_output: bool):
+@pytest.mark.parametrize("logprobs,prompt_logprobs",
+                         [(None, None), (NUM_SAMPLE_LOGPROBS, None),
+                          (None, NUM_PROMPT_LOGPROBS),
+                          (NUM_SAMPLE_LOGPROBS, NUM_PROMPT_LOGPROBS)])
+def test_stop_string(
+    include_stop_str_in_output: bool,
+    logprobs: Optional[int],
+    prompt_logprobs: Optional[int],
+) -> None:
+    do_generated_logprobs = logprobs is not None
+    do_prompt_logprobs = prompt_logprobs is not None
     detokenizer = Detokenizer(TOKENIZER_NAME)
-    engine_core = MockEngineCore(GENERATION_TOKENS)
+    engine_core = MockEngineCore(generated_tokens_list=GENERATION_TOKENS,
+                                 prompt_tokens_list=PROMPT_TOKENS,
+                                 generated_logprobs_raw=GENERATION_LOGPROBS_RAW
+                                 if do_generated_logprobs else None,
+                                 prompt_logprobs_raw=PROMPT_LOGPROBS_RAW
+                                 if do_prompt_logprobs else None)
 
     # Make N requests.
     requests = [
@@ -219,6 +256,8 @@ def test_stop_string(include_stop_str_in_output: bool):
             output_kind=RequestOutputKind.DELTA,
             stop=STOP_STRINGS,
             include_stop_str_in_output=include_stop_str_in_output,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
         ) for idx, (
             prompt,
             prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
