@@ -103,7 +103,7 @@ class Processor:
         # Preprocess multi-modal data
         mm_inputs = self.mm_input_mapper.process_inputs(
             decoder_inputs.multi_modal_data, decoder_inputs.mm_processor_kwargs
-        ) if decoder_inputs.multi_modal_data is not None else None
+        ) if not decoder_inputs.multi_modal_data else None
 
         # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
