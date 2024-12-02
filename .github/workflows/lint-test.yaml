@@ -70,7 +70,7 @@ jobs:
         run: |
           kubectl -n ns-vllm port-forward service/test-vllm-service 8001:80 &
           sleep 10
-          curl -f --location http://localhost:8001/v1/completions \
+          curl -f -X POST --location http://localhost:8001/v1/completions \
                   --header "Content-Type: application/json" \
                   --data '{
                           "model": "opt-125m",
@@ -78,7 +78,7 @@ jobs:
                           "max_tokens": 7,
                           "temperature": 0
                   }'
-          CODE="$(curl -v -f --location http://localhost:8001/v1/completions \
+          CODE="$(curl -v -f -X POST --location http://localhost:8001/v1/completions \
                   --header "Content-Type: application/json" \
                   --data '{
                           "model": "opt-125m",
