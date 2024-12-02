@@ -135,6 +135,10 @@ def linkcode_resolve(domain, info):
     try:
         for part in info['fullname'].split('.'):
             obj = getattr(obj, part)
+
+            if not inspect.isclass(obj) and not inspect.isfunction(obj) and not inspect.ismethod(obj):
+                obj = obj.__class__  # Get the class of the instance
+
             lineno = inspect.getsourcelines(obj)[1]
             filename = (inspect.getsourcefile(obj)
                         or f"{filename}.py").split("vllm/", 1)[1]
