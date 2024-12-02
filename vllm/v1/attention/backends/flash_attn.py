@@ -205,6 +205,7 @@ def unified_v1_flash_attention(
         v_scale,
     )
 
+    # Compute attention and update output up to `num_actual_tokens`.
     flash_attn_varlen_func(
         q=query[:num_actual_tokens],
         k=key_cache,
