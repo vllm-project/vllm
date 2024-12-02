@@ -64,13 +64,13 @@ jobs:
         run: |
           export AWS_ACCESS_KEY_ID=minioadmin
           export AWS_SECRET_ACCESS_KEY=minioadmin
-          helm install --wait --wait-for-jobs --timeout 10m0s --debug --create-namespace --namespace=ns-vllm test-vllm examples/chart-helm -f examples/chart-helm/values.yaml --set secrets.s3endpoint=http://minio:9000 --set secrets.s3bucketname=testbucket --set secrets.s3accesskeyid=$AWS_ACCESS_KEY_ID --set secrets.s3accesskey=$AWS_SECRET_ACCESS_KEY --set image.env[0].name=VLLM_CPU_KVCACHE_SPACE --set resources.requests.cpu=1 --set resources.requests.memory=4Gi --set resources.limits.cpu=2 --set resources.limits.memory=5Gi --set-string image.env[0].value="1" --set-string extraInit.s3modelpath="opt-125m/" --set-string 'resources.limits.nvidia\.com/gpu=0' --set-string 'resources.requests.nvidia\.com/gpu=0' --set-string image.repository="vllm-cpu-env"
+          helm install --wait --wait-for-jobs --timeout 10m0s --debug --create-namespace --namespace=ns-vllm test-vllm examples/chart-helm -f examples/chart-helm/values.yaml --set secrets.s3endpoint=http://minio:9000 --set secrets.s3bucketname=testbucket --set secrets.s3accesskeyid=$AWS_ACCESS_KEY_ID --set secrets.s3accesskey=$AWS_SECRET_ACCESS_KEY --set image.env[0].name=VLLM_CPU_KVCACHE_SPACE --set resources.requests.cpu=1 --set resources.requests.memory=4Gi --set resources.limits.cpu=2 --set resources.limits.memory=5Gi --set-string image.env[0].value="1" --set-string extraInit.s3modelpath="opt-125m/" --set-string 'resources.limits.nvidia\.com/gpu=0' --set-string 'resources.requests.nvidia\.com/gpu=0' --set-string image.repository="vllm-cpu-env" & (sleep 20; kubectl -n ns-vllm logs -f $(kubectl -n ns-vllm get pods -o name | awk '/deployment/ {print $1;exit}'))
     
       - name: curl test
         run: |
           kubectl -n ns-vllm port-forward service/test-vllm-service 8001:80 &
           sleep 10
-          curl -f -X POST --location http://localhost:8001/v1/completions \
+          curl -f --request POST --location http://localhost:8001/v1/completions \
                   --header "Content-Type: application/json" \
                   --data '{
                           "model": "opt-125m",
@@ -78,7 +78,7 @@ jobs:
                           "max_tokens": 7,
                           "temperature": 0
                   }'
-          CODE="$(curl -v -f -X POST --location http://localhost:8001/v1/completions \
+          CODE="$(curl -v -f --request POST --location http://localhost:8001/v1/completions \
                   --header "Content-Type: application/json" \
                   --data '{
                           "model": "opt-125m",
