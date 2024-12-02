@@ -55,7 +55,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
-def generate_and_test(llm,sql_lora_files):
+def generate_and_test(llm, sql_lora_files):
     print("lora adapter created")
     assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
@@ -79,8 +79,7 @@ def test_llama_lora(sql_lora_files):
                    max_num_seqs=16,
                    max_loras=4,
                    tensor_parallel_size=1)
-    generate_and_test(llm,sql_lora_files)
-
+    generate_and_test(llm, sql_lora_files)
 
 
 @fork_new_process_for_each_test
@@ -122,7 +121,7 @@ def test_llama_lora_tp4(sql_lora_files):
         max_loras=4,
         tensor_parallel_size=4,
     )
-    generate_and_test(llm,sql_lora_files)
+    generate_and_test(llm, sql_lora_files)
 
 
 @multi_gpu_test(num_gpus=4)
@@ -137,8 +136,7 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
         tensor_parallel_size=4,
         fully_sharded_loras=True,
     )
-    generate_and_test(llm,sql_lora_files)
-
+    generate_and_test(llm, sql_lora_files)
 
 
 @multi_gpu_test(num_gpus=4)
@@ -154,4 +152,4 @@ def test_llama_lora_tp4_fully_sharded_enable_bias(sql_lora_files):
         fully_sharded_loras=True,
         enable_lora_bias=True,
     )
-    generate_and_test(llm,sql_lora_files)
+    generate_and_test(llm, sql_lora_files)
