@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 
 def maybe_backend_fallback(
         guided_params: GuidedDecodingParams) -> GuidedDecodingParams:
-    # Since lm-format-enforce doesn't support grammar, fallback to xgrammar
+    # lm-format-enforce doesn't support grammar, fallback to xgrammar
     if (guided_params.backend == "lm-format-enforcer"
             and guided_params.grammar is not None):
         logger.warning(
@@ -24,14 +24,21 @@ def maybe_backend_fallback(
             "Falling back to use xgrammar instead.")
         guided_params.backend = "xgrammar"
 
-    # Since xgrammar backend only supports json/grammar, fallback to outlines
-    xgrammar_supports = any(
-        [guided_params.json is not None, guided_params.grammar is not None])
-    if guided_params.backend == "xgrammar" and not xgrammar_supports:
-        logger.warning(
-            "xgrammar only supports json or grammar guided decoding. "
-            "Falling back to use outlines instead.")
-        guided_params.backend = "outlines"
+    if guided_params.backend == "xgrammar":
+        # xgrammar doesn't support regex or choice, fallback to outlines
+        if guided_params.regex is not None or guided_params.choice is not None:
+            logger.warning(
+                "xgrammar only supports json or grammar guided decoding. "
+                "Falling back to use outlines instead.")
+            guided_params.backend = "outlines"
+
+        # xgrammar only supports EBNF grammars and uses the GBNF format
+        # https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md
+        elif (guided_params.grammar is not None
+              and "::=" not in guided_params.grammar):
+            logger.warning("xgrammar only supports EBNF grammars. "
+                           "Falling back to use outlines instead.")
+            guided_params.backend = "outlines"
 
     return guided_params
 

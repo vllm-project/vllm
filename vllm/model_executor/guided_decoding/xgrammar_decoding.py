@@ -113,6 +113,7 @@ class GrammarConfig:
     vocab_size: int
     json_str: str | None = None
     grammar_str: str | None = None
+    json_object: bool | None = None
     max_threads: int = 8
     # Only populated if tokenizer_hash not in cache
     encoded_vocab: list[str] | None = None
@@ -158,6 +159,14 @@ class GrammarConfig:
                        backend_str=backend_str,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads)
+        elif guided_params.json_object:
+            return cls(json_object=True,
+                       vocab_size=model_config.hf_config.vocab_size,
+                       encoded_vocab=encoded_vocab,
+                       stop_token_ids=stop_token_ids,
+                       backend_str=backend_str,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads)
         else:
             raise ValueError(
                 "Currently only support JSON and EBNF grammar mode for xgrammar"
@@ -193,8 +202,13 @@ class XGrammarLogitsProcessor:
             compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
                 self.ctx = compiler.compile_json_schema(self.config.json_str)
-            else:
+            elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
+            elif self.config.json_object:
+                self.ctx = compiler.compile_builtin_json_grammar()
+            else:
+                raise ValueError(
+                    "Invalid configuration for xgrammar logits processor")
 
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
