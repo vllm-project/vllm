@@ -211,8 +211,7 @@ class GPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
         sampling_metadata: SamplingMetadata,
-    ) -> Tuple[torch.Tensor, FlashAttentionMetadata, torch.Tensor,
-               torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, FlashAttentionMetadata]:
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0

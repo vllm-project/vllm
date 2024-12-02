@@ -39,7 +39,7 @@ class Processor:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
-    def _assert_valid_logprobs_prompt_logprobs(
+    def _assert_valid_sample_logprobs_prompt_logprobs(
         self,
         params: Union[SamplingParams, PoolingParams],
         max_logprobs: int,
@@ -70,17 +70,37 @@ class Processor:
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
-        max_logprobs: int,
+        max_logprobs_permitted_by_engine: int,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
+        """Process the input prompt into an engine request
+        
+        Args:
+          request_id: request ID
+          prompt: input prompt str
+          params: sampling or pooling commands
+          arrival_time: time when inputs arrived; will be computed if `None`
+          is passed in
+          max_logprobs_permitted_by_engine: the max number of sample or prompt
+          logprobs a request may ask for
+          lora_request: LoRA request structure
+          trace_headers: trace info
+          prompt_adapter_request: prompt adapter request structure
+          priority: currently unsupported; must be zero & is by default.
+
+        Returns:
+          Detokenizer request structure
+          Engine request structure
+        """
 
         # TODO(woosuk): Support embedding mode.
         # TODO(woosuk): Support encoder-decoder models.
 
-        self._assert_valid_logprobs_prompt_logprobs(params, max_logprobs)
+        self._assert_valid_sample_logprobs_prompt_logprobs(
+            params, max_logprobs_permitted_by_engine)
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
