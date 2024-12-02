@@ -5,8 +5,6 @@ the correct prompt format on vision language models for text generation.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
-import time
-
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -26,7 +24,6 @@ def run_llava(question: str, modality: str):
     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf", max_model_len=4096)
-
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -517,10 +514,7 @@ def main(args):
             },
         } for _ in range(args.num_prompts)]
 
-    start_time = time.time()
     outputs = llm.generate(inputs, sampling_params=sampling_params)
-    elapsed_time = time.time() - start_time
-    print("generate time = {}".format(elapsed_time))
 
     for o in outputs:
         generated_text = o.outputs[0].text
