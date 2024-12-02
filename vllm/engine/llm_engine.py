@@ -34,7 +34,7 @@ from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
-from vllm.logits_process import get_bad_words_logits_processors
+from vllm.logits_process import get_bad_words_logits_processors, LogitsProcessor
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
@@ -896,13 +896,10 @@ class LLMEngine:
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
 
-        # FIXME: do not mutate SamplingParams here - just store the
-        # created logits_processors list elsewhere
-        sampling_params = self._build_logits_processors(
+        logits_processors = self._build_logits_processors(
             sampling_params, lora_request)
 
-        # Defensive copy of SamplingParams, which are used by the sampler,
-        # this doesn't deep-copy LogitsProcessor objects
+        # Defensive copy of SamplingParams, which are used by the sampler.
         sampling_params = sampling_params.clone()
 
         sampling_params.update_from_generation_config(
@@ -914,6 +911,7 @@ class LLMEngine:
             seqs=[seq],
             arrival_time=arrival_time,
             sampling_params=sampling_params,
+            logits_processors=logits_processors,
             lora_request=lora_request,
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
@@ -2029,11 +2027,10 @@ class LLMEngine:
 
     def _build_logits_processors(
             self, sampling_params: SamplingParams,
-            lora_request: Optional[LoRARequest]) -> SamplingParams:
+            lora_request: Optional[LoRARequest]) -> List[LogitsProcessor]:
         """Constructs logits processors based on the guided_decoding,
-        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
-        those fields and adds the constructed logits processors to the
-        logits_processors field. Returns the modified sampling params."""
+        logits_bias, and allowed_token_ids fields in sampling_params. Returns
+        the constructed logits processors."""
 
         logits_processors = []
 
@@ -2054,9 +2051,6 @@ class LLMEngine:
             if processor:
                 logits_processors.append(processor)
 
-            # Unset so this doesn't get passed down to the model
-            sampling_params.guided_decoding = None
-
         if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
             tokenizer = self.get_tokenizer(lora_request=lora_request)
 
@@ -2066,20 +2060,13 @@ class LLMEngine:
                 tokenizer=tokenizer)
             logits_processors.extend(processors)
 
-            # Unset so these don't get passed down to the model
-            sampling_params.logit_bias = None
-            sampling_params.allowed_token_ids = None
-
         if len(sampling_params.bad_words) > 0:
             tokenizer = self.get_tokenizer(lora_request)
             processors = get_bad_words_logits_processors(
                 bad_words=sampling_params.bad_words, tokenizer=tokenizer)
             logits_processors.extend(processors)
 
-        if logits_processors:
-            if sampling_params.logits_processors is None:
-                sampling_params.logits_processors = logits_processors
-            else:
-                sampling_params.logits_processors.extend(logits_processors)
+        if sampling_params.logits_processors:
+            logits_processors.extend(logits_processors)
 
-        return sampling_params
+        return logits_processors

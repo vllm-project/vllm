@@ -11,6 +11,7 @@ from typing import Set, Tuple, Union
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
+from vllm.logits_process import check_logits_processors_readiness
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
@@ -351,6 +352,8 @@ class Scheduler:
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 
+        # Sequence groups whose logits processors are not ready
+        self.notready: Deque[SequenceGroup] = deque()
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -425,7 +428,10 @@ class Scheduler:
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
-        self.waiting.append(seq_group)
+        if check_logits_processors_readiness(seq_group.logits_processors):
+            self.waiting.append(seq_group)
+        else:
+            self.notready.append(seq_group)
 
     def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the running queue.
@@ -489,14 +495,14 @@ class Scheduler:
             self.block_manager.free_cross(seq_group)
 
     def has_unfinished_seqs(self) -> bool:
-        return len(self.waiting) != 0 or len(self.running) != 0 or len(
+        return len(self.notready) != 0 or len(self.waiting) != 0 or len(self.running) != 0 or len(
             self.swapped) != 0
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
 
     def get_num_unfinished_seq_groups(self) -> int:
-        return len(self.waiting) + len(self.running) + len(self.swapped)
+        return len(self.notready) + len(self.waiting) + len(self.running) + len(self.swapped)
 
     def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
@@ -1047,6 +1053,16 @@ class Scheduler:
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
         )
+
+        # Iterate over notready and move ready requests to waiting
+        ready_seq_groups = [
+            seq_group for seq_group in self.notready
+            if check_logits_processors_readiness(seq_group.logits_processors)
+        ]
+        for seq_group in ready_seq_groups:
+            self.notready.remove(seq_group)
+            self.waiting.append(seq_group)
+
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
@@ -1161,6 +1177,15 @@ class Scheduler:
 
         prefills = SchedulerPrefillOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
+
+        # Iterate over notready and move ready requests to waiting
+        ready_seq_groups = [
+            seq_group for seq_group in self.notready
+            if check_logits_processors_readiness(seq_group.logits_processors)
+        ]
+        for seq_group in ready_seq_groups:
+            self.notready.remove(seq_group)
+            self.waiting.append(seq_group)
 
         # Decoding should be always scheduled first by fcfs.
         running_scheduled = self._schedule_running(budget,

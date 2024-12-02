@@ -14,6 +14,7 @@ import msgspec
 import torch
 
 from vllm.inputs import SingletonInputs, SingletonInputsAdapter
+from vllm.logits_process import LogitsProcessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
@@ -615,6 +616,7 @@ class SequenceGroup:
         request_id: The ID of the request.
         seqs: The list of sequences.
         sampling_params: The sampling parameters used to generate the outputs.
+        logits_processors: FIXME
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         embeddings: The embeddings vectors of the prompt of the sequence group
@@ -634,6 +636,7 @@ class SequenceGroup:
         seqs: List[Sequence],
         arrival_time: float,
         sampling_params: Optional[SamplingParams] = None,
+        logits_processors: List[LogitsProcessor] = None,
         lora_request: Optional[LoRARequest] = None,
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
@@ -650,6 +653,7 @@ class SequenceGroup:
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
 
         self.sampling_params = sampling_params
+        self.logits_processors = logits_processors
         self.metrics = RequestMetrics(arrival_time=arrival_time,
                                       last_token_time=arrival_time,
                                       first_scheduled_time=None,

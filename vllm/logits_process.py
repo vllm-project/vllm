@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from typing import Callable, List, Tuple, Union
 
 import torch
@@ -12,6 +13,21 @@ of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
 first argument, and returns a modified tensor of logits
 to sample from."""
+
+
+class Readyable(ABC):
+    @abstractmethod
+    def ready(self):
+        pass
+
+
+def check_logits_processors_readiness(logits_processors):
+    if not logits_processors:
+        return True
+    return all(
+        not isinstance(lp, Readyable) or lp.ready()
+        for lp in logits_processors
+    )
 
 
 def get_bad_words_logits_processors(

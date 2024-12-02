@@ -28,13 +28,17 @@ from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
+from vllm.logits_process import Readyable
 
 
-class BaseLogitsProcessor:
+class BaseLogitsProcessor(Readyable):
 
     def __init__(self, guide: Guide):
         self._guide: Guide = guide
         self._fsm_state: DefaultDict[int, int] = defaultdict(int)
+
+    def ready(self):
+        return self._guide_future.done()
 
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
