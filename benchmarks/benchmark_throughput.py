@@ -315,7 +315,8 @@ def main(args: argparse.Namespace):
                 diff = args.input_len - tokenized_len
                 if diff > 0:
                     candidate_ids.extend([
-                        random.randint(0, vocab_size - 1) for _ in range(diff)
+                        random.randint(100, vocab_size - 100)
+                        for _ in range(diff)
                     ])
                 else:
                     candidate_ids = candidate_ids[:diff]
