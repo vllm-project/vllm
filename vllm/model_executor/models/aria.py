@@ -15,8 +15,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.sampler import (Sampler, SamplerOutput,
                                                 SamplingMetadata)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -390,14 +388,18 @@ class AriaMoELMModel(LlamaModel):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if scale_name := get_compressed_tensors_cache_scale(name):
-                # Loading kv cache scales for compressed-tensors quantization
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
+            if (self.quant_config is not None and 
+                (scale_names := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache scales for quark and 
+                # compressed-tensors quantization
+                for scale_name in scale_names:
+                    param = params_dict[scale_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    loaded_weight = (loaded_weight if loaded_weight.dim()==0 
+                                     else loaded_weight[0])
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(scale_name)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
