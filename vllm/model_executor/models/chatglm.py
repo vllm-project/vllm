@@ -127,11 +127,13 @@ class GLMMLP(nn.Module):
     def __init__(
         self,
         config,
+        layer,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
         self.add_bias = config.add_bias_linear
+        self.layer = layer
 
         # Project to 4h.
         self.dense_h_to_4h = MergedColumnParallelLinear(
@@ -154,7 +156,11 @@ class GLMMLP(nn.Module):
     def forward(self, hidden_states):
         # [s, b, 4hp]
         intermediate_parallel, _ = self.dense_h_to_4h(hidden_states)
-        intermediate_parallel = self.activation_func(intermediate_parallel)
+        # IPEX-LLM changes start: workaround fp16 overflow
+        if self.layer == 39 and intermediate_parallel.device.type == "xpu":
+            intermediate_parallel = self.activation_func(intermediate_parallel) / 10
+        else:
+            intermediate_parallel = self.activation_func(intermediate_parallel)
         # [s, b, h]
         output, _ = self.dense_4h_to_h(intermediate_parallel)
         return output
@@ -170,6 +176,7 @@ class GLMBlock(nn.Module):
     def __init__(
         self,
         config,
+        layer,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
@@ -193,7 +200,8 @@ class GLMBlock(nn.Module):
             config.hidden_size, eps=config.layernorm_epsilon)
 
         # MLP
-        self.mlp = GLMMLP(config, quant_config)
+        self.layer = layer
+        self.mlp = GLMMLP(config, layer, quant_config)
 
     def forward(
         self,
@@ -229,8 +237,13 @@ class GLMBlock(nn.Module):
             residual = layernorm_output
         else:
             residual = layernorm_input
-
-        output = self.mlp(layernorm_output) + residual
+        # IPEX-LLM changes start: workaround fp16 overflow
+        if self.layer == 39 and layernorm_output.device.type == "xpu":
+            output = self.mlp(layernorm_output) * 10 + residual
+            output = torch.nan_to_num(output)
+        else:
+            output = self.mlp(layernorm_output) + residual
+        # ipex-llm changes end
 
         return output
 
@@ -252,7 +265,7 @@ class GLMTransformer(nn.Module):
 
         # Transformer layers.
         self.layers = nn.ModuleList([
-            GLMBlock(config, cache_config, quant_config)
+            GLMBlock(config, i, cache_config, quant_config)
             for i in range(self.num_layers)
         ])
 
