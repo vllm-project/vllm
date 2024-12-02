@@ -360,6 +360,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -448,5 +449,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 blocksparse_head_sliding_step=self.head_sliding_step,
             )
 
+        assert output is not None
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
