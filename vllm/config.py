@@ -443,16 +443,11 @@ class ModelConfig:
                 method = get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
-                if quantization_override:
-                    if current_platform.is_rocm():
-                        if quantization_override in rocm_supported_quantization:
-                            quant_method = quantization_override
-                            self.quantization = quantization_override
-                            break
-                    else:
-                        quant_method = quantization_override
-                        self.quantization = quantization_override
-                        break
+                if (quantization_override and quantization_override
+                        in current_platform.supported_quantization):
+                    quant_method = quantization_override
+                    self.quantization = quantization_override
+                    break
 
             # Verify quantization configurations.
             if self.quantization is None:
