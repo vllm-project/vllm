@@ -581,7 +581,7 @@ class PunicaWrapper:
         offset_left = 0
         if bias_stacked is not None:
             self.apply_bias_packed_nslice(self.token_lora_indices, y,
-                                        output_slices, bias_stacked)
+                                          output_slices, bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
             self.add_expand_slice(y,
                                   x[slice_idx],
@@ -667,7 +667,7 @@ class PunicaWrapper:
         offset_left = 0
         if bias_all is not None:
             y = self.apply_bias_packed_nslice(self.token_lora_indices, y,
-                                            output_slices, bias_all)
+                                              output_slices, bias_all)
         # TODO fuse these kernels
         for slice_idx in range(len(output_slices)):
             self.add_lora(y, x, lora_a_stacked[slice_idx],
