@@ -876,7 +876,7 @@ class LLM:
             raise ValueError(" ".join(messages))
 
         if not self.llm_engine.model_config.is_cross_encoder:
-            raise ValueError("Your model does not support the cross encoding")
+            raise ValueError("Your model does not support cross encoding")
 
         tokenizer = self.llm_engine.get_tokenizer()
 
