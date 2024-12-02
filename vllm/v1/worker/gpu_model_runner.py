@@ -618,23 +618,6 @@ class CachedRequestState:
     def num_tokens(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
 
-    @property
-    def stop_token_ids(self) -> Optional[List[int]]:
-        return self.sampling_params.stop_token_ids
-
-    @property
-    def prompt_tokens_mask(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
-
-    @property
-    def output_tokens_mask(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
-
-    @property
-    def output_tokens_bin_counts(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
-
-
 class InputBatch:
 
     def __init__(
@@ -701,9 +684,6 @@ class InputBatch:
                                             pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
-
-        self.prompt_masks = Dict[int, torch.Tensor]
-        self.output_masks = Dict[int, torch.Tensor]
 
         # req_index -> generator
         self.generators: Dict[int, torch.Generator] = {}
@@ -821,7 +801,6 @@ class InputBatch:
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
             self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
-
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
