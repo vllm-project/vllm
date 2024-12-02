@@ -68,7 +68,7 @@ class LlavaMultiModalProjector(nn.Module):
                  text_hidden_size: int,
                  projector_hidden_act: str,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix=""):
+                 prefix: str = ""):
         super().__init__()
 
         self.linear_1 = ColumnParallelLinear(vision_hidden_size,
