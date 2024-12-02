@@ -9,6 +9,7 @@ from vllm.utils import FP8_DTYPE
 # issue on dynamic quantization models. Here use 224.0 for rocm.
 ROCM_FP8_MAX = 224.0
 
+
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
     return torch.as_tensor(x, dtype=torch.float32, device='cuda')
 
