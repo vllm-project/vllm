@@ -49,8 +49,8 @@ class MooncakeConnector(KVConnectorBase):
 
         if not use_mooncake_distributed_pipe:
             raise ValueError(
-                "To use MooncakeConnector, you need to export or pass the env "
-                "variable: MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json")
+                "To use MooncakeConnector, you need to pass the env variable: "
+                "'MOONCAKE_CONFIG_PATH=/path/to/your/mooncake_config.json'.")
 
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
