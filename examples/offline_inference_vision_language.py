@@ -26,7 +26,6 @@ def run_llava(question: str, modality: str):
 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf",
               max_model_len=4096)
-              #mm_disable_frontend_processor=True)
 
     stop_token_ids = None
     return llm, prompt, stop_token_ids

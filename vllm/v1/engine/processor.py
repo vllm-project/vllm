@@ -104,8 +104,7 @@ class Processor:
         # here in the frontend process (if enabled)
         mm_data = decoder_inputs.multi_modal_data
         mm_inputs = None
-        if (not self.model_config.mm_disable_frontend_processor
-                and mm_data is not None):
+        if mm_data is not None:
             mm_inputs = self.mm_input_mapper.process_inputs(
                 decoder_inputs.multi_modal_data,
                 decoder_inputs.mm_processor_kwargs)
