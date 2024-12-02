@@ -36,10 +36,8 @@ class EngineCoreRequest:
     # always be tokenized?
     prompt: Optional[str]
     prompt_token_ids: List[int]
-    mm_data: Optional[MultiModalDataDict]
     mm_inputs: Optional[List[MultiModalKwargs]]
     mm_placeholders: Optional[MultiModalPlaceholderDict]
-    mm_processor_kwargs: Optional[Dict[str, Any]]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float

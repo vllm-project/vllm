@@ -86,11 +86,6 @@ class EngineCore:
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
         req = Request.from_engine_core_request(request)
-
-        # Sanity check to verify that the multi-modal preprocessor
-        # ran in the frontend P0 process
-        assert req.mm_data is None or req.mm_data == {}
-
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):

@@ -100,15 +100,10 @@ class Processor:
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
 
-        # Process multi-modal data via (huggingface) preprocessor
-        # here in the frontend process (if enabled)
-        mm_data = decoder_inputs.multi_modal_data
-        mm_inputs = None
-        if mm_data is not None:
-            mm_inputs = self.mm_input_mapper.process_inputs(
-                decoder_inputs.multi_modal_data,
-                decoder_inputs.mm_processor_kwargs)
-            mm_data = None
+        # Preprocess multi-modal data
+        mm_inputs = self.mm_input_mapper.process_inputs(
+            decoder_inputs.multi_modal_data, decoder_inputs.mm_processor_kwargs
+        ) if decoder_inputs.multi_modal_data is not None else None
 
         # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
@@ -127,10 +122,8 @@ class Processor:
             request_id,
             decoder_inputs.prompt,
             decoder_inputs.prompt_token_ids,
-            mm_data,
             mm_inputs,
             decoder_inputs.multi_modal_placeholders,
-            decoder_inputs.mm_processor_kwargs,
             sampling_params,
             eos_token_id,
             arrival_time,
