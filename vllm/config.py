@@ -2380,44 +2380,9 @@ class CompilationConfig(BaseModel):
             if self.inductor_compile_sizes is None:
                 self.inductor_compile_sizes = []
             self.compile_sizes = self.inductor_compile_sizes
-        
+
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
-
-    @staticmethod
-    def get_graph_batch_size(batch_size: int) -> int:
-        """Returns the padded batch size given actual batch size.
-
-        Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
-        2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
-        """
-        if batch_size <= 2:
-            return batch_size
-        elif batch_size <= 4:
-            return 4
-        else:
-            return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
-                    _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-    @staticmethod
-    def get_max_graph_batch_size(max_num_seqs: int) -> int:
-        """
-        max_num_seqs: Maximum number of sequences in a batch.
-        _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
-
-        pad the max_num_seqs if necessary by calling _get_graph_batch_size,
-        which will deal with some edge cases like 1, 2, 4.
-
-        if the padded size is in _BATCH_SIZES_TO_CAPTURE, return the padded
-        size. if not, it means the padded size is larger than the largest size
-        in _BATCH_SIZES_TO_CAPTURE, return the largest size in
-        _BATCH_SIZES_TO_CAPTURE.
-        """
-        padded_size = CompilationConfig.get_graph_batch_size(max_num_seqs)
-        if padded_size in _BATCH_SIZES_TO_CAPTURE:
-            return padded_size
-        assert padded_size > _BATCH_SIZES_TO_CAPTURE[-1]
-        return _BATCH_SIZES_TO_CAPTURE[-1]
 
 
 _BATCH_SIZE_ALIGNMENT = 8
@@ -2457,6 +2422,41 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+
+    @staticmethod
+    def get_graph_batch_size(batch_size: int) -> int:
+        """Returns the padded batch size given actual batch size.
+
+        Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
+        2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
+        """
+        if batch_size <= 2:
+            return batch_size
+        elif batch_size <= 4:
+            return 4
+        else:
+            return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
+                    _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
+
+    @staticmethod
+    def get_max_graph_batch_size(max_num_seqs: int) -> int:
+        """
+        max_num_seqs: Maximum number of sequences in a batch.
+        _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
+
+        pad the max_num_seqs if necessary by calling _get_graph_batch_size,
+        which will deal with some edge cases like 1, 2, 4.
+
+        if the padded size is in _BATCH_SIZES_TO_CAPTURE, return the padded
+        size. if not, it means the padded size is larger than the largest size
+        in _BATCH_SIZES_TO_CAPTURE, return the largest size in
+        _BATCH_SIZES_TO_CAPTURE.
+        """
+        padded_size = VllmConfig.get_graph_batch_size(max_num_seqs)
+        if padded_size in _BATCH_SIZES_TO_CAPTURE:
+            return padded_size
+        assert padded_size > _BATCH_SIZES_TO_CAPTURE[-1]
+        return _BATCH_SIZES_TO_CAPTURE[-1]
 
     @staticmethod
     def _get_quantization_config(
@@ -2547,7 +2547,7 @@ class VllmConfig:
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
                 max_batchsize_to_capture = \
-                    CompilationConfig.get_max_graph_batch_size(
+                    self.get_max_graph_batch_size(
                     self.scheduler_config.max_num_seqs)
             batch_size_capture_list = [
                 size for size in _BATCH_SIZES_TO_CAPTURE
