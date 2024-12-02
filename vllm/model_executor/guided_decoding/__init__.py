@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
@@ -9,10 +11,34 @@ if TYPE_CHECKING:
     from vllm.logits_process import LogitsProcessor
     from vllm.sampling_params import GuidedDecodingParams
 
+logger = init_logger(__name__)
+
+
+def maybe_backend_fallback(
+        guided_params: GuidedDecodingParams) -> GuidedDecodingParams:
+    # Since lm-format-enforce doesn't support grammar, we fallback to xgrammar
+    if guided_params.backend == "lm-format-enforcer" and guided_params.grammar is not None:
+        logger.warning(
+            "lm-format-enforcer does not support grammar guided decoding. "
+            "Falling back to use xgrammar instead.")
+        guided_params.backend = "xgrammar"
+
+    # Since xgrammar backend only supports json or grammar, we fallback to outlines for others
+    xgrammar_supports = any(
+        [guided_params.json is not None, guided_params.grammar is not None])
+    if guided_params.backend == "xgrammar" and not xgrammar_supports:
+        logger.warning(
+            "xgrammar only supports json or grammar guided decoding. "
+            "Falling back to use outlines instead.")
+        guided_params.backend = "outlines"
+
+    return guided_params
+
 
 async def get_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig) -> LogitsProcessor | None:
+    guided_params = maybe_backend_fallback(guided_params)
     # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
@@ -39,6 +65,7 @@ async def get_guided_decoding_logits_processor(
 def get_local_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig) -> LogitsProcessor | None:
+    guided_params = maybe_backend_fallback(guided_params)
     # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
