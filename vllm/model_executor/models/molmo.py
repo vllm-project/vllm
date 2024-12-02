@@ -1225,7 +1225,14 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if multimodal_embeddings is not None:
             assert isinstance(multimodal_embeddings, (list, tuple))
             multimodal_embeddings = torch.cat(multimodal_embeddings, dim=0)
-            inputs_embeds = inputs_embeds + multimodal_embeddings
+            diff = inputs_embeds.shape[0] - multimodal_embeddings.shape[0]
+            if diff:
+                # We need to pad at the front of the multimodal embeddings to
+                # take input ids from other running requests into account.
+                inputs_embeds = inputs_embeds + F.pad(multimodal_embeddings,
+                                                      (0, 0, diff, 0))
+            else:
+                inputs_embeds = inputs_embeds + multimodal_embeddings
         return inputs_embeds
 
     def forward(
