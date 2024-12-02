@@ -610,6 +610,7 @@ class CachedRequestState:
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
+
     block_ids: List[int]
     num_computed_tokens: int
     output_token_ids: List[int]
@@ -617,6 +618,7 @@ class CachedRequestState:
     @property
     def num_tokens(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
+
 
 class InputBatch:
 
