@@ -473,13 +473,13 @@ class LoggingStatLogger(StatLoggerBase):
             )
             if (stats.cpu_prefix_cache_hit_rate >= 0
                     or stats.gpu_prefix_cache_hit_rate >= 0):
-                logger.info(
+                log_fn(
                     "Prefix cache hit rate: GPU: %.2f%%, CPU: %.2f%%",
                     stats.gpu_prefix_cache_hit_rate * 100,
                     stats.cpu_prefix_cache_hit_rate * 100,
                 )
             if self.spec_decode_metrics is not None:
-                logger.info(
+                log_fn(
                     self._format_spec_decode_metrics_str(
                         self.spec_decode_metrics))
 
