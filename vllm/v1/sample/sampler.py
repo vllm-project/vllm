@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 
 import torch
 import torch.nn as nn
@@ -18,16 +18,17 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
-        logits = self.apply_top_k_top_p(logits, sampling_metadata)
-        _apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
+        _apply_min_token_penalties(logits,
+                                   sampling_metadata.output_token_ids,
                                    sampling_metadata.stop_token_ids,
                                    sampling_metadata.min_tokens)
         _apply_penalties(logits, sampling_metadata.prompt_token_ids,
                          sampling_metadata.output_token_ids,
                          sampling_metadata.presence_penalties,
                          sampling_metadata.frequency_penalties,
-                         sampling_metadata.repetition_penalties)
+                         sampling_metadata.repetition_penalties)        
+        logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        logits = self.apply_top_k_top_p(logits, sampling_metadata)
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
         # Use int32 to reduce the tensor size.
@@ -168,29 +169,34 @@ def _apply_top_k_top_p(
 
 def _apply_min_token_penalties(logits: torch.Tensor,
                                output_token_ids: List[List[int]],
-                               stop_token_ids: List[List[int]],
-                               min_tokens: List[int]):
-    # Compute min_tokens_logits_to_penalize
+                               stop_token_ids: List[Set[int]],
+                               min_tokens: List[int]) -> torch.Tensor:
+    """
+    Applies minimum token penalty by setting the logits of the stop tokens
+    to -inf.
+    """
     min_tokens_logits_to_penalize: List[Tuple[int, int]] = []
     for index, min_token in enumerate(min_tokens):
         if (min_token > 0 and len(output_token_ids[index]) < min_token):
-            for stop_token_id in stop_token_ids:
+            for stop_token_id in stop_token_ids[index]:
                 min_tokens_logits_to_penalize.append((index, stop_token_id))
     if min_tokens_logits_to_penalize:
         logits[tuple(zip(*min_tokens_logits_to_penalize))] = -float("inf")
-
+    return logits
 
 def _apply_penalties(logits: torch.Tensor, prompt_token_ids: List[List[int]],
                      output_token_ids: List[List[int]],
                      presence_penalties: List[float],
                      frequency_penalties: List[float],
-                     repetition_penalties: List[float]):
+                     repetition_penalties: List[float]) -> torch.Tensor:
+    """
+    Applies presence, frequency and repetition penalties to the logits.
+    """
     apply_penalties = any(p != 0.0 for p in presence_penalties) or any(
         f != 0.0
         for f in frequency_penalties) or any(r != 1.0
                                              for r in repetition_penalties)
     if apply_penalties:
-        # Convert to tensors
         _, vocab_size = logits.shape
         (prompt_tokens_t, output_tokens_t, frequency_penalties_t,
         presence_penalties_t, repetition_penalties_t) = \
@@ -202,6 +208,7 @@ def _apply_penalties(logits: torch.Tensor, prompt_token_ids: List[List[int]],
                                         output_tokens_t, presence_penalties_t,
                                         frequency_penalties_t,
                                         repetition_penalties_t)
+    return logits
 
 
 def _convert_to_tensors(prompt_token_ids: List[List[int]],
@@ -210,6 +217,9 @@ def _convert_to_tensors(prompt_token_ids: List[List[int]],
                         presence_penalties: List[float],
                         repetition_penalties: List[float], vocab_size: int,
                         device: torch.device) -> Tuple[torch.Tensor, ...]:
+    """
+    Convert the different list data structures to tensors.
+    """
     prompt_tokens_tensor = make_tensor_with_pad(
         prompt_token_ids,
         vocab_size,
@@ -237,7 +247,6 @@ def _convert_to_tensors(prompt_token_ids: List[List[int]],
         device=device,
         dtype=torch.float,
     )
-
     return (prompt_tokens_tensor, output_tokens_tensor,
             frequency_penalties_tensor, presence_penalties_tensor,
             repetition_penalties_tensor)

@@ -1668,12 +1668,10 @@ def apply_sampling_penalties(
                                                    vocab_size, num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs)
-
     repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
     repetition_penalties[~(prompt_mask | output_mask)] = 1.0
-    logits = torch.where(logits > 0, logits / repetition_penalties,
-                         logits * repetition_penalties)
-
+    logits[logits > 0] /= repetition_penalties[logits > 0]
+    logits[logits <= 0] *= repetition_penalties[logits <= 0]
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
     logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts

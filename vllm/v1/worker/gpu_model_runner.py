@@ -848,7 +848,7 @@ class InputBatch:
         presence_penalties: List[float] = []
         repetition_penalties: List[float] = []
         min_tokens: List[int] = []
-        stop_token_ids: List[List[int]] = []
+        stop_token_ids: List[set[int]] = []
 
         for req_id in self.req_ids[:self.num_reqs]:
             assert req_id is not None
@@ -861,7 +861,7 @@ class InputBatch:
             repetition_penalties.append(
                 request.sampling_params.repetition_penalty)
             min_tokens.append(request.sampling_params.min_tokens)
-            stop_token_ids.append(request.sampling_params.stop_token_ids)
+            stop_token_ids.append(request.sampling_params.all_stop_token_ids)
 
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],
