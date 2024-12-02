@@ -13,6 +13,7 @@ from vllm.model_executor.guided_decoding.guidance_utils import (
 
 
 class GuidanceLogitsProcessor:
+    """Base Guidance Logits Processor"""
     metadata: dict[str, Any] = {}
 
     def __init__(
@@ -130,41 +131,30 @@ class GuidanceLogitsProcessor:
             # if we have pending fast-forward tokens,
             # just return them immediately
             ff_token = self.pending_ff_tokens.pop(0)
-            masked_logits = torch.zeros_like(logits,
-                                             dtype=logits.dtype,
-                                             device=logits.device)
-            masked_logits[ff_token] = 200.0
-            return masked_logits
+            logits.add_(-logits)
+            logits[ff_token] = 200.0
+            return logits
 
         mask, resp = self.ll_interpreter.compute_mask()
         r = LLInterpreterResponse.model_validate_json(resp)
 
         if r.stop:
-            mask = torch.zeros_like(logits,
-                                    dtype=logits.dtype,
-                                    device=logits.device)
+            mask = np.zeros(logits.shape[-1], dtype=np.uint8)
             if self.guidance_tokenizer.eos_token_id is not None:
-                mask[self.guidance_tokenizer.eos_token_id] = 200.0
+                mask[self.guidance_tokenizer.eos_token_id] = 200
             self.is_stopped = True
         elif mask is None:
             # NOTE: mask should not be None unless r.stop is True
             # However, we are handling this case just in case
             # llguidance allows free-style generation
-            mask = torch.zeros_like(logits,
-                                    dtype=logits.dtype,
-                                    device=logits.device)
+            mask = np.zeros(logits.shape[-1], dtype=np.uint8)
         else:
             mask = np.frombuffer(mask, dtype=np.uint8)
-            mask = torch.tensor(mask, dtype=logits.dtype, device=logits.device)
-
-        if mask.shape[0] != logits.shape[0]:
-            extra_tokens = logits.shape[0] - mask.shape[0]
-            if extra_tokens > 0:
-                # Some models have extra tokens that are not in the vocabulary
-                mask = torch.nn.functional.pad(mask, (0, extra_tokens))
-
+        
         # Force all invalid tokens to have 0 value
-        masked_logits = (logits - torch.min(logits)) * mask
+        logits.add_(torch.min(logits))
+        non_zero_indices = np.nonzero(mask)[0]
+        logits[non_zero_indices] += 200.0
         self.new_sampling = True
 
-        return masked_logits
+        return logits
