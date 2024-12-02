@@ -800,9 +800,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                         max_encoder_seq_len):
             return -1
 
-        graph_batch_size = \
-            self.runner.vllm_config.compilation_config.get_graph_batch_size(
-            batch_size)
+        graph_batch_size = VllmConfig.get_graph_batch_size(batch_size)
         assert graph_batch_size >= batch_size
         return graph_batch_size - batch_size
 
@@ -1014,7 +1012,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
-        self.max_batchsize_to_capture = self.vllm_config.compilation_config.get_max_graph_batch_size(  # noqa
+        self.max_batchsize_to_capture = VllmConfig.get_max_graph_batch_size(
             self.scheduler_config.max_num_seqs)
 
         self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
