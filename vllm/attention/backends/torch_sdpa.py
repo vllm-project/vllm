@@ -431,6 +431,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
