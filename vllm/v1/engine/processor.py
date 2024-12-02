@@ -76,7 +76,7 @@ class Processor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
-        """Process the input prompt into an engine request
+        """Process the input prompt into engine (& possibly tokenizer) requests
         
         Args:
           request_id: request ID
