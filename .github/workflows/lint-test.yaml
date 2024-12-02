@@ -71,7 +71,7 @@ jobs:
           kubectl -n ns-vllm port-forward service/test-vllm-service 8001:80 &
           sleep 10
           (kubectl -n ns-vllm logs -f $(kubectl -n ns-vllm get pods -o name | awk '/deployment/ {print $1;exit}')) &
-          curl -v --fail-with-body --show-error --location http://localhost:8001/v1/completions \
+          curl -v --fail-with-body --show-error http://localhost:8001/v1/completions \
                   --header "Content-Type: application/json" \
                   --data '{
                           "model": "opt-125m",
