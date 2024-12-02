@@ -144,6 +144,8 @@ def apply_fp8_linear(
             if type(output) is tuple and len(output) == 2:
                 output = output[0]
 
+            return output[0:input_2d.shape[0], ...].view(*output_shape)
+
             return torch.narrow(output, 0, 0,
                                 input_2d.shape[0]).view(*output_shape)
 

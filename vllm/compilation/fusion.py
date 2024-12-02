@@ -8,6 +8,7 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
 
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
+from vllm.utils import FP8_DTYPE
 
 from .vllm_inductor_pass import VllmInductorPass, is_func
 
@@ -82,8 +83,7 @@ def empty_bf16(*args, **kwargs):
 
 
 def empty_fp8(*args, **kwargs):
-    fp8 = torch.float8_e4m3fn
-    return torch.empty(*args, **kwargs, dtype=fp8, device="cuda")
+    return torch.empty(*args, **kwargs, dtype=FP8_DTYPE, device="cuda")
 
 
 def empty_fp32(*args, **kwargs):
