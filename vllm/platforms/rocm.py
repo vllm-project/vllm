@@ -7,6 +7,7 @@ from amdsmi import (AmdSmiException, amdsmi_get_gpu_board_info,
                     amdsmi_get_processor_handles, amdsmi_init,
                     amdsmi_shut_down, amdsmi_topo_get_link_type)
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
@@ -73,8 +74,13 @@ def device_id_to_physical_device_id(device_id: int) -> int:
 
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
+    device_name: str = "rocm"
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
+    supported_quantization: list[str] = [
+        "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
+        "fbgemm_fp8", "gguf"
+    ]
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -146,3 +152,12 @@ class RocmPlatform(Platform):
                     "vllm.spec_decode.spec_decode_worker.create_spec_worker"
             else:
                 parallel_config.worker_cls = "vllm.worker.worker.Worker"
+
+    @classmethod
+    def verify_quantization(cls, quant: str) -> None:
+        super().verify_quantization(quant)
+        if quant == "awq" and not envs.VLLM_USE_TRITON_AWQ:
+            logger.warning(
+                "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
+                " is not set, enabling VLLM_USE_TRITON_AWQ.")
+        envs.VLLM_USE_TRITON_AWQ = True
