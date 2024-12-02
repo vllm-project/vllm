@@ -342,9 +342,6 @@ class ReplicatedLinearWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        if self.bias_stacked is not None:
-            self.indices = self.punica_wrapper.token_lora_indices
-
         self.punica_wrapper.add_lora(output, x, self.lora_a_stacked,
                                      self.lora_b_stacked, self.bias_stacked,
                                      1.0)
@@ -516,9 +513,6 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        if self.bias_stacked is not None:
-            self.indices = self.punica_wrapper.token_lora_indices
-
         self.punica_wrapper.add_lora(output, x, self.lora_a_stacked,
                                      self.lora_b_stacked, self.bias_stacked,
                                      1.0)
@@ -709,9 +703,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        if self.bias_stacked is not None:
-            self.indices = self.punica_wrapper.token_lora_indices
-
         self.punica_wrapper.add_lora_packed_nslice(
             output, x, self.lora_a_stacked, self.lora_b_stacked,
             self.bias_stacked, 1.0, (self.output_dim, self.output_dim))
@@ -1061,8 +1052,6 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        if self.bias_stacked is not None:
-            self.indices = self.punica_wrapper.token_lora_indices
         self.punica_wrapper.add_lora_packed_nslice(output, x,
                                                    self.lora_a_stacked,
                                                    self.lora_b_stacked,

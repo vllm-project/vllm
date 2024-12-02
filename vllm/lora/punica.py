@@ -479,7 +479,7 @@ class PunicaWrapper:
         indices: torch.Tensor,
         output: torch.Tensor,
         output_slices: Tuple[int, ...],
-        bias_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        bias_stacked: Tuple[Optional[torch.Tensor], ...],
     ):
         """Applies bias to output
 
@@ -602,7 +602,7 @@ class PunicaWrapper:
                                  dtype=torch.float32,
                                  device=x.device)
         if bias_all is not None:
-            x = self.add_bias(self.token_lora_indices, x, bias_all)
+            y = self.add_bias(self.token_lora_indices, y, bias_all)
         self.add_shrink(buffer, x, wa_t_all, scale)
         if y_offset is None and y_slice_size is None:
             self.add_expand(y, buffer, wb_t_all, add_input=True)
@@ -630,11 +630,13 @@ class PunicaWrapper:
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
         offset_left = 0
+        if bias_all is not None:
+            y = self.add_bias_packed_nslice(self.token_lora_indices, y,
+                                            output_slices, bias_all)
         # TODO fuse these kernels
         for slice_idx in range(len(output_slices)):
-            bias = bias_all[slice_idx] if bias_all is not None else None
             self.add_lora(y, x, lora_a_stacked[slice_idx],
-                          lora_b_stacked[slice_idx], bias, scale, offset_left,
+                          lora_b_stacked[slice_idx], None, scale, offset_left,
                           output_slices[slice_idx])
             offset_left += output_slices[slice_idx]
 
