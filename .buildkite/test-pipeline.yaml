@@ -481,7 +481,6 @@ steps:
 
 - label: LoRA TP Test (Distributed)
   num_gpus: 4
-  soft_fail: true
   source_file_dependencies:
   - vllm/lora
   - tests/lora
