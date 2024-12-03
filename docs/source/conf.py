@@ -136,7 +136,8 @@ def linkcode_resolve(domain, info):
         for part in info['fullname'].split('.'):
             obj = getattr(obj, part)
 
-            if not inspect.isclass(obj) and not inspect.isfunction(obj) and not inspect.ismethod(obj):
+            if not (inspect.isclass(obj) or inspect.isfunction(obj)
+                    or inspect.ismethod(obj)):
                 obj = obj.__class__  # Get the class of the instance
 
             lineno = inspect.getsourcelines(obj)[1]
