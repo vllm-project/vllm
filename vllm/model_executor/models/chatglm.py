@@ -157,10 +157,13 @@ class GLMMLP(nn.Module):
         # [s, b, 4hp]
         intermediate_parallel, _ = self.dense_h_to_4h(hidden_states)
         # IPEX-LLM changes start: workaround fp16 overflow
-        if self.layer == 39 and intermediate_parallel.device.type == "xpu":
-            intermediate_parallel = self.activation_func(intermediate_parallel) / 10
+        if self.layer >= 38 and intermediate_parallel.device.type == "xpu":
+            d = intermediate_parallel.shape[-1] // 2
+            intermediate_parallel[..., d:] /= 10
+            intermediate_parallel = self.activation_func(intermediate_parallel)
         else:
             intermediate_parallel = self.activation_func(intermediate_parallel)
+        # IPEX-LLM changes end.
         # [s, b, h]
         output, _ = self.dense_4h_to_h(intermediate_parallel)
         return output
@@ -238,7 +241,7 @@ class GLMBlock(nn.Module):
         else:
             residual = layernorm_input
         # IPEX-LLM changes start: workaround fp16 overflow
-        if self.layer == 39 and layernorm_output.device.type == "xpu":
+        if self.layer >= 38 and layernorm_output.device.type == "xpu":
             output = self.mlp(layernorm_output) * 10 + residual
             output = torch.nan_to_num(output)
         else:
@@ -419,3 +422,4 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+
