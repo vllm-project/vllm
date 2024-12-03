@@ -51,8 +51,7 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [64, 3392, 4096])
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda"
-                    and envs.VLLM_TARGET_DEVICE != "rocm",
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
                     reason="Only test on CUDA and Rocm")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
     torch.set_default_device("cuda")
