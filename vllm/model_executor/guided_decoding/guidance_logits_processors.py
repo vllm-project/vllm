@@ -153,6 +153,8 @@ class GuidanceLogitsProcessor:
 
         # Force all invalid tokens to have 0 value
         logits.add_(torch.min(logits))
+        zero_indices = np.where(mask == 0)[0]
+        logits[zero_indices] = 0.0
         non_zero_indices = np.nonzero(mask)[0]
         logits[non_zero_indices] += 200.0
         self.new_sampling = True
