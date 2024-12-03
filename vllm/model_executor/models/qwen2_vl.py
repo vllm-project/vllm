@@ -748,7 +748,7 @@ def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
         _get_max_image_info(image_processor, data_type_key=data_type_key,
                             mm_count=1, min_pixels=min_pixels,
                             max_pixels=max_pixels)
-    print("max_llm_image_tokens", max_llm_image_tokens)
+
     return max_llm_image_tokens
 
 
