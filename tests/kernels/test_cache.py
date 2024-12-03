@@ -355,7 +355,7 @@ def test_swap_blocks(
     block_mapping = list(zip(src_blocks, dst_blocks))
     block_mapping_tensor = torch.tensor(block_mapping,
                                         dtype=torch.int64,
-                                        device="cpu").view(-1, 2)
+                                        device="cuda").view(-1, 2)
 
     # Create the KV caches on the first device.
     src_key_caches, src_value_caches = kv_cache_factory(

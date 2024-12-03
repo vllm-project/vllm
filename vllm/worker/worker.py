@@ -340,10 +340,10 @@ class Worker(LocalOrDistributedWorkerBase):
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
-                                         device="cpu",
+                                         device="cuda",
                                          dtype=torch.int64).view(-1, 2)
         blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
-                                          device="cpu",
+                                          device="cuda",
                                           dtype=torch.int64).view(-1, 2)
         # `blocks_to_copy` is a gpu tensor. The src and tgt of
         # blocks to copy are in the same device, and `blocks_to_copy`
