@@ -527,18 +527,21 @@ def repackage_wheel(package_data: Dict[str, List[str]],
                     f"Failed to get vLLM wheel from {wheel_location}") from e
 
     with zipfile.ZipFile(wheel_filename) as wheel:
-        for lib in filter(
-                lambda file: file.filename.endswith(".so") or file.filename.
-                startswith("vllm/vllm_flash_attn"), wheel.filelist):
+        files_to_copy = filter(
+            lambda file: file.filename.endswith(".so") or file.filename.
+            startswith("vllm/vllm_flash_attn"), wheel.filelist)
+
+        for file in files_to_copy:
             print(
-                "Extracting and including {lib.filename} from existing wheel")
-            package_name = os.path.dirname(lib.filename).replace("/", ".")
-            file_name = os.path.basename(lib.filename)
+                f"Extracting and including {file.filename} from existing wheel"
+            )
+            package_name = os.path.dirname(file.filename).replace("/", ".")
+            file_name = os.path.basename(file.filename)
 
             if package_name not in package_data:
                 package_data[package_name] = []
 
-            wheel.extract(lib)
+            wheel.extract(file)
             if file_name.endswith(".py"):
                 # python files shouldn't be added to package_data
                 continue
