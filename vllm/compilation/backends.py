@@ -251,11 +251,6 @@ class VllmBackend:
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_configs.splitting_ops)
 
-        from torch._dynamo.utils import lazy_format_graph_code
-        logger.debug("%s", lazy_format_graph_code("before split", self.graph))
-        logger.debug("%s", lazy_format_graph_code("after split",
-                                                  self.split_gm))
-
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)
         submod_names_to_compile = [

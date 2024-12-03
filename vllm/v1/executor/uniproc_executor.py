@@ -74,6 +74,9 @@ class UniprocExecutor:
     def profile(self, is_start=True):
         self.worker.profile(is_start)
 
+    def shutdown(self):
+        self.worker = None
+
     def check_health(self) -> None:
         # UniprocExecutor will always be healthy as long as
         # it's running.
