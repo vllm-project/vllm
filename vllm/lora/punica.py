@@ -596,7 +596,6 @@ class PunicaWrapper:
 
         y = y.view_as(y_org)
 
-
     def add_lora(self,
                  y: torch.Tensor,
                  x: torch.Tensor,
@@ -656,8 +655,8 @@ class PunicaWrapper:
     def add_lora_packed_nslice(self, y: torch.Tensor, x: torch.Tensor,
                                lora_a_stacked: Tuple[torch.Tensor, ...],
                                lora_b_stacked: Tuple[torch.Tensor, ...],
-                               bias_all: Tuple[Optional[torch.Tensor],
-                                               ...], scale: float,
+                               bias_all: Optional[Tuple[torch.Tensor,
+                                                        ...]], scale: float,
                                output_slices: Tuple[int, ...]) -> None:
         """
         Applies lora to each input. Similar to add_lora, This method is 
