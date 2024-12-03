@@ -207,7 +207,8 @@ class PyNcclCommunicator:
             stream = self.stream
         if src == self.rank:
             sendbuff = buffer_type(tensor.data_ptr())
-            recvbuff = buffer_type()
+            # NCCL requires the sender also to have a receive buffer
+            recvbuff = buffer_type(tensor.data_ptr())
         else:
             sendbuff = buffer_type()
             recvbuff = buffer_type(tensor.data_ptr())
