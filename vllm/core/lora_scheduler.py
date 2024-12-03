@@ -3,6 +3,10 @@ from enum import Enum
 from vllm.config import LoRAConfig
 from typing import List
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class Policy(Enum):
     ROUND_ROBIN = "round_robin"
@@ -18,6 +22,8 @@ class LoRAScheduler:
         num_iters_before_reschedule: int = 32,
         policy: Policy = Policy.ROUND_ROBIN
     ):
+        logger.info(f"Initializing LoRA Scheduler with policy {policy} and {num_iters_before_reschedule} iterations before rescheduling. Lora_config {lora_config}")
+
         self.lora_config = lora_config
         self.num_iters_before_reschedule = num_iters_before_reschedule
         self.policy = policy

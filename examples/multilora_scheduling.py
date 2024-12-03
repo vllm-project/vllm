@@ -13,6 +13,7 @@ from faker import Faker
 
 OUT_DIR = "out"
 NB_WORDS = 20
+TOTAL_LORAS = 10
 
 def create_test_prompts(
     base_path: str
@@ -26,11 +27,11 @@ def create_test_prompts(
     first adapter have finished.
     """
     fake = Faker()
-    sentence = fake.sentence(nb_words=NB_WORDS)
+    sentence = f"lora:"
 
     prompts = []
     for _ in range(10):
-        for i in range(2):
+        for i in range(TOTAL_LORAS):
             prompts.append((
                 sentence,
                 SamplingParams(temperature=0.0,
@@ -77,9 +78,9 @@ def initialize_engine() -> LLMEngine:
     # max_cpu_loras: controls the size of the CPU LoRA cache.
     engine_args = EngineArgs(model="meta-llama/Llama-3.2-1B",
                              enable_lora=True,
-                             max_loras=1,
+                             max_loras=2,
                              max_lora_rank=8,
-                             max_cpu_loras=2,
+                             max_cpu_loras=TOTAL_LORAS,
                              max_num_seqs=256)
     return LLMEngine.from_engine_args(engine_args)
 

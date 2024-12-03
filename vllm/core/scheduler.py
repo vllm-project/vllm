@@ -1009,7 +1009,7 @@ class Scheduler:
                 if (self.lora_enabled and lora_int_id > 0
                         and lora_int_id not in curr_loras
                         and len(curr_loras) >= self.lora_config.max_loras
-                        and (allowed_loras is not None and lora_int_id in allowed_loras)):
+                        and (allowed_loras is not None and lora_int_id not in allowed_loras)):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
                     leftover_waiting_sequences.appendleft(seq_group)
@@ -1097,6 +1097,7 @@ class Scheduler:
             self._update_loras()
         
         allowed_loras = self.lora_scheduler.schedule_loras() if self.lora_enabled else None
+        logger.info(f"Allowed loras for default scheduler: {allowed_loras}")
 
         curr_loras = set(
             seq_group.lora_int_id for seq_group in self.running
@@ -1115,6 +1116,7 @@ class Scheduler:
 
         if len(prefills.seq_groups
                ) == 0 and self.scheduler_config.policy == "priority":
+            assert not self.lora_enabled
             self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.
@@ -1480,6 +1482,12 @@ class Scheduler:
 
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
+
+        scheduled_loras = []
+        for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+            seq_group = scheduled_seq_group.seq_group
+            scheduled_loras.append(seq_group.lora_int_id)
+        logger.info(f"Scheduler scheduled loras: {scheduled_loras}")
 
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,
@@ -1880,3 +1888,4 @@ class Scheduler:
         num_new_tokens = min(num_new_tokens, remaining_token_budget)
 
         return num_new_tokens
+
