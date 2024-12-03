@@ -26,6 +26,7 @@ class RequestFuncInput:
     logprobs: Optional[int] = None
     multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
+    extra_body: Optional[dict[str, str]] = None
 
 
 @dataclass
@@ -242,6 +243,8 @@ async def async_request_openai_completions(
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
         }
+        if request_func_input.extra_body:
+            payload.update(request_func_input.extra_body)
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
