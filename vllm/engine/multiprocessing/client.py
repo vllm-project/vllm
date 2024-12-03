@@ -474,8 +474,8 @@ class MQLLMEngineClient(EngineClient):
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
-            priority: Priority of the request (lower means earlier handling). 
-                Any priority other than 0 will lead to an error if the 
+            priority: Priority of the request (lower means earlier handling).
+                Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
         if inputs is not None:
@@ -589,6 +589,7 @@ class MQLLMEngineClient(EngineClient):
                     default_guided_backend=(self.decoding_config.guided_decoding_backend
                         if self.decoding_config
                         else DecodingConfig.guided_decoding_backend),
+                    model_config=self.model_config
                 )
 
         # 1) Create output queue for this requests.

@@ -178,6 +178,7 @@ autodoc_mock_imports = [
     "tensorizer",
     "pynvml",
     "outlines",
+    "xgrammar,"
     "librosa",
     "soundfile",
     "gguf",
