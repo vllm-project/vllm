@@ -163,8 +163,9 @@ def test_engine_core_advanced_sampling(monkeypatch):
                                                  presence_penalty=1.0,
                                                  frequency_penalty=1.0,
                                                  repetition_penalty=0.1,
-                                                 stop_token_ids=[1001, 1002])
-        engine_core.add_request(make_request())
+                                                 stop_token_ids=[1001, 1002],
+                                                )
+        engine_core.add_request(request)
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
         # Loop through until they are all done.
