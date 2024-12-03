@@ -23,19 +23,16 @@ def silu_mul_pattern_static(result: torch.Tensor, result_silu_mul: torch.Tensor,
                               result=result,
                               input=at1[1],
                               scale=scale)
-    # result
     return at2[1]
 
 
 def silu_mul_replacement_static(result: torch.Tensor,
                                 result_silu_mul: torch.Tensor,
                                 input: torch.Tensor, scale: torch.Tensor):
-    print("REPLACEMENT RUNNING")
     at = auto_functionalized(torch.ops._C.silu_and_mul_quant.default,
                              result=result,
                              input=input,
                              scale=scale)
-    # result, residual
     return at[1]
 
 
