@@ -183,7 +183,7 @@ def calculate_metrics(
         "request_throughput": completed / duration,
         "token_throughput": (total_input_tokens + total_output_tokens) / duration,
         "output_throughput": total_output_tokens / duration,
-        "latency_stats": {
+        "e2e_latency_stats": {
             "mean": np.mean(latencies),
             "median": np.median(latencies),
             "p90": np.percentile(latencies, 90),
@@ -451,12 +451,12 @@ def main():
     print(f"Request throughput: {metrics['request_throughput']:.2f} requests/s")
     print(f"Total Token throughput: {metrics['token_throughput']:.2f} tokens/s")
     print(f"Output Token throughput: {metrics['token_throughput']:.2f} tokens/s")
-    print("\nLatency Statistics (ms):")
-    print(f"  Mean: {metrics['latency_stats']['mean']:.2f}")
-    print(f"  Median: {metrics['latency_stats']['median']:.2f}")
-    print(f"  P90: {metrics['latency_stats']['p90']:.2f}")
-    print(f"  P95: {metrics['latency_stats']['p95']:.2f}")
-    print(f"  P99: {metrics['latency_stats']['p99']:.2f}")
+    print("\nE2E Latency Statistics (ms):")
+    print(f"  Mean: {metrics['e2e_latency_stats']['mean']:.2f}")
+    print(f"  Median: {metrics['e2e_latency_stats']['median']:.2f}")
+    print(f"  P90: {metrics['e2e_latency_stats']['p90']:.2f}")
+    print(f"  P95: {metrics['e2e_latency_stats']['p95']:.2f}")
+    print(f"  P99: {metrics['e2e_latency_stats']['p99']:.2f}")
     print("\nTime to First Token (ms):")
     print(f"  Mean: {metrics['ttft_stats']['mean']:.2f}")
     print(f"  Median: {metrics['ttft_stats']['median']:.2f}")
