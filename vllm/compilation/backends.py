@@ -242,10 +242,6 @@ class VllmBackend:
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
-        # config is updated now, because only here can
-        # we get the sizes to capture for cudagraph
-        # from compilation context
-        self.compilation_configs.init_during_runtime()
         self.configure_post_pass()
 
         self.split_gm, self.piecewise_graphs = split_graph(

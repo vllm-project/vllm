@@ -13,7 +13,6 @@ import torch
 from torch import nn
 from torch.library import Library
 
-from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
@@ -256,6 +255,7 @@ def run_model(llama_config,
         compilation_config = CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
+            cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
             compilation_config.splitting_ops = ["silly.attention"]
@@ -273,10 +273,9 @@ def run_model(llama_config,
     input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
     positions = torch.arange(B).cuda()
 
-    with set_compile_context([1, 2]):
-        model(input_ids, positions)
-        model(input_ids[:2], positions[:2])
-        model(input_ids[:1], positions[:1])
+    model(input_ids, positions)
+    model(input_ids[:2], positions[:2])
+    model(input_ids[:1], positions[:1])
 
     input_ids[:2].zero_()
     output = model(input_ids[:2], positions[:2])
@@ -379,10 +378,13 @@ def benchmark():
                 level=CompilationLevel.PIECEWISE,
                 use_cudagraph=True,
                 splitting_ops=["silly.attention"],
+                cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE, )
+                level=CompilationLevel.PIECEWISE,
+                cudagraph_capture_sizes=cudagraph_sizes,
+            )
 
         vllm_config = VllmConfig(compilation_config=compilation_config)
         with set_current_vllm_config(vllm_config):
@@ -396,17 +398,16 @@ def benchmark():
 
         graphs = {}
 
-        with set_compile_context(cudagraph_sizes):
-            model(input_ids, positions)
-            for b in cudagraph_sizes[::-1]:
-                if not piecewise:
-                    graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph, pool=pool):
-                        output = model(input_ids[:b], positions[:b])
-                    graphs[b] = (graph, output)
-                else:
+        model(input_ids, positions)
+        for b in cudagraph_sizes[::-1]:
+            if not piecewise:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, pool=pool):
                     output = model(input_ids[:b], positions[:b])
-                    graphs[b] = (model, output)
+                graphs[b] = (graph, output)
+            else:
+                output = model(input_ids[:b], positions[:b])
+                graphs[b] = (model, output)
         for b in cudagraph_sizes:
             if piecewise:
                 # noqa is for `Function definition does not bind loop variable`
