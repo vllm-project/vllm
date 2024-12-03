@@ -159,12 +159,13 @@ def test_engine_core_advanced_sampling(monkeypatch):
         """Test basic request lifecycle."""
         # First request.
         request: EngineCoreRequest = make_request()
-        request.sampling_params = SamplingParams(min_tokens=4,
-                                                 presence_penalty=1.0,
-                                                 frequency_penalty=1.0,
-                                                 repetition_penalty=0.1,
-                                                 stop_token_ids=[1001, 1002],
-                                                )
+        request.sampling_params = SamplingParams(
+            min_tokens=4,
+            presence_penalty=1.0,
+            frequency_penalty=1.0,
+            repetition_penalty=0.1,
+            stop_token_ids=[1001, 1002],
+        )
         engine_core.add_request(request)
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
