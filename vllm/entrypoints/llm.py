@@ -163,7 +163,7 @@ class LLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
-        block_allocator: str = "CpuOffloadingBlockAllocator",
+        block_allocator: str = "CpuGpuBlockAllocator",
         enforce_eager: Optional[bool] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,

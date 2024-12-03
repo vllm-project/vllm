@@ -11,6 +11,7 @@
   #include "quantization/fp8/nvidia/quant_utils.cuh"
 #endif
 
+#include <cstdio>
 #include <algorithm>
 #include <cassert>
 #include <map>
@@ -27,11 +28,12 @@ template <typename T, typename ACC_T>
 __global__ void paged_copy(T* __restrict__ dst, const T* __restrict__ src,
                            ACC_T src_to_dst, const int num_pages,
                            const int num_elements_per_page) {
-  const int srcPageIdx = src_to_dst[blockIdx.x][0];
-  const int dstPageIdx = src_to_dst[blockIdx.x][1];
+  const int64_t srcPageIdx = src_to_dst[blockIdx.x][0];
+  const int64_t dstPageIdx = src_to_dst[blockIdx.x][1];
 
-  const int srcPageOffset = srcPageIdx * num_elements_per_page;
-  const int dstPageOffset = dstPageIdx * num_elements_per_page;
+
+  const int64_t srcPageOffset = srcPageIdx * num_elements_per_page;
+  const int64_t dstPageOffset = dstPageIdx * num_elements_per_page;
 
   for (int i = threadIdx.x; i < num_elements_per_page; i += blockDim.x) {
     dst[dstPageOffset + i] = src[srcPageOffset + i];
@@ -45,6 +47,7 @@ void launch_swap_block_kernel(DTYPE* dst, const DTYPE* src,
                               const torch::Tensor& block_mapping,
                               const int num_blocks,
                               const int block_size_in_bytes) {
+  c10::cuda::CUDAGuard device_guard(block_mapping.device());
   auto block_mapping_accessor =
       block_mapping.packed_accessor32<int64_t, 2, torch::RestrictPtrTraits>();
 
@@ -125,6 +128,25 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     // fall back to the slow implementation
     swap_blocks_slow(src, dst, block_mapping.cpu());
   } else {
+    // Check the device
+    torch::Device src_device = src.device();
+    torch::Device dst_device = dst.device();
+    torch::Device block_mapping_device = block_mapping.device();
+    TORCH_CHECK(block_mapping_device.is_cuda(),
+                "block_mapping must be on GPU");
+    if (src_device.is_cuda() && dst_device.is_cuda()) {
+      TORCH_CHECK(src_device.index() == dst_device.index(),
+                  "src and dst must be on the same GPU");
+    }
+    if (src_device.is_cuda()) {
+      TORCH_CHECK(src_device.index() == block_mapping_device.index(),
+                  "src and block_mapping must be on the same GPU");
+    }
+    if (dst_device.is_cuda()) {
+      TORCH_CHECK(dst_device.index() == block_mapping_device.index(),
+                  "src and block_mapping must be on the same GPU");
+    }
+
     const int64_t num_blocks = block_mapping.size(0);
     const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
 
