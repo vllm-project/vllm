@@ -108,6 +108,7 @@ _EMBEDDING_MODELS = {
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
+    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
