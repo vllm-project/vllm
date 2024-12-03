@@ -157,6 +157,8 @@ class GuidanceLogitsProcessor:
         logits[zero_indices] = 0.0
         non_zero_indices = np.nonzero(mask)[0]
         logits[non_zero_indices] += 200.0
+        # set special tokens not in vocab to 0
+        logits[mask.shape[0]:] = 0.0
         self.new_sampling = True
 
         return logits
