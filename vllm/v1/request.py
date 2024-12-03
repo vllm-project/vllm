@@ -51,7 +51,6 @@ class Request:
             self.mm_positions = mm_positions.get("image", [])
         else:
             self.mm_positions = []
-
         # Output of the mm input mapper (e.g., image tensors).
         if self.inputs.multi_modal_inputs:
             self.mm_inputs = self.inputs.multi_modal_inputs
