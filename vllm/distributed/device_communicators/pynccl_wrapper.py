@@ -189,6 +189,15 @@ class NCCLLibrary:
             ncclComm_t, cudaStream_t
         ]),
 
+        # ncclResult_t ncclBroadcast(
+        #   const void* sendbuff, void* recvbuff, size_t count,
+        #   ncclDataType_t datatype, int root, ncclComm_t comm,
+        #   cudaStream_t stream);
+        Function("ncclBroadcast", ncclResult_t, [
+            buffer_type, buffer_type, ctypes.c_size_t, ncclDataType_t,
+            ctypes.c_int, ncclComm_t, cudaStream_t
+        ]),
+
         # be cautious! this is a collective call, it will block until all
         # processes in the communicator have called this function.
         # because Python object destruction can happen in random order,
@@ -311,6 +320,13 @@ class NCCLLibrary:
                  src: int, comm: ncclComm_t, stream: cudaStream_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclRecv"](recvbuff, count, datatype, src,
                                                 comm, stream))
+
+    def ncclBroadcast(self, sendbuff: buffer_type, recvbuff: buffer_type,
+                      count: int, datatype: int, root: int, comm: ncclComm_t,
+                      stream: cudaStream_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclBroadcast"](sendbuff, recvbuff, count,
+                                                     datatype, root, comm,
+                                                     stream))
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
