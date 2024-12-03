@@ -25,8 +25,7 @@ __device__ __forceinline__ FP8_TYPE scaled_fp8_conversion(float const val,
   float x = 0.0f;
   if constexpr (is_scale_inverted) {
     x = val * scale;
-  } 
-  else {
+  } else {
     x = val / scale;
   }
   float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
@@ -38,9 +37,7 @@ template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
 __global__ void act_and_mul_quant_kernel(
     FP8_TYPE* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
-    const float* scale, 
-    const int d) {
-
+    const float* scale, const int d) {
   const int32_t token_idx = blockIdx.x;
   const int32_t blocks_per_token = gridDim.y;
 
@@ -82,7 +79,8 @@ __global__ void act_and_mul_quant_kernel(
 
 #pragma unroll
     for (int i = 0; i < elems_per_128bit_load; i++) {
-      out_vec[i] = scaled_fp8_conversion<true>(ACT_FN(x_vec[i]) * y_vec[i] , inverted_scale);
+      out_vec[i] = scaled_fp8_conversion<true>(ACT_FN(x_vec[i]) * y_vec[i],
+                                               inverted_scale);
     }
 
     out_128bit_ptr[vec_idx] = reinterpret_cast<const int2&>(out_vec);
@@ -95,33 +93,31 @@ __global__ void act_and_mul_quant_kernel(
       const scalar_t x = VLLM_LDG(&x_ptr[idx]);
       const scalar_t y = VLLM_LDG(&y_ptr[idx]);
       // out_ptr[idx] = ACT_FN(x) * y;
-      out_ptr[idx] = scaled_fp8_conversion<true>(ACT_FN(x) * y , inverted_scale);
+      out_ptr[idx] = scaled_fp8_conversion<true>(ACT_FN(x) * y, inverted_scale);
     }
   }
 }
-}
-
+}  // namespace vllm
 
 // Launch activation, gating, and quantize kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                            \
-  int d = input.size(-1) / 2;                                            \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);  \
-  dim3 block(std::min(d, 512));                                          \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
-  VLLM_DISPATCH_FLOATING_TYPES(                                          \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                   \
-        vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>>       \
-            <<<grid, block, 0, stream>>>(out.data_ptr<FP8_TYPE>(),       \
-                                         input.data_ptr<scalar_t>(),     \
-                                         scale.data_ptr<float>(),        \
-                                         d);                             \
-      });                                                                
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                           \
+  int d = input.size(-1) / 2;                                           \
+  int64_t num_tokens = input.numel() / input.size(-1);                  \
+  dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4); \
+  dim3 block(std::min(d, 512));                                         \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));     \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();         \
+  VLLM_DISPATCH_FLOATING_TYPES(                                         \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                  \
+        vllm::act_and_mul_quant_kernel<scalar_t, KERNEL<scalar_t>>      \
+            <<<grid, block, 0, stream>>>(out.data_ptr<FP8_TYPE>(),      \
+                                         input.data_ptr<scalar_t>(),    \
+                                         scale.data_ptr<float>(), d);   \
+      });
 
-void silu_and_mul_quant(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input,
-                  torch::Tensor& scale)  // [..., 2 * d]
+void silu_and_mul_quant(torch::Tensor& out,  // [..., d]
+                        torch::Tensor& input,
+                        torch::Tensor& scale)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
 }
