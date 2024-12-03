@@ -34,6 +34,7 @@ Testing
     # Static type checking
     mypy
     # Unit tests
+    pip install -e tests/vllm_test_utils
     pytest tests/
 
 .. note:: Currently, the repository does not pass the ``mypy`` tests.
