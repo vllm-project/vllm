@@ -77,13 +77,6 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
                                        add_input=True)
         # now have column partitioned output
 
-        if self.bias_stacked is not None:
-            self.bias_stacked = self.bias_stacked.view(
-                -1, self.bias_stacked.shape[-1])
-            self.bias_stacked = self.bias_stacked[
-                self.punica_wrapper.token_lora_indices]
-            output += self.bias_stacked
-
         output = output.view(*out_orig_shape)
         return output
 
@@ -222,7 +215,7 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
         self.punica_wrapper.add_expand(output,
                                        buffer,
                                        self.lora_b_stacked,
-                                       self.bias_all,
+                                       self.bias_stacked,
                                        add_input=True)
         # now have column partitioned output
         output = output.view(*out_orig_shape)
