@@ -9,6 +9,7 @@ import cloudpickle
 import psutil
 import zmq
 import zmq.asyncio
+from typing_extensions import deprecated
 from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
@@ -414,7 +415,8 @@ class MQLLMEngineClient(EngineClient):
     def dead_error(self) -> BaseException:
         return ENGINE_DEAD_ERROR(self._errored_with)
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def generate(
         self,
         *,
@@ -485,7 +487,8 @@ class MQLLMEngineClient(EngineClient):
                                      lora_request, trace_headers,
                                      prompt_adapter_request, priority)
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def encode(
         self,
         *,
