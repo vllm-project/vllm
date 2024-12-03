@@ -358,34 +358,3 @@ def to_enc_dec_tuple_list(
     return [(enc_dec_prompt["encoder_prompt"],
              enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]
-
-
-def __getattr__(name: str):
-    import warnings
-
-    if name == "PromptInput":
-        msg = ("PromptInput has been renamed to PromptType. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return PromptType
-
-    if name == "LLMInputs":
-        msg = ("LLMInputs has been renamed to DecoderOnlyInputs. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return DecoderOnlyInputs
-
-    if name == "EncoderDecoderLLMInputs":
-        msg = (
-            "EncoderDecoderLLMInputs has been renamed to EncoderDecoderInputs. "
-            "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return EncoderDecoderInputs
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

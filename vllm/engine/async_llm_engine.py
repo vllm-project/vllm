@@ -6,6 +6,8 @@ from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
                     List, Mapping, Optional, Set, Tuple, Type, Union, overload)
 from weakref import ReferenceType
 
+from typing_extensions import deprecated
+
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VllmConfig)
@@ -422,7 +424,8 @@ class _AsyncLLMEngine(LLMEngine):
         return await (
             self.get_tokenizer_group().get_lora_tokenizer_async(lora_request))
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     async def add_request_async(
         self,
         request_id: str,
@@ -894,7 +897,8 @@ class AsyncLLMEngine(EngineClient):
 
     # This method does not need to be async, but kept that way
     # for backwards compatibility.
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
