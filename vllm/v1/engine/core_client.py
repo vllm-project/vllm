@@ -1,5 +1,4 @@
 import multiprocessing
-import time
 from typing import List, Union
 
 import msgspec
@@ -162,6 +161,7 @@ class MPClient(EngineCoreClient):
     def shutdown(self):
         # Send shutdown signal to background process.
         self.should_shutdown = True
+        self.proc.join(5)
 
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
@@ -169,8 +169,8 @@ class MPClient(EngineCoreClient):
         # Shutdown the process if needed.
         if hasattr(self, "proc") and self.proc.is_alive():
             self.proc.terminate()
+            self.proc.join(5)
 
-            time.sleep(5)
             if self.proc.is_alive():
                 self.proc.kill()
 

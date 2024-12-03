@@ -230,6 +230,7 @@ class EngineCoreProc(EngineCore):
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
             engine_core.run_busy_loop()
+            engine_core.shutdown()
 
         except KeyboardInterrupt:
             logger.debug("EngineCore interrupted.")

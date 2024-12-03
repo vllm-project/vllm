@@ -165,39 +165,40 @@ class MultiprocExecutor:
                 time.sleep(0.1)
             return False
 
-        active_procs = [p for p in self.workers if p.proc.is_alive()]
+        active_workers = [p for p in self.workers if p.proc.is_alive()]
         self.workers = None
 
         # First wait for graceful shutdown
-        if wait_for_termination(active_procs, 0.5):
+        if wait_for_termination(active_workers, 5):
             return
 
         # Send SIGTERM if still running
-        active_procs = [p for p in active_procs if p.proc.is_alive()]
-        for proc in active_procs:
-            proc.proc.terminate()
-        if wait_for_termination(active_procs, 1):
+        active_workers = [p for p in active_workers if p.proc.is_alive()]
+        for w in active_workers:
+            w.proc.terminate()
+        if wait_for_termination(active_workers, 5):
             return
 
         # Send SIGKILL if still running
-        active_procs = [p for p in active_procs if p.proc.is_alive()]
-        for proc in active_procs:
-            os.kill(proc.proc.pid, signal.SIGKILL)
-        if not wait_for_termination(active_procs, 1):
+        active_workers = [p for p in active_workers if p.proc.is_alive()]
+        for w in active_workers:
+            os.kill(w.proc.pid, signal.SIGKILL)
+        if not wait_for_termination(active_workers, 5):
             raise RuntimeError("Failed to terminate worker processes")
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if (hasattr(self, 'scheduler_output_mq')
                 and self.scheduler_output_mq is not None):
-            # Broadcast termination message
-            termination_msg = WorkerExecRequest(
-                WorkerExecRequest.Type.TERMINATE, None)
-            self.scheduler_output_mq.enqueue(termination_msg)
-            self.scheduler_output_mq = None
+            # Broadcast termination message for graceful shutdown
+            self.scheduler_output_mq.enqueue(
+                WorkerExecRequest(WorkerExecRequest.Type.TERMINATE, None))
 
         if (hasattr(self, 'workers') and self.workers is not None):
             self._ensure_worker_termination()
+
+        self.model_output_mq = None
+        self.scheduler_output_mq = None
 
     def __del__(self):
         self.shutdown()

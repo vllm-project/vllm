@@ -1,8 +1,9 @@
 """A GPU worker class."""
-import atexit
 import gc
 import os
 import pickle
+import signal
+import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
@@ -14,7 +15,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-from vllm.distributed import (destroy_distributed_environment,
+from vllm.distributed import (cleanup_dist_env_and_memory,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -35,7 +36,6 @@ logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
-LOGGING_TIME_S = 5000
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -323,6 +323,9 @@ class WorkerProc:
         initialization_input_path: str,
         initialization_output_path: str,
     ):
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+        self._finalizer = weakref.finalize(self, self.shutdown)
+
         self.rank = rank
         self.worker = Worker(vllm_config, local_rank, rank,
                              distributed_init_method)
@@ -349,6 +352,9 @@ class WorkerProc:
 
         self.worker.initialize()
         self.worker.load_model()
+
+    def _handle_sigterm(self, signum, frame):
+        self.shutdown()
 
     @staticmethod
     def make_worker_process(
@@ -379,7 +385,7 @@ class WorkerProc:
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.run_worker,
                                kwargs=process_kwargs,
-                               daemon=True)
+                               daemon=False)
         proc.start()
 
         # Wait for startup
@@ -390,11 +396,14 @@ class WorkerProc:
                                 initialization_output_path,
                                 model_output_mq_handle)
 
+    def shutdown(self):
+        self.scheduler_output_receiver = None
+        self.model_output_mq = None
+        cleanup_dist_env_and_memory()
+
     @staticmethod
     def run_worker(*args, **kwargs):
         """Launch Worker busy loop in background process."""
-        atexit.register(destroy_distributed_environment)
-
         try:
             worker = WorkerProc(*args, **kwargs)
             worker.model_initialization_loop(
@@ -403,15 +412,17 @@ class WorkerProc:
 
             worker.execute_model_busy_loop()
 
-            # Clean up once worker exits busy loop
-            worker = None
-
         except KeyboardInterrupt:
             logger.debug("Worker interrupted.")
 
         except BaseException as e:
             logger.exception(e)
             raise e
+
+        finally:
+            # Clean up once worker exits busy loop
+            worker.shutdown()
+            worker = None
 
     @staticmethod
     def wait_for_startup(
