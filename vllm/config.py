@@ -754,6 +754,7 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: float,
         cache_dtype: str,
+        kv_store_space: float,
         is_attention_free: bool = False,
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
@@ -777,6 +778,13 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks: Optional[int] = None
         self.num_cpu_blocks: Optional[int] = None
+        # for vllm.store.kv_store.KVBlockStore
+        self.enable_kv_store = False
+        self.kv_store_space_bytes = int(kv_store_space * GiB_bytes)
+        if (kv_store_space > 0):
+            self.enable_kv_store = True
+        self.kv_store = None
+        self.kv_store_manager = None
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

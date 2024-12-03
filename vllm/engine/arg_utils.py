@@ -120,6 +120,7 @@ class EngineArgs:
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
+    kv_store_space: float = 0 # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -454,6 +455,10 @@ class EngineArgs:
                             type=float,
                             default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU.')
+        parser.add_argument('--kv-store-space',
+                            type=float,
+                            default=EngineArgs.kv_store_space,
+                            help='KV store space size (GiB) per GPU.')
         parser.add_argument(
             '--cpu-offload-gb',
             type=float,
@@ -1022,6 +1027,7 @@ class EngineArgs:
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
+            kv_store_space=self.kv_store_space,
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),

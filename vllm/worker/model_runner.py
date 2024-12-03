@@ -466,6 +466,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.finished_requests_ids = finished_requests_ids
         self.decode_only = True
+        self.enable_kv_store = self.runner.enable_kv_store
 
         # Intermediate data (data in CPU before going to GPU) for
         # the current sequence group.
@@ -1015,6 +1016,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         self.is_driver_worker = is_driver_worker
         self.return_hidden_states = return_hidden_states
+        self.enable_kv_store = cache_config.enable_kv_store
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()

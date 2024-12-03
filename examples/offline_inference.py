@@ -1,5 +1,13 @@
 from vllm import LLM, SamplingParams
 
+def print_outputs(llm, outputs):
+    for output in outputs:
+        prompt = output.prompt
+        token_ids = output.outputs[0].token_ids
+        generated_text = llm.get_tokenizer().decode(token_ids)
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
 # Sample prompts.
 prompts = [
     "Hello, my name is",
@@ -16,7 +24,4 @@ llm = LLM(model="facebook/opt-125m")
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
 # Print the outputs.
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+print_outputs(llm, outputs)

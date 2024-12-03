@@ -12,6 +12,7 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
 from vllm.attention.backends.abstract import AttentionType
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.store.kv_store import KVStoreMeta
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase
@@ -78,9 +79,11 @@ def _compute_slot_mapping_numpy(slot_mapping: List[int],
 def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
                          seq_id: int, seq_len: int, context_len: int,
                          start_idx: int, block_size: int,
-                         block_tables: Dict[int, List[int]]):
+                         block_tables: Dict[int, List[int]]) \
+                                 -> (int, int, List[int]):
     """
     Compute slot mapping.
+    return: the range_start and range_end
     """
     if is_profile_run:
         # During memory profiling, the block tables are not
@@ -88,7 +91,7 @@ def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
         # slot mapping.
         # In embeddings, the block tables are {seq_id: None}.
         slot_mapping.extend([PAD_SLOT_ID] * seq_len)
-        return
+        return (0, 0, [])
 
     # Mask the [0, start_idx) tokens of the prompt with
     # PAD_SLOT_ID, where start_idx is max(0, seq_len -
@@ -112,6 +115,12 @@ def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
     else:
         _compute_slot_mapping_numpy(slot_mapping, block_table, range_start,
                                     range_end, block_size)
+    block_table = block_table[
+            (range_start // block_size):((range_end - 1) // block_size) + 1]
+    start_offset = (range_start // block_size) * block_size
+    range_start -= start_offset
+    range_end -= start_offset
+    return (range_start, range_end, block_table)
 
 
 TAttentionMetadata = TypeVar("TAttentionMetadata", bound='AttentionMetadata')
@@ -326,6 +335,7 @@ class CommonAttentionState(AttentionState):
             seq_start_loc=None,
             context_lens_tensor=None,
             block_tables=self._graph_block_tables[:batch_size],
+            kv_store_meta = KVStoreMeta.null(),
             use_cuda_graph=True,
         )
         if is_encoder_decoder_model:

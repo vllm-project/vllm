@@ -61,6 +61,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.store.kv_store import KVBlockStoreManager
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -332,6 +333,14 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             self.model_config)
 
+        self.kv_store_manager: Optional[KVBlockStoreManager] = None
+        if (self.cache_config.enable_kv_store):
+            kv_store_manager = KVBlockStoreManager.from_configs(
+                    self.cache_config, self.model_config, self.parallel_config)
+            self.kv_store_manager = kv_store_manager
+            self.cache_config.kv_store_manager = kv_store_manager
+
+
         self.model_executor = executor_class(vllm_config=vllm_config, )
 
         if self.model_config.task != "embedding":
@@ -410,7 +419,9 @@ class LLMEngine:
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = [
             Scheduler(
-                self.scheduler_config, self.cache_config, self.lora_config,
+                self.scheduler_config, self.cache_config,
+                self.kv_store_manager,
+                self.lora_config,
                 self.parallel_config.pipeline_parallel_size,
                 self.async_callbacks[v_id]
                 if self.model_config.use_async_output_proc else None)
@@ -1023,9 +1034,9 @@ class LLMEngine:
         This function updates num_computed_tokens for prompt sequences
         when Multi-Step is enabled.
 
-        seq_group: SequenceGroup to update the num_computed_tokens for. 
+        seq_group: SequenceGroup to update the num_computed_tokens for.
         seq_group_meta: Metadata of the given SequenceGroup.
-        is_first_step_output: Optional[bool] - 
+        is_first_step_output: Optional[bool] -
             When available, is_first_step_output indicates if the appended
             output token is the output of the first-step in multi-step.
             A value of None indicates that outputs from all steps in
@@ -1437,7 +1448,9 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                kv_store_block_mapping_from_cpu=\
+                        scheduler_outputs.kv_store_block_mapping_from_cpu,)
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[

@@ -1266,6 +1266,10 @@ class ExecuteModelRequest(
     # Async callback
     async_callback: Optional[Callable] = None
 
+
+    # for kv store
+    kv_store_block_mapping_from_cpu: Optional["BlockMappingFromCPU"] = None
+
     @property
     def is_first_multi_step(self) -> bool:
         # TODO(will) make this be able to handle batches with variable number of

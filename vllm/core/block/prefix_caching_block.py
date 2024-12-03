@@ -13,6 +13,10 @@ from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
 from vllm.sequence import Sequence
+from vllm.store.kv_store import KVBlockStoreManager
+
+# NOTE: for debug the kvstore, may cause some assert errors
+only_enable_cpu_kvstore = False
 
 PrefixHash = int
 
@@ -66,6 +70,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         num_blocks: int,
         block_size: int,
         block_ids: Optional[Iterable[int]] = None,
+        kv_store_manager: Optional[KVBlockStoreManager] = None,
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
     ):
         if block_ids is None:
@@ -117,6 +122,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         self.metric_data = CacheMetricData()
 
+        self.kv_store_manager = kv_store_manager
+
     # Implements Block.Factory.
     def _create_block(
         self,
@@ -163,13 +170,29 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                             physical_block_id=None)
         assert block.content_hash is not None
 
-        cached_block_id = self._cached_blocks.get(block.content_hash, None)
-        if cached_block_id is not None:
-            self.metric_data.query(hit=True)
-            block.block_id = cached_block_id
-            self._incr_refcount_cached_block(block)
-            return block
+        if (only_enable_cpu_kvstore == False) or \
+                (self.kv_store_manager == None):
+            cached_block_id = self._cached_blocks.get(block.content_hash, None)
+            if cached_block_id is not None:
+                self.metric_data.query(hit=True)
+                block.block_id = cached_block_id
+                self._incr_refcount_cached_block(block)
+                return block
         self.metric_data.query(hit=False)
+        if (self.kv_store_manager != None) and \
+                (self.kv_store_manager.has(block.content_hash)):
+            block_id = self._allocate_block_id()
+            block.block_id = block_id
+            # print("Found in kv store with hash: ", block.content_hash,
+            #       "block_id: ", block_id)
+            self.kv_store_manager.remap_block_id(
+                    block.content_hash, block.block_id)
+            self.kv_store_manager.open_send_flag(block.block_id)
+            self._cached_blocks[block.content_hash] = block_id
+            block.computed = True
+            self._block_tracker[block_id].computed = True
+            return block
+
         self._block_pool.free_block(block)
 
         # No cached block => Allocate a new block
@@ -213,6 +236,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                             physical_block_id=block_id)
         assert not block.computed
         assert block.content_hash is None
+        if (self.kv_store_manager != None):
+            self.kv_store_manager.allocate_block(-1, block.block_id)
         return block
 
     def _incr_refcount_cached_block(self, block: Block) -> None:
@@ -445,6 +470,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert self._refcounter.get(block.block_id) > 0
 
         if block.content_hash not in self._cached_blocks:
+            if (self.kv_store_manager != None):
+                self.kv_store_manager.add_hash_map(
+                        block.content_hash, block.block_id)
+
             # No cached content hash => Set this block as cached.
             # Note that this block cannot be marked as computed yet
             # because other sequences in the same batch cannot reuse
@@ -463,6 +492,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # it from the evictor.
         # Note that in this case, the block is marked as computed
         self._incr_refcount_cached_block(block)
+
+        if (self.kv_store_manager != None):
+            self.kv_store_manager.add_hash_map(
+                    block.content_hash, block.block_id)
+
 
         return block.block_id
 

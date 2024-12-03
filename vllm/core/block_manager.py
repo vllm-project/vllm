@@ -12,6 +12,7 @@ from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+from vllm.store.kv_store import KVBlockStoreManager
 
 SeqId = int
 EncoderSeqId = str
@@ -62,6 +63,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
+        kv_store_manager : KVBlockStoreManager,
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
@@ -95,6 +97,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             block_size=block_size,
+            kv_store_manager=kv_store_manager,
         )
 
         self.block_tables: Dict[SeqId, BlockTable] = {}
@@ -104,6 +107,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             self.block_allocator, self.block_size, self.enable_caching)
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
+        self.kv_store_manager = kv_store_manager
 
     def can_allocate(self,
                      seq_group: SequenceGroup,

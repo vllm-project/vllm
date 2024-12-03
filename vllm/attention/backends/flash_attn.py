@@ -5,6 +5,7 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
+import numpy as np
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -16,6 +17,7 @@ from vllm.attention.backends.utils import (
     compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
+from vllm.store.kv_store import KVStoreMeta
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
@@ -235,6 +237,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
+            kv_store_meta=self.kv_store_meta,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -285,6 +288,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=None,
             block_tables=block_tables,
             use_cuda_graph=self.use_cuda_graph,
+            kv_store_meta=self.kv_store_meta,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -384,11 +388,13 @@ class FlashAttentionMetadataBuilder(
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
+        self.range_list: List[Tuple[int, int, List[int], bool]] = []
 
         self.input_builder = input_builder
         self.runner = input_builder.runner
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
+        self.enable_kv_store = input_builder.enable_kv_store
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -446,9 +452,12 @@ class FlashAttentionMetadataBuilder(
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
                                                        context_len,
                                                        self.sliding_window)
-            compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
-                                 seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
+            (range_start, range_end, block_table) = compute_slot_mapping(
+                    is_profile_run, self.slot_mapping, seq_id,
+                    curr_seq_len, context_len, start_idx,
+                    self.block_size, inter_data.block_tables)
+            self.range_list.append((range_start, range_end,
+                                    block_table, is_prompt))
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
@@ -472,7 +481,7 @@ class FlashAttentionMetadataBuilder(
                         i, :max_blocks] = block_table[:max_blocks]
 
         return torch.from_numpy(graph_block_tables).to(
-            device=self.runner.device, non_blocking=True)
+                device=self.runner.device, non_blocking=True)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
@@ -543,6 +552,48 @@ class FlashAttentionMetadataBuilder(
             self.multimodal_placeholder_maps.items()
         }
 
+        incomplete_put_block_ids = []
+        put_block_ids = []
+        assert(len(self.range_list) == len(self.block_tables))
+        if (self.enable_kv_store == True):
+            for (range_start, range_end, seq_block_table, is_prompt) in \
+                    self.range_list:
+                if (range_start == range_end) or (is_prompt == False):
+                    continue
+                block_size = self.block_size
+                range_end -= 1
+                range_start_block_id = range_start // block_size
+                range_end_block_id = range_end // block_size
+                range_start_block_offset = range_start % block_size
+                range_end_block_offset = range_end % block_size + 1
+                if (range_start_block_id == range_end_block_id):
+                    incomplete_put_block_ids.append(
+                            [seq_block_table[range_start_block_id],
+                             range_start_block_offset, range_end_block_offset])
+                else:
+                    if (range_start_block_offset == 0):
+                        put_block_ids.append(
+                            seq_block_table[range_start_block_id])
+                    else:
+                        incomplete_put_block_ids.append(
+                                [seq_block_table[range_start_block_id],
+                                 range_start_block_offset, block_size])
+                    put_block_ids.extend(
+                            seq_block_table[
+                                range_start_block_id + 1:range_end_block_id])
+                    if (range_end_block_offset == block_size):
+                        put_block_ids.append(
+                            seq_block_table[range_end_block_id])
+                    else:
+                        incomplete_put_block_ids.append(
+                                [seq_block_table[range_end_block_id],
+                                 0, range_end_block_offset])
+        incomplete_put_block_ids_numpy = np.array(incomplete_put_block_ids)
+        put_block_ids_numpy = np.array(put_block_ids)
+        incomplete_put_block_ids_cpu = torch.from_numpy(
+                incomplete_put_block_ids_numpy).to("cpu")
+        put_block_ids_cpu = torch.from_numpy(put_block_ids_numpy).to("cpu")
+
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
@@ -560,6 +611,9 @@ class FlashAttentionMetadataBuilder(
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            kv_store_meta=KVStoreMeta(incomplete_put_block_ids_cpu,
+                                      put_block_ids_cpu,
+                                      torch.Tensor())
         )
 
 

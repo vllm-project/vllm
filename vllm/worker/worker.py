@@ -28,9 +28,10 @@ from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
+from vllm.utils import init_logger
+from vllm.store.kv_store import KVBlockStore, KVStoreMeta
 
 logger = init_logger(__name__)
-
 
 class Worker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
@@ -55,6 +56,14 @@ class Worker(LocalOrDistributedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
+
+        if (self.cache_config.enable_kv_store):
+            self.cache_config.kv_store = KVBlockStore.from_configs(
+                    self.cache_config, self.model_config, self.parallel_config,
+                    torch.device(f"cuda:{self.local_rank}"))
+        self.kv_store = self.cache_config.kv_store
+        self.kv_store_manager = self.cache_config.kv_store_manager
+
         if is_driver_worker:
             assert rank % self.parallel_config.tensor_parallel_size == 0, \
                    "Driver worker should be rank 0 of tensor parallel group."
@@ -112,6 +121,37 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
+    def prepare_kv_store_meta(self,
+                              is_prefill: bool,
+                              incomplete_put_block_ids: torch.Tensor,
+                              put_block_ids: torch.Tensor,
+                              seq_g_list: List[SequenceGroupMetadata]) \
+                                      -> KVStoreMeta:
+        ret_incomplete_put_blocks = torch.Tensor()
+        ret_put_blocks_mapping = torch.Tensor()
+        ret_seq_g_ids = torch.Tensor()
+        if (self.local_rank == 0) and (self.kv_store_manager is not None):
+            self.kv_store_manager.is_prefill = is_prefill
+            (ret_incomplete_put_blocks, ret_put_blocks_mapping) = \
+                    self.kv_store_manager.get_put_blocks_mapping(
+                        incomplete_put_block_ids, put_block_ids)
+            self.kv_store_manager.is_prefill = False
+            if (is_prefill) and (ret_incomplete_put_blocks.numel() + \
+                    ret_put_blocks_mapping.numel() > 0):
+                # XXX: use first seq_id representing the seq_group id
+                seq_g_ids = [seq_g.get_first_seq_id() for seq_g in seq_g_list]
+                ret_seq_g_ids = torch.tensor(seq_g_ids,
+                                             device="cpu",
+                                             dtype=torch.int64).view(-1)
+        return KVStoreMeta(ret_incomplete_put_blocks,
+                           ret_put_blocks_mapping,
+                           ret_seq_g_ids)
+
+    def put_stream_sync(self):
+        if (self.kv_store is not None):
+            self.kv_store.put_stream_sync()
+
+
     def start_profile(self):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
@@ -144,6 +184,11 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
+
+        # use higher priority stream for forward step
+        compute_stream = torch.cuda.Stream(priority=-10)
+        torch.cuda.set_stream(compute_stream)
+
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
@@ -341,6 +386,8 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
+            kv_store_block_mapping_from_cpu=\
+                    execute_model_req.kv_store_block_mapping_from_cpu,
         )
 
     @torch.inference_mode()
@@ -358,6 +405,18 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+
+    @torch.inference_mode()
+    def issue_blocks_copy(self, worker_input: WorkerInput) -> None:
+        if (self.kv_store == None):
+            return
+        kv_store_block_mapping_from_cpu = \
+                worker_input.kv_store_block_mapping_from_cpu
+        kv_caches = (self.kv_cache[worker_input.virtual_engine]
+                     if self.kv_cache is not None else None)
+        self.kv_store.get_blocks(
+                worker_input.kv_store_block_mapping_from_cpu,
+                kv_caches)
 
     def _get_cached_seq_group_metadata(
             self,

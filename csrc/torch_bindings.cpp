@@ -404,6 +404,32 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "swap_blocks(Tensor src, Tensor! dst, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
 
+  // Copy the incomplete blocks from src to dst.
+  cache_ops.def(
+      "kv_store_copy_incomplete_blocks(Tensor src, Tensor! dst, "
+      "                       int layer_id, "
+      "                       Tensor incomplete_block_mapping) -> ()");
+  cache_ops.impl("kv_store_copy_incomplete_blocks", torch::kCUDA,
+          &kv_store_copy_incomplete_blocks);
+
+  // Copy the kv cache blocks from src(GPU) to dst(CPU), used for kv store.
+  cache_ops.def(
+      "kv_store_copy_blocks2CPU(Tensor src, Tensor! dst, "
+      "                       int layer_id, Tensor block_mapping) -> ()");
+  cache_ops.impl("kv_store_copy_blocks2CPU", torch::kCUDA,
+          &kv_store_copy_blocks2CPU);
+
+  // Copy the kv cache blocks from src(CPU) to dst(GPU), used for kv store.
+  cache_ops.def(
+      "kv_store_copy_blocks2GPU(Tensor src, Tensor[](b!) dst, "
+      "                         int num_layers,"
+      "                         Tensor block_mapping, Tensor block_offsets,"
+      "                         Tensor req_ids,"
+      "                         int[] events,"
+      "                         bool is_batch_layer) -> ()");
+  cache_ops.impl("kv_store_copy_blocks2GPU", torch::kCUDA,
+          &kv_store_copy_blocks2GPU);
+
   // Copy the cache blocks from src to dst.
   cache_ops.def(
       "copy_blocks(Tensor(a!)[] key_caches, Tensor[](b!) value_caches, "

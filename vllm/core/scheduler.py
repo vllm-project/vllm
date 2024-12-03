@@ -16,7 +16,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
-from vllm.utils import Device, PyObjectCache
+from vllm.utils import Device, PyObjectCache, set_abort_request_id
+from vllm.store.kv_store import KVBlockStoreManager,BlockMappingFromCPU
 
 logger = init_logger(__name__)
 
@@ -149,6 +150,7 @@ class SchedulerOutputs:
     # The number of requests in the running queue
     running_queue_size: int
     preempted: int
+    kv_store_block_mapping_from_cpu: BlockMappingFromCPU
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -274,6 +276,7 @@ class SchedulerPrefillOutputs:
     # Ignored sequence groups.
     ignored_seq_groups: List[SequenceGroup]
     num_lookahead_slots: int
+    kv_store_block_mapping_from_cpu: BlockMappingFromCPU
 
     @classmethod
     def create_empty(cls) -> "SchedulerPrefillOutputs":
@@ -281,6 +284,7 @@ class SchedulerPrefillOutputs:
             seq_groups=[],
             ignored_seq_groups=[],
             num_lookahead_slots=0,
+            kv_store_block_mapping_from_cpu=None,
         )
 
 
@@ -316,6 +320,7 @@ class Scheduler:
         self,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
+        kv_store_manager: KVBlockStoreManager,
         lora_config: Optional[LoRAConfig],
         pipeline_parallel_size: int = 1,
         output_proc_callback: Optional[Callable] = None,
@@ -332,6 +337,7 @@ class Scheduler:
                 or self.cache_config.is_attention_free):
             version = "placeholder"
 
+        logger.info("Using BlockSpaceManager version %s", version)
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
@@ -348,12 +354,15 @@ class Scheduler:
             block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
+            kv_store_manager=kv_store_manager,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
+        self.kv_store_manager = kv_store_manager
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
+        self.kv_store_waiting: Deque[SequenceGroup] = deque()
         # Sequence groups in the RUNNING state.
         # Contain decode requests.
         self.running: Deque[SequenceGroup] = deque()
@@ -453,7 +462,8 @@ class Scheduler:
         if isinstance(request_id, str):
             request_id = (request_id, )
         request_ids = set(request_id)
-        for state_queue in [self.waiting, self.running, self.swapped]:
+        for state_queue in [self.waiting, self.running,
+                            self.swapped, self.kv_store_waiting]:
             aborted_groups: List[SequenceGroup] = []
             for seq_group in state_queue:
                 if not request_ids:
@@ -490,13 +500,14 @@ class Scheduler:
 
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
-            self.swapped) != 0
+            self.swapped) != 0 or len(self.kv_store_waiting) != 0
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
 
     def get_num_unfinished_seq_groups(self) -> int:
-        return len(self.waiting) + len(self.running) + len(self.swapped)
+        return len(self.waiting) + len(self.running) + len(self.swapped) + \
+                len(self.kv_store_waiting)
 
     def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
@@ -523,7 +534,7 @@ class Scheduler:
                 chunked number of tokens are scheduled  if
                 `budget.num_batched_tokens` has not enough capacity to schedule
                 all tokens.
-    
+
         Returns:
             SchedulerRunningOutputs.
         """
@@ -910,9 +921,87 @@ class Scheduler:
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
 
+        kv_store_waiting_queue = self.kv_store_waiting
         waiting_queue = self.waiting
+        kv_store_block_mapping = []
+        kv_store_block_mapping_offset = []
+        kv_store_block_mapping_req_ids = []
+        kv_store_block_mapping_cnt = 0
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
+        kv_store_leftover_waiting_sequences: Deque[SequenceGroup] = deque()
+
+        def _stop_schedule_prefill(num_new_tokens_uncached,
+                                  num_new_seqs,
+                                  max_num_batched_tokens,
+                                  budget):
+            if (budget.num_batched_tokens >=
+                    self.scheduler_config.max_num_batched_tokens):
+                return True
+            if (num_new_tokens_uncached == 0 or
+                    not budget.can_schedule(
+                        num_new_tokens=num_new_tokens_uncached,
+                        num_new_seqs=num_new_seqs)):
+                return True
+            return False
+
+        kv_store_tmp_queue : Deque[SequenceGroup] = deque()
+        while self._passed_delay(time.time()) and kv_store_waiting_queue:
+            if budget.num_curr_prefill_seqs >= self.scheduler_config.max_num_prefill_seqs:
+                break
+
+            seq_group = kv_store_waiting_queue[0]
+
+            waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
+            assert len(waiting_seqs) == 1, (
+                "Waiting sequence group should have only one prompt "
+                "sequence.")
+
+            num_new_tokens_uncached, num_new_tokens_cached = (
+                self._get_num_new_uncached_and_cached_tokens(
+                    seq_group, SequenceStatus.WAITING, enable_chunking,
+                    budget))
+            num_new_tokens = num_new_tokens_uncached + num_new_tokens_cached
+            num_new_seqs = seq_group.get_max_num_running_seqs()
+
+            lora_int_id = 0
+            if self.lora_enabled:
+                lora_int_id = seq_group.lora_int_id
+                assert curr_loras is not None
+                assert self.lora_config is not None
+                if (self.lora_enabled and lora_int_id > 0
+                        and lora_int_id not in curr_loras
+                        and len(curr_loras) >= self.lora_config.max_loras):
+                    # We don't have a space for another LoRA, so
+                    # we ignore this request for now.
+                    kv_store_tmp_queue.appendleft(seq_group)
+                    kv_store_waiting_queue.popleft()
+                    continue
+
+            if (_stop_schedule_prefill(num_new_tokens_uncached,
+                    num_new_seqs,
+                    self.scheduler_config.max_num_batched_tokens, budget)):
+                break
+
+            # Can schedule this request.
+            if curr_loras is not None and lora_int_id > 0:
+                curr_loras.add(lora_int_id)
+
+            kv_store_waiting_queue.popleft()
+            self._set_running(seq_group)
+
+            seq_groups.append(
+                ScheduledSequenceGroup(seq_group=seq_group,
+                                       token_chunk_size=num_new_tokens))
+            budget.add_num_batched_tokens(
+                seq_group.request_id,
+                num_batched_tokens=num_new_tokens_uncached,
+                num_cached_tokens=num_new_tokens_cached,
+            )
+            budget.add_num_seqs(seq_group.request_id, num_new_seqs)
+            budget.add_num_prefill_seqs(num_new_seqs)
+        kv_store_waiting_queue.extendleft(kv_store_tmp_queue)
+
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
 
@@ -976,25 +1065,19 @@ class Scheduler:
                     waiting_queue.popleft()
                     continue
 
-            if (budget.num_batched_tokens >=
-                    self.scheduler_config.max_num_batched_tokens):
-                # We've reached the budget limit - since there might be
-                # continuous prefills in the running queue, we should break
-                # to avoid scheduling any new prefills.
-                break
+            if (self.kv_store_manager != None):
+                self.kv_store_manager.is_prefill = seq_group.is_prefill()
 
-            num_new_seqs = seq_group.get_max_num_running_seqs()
-            if num_new_tokens_uncached == 0 or not budget.can_schedule(
-                    num_new_tokens=num_new_tokens_uncached,
-                    num_new_seqs=num_new_seqs,
-            ):
-                break
+            block_mapping_from_cpu = []
+            self._allocate(seq_group)
 
-            # Can schedule this request.
-            if curr_loras is not None and lora_int_id > 0:
-                curr_loras.add(lora_int_id)
-            waiting_queue.popleft()
-            self._allocate_and_set_running(seq_group)
+            if (self.kv_store_manager != None):
+                block_ids = self.block_manager.get_block_table(
+                        seq_group.get_seqs()[0])
+                block_mapping_from_cpu = \
+                        self.kv_store_manager.get_block_mapping_from_python(
+                                block_ids)
+                self.kv_store_manager.is_prefill = False
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
@@ -1013,6 +1096,33 @@ class Scheduler:
                     is_multi_step=self.scheduler_config.is_multi_step,
                     enable_chunking=enable_chunking)
 
+            if (len(block_mapping_from_cpu) > 0):
+                waiting_queue.popleft()
+                kv_store_leftover_waiting_sequences.appendleft(seq_group)
+                kv_store_block_mapping.extend(
+                        block_mapping_from_cpu)
+                kv_store_block_mapping_offset.append(kv_store_block_mapping_cnt)
+                kv_store_block_mapping_req_ids.append(
+                        seq_group.get_seqs()[0].seq_id)
+                kv_store_block_mapping_cnt += len(block_mapping_from_cpu)
+                continue
+
+            num_new_seqs = seq_group.get_max_num_running_seqs()
+            if (_stop_schedule_prefill(num_new_tokens_uncached, num_new_seqs,
+                             self.scheduler_config.max_num_batched_tokens,
+                             budget)):
+                # let it to the next running one
+                waiting_queue.popleft()
+                kv_store_leftover_waiting_sequences.appendleft(seq_group)
+                break
+
+            # Can schedule this request.
+            if curr_loras is not None and lora_int_id > 0:
+                curr_loras.add(lora_int_id)
+
+            waiting_queue.popleft()
+            self._set_running(seq_group)
+
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
@@ -1023,20 +1133,34 @@ class Scheduler:
             )
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
+        self.kv_store_waiting.extendleft(kv_store_leftover_waiting_sequences)
+
         # Queue requests that couldn't be scheduled.
         waiting_queue.extendleft(leftover_waiting_sequences)
         if len(seq_groups) > 0:
             self.prev_prompt = True
 
+        if (self.kv_store_manager != None) and \
+                (len(kv_store_block_mapping) > 0):
+            self.kv_store_manager.close_send_flags(
+                    [items[1]
+                     for items in kv_store_block_mapping])
+
+        kv_store_block_mapping_offset.append(kv_store_block_mapping_cnt)
+        kv_store_block_mapping_from_cpu = BlockMappingFromCPU(
+                kv_store_block_mapping, kv_store_block_mapping_offset,
+                kv_store_block_mapping_req_ids)
+
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
             ignored_seq_groups=ignored_seq_groups,
             num_lookahead_slots=self._get_num_lookahead_slots(
-                is_prefill=True, enable_chunking=enable_chunking))
+                is_prefill=True, enable_chunking=enable_chunking),
+            kv_store_block_mapping_from_cpu=kv_store_block_mapping_from_cpu)
 
     def _schedule_default(self) -> SchedulerOutputs:
         """Schedule queued requests.
-        
+
         The current policy is designed to optimize the throughput. First,
         it batches as many prefill requests as possible. And it schedules
         decodes. If there's a pressure on GPU memory, decode requests can
@@ -1137,11 +1261,13 @@ class Scheduler:
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=preempted,
+            kv_store_block_mapping_from_cpu= \
+                    prefills.kv_store_block_mapping_from_cpu,
         )
 
     def _schedule_chunked_prefill(self) -> SchedulerOutputs:
         """Schedule queued requests.
-        
+
         Chunked prefill allows to chunk prefill requests, batch them together
         with decode requests. This policy 1. schedule as many decoding requests
         as possible. 2. schedule chunked prefill requests that are not
@@ -1232,6 +1358,8 @@ class Scheduler:
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
+            kv_store_block_mapping_from_cpu= \
+                    prefills.kv_store_block_mapping_from_cpu,
         )
 
     def _schedule(self) -> SchedulerOutputs:
@@ -1478,6 +1606,13 @@ class Scheduler:
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
+        for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
+            seq.status = SequenceStatus.RUNNING
+
+    def _allocate(self, seq_group: SequenceGroup) -> None:
+        self.block_manager.allocate(seq_group)
+
+    def _set_running(self, seq_group: SequenceGroup) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 

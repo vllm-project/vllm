@@ -26,6 +26,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         block_size: int,
+        kv_store_manager: Optional["KVStoreManager"],
     ) -> DeviceAwareBlockAllocator:
         """Creates a CpuGpuBlockAllocator instance with the specified
         configuration.
@@ -67,6 +68,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
                 block_ids=gpu_block_ids,
+                kv_store_manager=kv_store_manager,
             )
 
             cpu_allocator: BlockAllocator = NaiveBlockAllocator(
@@ -80,6 +82,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
                 block_ids=gpu_block_ids,
+                kv_store_manager=kv_store_manager,
             )
 
             cpu_allocator = PrefixCachingBlockAllocator(
@@ -305,6 +308,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         # Prefix caching only supported on GPU.
         device = Device.GPU
         return self._allocators[device].mark_blocks_as_computed(block_ids)
+
+    def mark_blocks_as_cached(self, blocks: List[Block]) -> None:
+        """Mark blocks as cached, only use for prefix caching with KV Store."""
+        # Prefix caching only supported on GPU.
+        device = Device.GPU
+        return self._allocators[device].mark_blocks_as_cached(blocks)
 
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
