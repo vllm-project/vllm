@@ -99,12 +99,12 @@ If you only need to change Python code, you can build and install vLLM without c
 
 This will download the latest nightly wheel and use the compiled libraries from there in the install.
 
-The wheel that is used to retrieve the prebuilt libraries (e.g. the `PyPi wheel <https://pypi.org/project/vllm/#files>`_) can be set using the ``VLLM_PRECOMPILED_WHEEL_LOCATION`` environment variable:
+The``VLLM_PRECOMPILED_WHEEL_LOCATION`` environment variable can be used instead of ``VLLM_USE_PRECOMPILED`` to specify a custom path or URL to the wheel file. For example, to use the `0.6.1.post1 PyPi wheel <https://pypi.org/project/vllm/#files>`_:
 
 .. code-block:: console
 
    $ export VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/4a/4c/ee65ba33467a4c0de350ce29fbae39b9d0e7fcd887cc756fa993654d1228/vllm-0.6.3.post1-cp38-abi3-manylinux1_x86_64.whl
-   $ VLLM_USE_PRECOMPILED=1 pip install --editable .
+   $ pip install --editable .
 
 You can find more information about vLLM's wheels `above <#install-the-latest-code>`_.
 
