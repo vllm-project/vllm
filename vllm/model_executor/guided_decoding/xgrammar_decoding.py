@@ -179,10 +179,10 @@ class XGrammarLogitsProcessor:
     config: GrammarConfig
 
     ctx: xgr.CompiledGrammar | None = None
+    token_bitmask: torch.Tensor = None  # type: ignore[assignment]
     matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
-    batch_size: int = 1
-    token_bitmask: torch.Tensor = None
-    prefilled: bool = False
+    batch_size: int = field(default=1)
+    prefilled: bool = field(default=False)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
@@ -193,7 +193,7 @@ class XGrammarLogitsProcessor:
         self.ctx = None
         self.matchers = []
         self.batch_size = 1
-        self.token_bitmask = None
+        self.token_bitmask = None  # type: ignore[assignment]
         self.prefilled = False
 
     def _ensure_ctx(self):
