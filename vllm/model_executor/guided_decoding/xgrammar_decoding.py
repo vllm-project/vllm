@@ -233,6 +233,9 @@ class XGrammarLogitsProcessor:
 
         for i, matcher in enumerate(self.matchers):
             if not matcher.is_terminated():
+                # @ubospica: ideally, fill_next_token_bitmask should be
+                # parallelized with model decoding
+                # See https://github.com/vllm-project/vllm/pull/10785/files#r1864278303
                 matcher.fill_next_token_bitmask(self.token_bitmask, i)
 
         # token_bitmask is a CPU tensor for use with accept_token and
