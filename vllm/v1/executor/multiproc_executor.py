@@ -1,5 +1,4 @@
 import os
-import signal
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -175,7 +174,7 @@ class MultiprocExecutor:
         # Send SIGKILL if still running
         active_procs = [p for p in active_procs if p.is_alive()]
         for p in active_procs:
-            os.kill(p.pid, signal.SIGKILL)
+            p.kill()
         if not wait_for_termination(active_procs, 5):
             raise RuntimeError("Failed to terminate worker processes")
 

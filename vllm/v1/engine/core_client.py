@@ -98,14 +98,8 @@ class InprocClient(EngineCoreClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self.engine_core.abort_requests(request_ids)
 
-    def shutdown(self):
-        self.engine_core.shutdown()
-
     async def profile(self, is_start=True) -> None:
         self.engine_core.profile(is_start)
-
-    def __del__(self):
-        self.shutdown()
 
 
 class MPClient(EngineCoreClient):

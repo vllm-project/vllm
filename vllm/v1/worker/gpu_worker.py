@@ -3,7 +3,6 @@ import gc
 import os
 import pickle
 import signal
-import weakref
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -307,8 +306,6 @@ class WorkerProc:
         initialization_input_path: str,
         initialization_output_path: str,
     ):
-        self._finalizer = weakref.finalize(self, self.shutdown)
-
         self.rank = rank
         self.worker = Worker(vllm_config, local_rank, rank,
                              distributed_init_method)
