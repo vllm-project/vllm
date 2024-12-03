@@ -141,6 +141,11 @@ def test_engine_core(monkeypatch):
 
 
 def test_engine_core_advanced_sampling(monkeypatch):
+    """
+    A basic end-to-end test to verify that the engine functions correctly 
+    when additional sampling parameters, such as min_tokens and 
+    presence_penalty, are set.
+    """
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         """Setup the EngineCore."""

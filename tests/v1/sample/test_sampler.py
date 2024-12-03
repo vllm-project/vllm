@@ -154,11 +154,12 @@ def test_sampler_min_tokens_penalty(device: str, batch_size: int):
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
-def test_sampler_presence_penalty(device: str, batch_size: int):
+@pytest.mark.parametrize("presence_penalty", [-2.0, 2.0])
+def test_sampler_presence_penalty(device: str, batch_size: int,
+                                  presence_penalty: float):
     """
     Test to verify that if presence penalty is enabled then tokens
-    which are already present in the output are penalized vs tokens
-    which are not yet present in the output.
+    are penalized as per their presence in the existing output.
     """
     torch.set_default_device(device)
     # Create fake logits where each token is assigned the same
@@ -167,47 +168,47 @@ def test_sampler_presence_penalty(device: str, batch_size: int):
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE)
     output_token_ids = sampling_metadata.output_token_ids
-    sampling_metadata.presence_penalties = [2.0 for _ in range(batch_size)]
+    sampling_metadata.presence_penalties = [
+        presence_penalty for _ in range(batch_size)
+    ]
     sampler = Sampler()
     sampler_output = sampler(fake_logits, sampling_metadata)
     for batch_idx in range(batch_size):
         # The logprobs in the SamplerOutput are arranged in descending order.
         # Since all tokens initially have the same logprobs, the non-penalized
-        # tokens (i.e., token IDs not present in the output) will appear at
-        # the beginning, while the penalized tokens (i.e., token IDs present in
-        # the output) will appear at the end of the list.
-        logprob_for_output_token = sampler_output.logprobs[batch_idx][
+        # tokens will appear at the beginning, while the penalized tokens
+        #  will appear at the end of the list.
+        penalized_token_id = sampler_output.logprob_token_ids[batch_idx][
             VOCAB_SIZE - 1]
-        logprob_for_non_output_token = sampler_output.logprobs[batch_idx][0]
-        assert logprob_for_non_output_token > logprob_for_output_token
-        for vocab in range(VOCAB_SIZE):
-            logprob_index = torch.where(
-                sampler_output.logprob_token_ids[batch_idx] ==
-                vocab)[0].item()
-            if vocab in output_token_ids[batch_idx]:
-                # This token is present in the list of already output tokens.
-                # Hence it must have been penalized by the presence penalty.
-                # Verify that the logprob of this token is same as that
-                # expected for penalized tokens.
-                assert torch.isclose(
-                    sampler_output.logprobs[batch_idx][logprob_index],
-                    logprob_for_output_token)
-            else:
-                # This token is not present in the list of already output
-                # tokens. Hence it has not been penalized.
-                # Verify that the logprob of this token is same as that
-                # expected for non-penalized tokens.
-                assert torch.isclose(
-                    sampler_output.logprobs[batch_idx][logprob_index],
-                    logprob_for_non_output_token)
+        penalized_log_prod = sampler_output.logprobs[batch_idx][VOCAB_SIZE - 1]
+        non_penalized_token_id = sampler_output.logprob_token_ids[batch_idx][0]
+        non_penalized_log_prod = sampler_output.logprobs[batch_idx][0]
+        assert non_penalized_log_prod > penalized_log_prod
+        if presence_penalty > 0:
+            # If `presence_penalty` is set to a value greater than 0, it
+            # indicates a preference for new tokens over those already
+            # present in the output.
+            # Verify that the penalized token ID exists in the output, while the
+            # non-penalized token ID does not.
+            assert penalized_token_id in output_token_ids[batch_idx]
+            assert non_penalized_token_id not in output_token_ids[batch_idx]
+        elif presence_penalty < 0:
+            # If `presence_penalty` is set to a value less than 0, it indicates
+            # a preference for existing tokens over new ones. Verify that the
+            # non-penalized token ID exists in the output, while the penalized
+            # token ID does not.
+            assert non_penalized_token_id in output_token_ids[batch_idx]
+            assert penalized_token_id not in output_token_ids[batch_idx]
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
-def test_sampler_frequency_penalty(device: str, batch_size: int):
+@pytest.mark.parametrize("frequency_penalty", [-2.0, 2.0])
+def test_sampler_frequency_penalty(device: str, batch_size: int,
+                                   frequency_penalty: float):
     """
-    Test to verify that if frequency penalty is enabled then tokens with
-    higher frequency are penalized more than those with lower frequency.
+    Test to verify that if frequency penalty is enabled then tokens are
+    penalized as per their frequency of occurrence.
     """
     torch.set_default_device(device)
     # Create fake logits where each token is assigned the same
@@ -215,7 +216,9 @@ def test_sampler_frequency_penalty(device: str, batch_size: int):
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE)
-    sampling_metadata.frequency_penalties = [2.0 for _ in range(batch_size)]
+    sampling_metadata.frequency_penalties = [
+        frequency_penalty for _ in range(batch_size)
+    ]
     output_token_ids, sorted_token_ids_in_output = \
         _create_weighted_output_token_list(batch_size, VOCAB_SIZE)
     sampling_metadata.output_token_ids = output_token_ids
@@ -223,32 +226,41 @@ def test_sampler_frequency_penalty(device: str, batch_size: int):
     sampler_output = sampler(fake_logits, sampling_metadata)
     for batch_idx in range(batch_size):
         logprobs_token_ids = sampler_output.logprob_token_ids[batch_idx]
-        token_ids_in_output = sorted_token_ids_in_output[batch_idx]
-        # The logprobs in the SamplerOutput are arranged in descending order.
-        # Initially, all tokens have the same logprob, so their order reflects
-        # their frequency in the existing output. Tokens that occur least
-        # frequently in the current output appear at the beginning of the list,
-        # while tokens that occur most frequently are placed at the end.
-
-        # Verify that tokens not present in the current output are ranked
-        # higher (i.e., appear earlier) than tokens already present in the
-        # output.
-        assert not torch.isin(logprobs_token_ids[:-len(token_ids_in_output)],
-                              torch.tensor(token_ids_in_output)).any(
-                              ), "Some values in the tensor are in the list"
-        # Verify that the logprobs of tokens already present in the output
-        # decrease as their frequency of occurrence increases.
-        assert logprobs_token_ids[-len(token_ids_in_output):].tolist() \
-            == token_ids_in_output, \
-            "The tensor values are not in the same order as the list!"
+        non_penalized_token_id = logprobs_token_ids[0]
+        penalized_token_id = logprobs_token_ids[VOCAB_SIZE - 1]
+        distinct_sorted_token_ids_in_output = \
+            sorted_token_ids_in_output[batch_idx]
+        most_frequent_token_id = distinct_sorted_token_ids_in_output[
+            len(distinct_sorted_token_ids_in_output) - 1]
+        if frequency_penalty > 0:
+            # If `frequency_penalty` is set to > 0, it indicates
+            # a preference for new tokens over existing ones. Verify that the
+            # non-penalized token ID is not present in the output, while the
+            # most penalized token is the one that occurs most frequently in
+            # the output.
+            assert non_penalized_token_id \
+                not in distinct_sorted_token_ids_in_output
+            assert penalized_token_id == most_frequent_token_id
+        elif frequency_penalty < 0:
+            # If `frequency_penalty` is set to < 0, it indicates
+            # a preference for existing tokens over new ones. Verify that the
+            # non-penalized token ID is the one that occurs most frequently
+            # in the output, while the penalized token ID is one that has not
+            # yet appeared.
+            assert non_penalized_token_id == most_frequent_token_id
+            assert penalized_token_id \
+                not in distinct_sorted_token_ids_in_output
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
-def test_sampler_repetition_penalty(device: str, batch_size: int):
+@pytest.mark.parametrize("repetition_penalty", [0.1, 1.9])
+def test_sampler_repetition_penalty(device: str, batch_size: int,
+                                    repetition_penalty: float):
     """
-    Test to verify that if frequency penalty is enabled then tokens with
-    higher frequency are penalized more than those with lower frequency.
+    Test to verify that when the repetition penalty is enabled, tokens 
+    are penalized based on their presence in the prompt or the existing
+    output.
     """
     torch.set_default_device(device)
     # Create fake logits where each token is assigned the same
@@ -256,16 +268,30 @@ def test_sampler_repetition_penalty(device: str, batch_size: int):
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE)
-    sampling_metadata.repetition_penalties = [2.0 for _ in range(batch_size)]
+    sampling_metadata.repetition_penalties = [
+        repetition_penalty for _ in range(batch_size)
+    ]
     sampler = Sampler()
     sampler_output = sampler(fake_logits, sampling_metadata)
     for batch_idx in range(batch_size):
         logprobs_token_ids = sampler_output.logprob_token_ids[batch_idx]
-        assert (logprobs_token_ids[0] not in \
-            sampling_metadata.prompt_token_ids[batch_idx] and \
-            logprobs_token_ids[0] not in \
-            sampling_metadata.output_token_ids[batch_idx])
-        assert (logprobs_token_ids[VOCAB_SIZE-1]  in \
-            sampling_metadata.prompt_token_ids[batch_idx] or \
-            logprobs_token_ids[VOCAB_SIZE-1] in \
-            sampling_metadata.output_token_ids[batch_idx])
+        non_penalized_token_id = logprobs_token_ids[0]
+        penalized_token_id = logprobs_token_ids[VOCAB_SIZE - 1]
+        prompt_tokens = sampling_metadata.prompt_token_ids[batch_idx]
+        output_tokens = sampling_metadata.output_token_ids[batch_idx]
+        if repetition_penalty > 1.0:
+            # If `repetition_penalty` > 1.0, verify that the non-penalized
+            # token ID has not been seen before, while the penalized token ID
+            # exists either in the prompt or the output.
+            assert (non_penalized_token_id not in prompt_tokens and \
+                non_penalized_token_id not in output_tokens)
+            assert (penalized_token_id  in prompt_tokens or \
+                penalized_token_id in output_tokens)
+        elif repetition_penalty < 1.0:
+            # If `repetition_penalty` < 1.0, verify that the penalized
+            # token ID has not been seen before, while the non-penalized
+            # token ID exists either in the prompt or the output.
+            assert (penalized_token_id not in prompt_tokens and \
+                penalized_token_id not in output_tokens)
+            assert (non_penalized_token_id  in prompt_tokens or \
+                non_penalized_token_id in output_tokens)
