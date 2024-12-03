@@ -99,7 +99,7 @@ If you only need to change Python code, you can build and install vLLM without c
 
 This will download the latest nightly wheel and use the compiled libraries from there in the install.
 
-The``VLLM_PRECOMPILED_WHEEL_LOCATION`` environment variable can be used instead of ``VLLM_USE_PRECOMPILED`` to specify a custom path or URL to the wheel file. For example, to use the `0.6.1.post1 PyPi wheel <https://pypi.org/project/vllm/#files>`_:
+The ``VLLM_PRECOMPILED_WHEEL_LOCATION`` environment variable can be used instead of ``VLLM_USE_PRECOMPILED`` to specify a custom path or URL to the wheel file. For example, to use the `0.6.1.post1 PyPi wheel <https://pypi.org/project/vllm/#files>`_:
 
 .. code-block:: console
 
@@ -131,7 +131,7 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
     For example, you can install `ccache <https://github.com/ccache/ccache>`_ using ``conda install ccache`` or ``apt install ccache`` .
     As long as ``which ccache`` command can find the ``ccache`` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
 
-    `sccache <https://github.com/mozilla/sccache>` works similarly to ``ccache``, but has the capability to utilize caching in remote storage environments.
+    `sccache <https://github.com/mozilla/sccache>`_ works similarly to ``ccache``, but has the capability to utilize caching in remote storage environments.
     The following environment variables can be set to configure the vLLM ``sccache`` remote: ``SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1``. We also recommend setting ``SCCACHE_IDLE_TIMEOUT=0``.
 
 
