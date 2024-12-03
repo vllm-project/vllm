@@ -14,6 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
+from vllm.v1.engine.mm_input_mapper import MMInputMapper
 
 
 class Processor:
@@ -38,6 +39,9 @@ class Processor:
                                                     mm_registry)
         self.input_processor = input_registry.create_input_processor(
             model_config)
+
+        # Multi-modal (huggingface) input mapper
+        self.mm_input_mapper = MMInputMapper(model_config)
 
     def _assert_valid_sample_logprobs_prompt_logprobs(
         self,
@@ -140,6 +144,12 @@ class Processor:
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
 
+        # Preprocess multi-modal data
+        mm_inputs = self.mm_input_mapper.process_inputs(
+            decoder_inputs.multi_modal_data,
+            decoder_inputs.mm_processor_kwargs) if len(
+                decoder_inputs.multi_modal_data) > 0 else None
+
         # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
             request_id,
@@ -159,9 +169,8 @@ class Processor:
             request_id,
             decoder_inputs.prompt,
             decoder_inputs.prompt_token_ids,
-            decoder_inputs.multi_modal_data,
+            mm_inputs,
             decoder_inputs.multi_modal_placeholders,
-            decoder_inputs.mm_processor_kwargs,
             sampling_params,
             eos_token_id,
             arrival_time,
