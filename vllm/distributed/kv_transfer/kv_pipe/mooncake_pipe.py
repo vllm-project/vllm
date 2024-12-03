@@ -3,7 +3,7 @@ import os
 import pickle
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import mooncake_vllm_adaptor as mva
 import torch
