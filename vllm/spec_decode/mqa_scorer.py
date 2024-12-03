@@ -54,6 +54,7 @@ class MQAScorer(SpeculativeScorer):
                 is_prompt=seq_group_metadata.is_prompt,
                 seq_data=new_seq_data_dict,
                 sampling_params=seq_group_metadata.sampling_params,
+                logits_processors=seq_group_metadata.logits_processors,
                 block_tables={
                     target_seq_id: seq_group_metadata.block_tables[seq_id],
                 },

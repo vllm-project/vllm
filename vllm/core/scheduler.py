@@ -1383,6 +1383,7 @@ class Scheduler:
                     is_prompt=is_prompt,
                     seq_data=seq_data,
                     sampling_params=seq_group.sampling_params,
+                    logits_processors=seq_group.logits_processors,
                     block_tables=block_tables,
                     do_sample=do_sample,
                     pooling_params=seq_group.pooling_params,

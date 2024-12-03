@@ -636,7 +636,7 @@ class SequenceGroup:
         seqs: List[Sequence],
         arrival_time: float,
         sampling_params: Optional[SamplingParams] = None,
-        logits_processors: List[LogitsProcessor] = None,
+        logits_processors: Optional[List[LogitsProcessor]] = None,
         lora_request: Optional[LoRARequest] = None,
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
@@ -914,6 +914,7 @@ class SequenceGroupMetadata(
     sampling_params: Optional[SamplingParams]
     block_tables: Dict[int, List[int]]
     do_sample: bool = True
+    logits_processors: Optional[List[LogitsProcessor]] = None
     pooling_params: Optional[PoolingParams] = None
     lora_request: Optional[LoRARequest] = None
     computed_block_nums: Optional[List[int]] = None

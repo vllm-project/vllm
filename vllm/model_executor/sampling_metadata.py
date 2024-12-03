@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from vllm.logits_process import LogitsProcessor
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData,
                            SequenceGroupMetadata)
@@ -25,6 +26,7 @@ class SequenceGroupToSample:
     # Sequence ids for the sequence group in a previous step.
     seq_ids: List[int]
     sampling_params: SamplingParams
+    logits_processors: List[LogitsProcessor]
     # seq_id -> sequence data.
     seq_data: Dict[int, SequenceData]
     # The length of the sequence (all tokens seen in the past + new token to
@@ -62,6 +64,7 @@ def gen_seq_group_to_sample_builder(num_seqs: int):
     return lambda: SequenceGroupToSample(
         seq_ids=[0] * num_seqs,
         sampling_params=None,
+        logits_processors=None,
         seq_data=None,  # type: ignore
         seq_len=0,
         query_len=0,
@@ -253,6 +256,7 @@ def _prepare_seq_groups(
             sample_obj.sample_indices.clear()
 
         sampling_params = seq_group_metadata.sampling_params
+        logits_processors = seq_group_metadata.logits_processors
         is_prompt = seq_group_metadata.is_prompt
         generator: Optional[torch.Generator] = None
         # If the current seq group is in decode stage, it is None.
@@ -334,6 +338,7 @@ def _prepare_seq_groups(
 
         if cache is not None:
             sample_obj.sampling_params = sampling_params
+            sample_obj.logits_processors = logits_processors
             sample_obj.seq_data = seq_group_metadata.seq_data
             sample_obj.seq_len = seq_len
             sample_obj.query_len = query_len
@@ -343,6 +348,7 @@ def _prepare_seq_groups(
             sample_obj = SequenceGroupToSample(
                 seq_ids=list(seq_ids),
                 sampling_params=sampling_params,
+                logits_processors=logits_processors,
                 seq_data=seq_group_metadata.seq_data,
                 seq_len=seq_len,
                 query_len=query_len,

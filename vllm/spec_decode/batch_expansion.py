@@ -5,6 +5,7 @@ from typing import Iterator, List, Optional, Tuple
 import torch
 
 from vllm import SamplingParams
+from vllm.logits_process import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID, VLLM_TOKEN_ID_ARRAY_TYPE,
                            ExecuteModelRequest, SequenceData,
@@ -308,6 +309,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             proposal_token_ids[batch_index])
 
         sampling_params = input_seq_group_metadata.sampling_params
+        logits_processors = input_seq_group_metadata.logits_processors
         target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for i, token_ids in enumerate(token_ids_to_score):
             target_seq_group_metadata_list.append(
@@ -317,6 +319,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                     next(target_seq_ids_iter),
                     token_ids,
                     sampling_params=sampling_params,
+                    logits_processors=logits_processors,
                 ))
 
         return target_seq_group_metadata_list
@@ -328,6 +331,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_seq_id: TargetSeqId,
         token_ids: List[TokenId],
         sampling_params: SamplingParams,
+        logits_processors: List[LogitsProcessor],
     ) -> SequenceGroupMetadata:
         """Create a single target SequenceGroupMetadata.
 
@@ -364,6 +368,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             is_prompt=seq_group_metadata.is_prompt,
             seq_data=new_seq_data_dict,
             sampling_params=sampling_params,
+            logits_processors=logits_processors,
             block_tables={
                 target_seq_id: seq_group_metadata.block_tables[seq_id],
             },
