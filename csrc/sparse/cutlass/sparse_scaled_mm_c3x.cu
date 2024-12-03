@@ -42,114 +42,6 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(e.dtype() == torch::kUInt8);
   TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
-  uint32_t const m = out.size(1);
-  uint32_t const n = out.size(0);
-  uint32_t const k = b.size(0);
-
-  if (m == 1) {
-      if (n == 4096 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_0
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 4096 && k == 14336)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_1
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 6144 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_2
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 28672 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_3
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (m <= 16) {
-      if (n == 4096 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_4
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 4096 && k == 14336)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_5
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 6144 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_6
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 28672 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_7
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (m <= 64) {
-      if (n == 4096 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_8
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 4096 && k == 14336)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_9
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 6144 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_10
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 28672 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_11
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (m <= 128) {
-      if (n == 4096 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_12
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 4096 && k == 14336)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_13
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 6144 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_14
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 28672 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_15
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (m <= 256) {
-      if (n == 4096 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_16
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 4096 && k == 14336)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_17
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 6144 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_18
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 28672 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_19
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else { // m512 kernels
-      if (n == 4096 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_20
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 4096 && k == 14336)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_21
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 6144 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_22
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-      if (n == 28672 && k == 4096)
-          return cutlass_sparse_gemm_caller<typename sm90_fp8_config_23
-              <InType, OutType, Epilogue>::Cutlass3xGemm >(
-              out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  }
-
   using Cutlass3xGemmDefault =
       typename sm90_fp8_config_default<InType, OutType,
                                        Epilogue>::Cutlass3xGemm;
@@ -161,24 +53,90 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
       typename sm90_fp8_config_M256<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM512 =
       typename sm90_fp8_config_M512<InType, OutType, Epilogue>::Cutlass3xGemm;
+    
+  using Cutlass3xGemm1 =
+      typename sm90_fp8_config_1<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm2 =
+      typename sm90_fp8_config_2<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm3 =
+      typename sm90_fp8_config_3<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm4 =
+      typename sm90_fp8_config_4<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm5 =
+      typename sm90_fp8_config_5<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm6 =
+      typename sm90_fp8_config_6<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm7 =
+      typename sm90_fp8_config_7<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm8 =
+      typename sm90_fp8_config_8<InType, OutType, Epilogue>::Cutlass3xGemm;
 
-  uint32_t const mp2 =
-      std::max(static_cast<uint32_t>(64), next_pow_2(m));  // next power of 2
+  uint32_t const n = b.size(1); // Batch size
+  uint32_t const m = a.size(0);
+  uint32_t const np2 =
+      std::max(static_cast<uint32_t>(64), next_pow_2(n));  // next power of 2
 
-  if (mp2 <= 64) {
-    // m in [1, 64]
+  if (np2 <= 64) {
+    if (m == 28672) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm2>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 4096 || m == 6144) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm1>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+  } else if (np2 <= 128) {
+    if (m == 4096) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm3>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 28672) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm5>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 6144) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm4>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+  } else if (np2 <= 256) {
+    if (m == 4096) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm6>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 28672) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm8>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 6144) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm7>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+  } else {
+    if (m == 6144 || m == 28672) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm8>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 4096) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm7>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+  }
+
+  // Otherwise the default heuristic
+  if (np2 <= 64) {
+    // n in [1, 64]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM64>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 128) {
-    // m in (64, 128]
+  } else if (np2 <= 128) {
+    // n in (64, 128]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM128>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 256) {
-    // m in (128, 256]
+  } else if (np2 <= 256) {
+    // n in (128, 256]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM256>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   } else {
-    // m in (256, inf)
+    // n in (256, inf)
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM512>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   }
