@@ -3,6 +3,7 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy < 2.0.0
 requests >= 2.26.0
 tqdm
+blake3
 py-cpuinfo
 transformers >= 4.45.2  # Required for Llama 3.2 and Qwen2-VL.
 tokenizers >= 0.19.1  # Required for Llama 3.
