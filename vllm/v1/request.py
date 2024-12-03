@@ -45,9 +45,6 @@ class Request:
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
         self.num_computed_tokens = 0
 
-        # Raw multimodal data before the mm input mapper (e.g., PIL images).
-        self.mm_data = self.inputs.multi_modal_data
-        self.mm_processor_kwargs = self.inputs.mm_processor_kwargs
         mm_positions = self.inputs.multi_modal_placeholders
         if mm_positions:
             # FIXME(woosuk): Support other modalities.
@@ -55,7 +52,10 @@ class Request:
         else:
             self.mm_positions = []
         # Output of the mm input mapper (e.g., image tensors).
-        self.mm_inputs: List[MultiModalKwargs] = []
+        if self.inputs.multi_modal_inputs:
+            self.mm_inputs = self.inputs.multi_modal_inputs
+        else:
+            self.mm_inputs: List[MultiModalKwargs] = []
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -64,9 +64,10 @@ class Request:
             inputs=token_inputs(
                 prompt_token_ids=request.prompt_token_ids,
                 prompt=request.prompt,
-                multi_modal_data=request.mm_data,
+                multi_modal_data=None,
+                multi_modal_inputs=request.mm_inputs,
                 multi_modal_placeholders=request.mm_placeholders,
-                mm_processor_kwargs=request.mm_processor_kwargs,
+                mm_processor_kwargs=None,
             ),
             sampling_params=request.sampling_params,
             eos_token_id=request.eos_token_id,
@@ -110,7 +111,7 @@ class Request:
         return RequestStatus.get_finished_reason(self.status)
 
     def has_encoder_inputs(self) -> bool:
-        return len(self.mm_data) > 0
+        return len(self.mm_inputs) > 0
 
     @property
     def num_encoder_inputs(self) -> int:

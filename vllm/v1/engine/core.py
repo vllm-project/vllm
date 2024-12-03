@@ -84,14 +84,7 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
-
         req = Request.from_engine_core_request(request)
-        # FIXME(woosuk): The input mapping (e.g., PIL images to tensors) may
-        # take 10-50 ms, which can cause a spike in the latency. We should
-        # consider moving this to a separate thread.
-        if req.mm_data:
-            req.mm_inputs = self.mm_input_mapper.process_inputs(
-                req.mm_data, req.mm_processor_kwargs)
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
