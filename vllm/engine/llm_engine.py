@@ -1,3 +1,4 @@
+import copy
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -1024,9 +1025,9 @@ class LLMEngine:
         This function updates num_computed_tokens for prompt sequences
         when Multi-Step is enabled.
 
-        seq_group: SequenceGroup to update the num_computed_tokens for. 
+        seq_group: SequenceGroup to update the num_computed_tokens for.
         seq_group_meta: Metadata of the given SequenceGroup.
-        is_first_step_output: Optional[bool] - 
+        is_first_step_output: Optional[bool] -
             When available, is_first_step_output indicates if the appended
             output token is the output of the first-step in multi-step.
             A value of None indicates that outputs from all steps in
@@ -2036,7 +2037,11 @@ class LLMEngine:
 
         logits_processors = []
 
-        if (guided_decoding := sampling_params.guided_decoding) is not None:
+        if sampling_params.guided_decoding is not None:
+            # Defensively copy sampling params since guided decoding logits
+            # processors can have different state for each request
+            sampling_params = copy.copy(sampling_params)
+            guided_decoding = sampling_params.guided_decoding
 
             logger.debug(
                 "Building guided decoding logits processor in "
@@ -2047,7 +2052,9 @@ class LLMEngine:
                 self.decoding_config.guided_decoding_backend
 
             processor = get_local_guided_decoding_logits_processor(
-                guided_params=guided_decoding, tokenizer=tokenizer)
+                guided_params=guided_decoding,
+                tokenizer=tokenizer,
+                model_config=self.model_config)
             if processor:
                 logits_processors.append(processor)
 
