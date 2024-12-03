@@ -24,21 +24,12 @@ def maybe_backend_fallback(
             "Falling back to use xgrammar instead.")
         guided_params.backend = "xgrammar"
 
-    if guided_params.backend == "xgrammar":
+    if (guided_params.backend == "xgrammar" and
+        (guided_params.regex is not None or guided_params.choice is not None)):
         # xgrammar doesn't support regex or choice, fallback to outlines
-        if guided_params.regex is not None or guided_params.choice is not None:
-            logger.warning(
-                "xgrammar only supports json or grammar guided decoding. "
-                "Falling back to use outlines instead.")
-            guided_params.backend = "outlines"
-
-        # xgrammar only supports EBNF grammars and uses the GBNF format
-        # https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md
-        elif (guided_params.grammar is not None
-              and "::=" not in guided_params.grammar):
-            logger.warning("xgrammar only supports EBNF grammars. "
-                           "Falling back to use outlines instead.")
-            guided_params.backend = "outlines"
+        logger.warning("xgrammar doesn't support regex guided decoding. "
+                       "Falling back to use outlines instead.")
+        guided_params.backend = "outlines"
 
     return guided_params
 

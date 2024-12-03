@@ -14,6 +14,9 @@ try:
 except ImportError:
     pass
 
+from vllm.model_executor.guided_decoding.xgrammar_utils import (
+    convert_lark_to_gbnf, grammar_is_likely_lark)
+
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
@@ -152,7 +155,12 @@ class GrammarConfig:
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads)
         elif guided_params.grammar:
-            return cls(grammar_str=guided_params.grammar,
+            # XGrammar only supports GBNF grammars, so we must convert Lark
+            if grammar_is_likely_lark(guided_params.grammar):
+                grammar_str = convert_lark_to_gbnf(guided_params.grammar)
+            else:
+                grammar_str = guided_params.grammar
+            return cls(grammar_str=grammar_str,
                        vocab_size=model_config.hf_config.vocab_size,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
