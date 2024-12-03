@@ -209,11 +209,17 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 block_tables.append(block_table)
                 # Total seq_lens
                 seq_lens.append(seq_len)
-                context_lens.append(context_len)
-                query_len = seq_len - context_len
-                query_lens.append(query_len)
                 input_tokens.extend(tokens)
-                input_positions.extend(list(range(context_len, seq_len)))
+                query_len = seq_len - context_len
+                if is_prompt:
+                    context_lens.append(context_len)
+                    query_lens.append(query_len)
+                    input_positions.extend(list(range(context_len, seq_len)))
+                else:
+                    context_lens = seq_lens
+                    query_lens = seq_lens
+                    position = seq_len - 1
+                    input_positions.append(position)
                 if is_prompt:
                     mm_data = seq_group_metadata.multi_modal_data
                     if mm_data:
@@ -256,7 +262,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 else:
                     assert query_len == 1, "Wrong query length in decoding"
                     num_decode_tokens += 1
-                    decode_seq_lens.append(seq_len)
+                    decode_seq_lens = seq_lens
+                    #decode_seq_lens.append(seq_len)
                 if is_block_tables_empty(seq_group_metadata.block_tables):
                     slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
                     continue
@@ -280,11 +287,11 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         need_block_table = False
         if  self.scheduler_config.chunked_prefill_enabled or not is_prompt or self.cache_config.enable_prefix_caching:
             need_block_table = True
-            max_block_table_len = max(
-                len(block_table) for block_table in block_tables)
+            # max_block_table_len = max(
+            #     len(block_table) for block_table in block_tables)
             block_tables = make_tensor_with_pad(
                 block_tables,
-                max_len=max_block_table_len,
+                # max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
                 device=self.device,
