@@ -272,6 +272,9 @@ class SchedulerPrefillOutputs:
     """
     # Selected sequences for prefill.
     seq_groups: List[ScheduledSequenceGroup]
+    preempted: List[SequenceGroup]
+    swapped_out: List[SequenceGroup]
+    blocks_to_swap_out: List[Tuple[int, int]]
     # Ignored sequence groups.
     ignored_seq_groups: List[SequenceGroup]
     num_lookahead_slots: int
@@ -281,6 +284,9 @@ class SchedulerPrefillOutputs:
         return SchedulerPrefillOutputs(
             seq_groups=[],
             ignored_seq_groups=[],
+            preempted=[],
+            swapped_out=[],
+            blocks_to_swap_out=[],
             num_lookahead_slots=0,
         )
 
@@ -557,7 +563,7 @@ class Scheduler:
         preempted: List[SequenceGroup] = ret.preempted
         swapped_out: List[SequenceGroup] = ret.swapped_out
 
-        def preempt_seq_group(victim_seq_group):
+        def preempt_seq_group(victim_seq_group: SequenceGroup):
             # With async postprocessor, before preempting a sequence
             # we need to ensure it has no pending async postprocessor
             do_preempt = True
@@ -686,9 +692,13 @@ class Scheduler:
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
+        
+        assert set(curr_loras) <= set(allowed_loras), f"curr_loras not a subset of allowed_loras in schedule_running, curr_loras: {curr_loras}, allowed_loras: {allowed_loras}"
 
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
+
+        self._ensure_loras_are_allowed(prefill_seq_groups + decode_seq_groups, allowed_loras)
 
         return ret
 
@@ -753,10 +763,14 @@ class Scheduler:
             if self.lora_enabled:
                 lora_int_id = seq_group.lora_int_id
                 assert curr_loras is not None
+                assert set(curr_loras) <= set(allowed_loras), f"curr_loras not a subset of allowed_loras in schedule_swapped, curr_loras: {curr_loras}, allowed_loras: {allowed_loras}"
                 assert self.lora_config is not None
                 if (lora_int_id > 0 and (lora_int_id not in curr_loras)
-                        and len(curr_loras) >= self.lora_config.max_loras
-                        and (allowed_loras is not None and lora_int_id not in allowed_loras)):
+                    and (
+                        len(curr_loras) >= self.lora_config.max_loras
+                        or lora_int_id not in allowed_loras
+                    )
+                ):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
                     leftover_swapped.appendleft(seq_group)
@@ -801,6 +815,8 @@ class Scheduler:
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
         swapped_queue.extendleft(leftover_swapped)
+
+        self._ensure_loras_are_allowed(prefill_seq_groups + decode_seq_groups, allowed_loras)
 
         return SchedulerSwappedInOutputs(
             decode_seq_groups=decode_seq_groups,
@@ -847,6 +863,15 @@ class Scheduler:
         )
         all_loras = set([lora for lora in all_loras if lora > 0])
         self.lora_scheduler.update_loras(all_loras)
+
+    def _ensure_loras_are_allowed(self, scheduled_seq_groups: List[ScheduledSequenceGroup], allowed_loras: List[int]):
+        scheduled_loras = []
+        for scheduled_seq_group in scheduled_seq_groups:
+            seq_group = scheduled_seq_group.seq_group
+            scheduled_loras.append(seq_group.lora_int_id)
+        scheduled_loras = list(set(scheduled_loras))
+        for lora_id in scheduled_loras:
+            assert lora_id == 0 or lora_id in allowed_loras, f"Scheduled loras: {scheduled_loras}, Allowed loras: {allowed_loras}"
 
     def _schedule_priority_preemption(
         self,
@@ -948,7 +973,49 @@ class Scheduler:
         """
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
+        preempted: List[SequenceGroup] = []
+        swapped_out: List[SequenceGroup] = []
+        blocks_to_swap_out: List[Tuple[int, int]] = []
 
+        def preempt_seq_group(victim_seq_group: SequenceGroup):
+            # With async postprocessor, before preempting a sequence
+            # we need to ensure it has no pending async postprocessor
+            do_preempt = True
+            if self.use_async_output_proc:
+                assert self.output_proc_callback is not None
+                self.output_proc_callback(
+                    request_id=victim_seq_group.request_id)
+
+                # It may be that the async pending "victim_seq_group"
+                # becomes finished, in which case we simply free it.
+                if victim_seq_group.is_finished():
+                    self._free_finished_seq_group(victim_seq_group)
+                    do_preempt = False
+
+            # Do preemption
+            if do_preempt:
+                preempted_mode = self._preempt(victim_seq_group,
+                                                blocks_to_swap_out)
+                if preempted_mode == PreemptionMode.RECOMPUTE:
+                    preempted.append(victim_seq_group)
+                else:
+                    swapped_out.append(victim_seq_group)
+            
+            if self.lora_enabled and curr_loras is not None and victim_seq_group.lora_int_id > 0 and victim_seq_group.lora_int_id in curr_loras:
+                curr_loras.remove(victim_seq_group.lora_int_id)
+
+        if self.lora_enabled:
+            assert allowed_loras is not None
+            running_temp = []
+            while self.running:
+                running_temp.append(self.running.popleft())
+            for seq_group in running_temp:
+                if seq_group.lora_int_id > 0 and seq_group.lora_int_id not in allowed_loras:
+                    preempt_seq_group(seq_group)
+                else:
+                    self.running.append(seq_group)
+            del running_temp
+            
         waiting_queue = self.waiting
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
@@ -1006,10 +1073,14 @@ class Scheduler:
                 lora_int_id = seq_group.lora_int_id
                 assert curr_loras is not None
                 assert self.lora_config is not None
+                assert set(curr_loras) <= set(allowed_loras), f"curr_loras not a subset of allowed_loras in schedule_prefills, curr_loras: {curr_loras}, allowed_loras: {allowed_loras}"
                 if (self.lora_enabled and lora_int_id > 0
                         and lora_int_id not in curr_loras
-                        and len(curr_loras) >= self.lora_config.max_loras
-                        and (allowed_loras is not None and lora_int_id not in allowed_loras)):
+                        and (
+                                len(curr_loras) >= self.lora_config.max_loras
+                                or lora_int_id not in allowed_loras
+                        )
+                    ):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
                     leftover_waiting_sequences.appendleft(seq_group)
@@ -1067,9 +1138,14 @@ class Scheduler:
         waiting_queue.extendleft(leftover_waiting_sequences)
         if len(seq_groups) > 0:
             self.prev_prompt = True
+        
+        self._ensure_loras_are_allowed(seq_groups, allowed_loras)
 
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
+            preempted=preempted,
+            swapped_out=swapped_out,
+            blocks_to_swap_out=blocks_to_swap_out,
             ignored_seq_groups=ignored_seq_groups,
             num_lookahead_slots=self._get_num_lookahead_slots(
                 is_prefill=True, enable_chunking=enable_chunking))
@@ -1128,11 +1204,7 @@ class Scheduler:
                                                        allowed_loras,
                                                        enable_chunking=False)
 
-            # If any sequence group is preempted, do not swap in any sequence
-            # group. because it means there's no slot for new running requests.
-            if len(running_scheduled.preempted) + len(
-                    running_scheduled.swapped_out) == 0:
-                swapped_in = self._schedule_swapped(budget, curr_loras, allowed_loras)
+            swapped_in = self._schedule_swapped(budget, curr_loras, allowed_loras)
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
@@ -1140,6 +1212,7 @@ class Scheduler:
 
         # Update waiting requests.
         self.waiting.extendleft(running_scheduled.preempted)
+        self.waiting.extendleft(prefills.preempted)
         # Update new running requests.
         if len(prefills.seq_groups) > 0:
             self.running.extend([s.seq_group for s in prefills.seq_groups])
@@ -1151,9 +1224,10 @@ class Scheduler:
                 [s.seq_group for s in swapped_in.decode_seq_groups])
 
         # Update swapped requests.
+        self.swapped.extend(prefills.swapped_out)
         self.swapped.extend(running_scheduled.swapped_out)
         preempted = (len(running_scheduled.preempted) +
-                     len(running_scheduled.swapped_out))
+                     len(running_scheduled.swapped_out) + len(prefills.swapped_out) + len(prefills.preempted))
 
         # There should be no prefill from running queue because this policy
         # doesn't allow chunked prefills.
@@ -1175,13 +1249,16 @@ class Scheduler:
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
 
+        self._ensure_loras_are_allowed(scheduled_seq_groups, allowed_loras)
+
+
         return SchedulerOutputs(
             scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=num_prefill_groups,
             num_batched_tokens=budget.num_batched_tokens +
             budget.num_cached_tokens,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
-            blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
+            blocks_to_swap_out=prefills.blocks_to_swap_out + running_scheduled.blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=ignored_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
@@ -1483,12 +1560,6 @@ class Scheduler:
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
 
-        scheduled_loras = []
-        for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
-            seq_group = scheduled_seq_group.seq_group
-            scheduled_loras.append(seq_group.lora_int_id)
-        logger.info(f"Scheduler scheduled loras: {scheduled_loras}")
-
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,
                 allow_async_output_proc)
@@ -1630,6 +1701,7 @@ class Scheduler:
     ) -> None:
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         assert len(seqs) == 1
+        seq_group.prompt_logprobs = []
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
             self.free_seq(seq)

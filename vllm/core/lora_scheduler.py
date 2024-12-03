@@ -48,6 +48,7 @@ class LoRAScheduler:
 
     def update_loras(self, all_lora_ids: List[int]):
         """Update the list of LoRAs that are available for scheduling."""
+        logger.info(f"Updating LoRA available list: {all_lora_ids}")
         for lora_id in all_lora_ids:
             self._register_lora(lora_id)
         to_remove = [lora_id for lora_id in self.all_loras if lora_id not in all_lora_ids]
@@ -62,7 +63,8 @@ class LoRAScheduler:
         assert self.policy == Policy.ROUND_ROBIN
 
         scheduled_loras = []
-        
+        logger.info(f"LoRA scheduler has {len(self.active_loras)} active loras")
+
         if self.__counter == 0:
             for _ in range(min(self.max_loras_each_iter, len(self.active_loras))):
                 lora_id = self.active_loras.popleft()  # Get the next LoRA in round-robin order
@@ -73,4 +75,6 @@ class LoRAScheduler:
         
         self.__counter = (self.__counter + 1) % self.num_iters_before_reschedule
         self.__prev_scheduled_loras = scheduled_loras
-        return scheduled_loras
+        return list(set([0] + scheduled_loras))
+    
+    # TODO: make lora schedulign dynamic (what if the final scheduled request list doesn't use all the LoRAs we allow?)

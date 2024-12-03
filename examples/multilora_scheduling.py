@@ -29,6 +29,8 @@ def create_test_prompts(
     fake = Faker()
     sentence = f"lora:"
 
+    # TODO Atindra: Instead of hardcoding i, make i follow a distribution and generate 100 or so requests
+    # NOTE: LoRA 0 means no LoRA in VLLM
     prompts = []
     for _ in range(10):
         for i in range(TOTAL_LORAS):
@@ -50,6 +52,9 @@ def process_requests(engine: LLMEngine,
                                               Optional[LoRARequest]]]):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
+
+    # TODO Scott: Add benchmarking here for ITL and TTFT
+    # Have dict mapping request to each of these
 
     while test_prompts or engine.has_unfinished_requests():
         if test_prompts:
@@ -81,7 +86,11 @@ def initialize_engine() -> LLMEngine:
                              max_loras=2,
                              max_lora_rank=8,
                              max_cpu_loras=TOTAL_LORAS,
-                             max_num_seqs=256)
+                             max_num_seqs=256,
+                             enforce_eager=True,
+                             disable_async_output_proc=True
+                             
+                             )
     return LLMEngine.from_engine_args(engine_args)
 
 
