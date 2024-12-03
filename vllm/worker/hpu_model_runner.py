@@ -34,7 +34,9 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
@@ -177,20 +179,26 @@ class HpuModelAdapter:
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
             if os.getenv("PT_REGIONAL_COMPILATION", 1):
-                self._compile_regions(self.model)
+                self.regional_compilation_layers_list = [RMSNorm, VocabParallelEmbedding]
+                self._regional_compilation(self.model)
             else:
                 self.model = torch.compile(self.model,
                                            backend='hpu_backend',
                                            dynamic=False)
 
-    def _compile_regions(self, model):
-        if isinstance(model, torch.nn.ModuleList):
-            for name, module in model.named_children():
-                module = torch.compile(module, backend='hpu_backend', dynamic=False)
-                setattr(model, name, module)
+    def _regional_compilation(self, module, parent_module=None, module_name=None):
+        if isinstance(module, torch.nn.ModuleList):
+            for children_name, children_module in module.named_children():
+                self._compile_region(module, children_name, children_module)
+        elif any(isinstance(module, layer) for layer in self.regional_compilation_layers_list):
+            self._compile_region(parent_module, module_name, module)
         else:
-            for name, module in model.named_children():
-                self.compile_regions(module)
+            for children_name, children_module in module.named_children():
+                self._regional_compilation(children_module, module, children_name)
+
+    def _compile_region(self, model, name, module):
+        module = torch.compile(module, backend='hpu_backend', dynamic=False)
+        setattr(model, name, module)
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
