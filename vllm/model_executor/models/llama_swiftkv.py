@@ -327,6 +327,13 @@ class LlamaSwiftKVDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+def _padded_size(size: int) -> int:
+    mult = (1 << (size - 1).bit_length()) // 4
+    if mult < 1:
+        return size
+    return (size + mult - 1) //  mult * mult
+
+
 class LlamaSwiftKVModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -368,35 +375,44 @@ class LlamaSwiftKVModel(nn.Module):
         self.norm_swiftkv = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Cuda graph inputs/output tensors
-        num_kv_heads = self.layers[0].self_attn.num_kv_heads
-        head_dim = self.layers[0].self_attn.head_dim
-        kv_size = num_kv_heads * head_dim
-        self.cuda_graphs = {}
-        self.cuda_graph_max_batch_size = 256
-        self.cuda_graph_max_num_blocks = 2048
-        self.cuda_graph_tensors = {
-            "positions": torch.empty(self.cuda_graph_max_batch_size,
-                                     dtype=torch.long),
-            "hidden_states": torch.empty(self.cuda_graph_max_batch_size,
-                                         config.hidden_size),
-            "residual": torch.empty(self.cuda_graph_max_batch_size,
-                                    config.hidden_size),
-            "kv_states": {
-                layer_idx: (torch.empty(self.cuda_graph_max_batch_size, kv_size),
-                            torch.empty(self.cuda_graph_max_batch_size, kv_size))
-                for layer_idx in range(config.num_key_value_layers,
-                                       config.num_hidden_layers)
-            },
-            "metadata": SwiftKVMetadata(
-                use_varlen=False,
-                indices=None,
-                seq_lens=torch.empty(self.cuda_graph_max_batch_size,
-                                     dtype=torch.int32),
-                block_tables=torch.empty(self.cuda_graph_max_batch_size,
-                                         self.cuda_graph_max_num_blocks,
-                                         dtype=torch.int32),
-            ),
-        }
+        if not vllm_config.model_config.enforce_eager:
+            self.use_inner_cuda_graph = True
+            num_kv_heads = self.layers[0].self_attn.num_kv_heads
+            head_dim = self.layers[0].self_attn.head_dim
+            kv_size = num_kv_heads * head_dim
+            self.cuda_graphs = {}
+            self.cuda_graph_max_batch_size = _padded_size(
+                vllm_config.scheduler_config.max_num_seqs)
+            self.cuda_graph_max_num_blocks = (
+                vllm_config.model_config.max_seq_len_to_capture //
+                vllm_config.cache_config.block_size)
+            self.cuda_graph_tensors = {
+                "positions": torch.empty(self.cuda_graph_max_batch_size,
+                                        dtype=torch.long),
+                "hidden_states": torch.empty(self.cuda_graph_max_batch_size,
+                                            config.hidden_size),
+                "residual": torch.empty(self.cuda_graph_max_batch_size,
+                                        config.hidden_size),
+                "kv_states": {
+                    layer_idx: (
+                        torch.empty(self.cuda_graph_max_batch_size, kv_size),
+                        torch.empty(self.cuda_graph_max_batch_size, kv_size),
+                    )
+                    for layer_idx in range(config.num_key_value_layers,
+                                        config.num_hidden_layers)
+                },
+                "metadata": SwiftKVMetadata(
+                    use_varlen=False,
+                    indices=None,
+                    seq_lens=torch.empty(self.cuda_graph_max_batch_size,
+                                        dtype=torch.int32),
+                    block_tables=torch.empty(self.cuda_graph_max_batch_size,
+                                            self.cuda_graph_max_num_blocks,
+                                            dtype=torch.int32),
+                ),
+            }
+        else:
+            self.use_inner_cuda_graph = False
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -489,8 +505,8 @@ class LlamaSwiftKVModel(nn.Module):
                          swiftkv_metadata.block_tables.size(1))
         cuda_graph_metadata.block_tables[:size, :num_blocks].copy_(
             swiftkv_metadata.block_tables[:, :num_blocks])
-        # Pad to next power of 2
-        padded_size = 1 << (size - 1).bit_length()
+        # Pad to next highest cuda graph batch size
+        padded_size = _padded_size(size)
         positions = self.cuda_graph_tensors["positions"][:padded_size]
         hidden_states = self.cuda_graph_tensors["hidden_states"][:padded_size]
         residual = self.cuda_graph_tensors["residual"][:padded_size]
@@ -601,13 +617,13 @@ class LlamaSwiftKVModel(nn.Module):
             }
 
         batch_size = hidden_states.size(0)
-        if (not attn_metadata.use_cuda_graph
+        if (self.use_inner_cuda_graph and not attn_metadata.use_cuda_graph
             and not swiftkv_metadata.use_varlen and kv_caches[0].numel()
             and batch_size <= self.cuda_graph_max_batch_size
             and swiftkv_metadata.block_tables.size(1) <=
                 self.cuda_graph_max_num_blocks
         ):
-            # We implement our own (JIT-captured) cuda graph for the second
+            # We implement our own (just-in-time) cuda graph for the second
             # half of the model (layers skipped for prefill tokens).
             (
                 padded_size,
@@ -627,8 +643,7 @@ class LlamaSwiftKVModel(nn.Module):
             g = self.cuda_graphs.get(padded_size)
             cuda_graph_hidden_states = self.cuda_graph_tensors["hidden_states"]
             if g is None:
-                print("JIT-capture SwiftKV CUDA graph for batch size",
-                      padded_size)
+                print("Capture SwiftKV CUDA graph for batch size", padded_size)
                 with graph_capture() as capture_context:
                     g = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(g, stream=capture_context.stream):
