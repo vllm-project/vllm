@@ -99,7 +99,11 @@ class GPUModelRunner:
                                == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
-        self.cudagraph_batch_sizes = [1, 2, 4] + [i for i in range(8, 513, 8)]
+        # The convention is different.
+        # self.cudagraph_batch_sizes sorts in ascending order.
+        # The batch sizes in the config are in descending order.
+        self.cudagraph_batch_sizes = list(
+            reversed(self.vllm_config.compilation_config.capture_sizes))
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
