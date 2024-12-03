@@ -5,6 +5,7 @@ the correct prompt format on vision language models for text generation.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+import random
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -23,7 +24,9 @@ def run_llava(question: str, modality: str):
 
     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf", max_model_len=4096)
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf",
+              max_model_len=4096,
+              mm_cache_preprocessor=args.mm_cache_preprocessor)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -507,12 +510,29 @@ def main(args):
 
     else:
         # Batch inference
-        inputs = [{
-            "prompt": prompt,
-            "multi_modal_data": {
-                modality: data
-            },
-        } for _ in range(args.num_prompts)]
+        if args.image_repeat_ratio is not None:
+            assert (args.image_repeat_ratio <= 1.0
+                    and args.image_repeat_ratio >= 0)
+            no_yes = [0, 1]
+            probs = [1.0 - args.image_repeat_ratio, args.image_repeat_ratio]
+
+        inputs = []
+        cur_image = data
+        for i in range(args.num_prompts):
+            if args.image_repeat_ratio is not None:
+                res = random.choices(no_yes, probs)[0]
+                if res == 0:
+                    # No repeat => Modify one pixel
+                    cur_image = cur_image.copy()
+                    new_val = (i // 256 // 256, i // 256, i % 256)
+                    cur_image.putpixel((0, 0), new_val)
+
+            inputs.append({
+                "prompt": prompt,
+                "multi_modal_data": {
+                    modality: cur_image
+                }
+            })
 
     import time
     start_time = time.time()
@@ -548,5 +568,19 @@ if __name__ == "__main__":
                         type=int,
                         default=16,
                         help='Number of frames to extract from the video.')
+
+    parser.add_argument(
+        '--image-repeat-ratio',
+        type=float,
+        default=None,
+        help=
+        'Simulates the hit-ratio for multi-modal preprocessor cache (if enabled)'
+    )
+
+    parser.add_argument(
+        '--mm-cache-preprocessor',
+        action='store_true',
+        help='If True, enable caching of multi-modal preprocessor/mapper.')
+
     args = parser.parse_args()
     main(args)

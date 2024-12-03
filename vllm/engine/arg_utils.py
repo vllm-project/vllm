@@ -593,6 +593,10 @@ class EngineArgs:
             type=json.loads,
             help=('Overrides for the multimodal input mapping/processing, '
                   'e.g., image processor. For example: {"num_crops": 4}.'))
+        parser.add_argument(
+            '--mm-cache-preprocessor',
+            action='store_true',
+            help='If True, enable caching of multi-modal preprocessor/mapper.')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
