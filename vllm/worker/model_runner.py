@@ -1650,6 +1650,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        swiftkv_kwargs = ({"sampling_metadata": model_input.sampling_metadata}
+                          if "SwiftKV" in type(self.model).__name__ else {})
+
         with set_forward_context(model_input.attn_metadata):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
@@ -1657,6 +1660,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
+                **swiftkv_kwargs,
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
                 **seqlen_agnostic_kwargs)
