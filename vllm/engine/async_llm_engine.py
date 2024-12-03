@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import time
 import weakref
 from functools import partial
@@ -533,8 +534,13 @@ async def build_guided_decoding_logits_processor_async(
     those fields and adds the constructed logits processors to the
     logits_processors field. Modifies sampling params in-place and returns
     the modified sampling params."""
-    if (guided_decoding := sampling_params.guided_decoding) is None:
+    if sampling_params.guided_decoding is None:
         return sampling_params
+
+    # Defensively copy sampling params since guided decoding logits
+    # processors can have different state for each request
+    sampling_params = copy.copy(sampling_params)
+    guided_decoding = sampling_params.guided_decoding
 
     logger.debug("Building guided decoding logits processor. "
                  "Params: %s", guided_decoding)

@@ -1,4 +1,3 @@
-import copy
 import itertools
 import json
 import warnings
@@ -1038,8 +1037,7 @@ class LLM:
         for i, prompt in enumerate(prompts):
             self._add_request(
                 prompt,
-                params[i]
-                if isinstance(params, Sequence) else copy.copy(params),
+                params[i] if isinstance(params, Sequence) else params,
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,

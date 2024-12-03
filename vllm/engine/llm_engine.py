@@ -1,3 +1,4 @@
+import copy
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -2035,7 +2036,11 @@ class LLMEngine:
 
         logits_processors = []
 
-        if (guided_decoding := sampling_params.guided_decoding) is not None:
+        if sampling_params.guided_decoding is not None:
+            # Defensively copy sampling params since guided decoding logits
+            # processors can have different state for each request
+            sampling_params = copy.copy(sampling_params)
+            guided_decoding = sampling_params.guided_decoding
 
             logger.debug(
                 "Building guided decoding logits processor in "
