@@ -125,7 +125,7 @@ def apply_fp8_linear(
         qinput, x_scale = ops.scaled_fp8_quant(
             input_2d,
             input_scale,
-            num_token_padding=17,
+            num_token_padding=None,
             use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         per_tensor_weights = (weight_scale.numel() == 1)
