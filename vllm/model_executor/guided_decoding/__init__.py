@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.platforms import CpuArchEnum, current_platform
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -25,6 +26,12 @@ def maybe_backend_fallback(
         guided_params.backend = "xgrammar"
 
     if guided_params.backend == "xgrammar":
+        # xgrammar only has x86 wheels for linux, fallback to outlines
+        if current_platform.get_cpu_architecture() is not CpuArchEnum.X86:
+            logger.warning("xgrammar is only supported on x86 CPUs. "
+                           "Falling back to use outlines instead.")
+            guided_params.backend = "outlines"
+
         # xgrammar doesn't support regex or choice, fallback to outlines
         if guided_params.regex is not None or guided_params.choice is not None:
             logger.warning(
