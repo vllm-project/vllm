@@ -5,7 +5,6 @@ import pickle
 import signal
 import weakref
 from dataclasses import dataclass
-from enum import Enum, auto
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -250,21 +249,6 @@ class WorkerInitResponseType:
 
 
 @dataclass
-class WorkerExecRequest:
-    """A directive from the core process to its worker processes.
-    
-	Wraps SchedulerOutput with a message type to distinguish between
-	regular work assignments and termination orders."""
-
-    class Type(Enum):
-        WORK = auto()
-        TERMINATE = auto()
-
-    message_type: Type
-    payload: Optional[SchedulerOutput]
-
-
-@dataclass
 class WorkerProcHandle:
     proc: BaseProcess
     initialization_input_path: str
@@ -323,7 +307,6 @@ class WorkerProc:
         initialization_input_path: str,
         initialization_output_path: str,
     ):
-        signal.signal(signal.SIGTERM, self._handle_sigterm)
         self._finalizer = weakref.finalize(self, self.shutdown)
 
         self.rank = rank
@@ -331,7 +314,7 @@ class WorkerProc:
                              distributed_init_method)
 
         # Initialize MessageQueue for receiving SchedulerOutput
-        self.scheduler_output_receiver = MessageQueue.create_from_handle(
+        self.worker_request_mq = MessageQueue.create_from_handle(
             input_shm_handle, self.worker.rank)
 
         # Worker 0 initializes a message queue for sending the model output
@@ -397,13 +380,22 @@ class WorkerProc:
                                 model_output_mq_handle)
 
     def shutdown(self):
-        self.scheduler_output_receiver = None
+        self.worker_request_mq = None
         self.model_output_mq = None
         cleanup_dist_env_and_memory()
 
     @staticmethod
     def run_worker(*args, **kwargs):
-        """Launch Worker busy loop in background process."""
+        """ Worker initialization and execution loops.
+        To be run in a background process """
+
+        def signal_handler(signum, frame):
+            raise SystemExit("Worker interrupted")
+
+        # Either SIGTERM or SIGINT will terminate the worker
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
         try:
             worker = WorkerProc(*args, **kwargs)
             worker.model_initialization_loop(
@@ -412,12 +404,12 @@ class WorkerProc:
 
             worker.execute_model_busy_loop()
 
-        except KeyboardInterrupt:
+        except SystemExit:
             logger.debug("Worker interrupted.")
 
         except BaseException as e:
             logger.exception(e)
-            raise e
+            raise
 
         finally:
             # Clean up once worker exits busy loop
@@ -490,7 +482,7 @@ class WorkerProc:
 
                     # Ensure message queues are ready.
                     # Must happen after sending the INITIALIZE_SUCESS message.
-                    self.scheduler_output_receiver.wait_until_ready()
+                    self.worker_request_mq.wait_until_ready()
                     if self.model_output_mq is not None:
                         self.model_output_mq.wait_until_ready()
 
@@ -502,16 +494,11 @@ class WorkerProc:
     def execute_model_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         while True:
-            msg = self.scheduler_output_receiver.dequeue()
+            msg = self.worker_request_mq.dequeue()
 
-            if msg.message_type == WorkerExecRequest.Type.TERMINATE:
-                return
-            if msg.message_type == WorkerExecRequest.Type.WORK:
-                output = self.worker.execute_model(msg.payload)
-                if self.worker.rank == 0:
-                    self.model_output_mq.enqueue(output)
-            else:
-                raise ValueError(f"Unknown RequestType: {msg.message_type}")
+            output = self.worker.execute_model(msg)
+            if self.worker.rank == 0:
+                self.model_output_mq.enqueue(output)
 
 
 def init_worker_distributed_environment(

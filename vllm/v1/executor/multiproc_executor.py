@@ -14,8 +14,7 @@ from vllm.triton_utils import maybe_set_triton_cache_manager
 from vllm.utils import (cuda_is_initialized, get_distributed_init_method,
                         get_open_port, get_vllm_instance_id)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.gpu_worker import (WorkerExecRequest, WorkerProc,
-                                       WorkerProcHandle)
+from vllm.v1.worker.gpu_worker import WorkerProc, WorkerProcHandle
 
 logger = init_logger(__name__)
 
@@ -88,8 +87,8 @@ class MultiprocExecutor:
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        self.scheduler_output_mq = MessageQueue(world_size, world_size)
-        scheduler_output_handle = self.scheduler_output_mq.export_handle()
+        self.worker_request_mq = MessageQueue(world_size, world_size)
+        scheduler_output_handle = self.worker_request_mq.export_handle()
 
         # Create workers
         self.workers: List[WorkerProcHandle] = []
@@ -121,7 +120,7 @@ class MultiprocExecutor:
         if not all(success_vals):
             raise RuntimeError("Worker initialization failed.")
 
-        self.scheduler_output_mq.wait_until_ready()
+        self.worker_request_mq.wait_until_ready()
         self.model_output_mq.wait_until_ready()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -144,8 +143,7 @@ class MultiprocExecutor:
         self,
         scheduler_output,
     ) -> ModelRunnerOutput:
-        self.scheduler_output_mq.enqueue(
-            WorkerExecRequest(WorkerExecRequest.Type.WORK, scheduler_output))
+        self.worker_request_mq.enqueue(scheduler_output)
         model_output = self.model_output_mq.dequeue()
         return model_output
 
@@ -160,45 +158,33 @@ class MultiprocExecutor:
         def wait_for_termination(procs, timeout):
             start_time = time.time()
             while time.time() - start_time < timeout:
-                if all(not proc.proc.is_alive() for proc in procs):
+                if all(not proc.is_alive() for proc in procs):
                     return True
                 time.sleep(0.1)
             return False
 
-        active_workers = [p for p in self.workers if p.proc.is_alive()]
-        self.workers = None
-
-        # First wait for graceful shutdown
-        if wait_for_termination(active_workers, 5):
-            return
-
         # Send SIGTERM if still running
-        active_workers = [p for p in active_workers if p.proc.is_alive()]
-        for w in active_workers:
-            w.proc.terminate()
-        if wait_for_termination(active_workers, 5):
+        active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
+        self.workers = None
+        for p in active_procs:
+            p.terminate()
+        if wait_for_termination(active_procs, 5):
             return
 
         # Send SIGKILL if still running
-        active_workers = [p for p in active_workers if p.proc.is_alive()]
-        for w in active_workers:
-            os.kill(w.proc.pid, signal.SIGKILL)
-        if not wait_for_termination(active_workers, 5):
+        active_procs = [p for p in active_procs if p.is_alive()]
+        for p in active_procs:
+            os.kill(p.pid, signal.SIGKILL)
+        if not wait_for_termination(active_procs, 5):
             raise RuntimeError("Failed to terminate worker processes")
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        if (hasattr(self, 'scheduler_output_mq')
-                and self.scheduler_output_mq is not None):
-            # Broadcast termination message for graceful shutdown
-            self.scheduler_output_mq.enqueue(
-                WorkerExecRequest(WorkerExecRequest.Type.TERMINATE, None))
-
         if (hasattr(self, 'workers') and self.workers is not None):
             self._ensure_worker_termination()
 
         self.model_output_mq = None
-        self.scheduler_output_mq = None
+        self.worker_request_mq = None
 
     def __del__(self):
         self.shutdown()
