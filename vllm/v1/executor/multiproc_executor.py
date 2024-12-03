@@ -1,7 +1,7 @@
-import atexit
 import os
 import signal
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 
@@ -22,8 +22,9 @@ logger = init_logger(__name__)
 class MultiprocExecutor:
 
     def __init__(self, vllm_config: VllmConfig) -> None:
-        # Register self.shutdown so we can make sure to call it on exit
-        atexit.register(self.shutdown)
+        # Call self.shutdown when the executor is garbage collected
+        # to clean up and ensure workers will be terminated.
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -185,9 +186,6 @@ class MultiprocExecutor:
 
         self.model_output_mq = None
         self.worker_request_mq = None
-
-    def __del__(self):
-        self.shutdown()
 
     def check_health(self) -> None:
         # MultiprocExecutor will always be healthy as long as

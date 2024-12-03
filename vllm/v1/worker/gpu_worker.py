@@ -366,6 +366,7 @@ class WorkerProc:
             "initialization_output_path": initialization_input_path,
         }
         # Run EngineCore busy loop in background process.
+        # Process is non-daemonic so it can clean up properly.
         proc = context.Process(target=WorkerProc.run_worker,
                                kwargs=process_kwargs,
                                daemon=False)
