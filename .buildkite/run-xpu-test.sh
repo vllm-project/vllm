@@ -13,6 +13,7 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image and test offline inference/tensor parallel
-docker run -it -d --name xpu-test --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path xpu-test /bin/bash
-docker exec xpu-test bash -c "python3 examples/offline_inference.py"
-docker exec xpu-test bash -c "python3 examples/offline_inference_cli.py -tp 2" 
+docker run --name xpu-test --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --entrypoint="" xpu-test sh -c '
+    python3 examples/offline_inference.py
+    python3 examples/offline_inference_cli.py -tp 2
+'
