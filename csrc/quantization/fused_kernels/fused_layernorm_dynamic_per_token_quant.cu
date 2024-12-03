@@ -36,7 +36,7 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
                                      has_residual>(
         out, input, weight, rms, 1.0f / token_scale, hidden_size, residual);
   } else {
-    // FP8 - Do not invert s_token_scale for exact match with FBGemm
+    // FP8 - Do not invert token_scale for exact match with FBGemm
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, false,
                                      has_residual>(
         out, input, weight, rms, token_scale, hidden_size, residual);
