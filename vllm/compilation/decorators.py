@@ -1,21 +1,39 @@
 import inspect
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, TypeVar, Union, overload
 
 import torch
+import torch.nn as nn
 
-import vllm.envs as envs
-from vllm.compilation.levels import CompilationLevel
+from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import supports_dynamo
 
 logger = init_logger(__name__)
 
+_T = TypeVar("_T", bound=type[nn.Module])
+
+
+@overload
+def support_torch_compile(
+    *,
+    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]],
+) -> Callable[[_T], _T]:
+    ...
+
+
+@overload
+def support_torch_compile(cls: _T) -> _T:
+    ...
+
 
 def support_torch_compile(
-        cls: Optional[type] = None,
-        dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]] = None):
+    cls: Optional[_T] = None,
+    *,
+    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]] = None,
+) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
 
@@ -66,7 +84,7 @@ def support_torch_compile(
     computation graph.
     """
 
-    def cls_decorator_helper(cls: type):
+    def cls_decorator_helper(cls: _T) -> _T:
         # helper to pass `dynamic_arg_dims`` to `_support_torch_compile``
         # to avoid too much indentation for `_support_torch_compile``
         if not hasattr(cls, 'forward'):
@@ -105,40 +123,45 @@ def support_torch_compile(
     return cls_decorator_helper
 
 
-def _support_torch_compile(cls: type,
-                           dynamic_arg_dims: Dict[str, Union[int, List[int]]]):
+def _support_torch_compile(
+    cls: _T,
+    dynamic_arg_dims: Dict[str, Union[int, List[int]]],
+) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
     """
-
-    # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
-    # will handle the compilation, so we don't need to do anything here.
-    if envs.VLLM_TORCH_COMPILE_LEVEL in [
-            CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-    ] or not supports_dynamo():
+    if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
+        # support decorating multiple times
         return cls
 
     # take care of method resolution order
     # make sure super().__init__ is called on the base class
     #  other than TorchCompileWrapperWithCustomDispatcher
-    if TorchCompileWrapperWithCustomDispatcher not in cls.__bases__:
-        # support decorating multiple times
-        cls.__bases__ = cls.__bases__ + (
-            TorchCompileWrapperWithCustomDispatcher, )
+    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
-    old_init = cls.__init__  # type: ignore
+    old_init = cls.__init__
 
-    def __init__(self, *args, **kwargs):
-        old_init(self, *args, **kwargs)
-        TorchCompileWrapperWithCustomDispatcher.__init__(self)
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
+        old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
+        # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
+        # will handle the compilation, so we don't need to do anything here.
+        self.do_not_compile = \
+            vllm_config.compilation_config.level in [
+            CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
+        ] or not supports_dynamo()
+        if self.do_not_compile:
+            return
+        compilation_counter.num_models_seen += 1
+        TorchCompileWrapperWithCustomDispatcher.__init__(
+            self, compilation_level=vllm_config.compilation_config.level)
 
-    cls.__init__ = __init__  # type: ignore
+    cls.__init__ = __init__
 
     def __call__(self, *args, **kwargs):
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
-        if torch.compiler.is_compiling():
+        if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
@@ -177,5 +200,5 @@ def _support_torch_compile(cls: type,
             model_output = self.forward(*args, **kwargs)
             return model_output
 
-    cls.__call__ = __call__  # type: ignore
+    cls.__call__ = __call__
     return cls

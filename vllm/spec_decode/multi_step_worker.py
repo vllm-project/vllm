@@ -5,17 +5,21 @@ from typing import Dict, List, Set, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
                            SequenceGroupMetadata)
-from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+
+if current_platform.is_cuda_alike():
+    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker import Worker
+from vllm.worker.worker_base import WorkerWrapperBase
 
 
-class MultiStepWorker(Worker, ProposerWorkerBase):
+class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
     allocated enough space to store the additional KV. This reduces overhead
@@ -28,13 +32,14 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(kwargs.get("vllm_config"))
+        self.init_worker(*args, **kwargs)
 
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
     def init_device(self) -> None:
-        super().init_device()
+        self.worker.init_device()
 
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
@@ -50,6 +55,18 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     def set_should_modify_greedy_probs_inplace(self) -> None:
         self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
             True)
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        return self.worker.determine_num_available_blocks()
+
+    def get_cache_block_size_bytes(self) -> int:
+        return self.worker.get_cache_block_size_bytes()
+
+    def initialize_cache(self, *args, **kwargs) -> None:
+        self.worker.initialize_cache(*args, **kwargs)
+
+    def execute_model(self, *args, **kwargs) -> List[SamplerOutput]:
+        return self.worker.execute_model(*args, **kwargs)
 
     @torch.inference_mode()
     def sampler_output(
@@ -75,7 +92,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
-        if isinstance(
+        if current_platform.is_cuda_alike() and isinstance(
                 self.model_runner, TP1DraftModelRunner
         ) and self.model_runner.supports_gpu_multi_step(expanded_request):
             # Here we run the draft_model_runner with multi-step prepare
@@ -92,7 +109,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
             for _ in range(sample_len):
-                model_output: List[SamplerOutput] = super().execute_model(
+                model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"

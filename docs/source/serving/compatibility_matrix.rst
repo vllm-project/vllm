@@ -39,16 +39,18 @@ Feature x Feature
      - :abbr:`prmpt adptr (Prompt Adapter)`
      - :ref:`SD <spec_decode>`
      - CUDA graph
+     - :abbr:`emd (Embedding Models)`
      - :abbr:`enc-dec (Encoder-Decoder Models)`
      - :abbr:`logP (Logprobs)`
      - :abbr:`prmpt logP (Prompt Logprobs)`
      - :abbr:`async output (Async Output Processing)`
      - multi-step
-     - :abbr:`MM (Multimodal)`
+     - :abbr:`mm (Multimodal)`
      - best-of
      - beam-search
      - :abbr:`guided dec (Guided Decoding)`
    * - :ref:`CP <chunked-prefill>`
+     - 
      - 
      - 
      - 
@@ -80,9 +82,11 @@ Feature x Feature
      - 
      - 
      - 
+     - 
    * - :ref:`LoRA <lora>`
      - `✗ <https://github.com/vllm-project/vllm/pull/9057>`__ 
      - ✅
+     - 
      - 
      - 
      - 
@@ -112,11 +116,13 @@ Feature x Feature
      - 
      - 
      - 
+     - 
    * - :ref:`SD <spec_decode>`
-     - ✗
+     - ✅
      - ✅
      - ✗
      - ✅
+     - 
      - 
      - 
      - 
@@ -144,12 +150,31 @@ Feature x Feature
      - 
      - 
      - 
+     - 
+   * - :abbr:`emd (Embedding Models)`
+     - ✗
+     - ✗
+     - ✗ 
+     - ✗
+     - ✗
+     - ✗
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
+     - 
    * - :abbr:`enc-dec (Encoder-Decoder Models)`
      - ✗
      - `✗ <https://github.com/vllm-project/vllm/issues/7366>`__ 
      - ✗ 
      - ✗
      - `✗ <https://github.com/vllm-project/vllm/issues/7366>`__ 
+     - ✅
      - ✅
      - 
      - 
@@ -166,7 +191,8 @@ Feature x Feature
      - ✅
      - ✅
      - ✅
-     - ✅
+     - ✅ 
+     - ✗
      - ✅
      - 
      - 
@@ -183,7 +209,8 @@ Feature x Feature
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/pull/8199>`__ 
      - ✅
-     - ✅
+     - ✗
+     - ✅ 
      - ✅
      - 
      - 
@@ -199,6 +226,7 @@ Feature x Feature
      - ✅
      - ✗
      - ✅ 
+     - ✗ 
      - ✗
      - ✅
      - ✅
@@ -215,6 +243,7 @@ Feature x Feature
      - ✅
      - ✗
      - ✅
+     - ✗ 
      - ✗
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/issues/8198>`__ 
@@ -224,14 +253,15 @@ Feature x Feature
      - 
      - 
      - 
-   * - :abbr:`MM (Multimodal)`
-     -  `✗ <https://github.com/vllm-project/vllm/pull/8346>`__ 
+   * - :abbr:`mm (Multimodal)`
+     - ✅
      -  `✗ <https://github.com/vllm-project/vllm/pull/8348>`__ 
      -  `✗ <https://github.com/vllm-project/vllm/pull/7199>`__ 
      - ?
      - ?
      - ✅
-     - ✗
+     - ✅
+     - ✅
      - ✅
      - ✅
      - ✅
@@ -247,6 +277,7 @@ Feature x Feature
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/issues/6137>`__ 
      - ✅
+     - ✗
      - ✅
      - ✅
      - ✅
@@ -263,6 +294,7 @@ Feature x Feature
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/issues/6137>`__ 
      - ✅
+     - ✗
      - ✅
      - ✅
      - ✅
@@ -279,6 +311,7 @@ Feature x Feature
      - ?
      - ✅
      - ✅
+     - ✗
      - ?
      - ✅
      - ✅
@@ -311,7 +344,7 @@ Feature x Hardware
      - ✅
      - ✅
      - ✅
-     - ✗ 
+     - ✅
      - ✅
    * - :ref:`APC <apc>`
      - `✗ <https://github.com/vllm-project/vllm/issues/3687>`__ 
@@ -319,7 +352,7 @@ Feature x Hardware
      - ✅
      - ✅
      - ✅
-     - ✗
+     - ✅
      - ✅
    * - :ref:`LoRA <lora>`
      - ✅
@@ -353,6 +386,14 @@ Feature x Hardware
      - ✅
      - ✗
      - ✅
+   * - :abbr:`emd (Embedding Models)`
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ?
    * - :abbr:`enc-dec (Encoder-Decoder Models)`
      - ✅
      - ✅
@@ -361,6 +402,14 @@ Feature x Hardware
      - ✅
      - ✅
      - ✗
+   * - :abbr:`mm (Multimodal)`
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
    * - :abbr:`logP (Logprobs)`
      - ✅
      - ✅
@@ -392,14 +441,6 @@ Feature x Hardware
      - ✅
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/issues/8477>`__ 
-     - ✅
-   * - :abbr:`MM (Multimodal)`
-     - ✅
-     - ✅
-     - ✅
-     - ✅
-     - ✅
-     - ✅
      - ✅
    * - best-of
      - ✅

@@ -85,7 +85,6 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_encoder_decoder_attn.py \
   --ignore=kernels/test_flash_attn.py \
   --ignore=kernels/test_flashinfer.py \
-  --ignore=kernels/test_gguf.py \
   --ignore=kernels/test_int8_quant.py \
   --ignore=kernels/test_machete_gemm.py \
   --ignore=kernels/test_mamba_ssm.py \

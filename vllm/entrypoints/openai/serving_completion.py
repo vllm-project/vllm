@@ -101,7 +101,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            request_prompts, engine_prompts = self._preprocess_completion(
+            request_prompts, engine_prompts = await self._preprocess_completion(
                 request,
                 tokenizer,
                 request.prompt,
@@ -140,7 +140,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
-                        model_config=self.model_config,
                         request_id=request_id,
                         params=sampling_params,
                     )
