@@ -505,7 +505,8 @@ def repackage_wheel(package_data: Dict[str, List[str]],
 
     import zipfile
 
-    if os.path.exists(wheel_filename := os.path.basename(wheel_location)):
+    if os.path.isfile(wheel_location):
+        wheel_filename = os.path.realpath(wheel_location)
         print(f"Using existing wheel={wheel_filename}")
     else:
         try:
