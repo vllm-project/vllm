@@ -211,7 +211,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 seq_lens.append(seq_len)
                 input_tokens.extend(tokens)
                 query_len = seq_len - context_len
-                if is_prompt:
+                if is_prompt or self.scheduler_config.chunked_prefill_enabled:
                     context_lens.append(context_len)
                     query_lens.append(query_len)
                     input_positions.extend(list(range(context_len, seq_len)))
