@@ -55,7 +55,7 @@ A code example can be found in `examples/offline_inference.py <https://github.co
 ^^^^^^^^^^^^^^^^^^^
 
 The :class:`~vllm.LLM.beam_search` method implements `beam search <https://huggingface.co/docs/transformers/en/generation_strategies#beam-search-decoding>`__ on top of :class:`~vllm.LLM.generate`.
-For example, to search using 5 beams and output at most 16 tokens:
+For example, to search using 5 beams and output at most 50 tokens:
 
 .. code-block:: python
 
