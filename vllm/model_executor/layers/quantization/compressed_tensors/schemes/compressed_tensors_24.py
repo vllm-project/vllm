@@ -55,7 +55,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         """
 
         w_compressed, meta = ops.cutlass_compress_entry(layer.weight)
-        layer.w_compressed = torch.nn.Parameter(w_compressed, requires_grad=False)
+        layer.weight = torch.nn.Parameter(w_compressed, requires_grad=False)
         layer.meta = torch.nn.Parameter(meta, requires_grad=False)
 
     def apply_weights(self,
@@ -78,7 +78,7 @@ class CompressedTensors24(CompressedTensorsScheme):
             x, use_per_token_if_dynamic=True)
 
         out = ops.cutlass_scaled_sparse_mm(
-            a=layer.w_compressed,
+            a=layer.weight,
             e=layer.meta,
             b=q_input.t(),
             scale_a=layer.weight_scale,
