@@ -514,7 +514,11 @@ def main(args):
             },
         } for _ in range(args.num_prompts)]
 
+    import time
+    start_time = time.time()
     outputs = llm.generate(inputs, sampling_params=sampling_params)
+    elapsed_time = time.time() - start_time
+    print("-- generate time = {}".format(elapsed_time))
 
     for o in outputs:
         generated_text = o.outputs[0].text

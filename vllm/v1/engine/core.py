@@ -19,7 +19,6 @@ from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
-from vllm.v1.engine.mm_input_mapper import MMInputMapper
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
@@ -54,9 +53,6 @@ class EngineCore:
             vllm_config.cache_config)
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        # Set up multimodal input mapper (e.g., convert PIL images to tensors).
-        self.mm_input_mapper = MMInputMapper(vllm_config.model_config)
 
         # Setup scheduler.
         self.scheduler = Scheduler(vllm_config.scheduler_config,

@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
-from vllm.v1.engine.mm_input_mapper import MMInputMapper
+from vllm.v1.engine.mm_input_mapper import MMInputMapper, MMHasher
 
 
 class Processor:
@@ -42,6 +42,10 @@ class Processor:
 
         # Multi-modal (huggingface) input mapper
         self.mm_input_mapper = MMInputMapper(model_config)
+
+        # Multi-modal hasher (for images)
+        self.mm_hasher = MMHasher(
+        ) if model_config.mm_cache_preprocessor else None
 
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
     # This ideally should releases the GIL, so we should not block the
@@ -101,8 +105,10 @@ class Processor:
             self.generation_config_fields, eos_token_id)
 
         # Preprocess multi-modal data
+        mm_hash = self.mm_hasher.hash(decoder_inputs.multi_modal_data
+                                      ) if self.mm_hasher is not None else None
         mm_inputs = self.mm_input_mapper.process_inputs(
-            decoder_inputs.multi_modal_data,
+            decoder_inputs.multi_modal_data, mm_hash,
             decoder_inputs.mm_processor_kwargs) if len(
                 decoder_inputs.multi_modal_data) > 0 else None
 

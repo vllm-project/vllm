@@ -1,4 +1,5 @@
 from typing import Generic, List, TypeVar, overload
+from collections import OrderedDict
 
 T = TypeVar("T")
 
@@ -62,3 +63,23 @@ class ConstantList(Generic[T]):
 
     def __len__(self):
         return len(self._x)
+
+
+class LRUDictCache:
+
+    def __init__(self, size: int):
+        self.cache = OrderedDict()
+        self.size = size
+
+    def get(self, key):
+        if key not in self.cache:
+            return None
+
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+    def put(self, key, value):
+        self.cache[key] = value
+        self.cache.move_to_end(key)
+        if len(self.cache) > self.size:
+            self.cache.popitem(last=False)
