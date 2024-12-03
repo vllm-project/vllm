@@ -16,7 +16,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
-from vllm.utils import Device, PyObjectCache, set_abort_request_id
+from vllm.utils import Device, PyObjectCache
 from vllm.store.kv_store import KVBlockStoreManager,BlockMappingFromCPU
 
 logger = init_logger(__name__)
@@ -947,8 +947,6 @@ class Scheduler:
 
         kv_store_tmp_queue : Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and kv_store_waiting_queue:
-            if budget.num_curr_prefill_seqs >= self.scheduler_config.max_num_prefill_seqs:
-                break
 
             seq_group = kv_store_waiting_queue[0]
 
@@ -999,7 +997,6 @@ class Scheduler:
                 num_cached_tokens=num_new_tokens_cached,
             )
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
-            budget.add_num_prefill_seqs(num_new_seqs)
         kv_store_waiting_queue.extendleft(kv_store_tmp_queue)
 
         while self._passed_delay(time.time()) and waiting_queue:

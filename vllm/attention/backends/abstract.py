@@ -115,7 +115,7 @@ class AttentionMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
-    kv_store_meta: KVStoreMeta = None
+    kv_store_meta: KVStoreMeta
 
     # The index maps that relate multi-modal embeddings to the corresponding
     # placeholders.
