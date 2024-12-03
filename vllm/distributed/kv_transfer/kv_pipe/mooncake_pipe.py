@@ -51,8 +51,9 @@ class MooncakeTransferEngineConfig:
 class MooncakeTransferEngine:
     """Handles the transfer of data using mooncake_vllm_adaptor and ZeroMQ."""
 
-    def __init__(self, rank_in_group: int):
+    def __init__(self, kv_rank: int, local_rank: int):
         self.engine = mva.mooncake_vllm_adaptor()
+        self.local_rank = local_rank
 
         try:
             self.config = MooncakeTransferEngineConfig.load_from_env()
@@ -64,14 +65,19 @@ class MooncakeTransferEngine:
             logger.error(
                 "An error occurred while loading the configuration: %s", exc)
             raise
-
+        prefill_host, base_prefill_port = self.config.prefill_url.split(':')
+        decode_host, base_decode_port = self.config.decode_url.split(':')
+        prefill_port = int(base_prefill_port) + self.local_rank
+        decode_port = int(base_decode_port) + self.local_rank
+        self.prefill_url = ':'.join([prefill_host, str(prefill_port)])
+        self.decode_url = ':'.join([decode_host, str(decode_port)])
         self.initialize(
-            self.config.prefill_url if rank_in_group == 0 else
-            self.config.decode_url, self.config.metadata_server,
-            self.config.protocol, self.config.device_name)
+            self.prefill_url if kv_rank == 0 else self.decode_url,
+            self.config.metadata_server, self.config.protocol,
+            self.config.device_name)
 
-        self.remote_url = (self.config.decode_url
-                           if rank_in_group == 0 else self.config.prefill_url)
+        self.remote_url = (self.decode_url
+                           if kv_rank == 0 else self.prefill_url)
 
         # Initialize ZeroMQ context and sockets
         self.context = zmq.Context()  # type: ignore[attr-defined]
@@ -80,22 +86,28 @@ class MooncakeTransferEngine:
         self.sender_ack = self.context.socket(zmq.constants.PULL)
         self.receiver_ack = self.context.socket(zmq.constants.PUSH)
 
-        host, port = self.remote_url.split(':')
         self.buffer_cleaner = ThreadPoolExecutor(max_workers=1)
-        self._setup_sockets(rank_in_group, host, port)
+        self._setup_metadata_sockets(
+            kv_rank,
+            prefill_host, base_prefill_port,
+            decode_host, base_decode_port)
 
-    def _setup_sockets(self, rank_in_group: int, host: str, port: str) -> None:
+    def _setup_metadata_sockets(self, kv_rank: int, p_host: str, p_port: str,
+                                d_host: str, d_port: str) -> None:
         """Set up ZeroMQ sockets for sending and receiving data."""
-        if rank_in_group == 0:
-            self.sender_socket.bind(f"tcp://*:{int(port) + 1}")
-            self.receiver_socket.connect(f"tcp://{host}:{int(port) + 2}")
-            self.sender_ack.connect(f"tcp://{host}:{int(port) + 3}")
-            self.receiver_ack.bind(f"tcp://*:{int(port) + 4}")
+        # Offsets < 8 are left for initialization in case tp and pp are enabled
+        p_rank_offset = int(p_port) + 8 + self.local_rank * 2
+        d_rank_offset = int(d_port) + 8 + self.local_rank * 2
+        if kv_rank == 0:
+            self.sender_socket.bind(f"tcp://*:{p_rank_offset + 1}")
+            self.receiver_socket.connect(f"tcp://{d_host}:{d_rank_offset + 1}")
+            self.sender_ack.connect(f"tcp://{d_host}:{d_rank_offset + 2}")
+            self.receiver_ack.bind(f"tcp://*:{p_rank_offset + 2}")
         else:
-            self.receiver_socket.connect(f"tcp://{host}:{int(port) + 1}")
-            self.sender_socket.bind(f"tcp://*:{int(port) + 2}")
-            self.receiver_ack.bind(f"tcp://*:{int(port) + 3}")
-            self.sender_ack.connect(f"tcp://{host}:{int(port) + 4}")
+            self.receiver_socket.connect(f"tcp://{p_host}:{p_rank_offset + 1}")
+            self.sender_socket.bind(f"tcp://*:{d_rank_offset + 1}")
+            self.receiver_ack.bind(f"tcp://*:{d_rank_offset + 2}")
+            self.sender_ack.connect(f"tcp://{p_host}:{p_rank_offset + 2}")
 
     def initialize(self, local_hostname: str, metadata_server: str,
                    protocol: str, device_name: str) -> None:
@@ -180,7 +192,8 @@ class MooncakePipe(KVPipeBase):
         else:
             self.device = self._select_device(device)
 
-        self.transfer_engine = MooncakeTransferEngine(self.kv_rank)
+        self.transfer_engine = MooncakeTransferEngine(
+            self.kv_rank, self.local_rank)
         self.transport_thread: Optional[ThreadPoolExecutor] = None
         self.none_tensor = torch.tensor([NONE_INT], device=self.device)
 
@@ -228,5 +241,7 @@ class MooncakePipe(KVPipeBase):
         """Cleanup logic when closing the pipe."""
         self.transfer_engine.sender_socket.close()
         self.transfer_engine.receiver_socket.close()
+        self.transfer_engine.sender_ack.close()
+        self.transfer_engine.receiver_ack.close()
         self.transfer_engine.context.term()  # Terminate the ZMQ context
         logger.info("Closed the transfer engine and cleaned up resources.")
