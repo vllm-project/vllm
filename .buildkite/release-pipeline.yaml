@@ -27,7 +27,12 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
+  - block: "Build release image"
+    depends_on: ~
+    key: block-release-image-build
+
   - label: "Build release image"
+    depends_on: block-release-image-build
     agents:
       queue: cpu_queue_postmerge
     commands:
