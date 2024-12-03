@@ -18,7 +18,6 @@ import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.compilation.compile_context import set_compile_context
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_kv_transfer_group, get_pp_group
@@ -63,16 +62,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 LORA_WARMUP_RANK = 8
-_BATCH_SIZE_ALIGNMENT = 8
-# all the token sizes that **can** be captured by cudagraph.
-# they can be arbitrarily large.
-# currently it includes: 1, 2, 4, 8, 16, 24, 32, 40, ..., 8192.
-# the actual sizes to capture will be determined by the model,
-# depending on the model's max_num_seqs.
-# NOTE: _get_graph_batch_size needs to be updated if this list is changed.
-_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
-    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 1025)
-]
+
 _NUM_WARMUP_ITERS = 2
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
@@ -763,7 +753,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                             max_decode_seq_len: int,
                             max_encoder_seq_len: int = 0) -> bool:
         return (decode_only and not self.runner.model_config.enforce_eager
-                and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
                 and max_decode_seq_len <= self.runner.max_seq_len_to_capture
                 and max_encoder_seq_len <= self.runner.max_seq_len_to_capture
                 and batch_size <= self.runner.max_batchsize_to_capture)
@@ -811,7 +800,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                         max_encoder_seq_len):
             return -1
 
-        graph_batch_size = _get_graph_batch_size(batch_size)
+        graph_batch_size = VllmConfig.get_graph_batch_size(batch_size)
         assert graph_batch_size >= batch_size
         return graph_batch_size - batch_size
 
@@ -1023,7 +1012,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
-        self.max_batchsize_to_capture = _get_max_graph_batch_size(
+        self.max_batchsize_to_capture = VllmConfig.get_max_graph_batch_size(
             self.scheduler_config.max_num_seqs)
 
         self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
@@ -1333,14 +1322,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
-        graph_batch_size = self.max_batchsize_to_capture
-        batch_size_capture_list = [
-            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
-        ]
-        if self.model_config.enforce_eager:
-            batch_size_capture_list = []
-        with set_compile_context(batch_size_capture_list):
-            self.execute_model(model_input, kv_caches, intermediate_tensors)
+        self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
         return
 
@@ -1459,18 +1441,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
-        graph_batch_size = self.max_batchsize_to_capture
-        batch_size_capture_list = [
-            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
-        ]
-
         with self.attn_state.graph_capture(
                 max_batch_size), graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
-                for batch_size in reversed(batch_size_capture_list):
+                for batch_size in \
+                    self.vllm_config.compilation_config.capture_sizes:
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
@@ -1993,37 +1971,3 @@ class CUDAGraphRunner(nn.Module):
             return self.output_buffers["hidden_states"]
 
         return self.output_buffers
-
-
-def _get_graph_batch_size(batch_size: int) -> int:
-    """Returns the padded batch size given actual batch size.
-
-    Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
-    2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
-    """
-    if batch_size <= 2:
-        return batch_size
-    elif batch_size <= 4:
-        return 4
-    else:
-        return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
-                _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-
-def _get_max_graph_batch_size(max_num_seqs: int) -> int:
-    """
-    max_num_seqs: Maximum number of sequences in a batch.
-    _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
-
-    pad the max_num_seqs if necessary by calling _get_graph_batch_size,
-    which will deal with some edge cases like 1, 2, 4.
-
-    if the padded size is in _BATCH_SIZES_TO_CAPTURE, return the padded size.
-    if not, it means the padded size is larger than the largest size in
-    _BATCH_SIZES_TO_CAPTURE, return the largest size in _BATCH_SIZES_TO_CAPTURE.
-    """
-    padded_size = _get_graph_batch_size(max_num_seqs)
-    if padded_size in _BATCH_SIZES_TO_CAPTURE:
-        return padded_size
-    assert padded_size > _BATCH_SIZES_TO_CAPTURE[-1]
-    return _BATCH_SIZES_TO_CAPTURE[-1]
