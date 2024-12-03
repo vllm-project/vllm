@@ -298,19 +298,25 @@ def test_pynccl_multiple_send_recv():
 def test_pynccl_broadcast():
     distributed_run(broadcast_worker_fn, 4)
 
+
 @worker_fn_wrapper
 def broadcast_worker_fn():
     pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
                                      device=get_world_group().device)
-    tensor = torch.ones(16, 1024, 1024,
-                        dtype=torch.float32).cuda(pynccl_comm.rank) * pynccl_comm.rank
+    tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(
+        pynccl_comm.rank) * pynccl_comm.rank
 
-    recv = torch.empty(16, 1024, 1024, dtype=torch.float32, device=pynccl_comm.device)
+    recv = torch.empty(16,
+                       1024,
+                       1024,
+                       dtype=torch.float32,
+                       device=pynccl_comm.device)
 
     for i in range(pynccl_comm.world_size):
-        pynccl_comm.broadcast(recv, src=i)
+        pynccl_comm.broadcast(recv if i != pynccl_comm.rank else tensor, src=i)
         result = recv.mean().cpu().item()
         assert result == i
+
 
 def test_ncclGetUniqueId():
     lib = NCCLLibrary()

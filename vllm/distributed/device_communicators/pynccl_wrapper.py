@@ -322,11 +322,11 @@ class NCCLLibrary:
                                                 comm, stream))
 
     def ncclBroadcast(self, sendbuff: buffer_type, recvbuff: buffer_type,
-                        count: int, datatype: int, root: int, comm: ncclComm_t,
-                        stream: cudaStream_t) -> None:
-            self.NCCL_CHECK(self._funcs["ncclBroadcast"](sendbuff, recvbuff, count,
-                                                         datatype, root, comm,
-                                                         stream))
+                      count: int, datatype: int, root: int, comm: ncclComm_t,
+                      stream: cudaStream_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclBroadcast"](sendbuff, recvbuff, count,
+                                                     datatype, root, comm,
+                                                     stream))
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
