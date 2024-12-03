@@ -385,7 +385,7 @@ class WorkerProc:
     @staticmethod
     def run_worker(*args, **kwargs):
         """ Worker initialization and execution loops.
-        To be run in a background process """
+        This runs a background process """
 
         def signal_handler(signum, frame):
             raise SystemExit("Worker interrupted")
