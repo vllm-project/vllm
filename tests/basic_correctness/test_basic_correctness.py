@@ -34,7 +34,6 @@ def v1(run_with_both_engines):
     pass
 
 
-
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
     llm = LLM("facebook/opt-125m")
@@ -91,6 +90,7 @@ def test_models(
         name_0="hf",
         name_1="vllm",
     )
+
 
 @pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=2)
