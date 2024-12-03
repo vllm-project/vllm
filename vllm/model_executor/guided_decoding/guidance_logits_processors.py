@@ -152,7 +152,7 @@ class GuidanceLogitsProcessor:
             mask = np.frombuffer(mask, dtype=np.uint8)
 
         # Force all invalid tokens to have 0 value
-        logits.add_(torch.min(logits))
+        logits.add_(-torch.min(logits))
         zero_indices = np.where(mask == 0)[0]
         logits[zero_indices] = 0.0
         non_zero_indices = np.nonzero(mask)[0]
