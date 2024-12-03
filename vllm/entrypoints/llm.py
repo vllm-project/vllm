@@ -590,7 +590,7 @@ class LLM:
                 ``True`` if ``add_generation_prompt`` is also ``True``.
             mm_processor_kwargs: Multimodal processor kwarg overrides for this
                 chat request. Only used for offline requests.
-            
+
         Returns:
             A list of ``RequestOutput`` objects containing the generated
             responses in the same order as the input messages.
