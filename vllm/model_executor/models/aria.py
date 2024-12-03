@@ -32,9 +32,8 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               maybe_prefix,
                                               merge_multimodal_embeddings)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors
@@ -451,7 +450,7 @@ def get_max_multimodal_tokens(ctx):
 
 
 def input_mapper_for_aria(ctx, data):
-    return MultiModalInputs(data)
+    return MultiModalKwargs(data)
 
 
 def input_processor(ctx, llm_inputs):
