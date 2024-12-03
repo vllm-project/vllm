@@ -19,6 +19,7 @@ class XPUPlatform(Platform):
     device_name: str = "xpu"
     device_type: str = "xpu"
     dispatch_key: str = "XPU"
+    is_async_output_support: bool = True
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
