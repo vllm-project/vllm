@@ -101,7 +101,11 @@ class PoolingModelRunner(
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-        with set_forward_context(model_input.attn_metadata):
+        cross_enc_kwargs = {}
+        if model_input.token_types is not None:
+            cross_enc_kwargs["token_type_ids"] = model_input.token_types
+
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -110,6 +114,7 @@ class PoolingModelRunner(
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
+                **cross_enc_kwargs,
                 **seqlen_agnostic_kwargs)
 
         if (self.observability_config is not None
