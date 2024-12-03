@@ -214,7 +214,7 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
         self.punica_wrapper.add_expand(output,
                                        buffer,
                                        self.lora_b_stacked,
-                                       self.bias_all,
+                                       self.bias_stacked,
                                        add_input=True)
         # now have column partitioned output
         output = output.view(*out_orig_shape)
