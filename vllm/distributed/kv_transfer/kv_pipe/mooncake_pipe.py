@@ -5,7 +5,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
-import mooncake_vllm_adaptor as mva
 import torch
 import zmq
 
@@ -52,6 +51,14 @@ class MooncakeTransferEngine:
     """Handles the transfer of data using mooncake_vllm_adaptor and ZeroMQ."""
 
     def __init__(self, kv_rank: int, local_rank: int):
+        try:
+            import mooncake_vllm_adaptor as mva
+        except ImportError as e:
+            raise ImportError(
+                "Please install mooncake by following the instructions at "
+                "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
+                "to run vLLM with MooncakeConnector.") from e
+
         self.engine = mva.mooncake_vllm_adaptor()
         self.local_rank = local_rank
 
