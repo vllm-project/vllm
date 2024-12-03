@@ -599,9 +599,9 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.time_queue_requests)
         self._log_histogram(self.metrics.histogram_inference_time_request,
                             stats.time_inference_requests)
-        self._log_histogram(self.metrics.histogram_decode_time_request,
-                            stats.time_prefill_requests)
         self._log_histogram(self.metrics.histogram_prefill_time_request,
+                            stats.time_prefill_requests)
+        self._log_histogram(self.metrics.histogram_decode_time_request,
                             stats.time_decode_requests)
         self._log_histogram(self.metrics.histogram_time_in_queue_request,
                             stats.time_in_queue_requests)
