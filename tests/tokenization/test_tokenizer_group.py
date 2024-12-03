@@ -36,7 +36,6 @@ async def test_tokenizer_group(tokenizer_group_type):
         tokenizer_id="gpt2",
         enable_lora=False,
         max_num_seqs=1,
-        max_loras=0,
         max_input_length=None,
     )
     assert reference_tokenizer.encode("prompt") == tokenizer_group.encode(
@@ -61,7 +60,6 @@ async def test_tokenizer_group_pool(tokenizer_group_type):
         tokenizer_id="gpt2",
         enable_lora=False,
         max_num_seqs=1,
-        max_loras=0,
         max_input_length=None,
     )
     # Send multiple requests to the tokenizer group pool
@@ -104,7 +102,6 @@ async def test_tokenizer_group_ray_pool_env_var_propagation(
         tokenizer_id="gpt2",
         enable_lora=False,
         max_num_seqs=1,
-        max_loras=0,
         max_input_length=None)
     with pytest.raises(AssertionError):
         tokenizer_pool.ping()
@@ -116,7 +113,6 @@ async def test_tokenizer_group_ray_pool_env_var_propagation(
             tokenizer_id="gpt2",
             enable_lora=False,
             max_num_seqs=1,
-            max_loras=0,
             max_input_length=None)
         tokenizer_pool.ping()
 
@@ -154,7 +150,6 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
         tokenizer_id="gpt2",
         enable_lora=False,
         max_num_seqs=1,
-        max_loras=0,
         max_input_length=None,
         fail_at=fail_at)
     tokenizer_actors = tokenizer_group_pool.tokenizer_actors.copy()
@@ -182,7 +177,6 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
         tokenizer_id="gpt2",
         enable_lora=False,
         max_num_seqs=1,
-        max_loras=0,
         max_input_length=None,
         fail_at=fail_at)
 
@@ -204,7 +198,6 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
         tokenizer_id="gpt2",
         enable_lora=False,
         max_num_seqs=1,
-        max_loras=0,
         max_input_length=2,
         fail_at=fail_at)
     tokenizer_actors = tokenizer_group_pool.tokenizer_actors.copy()
