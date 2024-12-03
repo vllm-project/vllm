@@ -450,7 +450,7 @@ def main():
           f"({metrics['completion_rate']:.2f}%)")
     print(f"Request throughput: {metrics['request_throughput']:.2f} requests/s")
     print(f"Total Token throughput: {metrics['token_throughput']:.2f} tokens/s")
-    print(f"Output Token throughput: {metrics['token_throughput']:.2f} tokens/s")
+    print(f"Output Token throughput: {metrics['output_throughput']:.2f} tokens/s")
     print("\nE2E Latency Statistics (ms):")
     print(f"  Mean: {metrics['e2e_latency_stats']['mean']:.2f}")
     print(f"  Median: {metrics['e2e_latency_stats']['median']:.2f}")
