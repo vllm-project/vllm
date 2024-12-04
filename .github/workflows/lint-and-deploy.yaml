@@ -49,10 +49,7 @@ jobs:
       - name: Create kind cluster
         uses: helm/kind-action@0025e74a8c7512023d06dc019c617aa3cf561fde # v1.10.0
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
-
-      - name: Build and push the Docker image vllm cpu
+      - name: Build the Docker image vllm cpu
         run: docker buildx build -f Dockerfile.cpu -t vllm-cpu-env .
 
       - name: Configuration of docker images, network and namespace for the kind cluster
