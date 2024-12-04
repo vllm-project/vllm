@@ -247,6 +247,7 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
 - `VLLM_HPU_LOG_STEP_GRAPH_COMPILATION_ALL`: if `true`, will log graph compilations per each vLLM engine step, always, even if there were none. Disabled by default.
 - `VLLM_HPU_LOG_STEP_CPU_FALLBACKS`: if `true`, will log cpu fallbacks per each vLLM engine step, only when there was any. Disabled by default.
 - `VLLM_HPU_LOG_STEP_CPU_FALLBACKS_ALL`: if `true`, will log cpu fallbacks per each vLLM engine step, always, even if there were none. Disabled by default.
+- `VLLM_REGIONAL_COMPILATION`: if `false`, turn off regional complation (when using torch.compile execution mode).
 
 **Performance tuning knobs:**
 
