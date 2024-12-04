@@ -168,15 +168,52 @@ def modify_decoder_layer(module: torch.nn.Module,
             modify_decoder_layer(child_module, suffix, n, counter)
 
 
+def get_names_for_rope(model: torch.nn.Module):
+    """Dynamically get layer names needed for cos and sin preparation for rope.
+
+    Every model can have a different naming convention for it's layers.
+    This function dynamically retrieves layer names to access rope layer.
+    If there's no rope layer, the function returns None.
+
+    This function assumes the following layer type layout:
+    Model -> ModuleList -> Attention -> RotaryEmbedding
+    """
+
+    def get_child(parent, suffix, is_list=False):
+        if parent is None:
+            return None, None
+        parent = parent[0] if is_list else parent
+        for child_name, child_module in parent.named_children():
+            if child_module.__class__.__name__.endswith(suffix):
+                return child_name, child_module
+        return None, None
+
+    model_name, model_module = get_child(model, "Model")
+    layers_name, layers_module = get_child(model_module, "ModuleList")
+    attn_name, attn_module = get_child(layers_module,
+                                       "Attention",
+                                       is_list=True)
+    rope_name, _ = get_child(attn_module, "RotaryEmbedding")
+
+    if rope_name is not None:
+        return {
+            'model_name': model_name,
+            'layers_name': layers_name,
+            'attn_name': attn_name,
+            'rope_name': rope_name
+        }
+
+
 class HpuModelAdapter:
 
-    def __init__(self, model, block_size, dtype, enforce_eager):
+    def __init__(self, model, block_size, dtype, enforce_eager, layer_names):
         self.model = model
         self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
                                                '1').lower() in ['1', 'true'] \
                                                 and not is_fake_hpu()
         self.block_size = block_size
         self.dtype = dtype
+        self.layer_names = layer_names
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
             if os.getenv('VLLM_REGIONAL_COMPILATION',
@@ -314,6 +351,19 @@ class HpuModelAdapter:
                                                       attn_metadata.is_prompt)
         return attn_metadata
 
+    def _prepare_cos_sin(self, positions):
+        model_name = self.layer_names['model_name']
+        layers_name = self.layer_names['layers_name']
+        attn_name = self.layer_names['attn_name']
+        rope_name = self.layer_names['rope_name']
+
+        base_model = getattr(self.model, model_name)
+        first_model_layer = getattr(base_model, layers_name)[0]
+        attention_layer = getattr(first_model_layer, attn_name)
+        rope = getattr(attention_layer, rope_name)
+
+        rope.prepare_cos_sin(positions)
+
     def forward(self, *args, **kwargs):
         kwargs = kwargs.copy()
         selected_token_indices = kwargs.pop('selected_token_indices')
@@ -324,6 +374,8 @@ class HpuModelAdapter:
             kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
             input_ids.device, self.dtype)
         LoraMask.setLoraMask(kwargs.pop('lora_mask'))
+        if self.layer_names is not None:
+            self._prepare_cos_sin(kwargs['positions'])
         hidden_states = self.model(*args, **kwargs)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = hidden_states.index_select(0, selected_token_indices)
@@ -676,6 +728,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 self.model,
                 get_decoder_layer_suffix(self.model.config.model_type),
                 hidden_layer_markstep_interval)
+            names_for_rope = get_names_for_rope(self.model)
             torch.hpu.synchronize()
 
             with HabanaMemoryProfiler() as m_wrap:
@@ -683,7 +736,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     self.model,
                     self.block_size,
                     dtype=self.model_config.dtype,
-                    enforce_eager=self.enforce_eager)
+                    enforce_eager=self.enforce_eager,
+                    layer_names=names_for_rope)
             msg = f"Wrapping in HPU Graph took {m_wrap.get_summary_string()}"
             logger.info(msg)
 
