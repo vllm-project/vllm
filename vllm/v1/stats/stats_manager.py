@@ -173,9 +173,12 @@ class EngineStatsManager:
         """
         # Update the iteration stats.
         for req_id, req_updates in request_updates.items():
-            assert (
-                req_id in self._request_stats
-            ), "Request must have been recorded when it arrived at the engine."
+            if req_id not in self._request_stats:
+                # This could happen if the request update from the engine core
+                # arrives later than a request was finished on the engine
+                # frontend.
+                continue
+
             r: RequestStats = self._request_stats[req_id]
 
             # Intermediate states before the request stats is updated.
@@ -268,15 +271,32 @@ class EngineStatsManager:
         """
         Make the engine stats from the current snapshot.
         """
-
         # Computed metrics from this iteration (the current iteration is
         # captured in the new snapshot).
         stats = Stats(now=time.time())
         self._build_system_stats(stats, engine_core_snapshot)
 
+        # Get the latest timestamp from the snapshot.
+        latest_snapshot_ts_s = 0
+        for req_stats_update in engine_core_snapshot.requests_stats_updates:
+            latest_snapshot_ts_s = max(
+                latest_snapshot_ts_s, req_stats_update.ts_s
+            )
+
+        # Filter out the updates that are older than the latest snapshot.
+        updates_iter = []
+        updates_remained = []
+        for update in self._request_updates:
+            if update.ts_s <= latest_snapshot_ts_s:
+                updates_iter.append(update)
+            else:
+                updates_remained.append(update)
+
+        self._request_updates = updates_remained
+
         # Merge the updates for this iteration.
         req_updates_iter = (
-            engine_core_snapshot.requests_stats_updates + self._request_updates
+            engine_core_snapshot.requests_stats_updates + updates_iter
         )
 
         # Group by the request id.
@@ -300,8 +320,6 @@ class EngineStatsManager:
 
         for req_id in finished_req_ids:
             del self._request_stats[req_id]
-
-        self._request_updates.clear()
 
         return stats
 

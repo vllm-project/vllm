@@ -278,6 +278,7 @@ class RequestStats:
         # Update if first output token is generated.
         if len(self.output_token_perf_counter_ns_lst) == 0:
             self.first_token_ts_s = ts_s
+            assert self.first_scheduled_ts_s is not None
 
         self.output_token_perf_counter_ns_lst.extend(
             [perf_ts_ns] * num_new_tokens
@@ -360,8 +361,9 @@ class RequestStatsUpdate(
         "detokenized",
     ]
 
-    # Timestamp when the update is recorded.
-    ts_s: float = msgspec_field(default_factory=lambda: time.time())
+    # Timestamp when the update is recorded. This is used to record time
+    # intervals between events.
+    ts_s: float = msgspec_field(default_factory=lambda: time.monotonic())
 
     # Metadata associated with the update.
     # For input_processed.

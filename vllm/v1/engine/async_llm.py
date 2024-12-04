@@ -364,7 +364,7 @@ class AsyncLLM(EngineClient):
                     "exiting stats handler. Please file an issue at "
                     "https://github.com/vllm-project/vllm/issues/new/choose"
                 )
-                continue
+                raise
 
     def _log_stats(self, stats: Stats):
         for stat_logger in self.stat_loggers.values():
