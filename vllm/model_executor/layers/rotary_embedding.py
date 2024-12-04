@@ -27,6 +27,9 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
+
+is_hpu = current_platform.is_hpu()
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -664,9 +667,12 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
                          is_neox_style, dtype)
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
-        pos_freqs = self.base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
-                                self.rotary_dim)
+        pos_freqs = self.base**(
+            torch.arange(0,
+                         self.rotary_dim,
+                         2,
+                         dtype=torch.float,
+                         device="hpu" if is_hpu else "cuda") / self.rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
 
@@ -684,7 +690,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(self.max_position_embeddings * self.scaling_factor,
-                         device="cuda",
+                         device="hpu" if is_hpu else "cuda",
                          dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = (freqs.cos() * self.mscale)
