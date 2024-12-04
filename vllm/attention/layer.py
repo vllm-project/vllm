@@ -191,14 +191,12 @@ class MultiHeadAttention(nn.Module):
                                         kv_cache_dtype=None,
                                         block_size=16,
                                         is_attention_free=False)
-        if attn_backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1):
+        if attn_backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
             attn_backend = _Backend.XFORMERS
 
-        if attn_backend in (_Backend.TORCH_SDPA, _Backend.XFORMERS):
-            self.attn_backend = attn_backend
-        else:
-            # fallback to SDPA which can support most of hardwares
-            self.attn_backend = _Backend.TORCH_SDPA
+        self.attn_backend = attn_backend if attn_backend in {
+            _Backend.TORCH_SDPA, _Backend.XFORMERS
+        } else _Backend.TORCH_SDPA
 
     def forward(
         self,
