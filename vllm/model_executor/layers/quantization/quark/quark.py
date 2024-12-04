@@ -97,7 +97,8 @@ class QuarkConfig(QuantizationConfig):
                                  "configuration.")
 
             q_configs = [
-                layer_quant_config.get(name) for name in kv_cache_group
+                cast(Dict[str, Any], layer_quant_config.get(name))
+                for name in kv_cache_group
             ]
             if not all(
                     deep_compare(q_config, q_configs[0])
@@ -220,7 +221,7 @@ class QuarkConfig(QuantizationConfig):
                 if fnmatch.fnmatch(layer_name, name_pattern):
                     return layer_quant_config[name_pattern]
 
-            layer_type = type(module)
+            layer_type = cast(str, type(module))
             layer_type_quant_config = cast(
                 Dict[str, Any],
                 self.quant_config.get("layer_type_quant_config"))
@@ -243,12 +244,14 @@ class QuarkConfig(QuantizationConfig):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False)
             if is_fp8_w8a8_supported:
-                return QuarkW8A8Fp8(
-                    qscheme=weight_config.get("qscheme"),
-                    is_static_input_scheme=(
-                        input_config and not input_config.get("is_dynamic")))
+                weight_qscheme = cast(str, weight_config.get("qscheme"))
+                input_static = (input_config is not None and
+                                not cast(bool, input_config.get("is_dynamic")))
+                return QuarkW8A8Fp8(qscheme=weight_qscheme,
+                                    is_static_input_scheme=input_static)
         elif self._is_static_tensor_w8a8(weight_config, input_config):
-            return QuarkW8A8Int8(qscheme=weight_config.get("qscheme"),
+            weight_qscheme = cast(str, weight_config.get("qscheme"))
+            return QuarkW8A8Int8(qscheme=weight_qscheme,
                                  is_static_input_scheme=True,
                                  input_symmetric=input_config.get("symmetric"))
 
