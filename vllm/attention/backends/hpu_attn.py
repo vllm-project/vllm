@@ -2,6 +2,7 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -15,6 +16,7 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
                                                HPUPagedAttentionMetadata)
 from vllm.logger import init_logger
+from vllm.utils import is_fake_hpu
 
 logger = init_logger(__name__)
 
@@ -125,6 +127,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
+                                               '1').lower() in ['1', 'true'] \
+                                               and not is_fake_hpu()
+        if self.prefill_use_fusedsdpa:
+            assert alibi_slopes is None, \
+                'Prefill with FusedSDPA not supported with alibi slopes!'
+
         suppored_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
@@ -187,17 +196,20 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
                         self.head_size)
             if attn_metadata is None or attn_metadata.block_list is None:
-                # TODO: move this outside of model
-                assert attn_metadata.attn_bias is not None, \
-                        'attn_bias must be set before calling model.forward'
-                attn_bias = attn_metadata.attn_bias
-                if self.alibi_slopes is not None:
-                    position_bias = _make_alibi_bias(self.alibi_slopes,
-                                                     self.num_kv_heads,
-                                                     attn_bias.dtype,
-                                                     attn_bias.shape[-1])
-                    attn_bias = attn_bias.tile((1, self.num_kv_heads, 1, 1))
-                    attn_bias.add_(position_bias)
+                if not self.prefill_use_fusedsdpa:
+                    # TODO: move this outside of model
+                    assert attn_metadata.attn_bias is not None, \
+                            'attn_bias must be set before calling model.forward'
+                    attn_bias = attn_metadata.attn_bias
+                    if self.alibi_slopes is not None:
+                        position_bias = _make_alibi_bias(
+                            self.alibi_slopes, self.num_kv_heads,
+                            attn_bias.dtype, attn_bias.shape[-1])
+                        attn_bias = attn_bias.tile(
+                            (1, self.num_kv_heads, 1, 1))
+                        attn_bias.add_(position_bias)
+                else:
+                    attn_bias = None
 
                 out = ops.prompt_attention(
                     query.view(query_shape),
