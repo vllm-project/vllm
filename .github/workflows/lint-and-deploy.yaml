@@ -58,8 +58,8 @@ jobs:
           push: true
           file: Dockerfile.cpu
           tags: vllm-cpu-env:latest
-          cache-from: type=registry,ref=vllm-cpu-env:latest
-          cache-to: type=inline
+          cache-from: type=registry,ref=vllm-cpu-env:buildcache
+          cache-to: type=registry,ref=vllm-cpu-env:buildcache,mode=max
 
       - name: Configuration of docker images, network and namespace for the kind cluster
         run: |
