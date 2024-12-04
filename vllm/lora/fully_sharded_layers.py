@@ -302,12 +302,10 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
 
         # TODO:add DOC
         buffer = buffer.squeeze(dim=0)
-        shard_size = self.lora_b_stacked[0].shape[2]
-        start_idx = self.tp_rank * shard_size
-        self.punica_wrapper.add_expand_slice(
+        self.punica_wrapper.add_expand_fs_rowlinear(
             output, buffer, self.lora_b_stacked[0],
             self.bias_stacked[0] if self.bias_stacked is not None else None,
-            start_idx, shard_size)
+            add_input=True)
         output = output.view(*out_orig_shape)
         return output
 

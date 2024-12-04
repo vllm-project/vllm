@@ -549,11 +549,11 @@ class PunicaWrapper:
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
-    def apply_expand(
+    def add_expand_fs_rowlinear(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
-        w_t_all: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
         bias_stacked: Optional[torch.Tensor],
         add_input: bool = True,
     ):
@@ -570,26 +570,9 @@ class PunicaWrapper:
 
         expand_fun: Callable = (self.expand_prefill
                                 if self.is_prefill else self.expand_decode)
-        expand_fun(y, x, w_t_all, add_input)
+        expand_fun(y, x, lora_b_stacked, add_input)
 
-    def add_expand_slice(self,
-                         y: torch.Tensor,
-                         x: torch.Tensor,
-                         w_t_all: torch.Tensor,
-                         bias_stacked: Optional[torch.Tensor],
-                         y_offset: Optional[int],
-                         y_slice_size: Optional[int],
-                         add_input: bool = True):
-        """
-        Similar to `add_expand`
-        """
-        if bias_stacked is not None:
-            y = self.apply_bias(self.token_lora_indices, y, bias_stacked)
 
-        expand_slice_fun: Callable = (self.expand_slice_prefill
-                                      if self.is_prefill else
-                                      self.expand_slice_decode)
-        expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_input)
 
     def add_shrink_packed_nslice(
         self,
@@ -664,26 +647,25 @@ class PunicaWrapper:
                                     output_slices[slice_idx],
                                     add_input=add_input)
             offset_left += output_slices[slice_idx]
-
         y = y.view_as(y_org)
 
     def add_lora_embedding(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
-        w_t_all: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
         add_input: bool = True,
     ):
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
 
         Semantics:
-            y += x @ w_t_all
+            y += x @ lora_b_stacked
 
         Args:
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensor.
-            w_t_all (torch.Tensor): Transposed weight matrix for all LoRAs.
+            lora_b_stacked (torch.Tensor): lora_b's weights.
             add_input (bool): Default to True.
    
         """
@@ -691,7 +673,7 @@ class PunicaWrapper:
         # Embedding layer only need expand op
         expand_fun: Callable = (self.expand_prefill
                                 if self.is_prefill else self.expand_decode)
-        expand_fun(y, x, w_t_all, add_input)
+        expand_fun(y, x, lora_b_stacked, add_input)
 
     def add_lora_linear(
             self,
