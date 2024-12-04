@@ -1,11 +1,10 @@
 import threading
 from typing import List
+
 from vllm.logger import init_logger
 from vllm.v1.core.common import SchedulerOutput
 from vllm.v1.request import Request
-from vllm.v1.stats.common import (
-    RequestStatsUpdate,
-)
+from vllm.v1.stats.common import RequestStatsUpdate
 
 logger = init_logger(__name__)
 
@@ -40,8 +39,7 @@ class EngineStatsAgent:
                     num_computed_tokens=req.num_computed_tokens,
                     # For a running sequence, cached tokens are irrelevant.
                     num_cached_tokens=None,
-                )
-            )
+                ))
 
         for req in scheduler_output.scheduled_new_reqs:
             self._updates.append(
@@ -53,8 +51,7 @@ class EngineStatsAgent:
                     # For a new sequence, a computed token is also a cached
                     # token.
                     num_cached_tokens=req.num_computed_tokens,
-                )
-            )
+                ))
 
         for req in scheduler_output.scheduled_resumed_reqs:
             self._updates.append(
@@ -66,24 +63,21 @@ class EngineStatsAgent:
                     # For a resumed sequence, a computed token is also a cached
                     # token.
                     num_cached_tokens=req.num_computed_tokens,
-                )
-            )
+                ))
 
         for req_id in scheduler_output.preempted_req_ids:
             self._updates.append(
                 RequestStatsUpdate(
                     request_id=req_id,
                     type="preempted",
-                )
-            )
+                ))
 
     def record_queued_request(self, request: Request):
         self._updates.append(
             RequestStatsUpdate(
                 request_id=request.request_id,
                 type="queued",
-            )
-        )
+            ))
 
     def take_requests_updates(self) -> List[RequestStatsUpdate]:
         updates = self._updates
@@ -101,8 +95,8 @@ class ThreadSafeEngineStatsAgent(EngineStatsAgent):
         super().__init__(*args, **kwargs)
 
     def record_scheduler_output(
-        self,
-        scheduler_output: "SchedulerOutput",  # noqa: F821
+            self,
+            scheduler_output: "SchedulerOutput",  # noqa: F821
     ):
         with self._lock:
             super().record_scheduler_output(scheduler_output)
@@ -114,4 +108,3 @@ class ThreadSafeEngineStatsAgent(EngineStatsAgent):
     def take_requests_updates(self) -> List[RequestStatsUpdate]:
         with self._lock:
             return super().take_requests_updates()
-

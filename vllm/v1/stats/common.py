@@ -34,7 +34,8 @@ class SchedulerStats:
     # Number of requests currently waiting.
     num_waiting_reqs: int = 0
 
-    kv_cache_stats: KVCacheStats = dataclass_field(default_factory=KVCacheStats)
+    kv_cache_stats: KVCacheStats = dataclass_field(
+        default_factory=KVCacheStats)
 
 
 @dataclass
@@ -103,8 +104,7 @@ class RequestStats:
 
     # A sorted list of perf counter timestamps for each output token.
     output_token_perf_counter_ns_lst: List[int] = dataclass_field(
-        default_factory=list
-    )
+        default_factory=list)
 
     # First token's timestamp.
     first_token_ts_s: Optional[float] = None
@@ -115,7 +115,8 @@ class RequestStats:
     # and sampling time.
     model_execute_duration_s: float = 0.0
 
-    # A sorted list of timestamps when the request was preempted at the scheduler.
+    # A sorted list of timestamps when the request was preempted at the
+    # scheduler.
     preempted_ts_s_lst: List[float] = dataclass_field(default_factory=list)
 
     # Timestamp when the request was finished at the engine core.
@@ -129,11 +130,8 @@ class RequestStats:
     ############################################################
     @property
     def num_prompt_tokens(self) -> Optional[int]:
-        return (
-            len(self.engine_request.prompt_token_ids)
-            if self.engine_request
-            else None
-        )
+        return (len(self.engine_request.prompt_token_ids)
+                if self.engine_request else None)
 
     @property
     def first_scheduled_ts_s(self) -> Optional[float]:
@@ -187,14 +185,10 @@ class RequestStats:
             return []
         latency_s_lst = []
         for i in range(1, len(self.output_token_perf_counter_ns_lst)):
-            assert (
-                self.output_token_perf_counter_ns_lst[i]
-                >= self.output_token_perf_counter_ns_lst[i - 1]
-            ), f"Output token timestamps must be sorted: {self.output_token_perf_counter_ns_lst[i]} and {self.output_token_perf_counter_ns_lst[i - 1]}"
-            latency_s = ns_to_s(
-                self.output_token_perf_counter_ns_lst[i]
-                - self.output_token_perf_counter_ns_lst[i - 1]
-            )
+            assert (self.output_token_perf_counter_ns_lst[i] >=
+                    self.output_token_perf_counter_ns_lst[i - 1])
+            latency_s = ns_to_s(self.output_token_perf_counter_ns_lst[i] -
+                                self.output_token_perf_counter_ns_lst[i - 1])
             latency_s_lst.append(latency_s)
         return latency_s_lst
 
@@ -208,9 +202,8 @@ class RequestStats:
 
     @property
     def sampling_params(self) -> Optional[SamplingParams]:
-        return (
-            self.engine_request.sampling_params if self.engine_request else None
-        )
+        return (self.engine_request.sampling_params
+                if self.engine_request else None)
 
     def update_from(self, update: "RequestStatsUpdate"):
         ts = update.ts_s
@@ -223,10 +216,8 @@ class RequestStats:
         elif update.type == "queued":
             self.waiting_ts_s = ts
         elif update.type == "running":
-            assert (
-                update.was_running is not None
-                and update.num_computed_tokens is not None
-            )
+            assert (update.was_running is not None
+                    and update.num_computed_tokens is not None)
             self._record_running(
                 update.num_computed_tokens,
                 update.was_running,
@@ -271,25 +262,24 @@ class RequestStats:
     ):
         # Handle the output token timestamps.
         if len(self.output_token_perf_counter_ns_lst) > 0:
-            self._check_sorted(
-                self.output_token_perf_counter_ns_lst, perf_ts_ns
-            )
+            self._check_sorted(self.output_token_perf_counter_ns_lst,
+                               perf_ts_ns)
 
         # Update if first output token is generated.
         if len(self.output_token_perf_counter_ns_lst) == 0:
             self.first_token_ts_s = ts_s
             assert self.first_scheduled_ts_s is not None
 
-        self.output_token_perf_counter_ns_lst.extend(
-            [perf_ts_ns] * num_new_tokens
-        )
+        self.output_token_perf_counter_ns_lst.extend([perf_ts_ns] *
+                                                     num_new_tokens)
 
         # Update if the request is finished.
         if finish_reason is not None:
             self.finished_ts_s = ts_s
             self.finish_reason = finish_reason
 
-    def _record_request_output(self, finish_reason: Optional[str], ts_s: float):
+    def _record_request_output(self, finish_reason: Optional[str],
+                               ts_s: float):
         if finish_reason is not None and self.finished_ts_s is None:
             self.finished_ts_s = ts_s
             self.finish_reason = finish_reason
@@ -304,9 +294,8 @@ class RequestStats:
         self.first_token_ts_s = None
 
     @staticmethod
-    def _check_sorted(
-        lst: List[float], elem_or_sorted_lst: Union[List[float], float]
-    ):
+    def _check_sorted(lst: List[float], elem_or_sorted_lst: Union[List[float],
+                                                                  float]):
         """
         Check if the list is sorted and the last element is less than the
         first element of the list to be appended or extended.
@@ -319,18 +308,17 @@ class RequestStats:
         if isinstance(elem_or_sorted_lst, list):
             assert lst[-1] <= elem_or_sorted_lst[0], (
                 f"Output token timestamps must be sorted: {lst[-1]} and "
-                f"{elem_or_sorted_lst[0]}"
-            )
+                f"{elem_or_sorted_lst[0]}")
         else:
             assert lst[-1] <= elem_or_sorted_lst, (
                 f"Output token timestamps must be sorted: {lst[-1]} and "
-                f"{elem_or_sorted_lst}"
-            )
+                f"{elem_or_sorted_lst}")
 
 
-class RequestStatsUpdate(
-    msgspec.Struct, array_like=True, omit_defaults=True, gc=False
-):
+class RequestStatsUpdate(msgspec.Struct,
+                         array_like=True,
+                         omit_defaults=True,
+                         gc=False):
     """
     An update to the request stats.
 
@@ -358,8 +346,7 @@ class RequestStatsUpdate(
         # Token decoded by the engine.
         "decoded",
         # Token detokenized by the detokenizer.
-        "detokenized",
-    ]
+        "detokenized", ]
 
     # Timestamp when the update is recorded. This is used to record time
     # intervals between events.
@@ -388,9 +375,10 @@ class RequestStatsUpdate(
     finish_reason: Optional[str] = None
 
 
-class EngineStatsSnapshot(
-    msgspec.Struct, array_like=True, omit_defaults=True, gc=False
-):
+class EngineStatsSnapshot(msgspec.Struct,
+                          array_like=True,
+                          omit_defaults=True,
+                          gc=False):
     """
     A snapshot of the engine's current stats.
     This represents a snapshot of the current engine core's stats over a
@@ -413,18 +401,15 @@ class EngineStatsSnapshot(
 
     # Snapshot of the scheduler stats.
     scheduler_stats: SchedulerStats = msgspec_field(
-        default_factory=SchedulerStats
-    )
+        default_factory=SchedulerStats)
 
     # Per request stats updates.
     requests_stats_updates: List[RequestStatsUpdate] = msgspec_field(
-        default_factory=list
-    )
+        default_factory=list)
 
     # Engine core's queue stats.
     engine_core_process_stats: EngineCoreProcessStats = msgspec_field(
-        default_factory=EngineCoreProcessStats
-    )
+        default_factory=EngineCoreProcessStats)
 
     # TODO(rickyx): Add other components' stats,
     # e.g. model runner/worker and etc.

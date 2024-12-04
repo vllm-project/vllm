@@ -23,10 +23,8 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.stats.stats_manager import (
-    NoopEngineStatsManager,
-    ThreadSafeEngineStatsManager,
-)
+from vllm.v1.stats.stats_manager import (NoopEngineStatsManager,
+                                         ThreadSafeEngineStatsManager)
 
 logger = init_logger(__name__)
 
@@ -97,8 +95,7 @@ class AsyncLLM(EngineClient):
             # 2. the main event loop when a request is added (and input
             # processed).
             self.stats_manager = ThreadSafeEngineStatsManager(
-                vllm_config, stat_loggers
-            )
+                vllm_config, stat_loggers)
         else:
             self.stats_manager = NoopEngineStatsManager()
 
@@ -350,20 +347,17 @@ class AsyncLLM(EngineClient):
                 # Pull the stats from the EngineCore before finalizing the
                 # snapshot for an updated view of the current stats.
                 stats_snapshot_from_engine = (
-                    await self.engine_core.poll_stats_async()
-                )
+                    await self.engine_core.poll_stats_async())
 
                 # Make the stats.
                 stats = self.stats_manager.make_stats(
-                    stats_snapshot_from_engine
-                )
+                    stats_snapshot_from_engine)
                 self.stats_manager.log_stats(stats)
             except Exception:
                 logger.exception(
                     "Error in stats handler. Suppressing exceptions and "
                     "exiting stats handler. Please file an issue at "
-                    "https://github.com/vllm-project/vllm/issues/new/choose"
-                )
+                    "https://github.com/vllm-project/vllm/issues/new/choose")
                 raise
 
     def _log_stats(self, stats: Stats):
