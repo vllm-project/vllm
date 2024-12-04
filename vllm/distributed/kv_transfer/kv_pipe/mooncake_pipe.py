@@ -78,7 +78,7 @@ class MooncakeTransferEngine:
         # Avoid ports conflict when running prefill and decode on the same node
         if prefill_host == decode_host and \
                 base_prefill_port == base_decode_port:
-            base_decode_port = int(base_decode_port) + 100
+            base_decode_port = str(int(base_decode_port) + 100)
 
         prefill_port = int(base_prefill_port) + self.local_rank
         decode_port = int(base_decode_port) + self.local_rank
