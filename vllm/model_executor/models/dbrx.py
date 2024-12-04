@@ -80,7 +80,7 @@ class DbrxExperts(FusedMoE):
         self.d_model = config.d_model
         self.intermediate_size = (self.config.ffn_config.ffn_hidden_size //
                                   self.tp_size)
-    
+
     # Define custom weight loader for dbrx model
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, param_name: str):
@@ -448,22 +448,22 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
-        
+
         for name, loaded_weight in weights:
-            if (self.quant_config is not None and 
+            if (self.quant_config is not None and
                 (scale_names := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache scales for quark and 
+                # Loading kv cache scales for quark and
                 # compressed-tensors quantization
                 for scale_name in scale_names:
                     param = params_dict[scale_name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
-                    loaded_weight = (loaded_weight if loaded_weight.dim()==0 
+                    loaded_weight = (loaded_weight if loaded_weight.dim() == 0
                                      else loaded_weight[0])
                     weight_loader(param, loaded_weight)
                     loaded_params.add(scale_name)
                 continue
-            
+
             if name.endswith(("w1", "w2", "v1")):
                 name = name + "_weight"
             for param_name, weight_name in expert_params_mapping:
