@@ -207,6 +207,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                               prompt_len=input_len,
                               expected_output_len=args.output_len,
                               schema=schema,
+                              structure_type=args.structure_type,
                               completion=completion))
 
     return requests
@@ -430,7 +431,7 @@ async def benchmark(
     async for i, request in get_request(input_requests, request_rate,
                                         burstiness):
         extra_body = {
-            request.structure_type: test_request.schema
+            request.structure_type: request.schema
         } if i in guided_decoding_req_idx else None
         request_func_input = RequestFuncInput(
             model=model_id,
