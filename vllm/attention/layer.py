@@ -208,11 +208,12 @@ class MultiHeadAttention(nn.Module):
     ) -> torch.Tensor:
         """Input shape: batch_size x seq_len x hidden_size"""
         # TODO(Isotr0py): Use existing backend implementations and support FA2
-        bsz, tgt_len, _ = query.size()
+        bsz, q_len, _ = query.size()
+        kv_len = key.size(1)
 
-        query = query.view(bsz, tgt_len, self.num_heads, self.head_size)
-        key = key.view(bsz, tgt_len, self.num_kv_heads, self.head_size)
-        value = value.view(bsz, tgt_len, self.num_kv_heads, self.head_size)
+        query = query.view(bsz, q_len, self.num_heads, self.head_size)
+        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
 
         if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
@@ -229,7 +230,7 @@ class MultiHeadAttention(nn.Module):
                                                  value,
                                                  scale=self.scale)
             out = out.transpose(1, 2)
-        return out.view(bsz, tgt_len, -1)
+        return out.view(bsz, q_len, -1)
 
 
 def unified_attention(
