@@ -18,6 +18,7 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available)
+from vllm.v1.utils import LRUDictCache
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.outputs import ModelRunnerOutput
@@ -112,6 +113,9 @@ class GPUModelRunner:
             dtype=self.dtype,
             device=self.device)
 
+        # Multi-modal cache
+        self.mm_cache = LRUDictCache(size=128)  # TODO: Fix 128
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
         # Keep the states of the pre-empted requests.
@@ -175,6 +179,7 @@ class GPUModelRunner:
                 prompt_token_ids=req_data.prompt_token_ids,
                 prompt=req_data.prompt,
                 mm_inputs=req_data.mm_inputs,
+                mm_hash=req_data.mm_hash,
                 mm_positions=req_data.mm_positions,
                 sampling_params=sampling_params,
                 generator=generator,
@@ -353,27 +358,42 @@ class GPUModelRunner:
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:
-                mm_inputs.append(req_state.mm_inputs[input_id])
-                req_input_ids.append((req_id, input_id))
-        batched_mm_inputs = MultiModalKwargs.batch(mm_inputs)
-        batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
-                                                       device=self.device)
+                hash = req_state.mm_hash[input_id]
+                mm_output = self.mm_cache.get(hash)
+                if mm_output is not None:
+                    # print("HIT!!")
+                    if req_id not in self.encoder_cache:
+                        self.encoder_cache[req_id] = {}
+                    self.encoder_cache[req_id][input_id] = mm_output
+                else:
+                    # print("MISS!!")
+                    mm_inputs.append(req_state.mm_inputs[input_id])
+                    req_input_ids.append((req_id, input_id))
+        
+        if len(mm_inputs) > 0:
+            batched_mm_inputs = MultiModalKwargs.batch(mm_inputs)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
+                                                        device=self.device)
 
-        # Run the encoder.
-        # `encoder_outputs` is either of the following:
-        # 1. A tensor of shape [num_images, feature_size, hidden_size]
-        # in case when feature_size is fixed across all images.
-        # 2. A list (length: num_images) of tensors, each of shape
-        # [feature_size, hidden_size] in case when the feature size is
-        # dynamic depending on input images.
-        encoder_outputs = self.model.get_multimodal_embeddings(
-            **batched_mm_inputs)
+            # Run the encoder.
+            # `encoder_outputs` is either of the following:
+            # 1. A tensor of shape [num_images, feature_size, hidden_size]
+            # in case when feature_size is fixed across all images.
+            # 2. A list (length: num_images) of tensors, each of shape
+            # [feature_size, hidden_size] in case when the feature size is
+            # dynamic depending on input images.
+            encoder_outputs = self.model.get_multimodal_embeddings(
+                **batched_mm_inputs)
 
-        # Cache the encoder outputs.
-        for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
-            if req_id not in self.encoder_cache:
-                self.encoder_cache[req_id] = {}
-            self.encoder_cache[req_id][input_id] = output
+            # Cache the encoder outputs.
+            for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
+                if req_id not in self.encoder_cache:
+                    self.encoder_cache[req_id] = {}
+                self.encoder_cache[req_id][input_id] = output
+
+                req_state = self.requests[req_id]
+                hash = req_state.mm_hash[input_id]
+                self.mm_cache.put(hash, output)
 
     def _gather_encoder_outputs(
         self,
@@ -611,6 +631,7 @@ class CachedRequestState:
     prompt_token_ids: List[int]
     prompt: Optional[str]
     mm_inputs: List[MultiModalKwargs]
+    mm_hash: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]

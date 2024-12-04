@@ -47,7 +47,7 @@ class MMInputMapper:
         if not isinstance(image_inputs, list):
             image_inputs = [image_inputs]
 
-        use_hash = mm_hash is not None
+        use_hash = False #mm_hash is not None
         if use_hash:
             assert len(image_inputs) == len(mm_hash)  # Sanity
 

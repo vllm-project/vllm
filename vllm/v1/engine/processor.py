@@ -130,6 +130,7 @@ class Processor:
             decoder_inputs.prompt,
             decoder_inputs.prompt_token_ids,
             mm_inputs,
+            mm_hash,
             decoder_inputs.multi_modal_placeholders,
             sampling_params,
             eos_token_id,
