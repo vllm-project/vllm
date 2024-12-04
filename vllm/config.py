@@ -2105,8 +2105,8 @@ class KVTransferConfig(BaseModel):
     def model_post_init(self, __context: Any) -> None:
         supported_kv_connector = ["PyNcclConnector", "MooncakeConnector"]
         if all([
-                self.kv_connector is not None,
-                self.kv_connector not in supported_kv_connector
+                self.kv_connector is not None, self.kv_connector
+                not in supported_kv_connector
         ]):
             raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
                              f"Supported connectors are "

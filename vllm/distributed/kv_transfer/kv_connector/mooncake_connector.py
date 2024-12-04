@@ -61,8 +61,7 @@ class MooncakeConnector(KVConnectorBase):
                 local_rank=local_rank,
                 config=self.config,
             )
-            # We only need to initialize MooncakePipe once, it supports 
-            # bidirectional transmission
+            # We only need to initialize MooncakePipe once
             self.producer_signal_pipe = self.producer_data_pipe
             self.producer_buffer = SimpleBuffer(self.producer_signal_pipe,
                                                 self.producer_data_pipe,

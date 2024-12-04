@@ -78,10 +78,9 @@ class MooncakeTransferEngine:
         decode_port = int(base_decode_port) + self.local_rank
         self.prefill_url = ':'.join([prefill_host, str(prefill_port)])
         self.decode_url = ':'.join([decode_host, str(decode_port)])
-        self.initialize(
-            self.prefill_url if kv_rank == 0 else self.decode_url,
-            self.config.metadata_server, self.config.protocol,
-            self.config.device_name)
+        self.initialize(self.prefill_url if kv_rank == 0 else self.decode_url,
+                        self.config.metadata_server, self.config.protocol,
+                        self.config.device_name)
 
         self.remote_url = (self.decode_url
                            if kv_rank == 0 else self.prefill_url)
@@ -94,10 +93,8 @@ class MooncakeTransferEngine:
         self.receiver_ack = self.context.socket(zmq.constants.PUSH)
 
         self.buffer_cleaner = ThreadPoolExecutor(max_workers=1)
-        self._setup_metadata_sockets(
-            kv_rank,
-            prefill_host, base_prefill_port,
-            decode_host, base_decode_port)
+        self._setup_metadata_sockets(kv_rank, prefill_host, base_prefill_port,
+                                     decode_host, base_decode_port)
 
     def _setup_metadata_sockets(self, kv_rank: int, p_host: str, p_port: str,
                                 d_host: str, d_port: str) -> None:
@@ -199,8 +196,8 @@ class MooncakePipe(KVPipeBase):
         else:
             self.device = self._select_device(device)
 
-        self.transfer_engine = MooncakeTransferEngine(
-            self.kv_rank, self.local_rank)
+        self.transfer_engine = MooncakeTransferEngine(self.kv_rank,
+                                                      self.local_rank)
         self.transport_thread: Optional[ThreadPoolExecutor] = None
         self.none_tensor = torch.tensor([NONE_INT], device=self.device)
 
