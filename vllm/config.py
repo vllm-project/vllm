@@ -796,7 +796,7 @@ class CacheConfig:
         ]:
             raise ValueError(
                 "Only CpuGpuBlockAllocator and CpuOffloadingBlockAllocator is "
-                "supported. Got %s." % self.block_allocator)
+                f"supported. Got {self.block_allocator}.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":

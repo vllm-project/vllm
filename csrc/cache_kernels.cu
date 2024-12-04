@@ -31,7 +31,6 @@ __global__ void paged_copy(T* __restrict__ dst, const T* __restrict__ src,
   const int64_t srcPageIdx = src_to_dst[blockIdx.x][0];
   const int64_t dstPageIdx = src_to_dst[blockIdx.x][1];
 
-
   const int64_t srcPageOffset = srcPageIdx * num_elements_per_page;
   const int64_t dstPageOffset = dstPageIdx * num_elements_per_page;
 
@@ -132,8 +131,7 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     torch::Device src_device = src.device();
     torch::Device dst_device = dst.device();
     torch::Device block_mapping_device = block_mapping.device();
-    TORCH_CHECK(block_mapping_device.is_cuda(),
-                "block_mapping must be on GPU");
+    TORCH_CHECK(block_mapping_device.is_cuda(), "block_mapping must be on GPU");
     if (src_device.is_cuda() && dst_device.is_cuda()) {
       TORCH_CHECK(src_device.index() == dst_device.index(),
                   "src and dst must be on the same GPU");

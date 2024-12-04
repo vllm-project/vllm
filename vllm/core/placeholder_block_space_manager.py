@@ -92,3 +92,7 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
 
     def get_num_cached_tokens(self, seq: Sequence) -> int:
         return 0
+
+    def get_and_reset_swaps(self,
+                            now: float) -> Tuple[List[Tuple[int, int]], ...]:
+        return [], []

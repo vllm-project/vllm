@@ -162,6 +162,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             # Add blocks to the block table only if the sequence is non empty.
             block_table.allocate(seq.get_token_ids())
 
+        # If the block allocator is CpuOffloadingBlockAllocator, we need to
+        # tell the computed_blocks_tracker to invalidate the previous computed
+        # num cached tokens
+        if isinstance(self.block_allocator, CpuOffloadingBlockAllocator) and \
+                self.block_allocator.will_swap_in_cpu_blocks():
+            self._computed_blocks_tracker.on_swap_in_cpu_blocks(seq.seq_id)
+
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
@@ -516,3 +523,19 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         cached in the block manager for the sequence.
         """
         return self._computed_blocks_tracker.get_num_cached_tokens(seq)
+
+    def get_and_reset_swaps(self,
+                            now: float) -> Tuple[List[Tuple[int, int]], ...]:
+        """Returns and clears the mapping of source to destination block IDs.
+        Will be called after every swapping operations for now, and after every
+        schedule when BlockManagerV2 become default. 
+        
+        Args:
+            now (float): The time stamp.
+
+        Returns:
+            A tuple of two lists: (blocks_to_swap_out, blocks_to_swap_in).
+            Each list is a List[Tuple[int, int]], containing the mapping of 
+            source to destination block IDs.
+        """
+        return self.block_allocator.get_and_reset_swaps(now)

@@ -166,7 +166,6 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             List[Block]: The newly allocated list of immutable blocks 
                 containing the provided block token IDs.
         """
-
         assert device == Device.GPU, "Calls to CPU offloading block allocator "\
             "should always use Device.GPU --- CPU offloading block allocator"\
             "handles CPU offloading internally."
@@ -249,7 +248,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         raise NotImplementedError("CPU offloading block allocator only "
                                   "support preemption by recomputation.")
 
-    def get_and_reset_swaps(self, now: float) -> List[Tuple[int, int]]:
+    def get_and_reset_swaps(self,
+                            now: float) -> Tuple[List[Tuple[int, int]], ...]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called right before scheduler step finishes.
         
@@ -264,7 +264,9 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             that CPU evictor can work.
         
         Returns:
-            List[Tuple[int, int]]: A mapping of source to destination block IDs.
+            A tuple of two lists: (blocks_to_swap_out, blocks_to_swap_in).
+            Each list is a List[Tuple[int, int]], containing the mapping of 
+            source to destination block IDs.
         """
 
         allocator = self._allocators[Device.GPU]
@@ -319,7 +321,25 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             # free the block
             cpu_allocator.free(cpu_block)
 
-        # return the mapping
-        mapping = self._swap_mapping.copy()
+        # populate the swap_out list and swap_in list
+        blocks_to_swap_out = []
+        blocks_to_swap_in = []
+        for src, dst in self._swap_mapping.items():
+            # only two possible cases: CPU -> GPU, or GPU -> CPU
+            if src in self._allocators[Device.GPU].all_block_ids:
+                # swap out
+                blocks_to_swap_out.append((src, dst))
+            else:
+                # swap in
+                blocks_to_swap_in.append((src, dst))
         self._swap_mapping.clear()
-        return list(mapping.items())
+        return blocks_to_swap_out, blocks_to_swap_in
+
+    def will_swap_in_cpu_blocks(self):
+        """Check if there are CPU blocks that will be swapped in
+
+        Returns:
+            bool: True if there are CPU blocks that will be swapped in, False
+                otherwise.
+        """
+        return bool(self._swap_mapping)
