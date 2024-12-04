@@ -42,7 +42,7 @@ chart **including persistent volumes** and deletes the release.
 Architecture
 ------------
 
-.. image:: architecture_helm_deployment.excalidraw.png
+.. image:: architecture_helm_deployment.png
 
 Values
 ------
