@@ -540,7 +540,8 @@ def repackage_wheel(package_data: Dict[str, List[str]],
             "vllm/vllm_flash_attn/__init__.py",
             # "vllm/_version.py", # not available in nightly wheels yet
         ]
-        file_members = filter(lambda x: x.filename in files_to_copy, wheel.filelist)
+        file_members = filter(lambda x: x.filename in files_to_copy,
+                              wheel.filelist)
 
         for file in file_members:
             print(
