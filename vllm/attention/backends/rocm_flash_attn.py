@@ -692,6 +692,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         self.scale,
                         attn_masks[0][None]
                         if attn_masks is not None else None,
+                        None,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
