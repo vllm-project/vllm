@@ -31,26 +31,23 @@ def _fully_sharded_can_replace(can_replace):
 
     return dec
 
+
 def _mcp_apply(x, bias, layer: ColumnParallelLinearWithLoRA):
     """ 
     For `ColumnParallelLinearWithLoRA` or classes that inherit from 
     `ColumnParallelLinearWithLoRA`, they share the same `apply` logic.
     """
-    assert (
-        layer.n_slices
-        == len(layer.lora_a_stacked)
-        == len(layer.lora_b_stacked)
-        == len(layer.output_slices)
-    )
+    assert (layer.n_slices == len(layer.lora_a_stacked) == len(
+        layer.lora_b_stacked) == len(layer.output_slices))
     if layer.bias_stacked is not None:
-        assert layer.n_slices==len(layer.bias_stacked)
-        
+        assert layer.n_slices == len(layer.bias_stacked)
+
     output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
 
-    # Since communication is needed, the buffer is directly initialized as a 
+    # Since communication is needed, the buffer is directly initialized as a
     # tensor rather than a tuple of tensor.
     buffers = torch.zeros(
         (layer.n_slices, x.shape[0], layer.lora_a_stacked[0].shape[2]),
@@ -71,6 +68,7 @@ def _mcp_apply(x, bias, layer: ColumnParallelLinearWithLoRA):
     output = output.view(*out_orig_shape)
     # now have column partitioned and packed output
     return output
+
 
 # these layers are based on the tensor parallelism strategy given in
 # Y. Sheng et al., S-LoRA: Serving Thousands of Concurrent LoRA Adapters. 2023,
@@ -100,7 +98,6 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
-    
 
     @classmethod
     @_fully_sharded_can_replace
@@ -119,6 +116,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             model_config=model_config,
             decorate=False,
         )
+
 
 class MergedColumnParallelLinearWithShardedLoRA(
         MergedColumnParallelLinearWithLoRA):

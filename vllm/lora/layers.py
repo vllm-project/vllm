@@ -376,11 +376,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        self.punica_wrapper.add_lora_packed_nslice(output, x,
-                                                   self.lora_a_stacked,
-                                                   self.lora_b_stacked,
-                                                   self.bias_stacked, 1.0,
-                                                   self.output_slices)
+        self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
+                                            self.lora_b_stacked,
+                                            self.bias_stacked, 1.0,
+                                            self.output_slices)
         return output
 
 
