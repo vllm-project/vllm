@@ -64,10 +64,8 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
     torch.manual_seed(1)
 
     # Reshape pass is needed for the fusion pass to work
-    config = CompilationConfig.PassConfig(
-        enable_fusion=True,
-        enable_reshape=True,
-        dump_graph_stages=["before_fusion", "after_fusion"])
+    config = CompilationConfig.PassConfig(enable_fusion=True,
+                                          enable_reshape=True)
     reshape_pass = RedundantReshapesPass(config)
     fusion_pass = FusionPass.instance(config)
 
