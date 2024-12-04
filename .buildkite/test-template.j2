@@ -19,7 +19,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 5
     agents:
-      queue: amd
+      queue: amd-cpu
 
 {% for step in steps %}
 {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
@@ -27,7 +27,7 @@ steps:
     depends_on: 
       - "amd-build"
     agents:
-      queue: amd
+      queue: amd_gpu
     commands: 
       - bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
     env:
