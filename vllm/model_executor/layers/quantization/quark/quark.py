@@ -1,24 +1,23 @@
-import re
 import fnmatch
+import re
 from typing import Any, Dict, List, Optional, cast
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FUSED_LAYER_NAME_MAPPING)
-from vllm.model_executor.layers.quantization.quark.utils import (
-    deep_compare, should_ignore_layer)
-
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
-    QuarkMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.quark.schemes import (
-    QuarkScheme, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkMoEMethod)
+from vllm.model_executor.layers.quantization.quark.schemes import (
+    QuarkScheme, QuarkW8A8Fp8, QuarkW8A8Int8)
+from vllm.model_executor.layers.quantization.quark.utils import (
+    deep_compare, should_ignore_layer)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FUSED_LAYER_NAME_MAPPING)
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkLinearMethod"]
@@ -104,16 +103,17 @@ class QuarkConfig(QuantizationConfig):
                     deep_compare(q_config, q_configs[0])
                     for q_config in q_configs):
                 raise ValueError(
-                    "The quantization method used for kv_cache should be the same, "
-                    "but the quantization method for the kv_cache layer in the "
-                    "config is different.")
+                    "The quantization method used for kv_cache should "
+                    "be the same, but the quantization method for the "
+                    "kv_cache layer in the config is different.")
             kv_cache_config = q_configs[0].get("output_tensors")
             if kv_cache_config is None:
                 raise ValueError(
                     "The kv_cache quantization configuration is empty.")
 
-            # Since we have already set kv_cache quantization configurations, we will remove
-            # the quantization configuration for the output_tensors corresponding to the kv_cache layer.
+            # Since we have already set kv_cache quantization configurations,
+            # we will remove the quantization configuration for the
+            # output_tensors corresponding to the kv_cache layer.
             for q_config in q_configs:
                 q_config["output_tensors"] = None
 
@@ -217,7 +217,7 @@ class QuarkConfig(QuantizationConfig):
         else:
             layer_quant_config = cast(
                 Dict[str, Any], self.quant_config.get("layer_quant_config"))
-            for name_pattern in layer_quant_config.keys():
+            for name_pattern in layer_quant_config:
                 if fnmatch.fnmatch(layer_name, name_pattern):
                     return layer_quant_config[name_pattern]
 

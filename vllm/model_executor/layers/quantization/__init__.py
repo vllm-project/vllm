@@ -35,6 +35,8 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
     # lazy import to avoid triggering `torch.compile` too early
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
     from .aqlm import AQLMConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
@@ -56,7 +58,6 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .neuron_quant import NeuronQuantConfig
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
-    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
