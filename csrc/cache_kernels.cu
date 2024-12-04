@@ -28,7 +28,7 @@ namespace {
 
 KVStore kv_store;
 
-}; // namespace
+};  // namespace
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping) {
@@ -73,8 +73,8 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
 
 // src layout: [2, num_blocks, block_size, num_kv_heads, head_size]
 // dst layout: [num_blocks, 2, num_layer, block_size, num_kv_heads*head_size]
-void kv_store_copy_incomplete_blocks(torch::Tensor& src, torch::Tensor& dst,
-    const int64_t layer_id,
+void kv_store_copy_incomplete_blocks(
+    torch::Tensor& src, torch::Tensor& dst, const int64_t layer_id,
     const torch::Tensor& incomplete_block_mapping) {
   kv_store.CopyIncompleteBlocks(src, dst, layer_id, incomplete_block_mapping);
 }
@@ -82,29 +82,26 @@ void kv_store_copy_incomplete_blocks(torch::Tensor& src, torch::Tensor& dst,
 // src layout: [2, num_blocks, block_size, num_kv_heads, head_size]
 // dst layout: [num_blocks, 2, num_layer, block_size, num_kv_heads*head_size]
 void kv_store_copy_blocks2CPU(torch::Tensor& src, torch::Tensor& dst,
-                            const int64_t layer_id,
-                            const torch::Tensor& block_mapping) {
+                              const int64_t layer_id,
+                              const torch::Tensor& block_mapping) {
   kv_store.CopyBlocks2CPU(src, dst, layer_id, block_mapping);
 }
 
 // src layout: [num_blocks, 2, num_layer, block_size, num_kv_heads*head_size]
-// kv_caches layout: [laysers, [2, num_blocks, block_size, num_kv_heads, head_size]]
-void kv_store_copy_blocks2GPU(torch::Tensor& src,
-                            std::vector<torch::Tensor> const& kv_caches,
-                            const int64_t num_layers,
-                            const torch::Tensor& block_mapping,
-                            const torch::Tensor& block_offsets,
-                            const torch::Tensor& req_ids,
-                            std::vector<long> const& events,
-                            const bool is_batch_layer) {
+// kv_caches layout: [laysers, [2, num_blocks, block_size, num_kv_heads,
+// head_size]]
+void kv_store_copy_blocks2GPU(
+    torch::Tensor& src, std::vector<torch::Tensor> const& kv_caches,
+    const int64_t num_layers, const torch::Tensor& block_mapping,
+    const torch::Tensor& block_offsets, const torch::Tensor& req_ids,
+    std::vector<long> const& events, const bool is_batch_layer) {
   if (is_batch_layer) {
     const int64_t num_requests = req_ids.size(0);
     kv_store.CopyBlocks2GPUBatch(src, kv_caches, num_layers, block_mapping,
-        block_offsets, num_requests, events);
-  }
-  else {
+                                 block_offsets, num_requests, events);
+  } else {
     kv_store.CopyLayerBlocks2GPU(src, kv_caches, num_layers, block_mapping,
-        block_offsets, req_ids, events);
+                                 block_offsets, req_ids, events);
   }
 }
 

@@ -8,21 +8,18 @@
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping);
 
-void kv_store_copy_incomplete_blocks(torch::Tensor& src, torch::Tensor& dst,
-                            const int64_t layer_id,
-                            const torch::Tensor& incomplete_block_mapping);
+void kv_store_copy_incomplete_blocks(
+    torch::Tensor& src, torch::Tensor& dst, const int64_t layer_id,
+    const torch::Tensor& incomplete_block_mapping);
 void kv_store_copy_blocks2CPU(torch::Tensor& src, torch::Tensor& dst,
-                            const int64_t layer_id,
-                            const torch::Tensor& block_mapping);
+                              const int64_t layer_id,
+                              const torch::Tensor& block_mapping);
 
-void kv_store_copy_blocks2GPU(torch::Tensor& src,
-                            std::vector<torch::Tensor> const& dst,
-                            const int64_t num_layers,
-                            const torch::Tensor& block_mapping,
-                            const torch::Tensor& block_offsets,
-                            const torch::Tensor& req_ids,
-                            std::vector<long> const& events,
-                            const bool is_batch_layer);
+void kv_store_copy_blocks2GPU(
+    torch::Tensor& src, std::vector<torch::Tensor> const& dst,
+    const int64_t num_layers, const torch::Tensor& block_mapping,
+    const torch::Tensor& block_offsets, const torch::Tensor& req_ids,
+    std::vector<long> const& events, const bool is_batch_layer);
 
 // Note: the key_caches and value_caches vectors are constant but
 // not the Tensors they contain. The vectors need to be const refs

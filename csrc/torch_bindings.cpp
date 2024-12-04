@@ -410,14 +410,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                       int layer_id, "
       "                       Tensor incomplete_block_mapping) -> ()");
   cache_ops.impl("kv_store_copy_incomplete_blocks", torch::kCUDA,
-          &kv_store_copy_incomplete_blocks);
+                 &kv_store_copy_incomplete_blocks);
 
   // Copy the kv cache blocks from src(GPU) to dst(CPU), used for kv store.
   cache_ops.def(
       "kv_store_copy_blocks2CPU(Tensor src, Tensor! dst, "
       "                       int layer_id, Tensor block_mapping) -> ()");
   cache_ops.impl("kv_store_copy_blocks2CPU", torch::kCUDA,
-          &kv_store_copy_blocks2CPU);
+                 &kv_store_copy_blocks2CPU);
 
   // Copy the kv cache blocks from src(CPU) to dst(GPU), used for kv store.
   cache_ops.def(
@@ -428,7 +428,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                         int[] events,"
       "                         bool is_batch_layer) -> ()");
   cache_ops.impl("kv_store_copy_blocks2GPU", torch::kCUDA,
-          &kv_store_copy_blocks2GPU);
+                 &kv_store_copy_blocks2GPU);
 
   // Copy the cache blocks from src to dst.
   cache_ops.def(
