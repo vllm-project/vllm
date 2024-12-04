@@ -24,9 +24,8 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
-if current_platform.is_cuda():
-    from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
-                                                       FlashAttentionMetadata)
+from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
+                                                    FlashAttentionMetadata)
 
 logger = init_logger(__name__)
 

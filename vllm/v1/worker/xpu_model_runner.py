@@ -3,8 +3,7 @@ import numpy as np
 from typing import TYPE_CHECKING
 
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.attention.backends.ipex_attn import (IPEXAttentionMetadata,
-                                                  IPEXAttentionBackend)
+from vllm.v1.attention.backends.ipex_attn import (IPEXAttentionBackend)
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
