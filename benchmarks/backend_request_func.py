@@ -24,6 +24,7 @@ class RequestFuncInput:
     model: str
     best_of: int = 1
     logprobs: Optional[int] = None
+    extra_body: Optional[dict] = None
     multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
 
@@ -241,6 +242,7 @@ async def async_request_openai_completions(
             "logprobs": request_func_input.logprobs,
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
+            "extra_body": request_func_input.extra_body,
         }
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
@@ -335,6 +337,7 @@ async def async_request_openai_chat_completions(
             "max_completion_tokens": request_func_input.output_len,
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
+            "extra_body": request_func_input.extra_body,
         }
         headers = {
             "Content-Type": "application/json",
