@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
 
-from vllm.attention.selector import _Backend
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import DecoderOnlyInputs, token_inputs
@@ -205,11 +205,11 @@ class BlipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        # Detect attention implementation.
-        self.attn_backend = get_vit_attn_backend(support_fa=False)
-        if self.attn_backend not in {_Backend.TORCH_SDPA, _Backend.XFORMERS}:
-            raise RuntimeError(
-                f"BLIP does not support {self.attn_backend} backend now.")
+        self.attn = MultiHeadAttention(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale
+        )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
@@ -220,41 +220,10 @@ class BlipAttention(nn.Module):
         hidden_states: torch.Tensor,
     ):
         """Input shape: Batch x Time x Channel"""
-        bsz, tgt_len, _ = hidden_states.size()
 
         qkv_states, _ = self.qkv(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
-        query_states = query_states.view(bsz, tgt_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        key_states = key_states.view(bsz, tgt_len,
-                                     self.num_heads_per_partition,
-                                     self.head_dim)
-        value_states = value_states.view(bsz, tgt_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-
-        if self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-
-            out = xops.memory_efficient_attention_forward(query_states,
-                                                          key_states,
-                                                          value_states,
-                                                          p=self.dropout,
-                                                          scale=self.scale)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            query_states, key_states, value_states = (x.transpose(1, 2)
-                                                      for x in (query_states,
-                                                                key_states,
-                                                                value_states))
-            out = F.scaled_dot_product_attention(query_states,
-                                                 key_states,
-                                                 value_states,
-                                                 dropout_p=self.dropout,
-                                                 scale=self.scale)
-            out = out.transpose(1, 2)
-
-        out = out.view(bsz, tgt_len, -1)
+        out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.projection(out)
 
         return attn_output, None
