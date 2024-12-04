@@ -7,7 +7,7 @@ Requires HuggingFace credentials for access to Llama2.
 
 from typing import List, Optional, Tuple
 import numpy as np
-from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
+from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams, LoraPolicy
 from vllm.lora.request import LoRARequest
 from faker import Faker
 import pandas as pd
@@ -15,11 +15,10 @@ import pandas as pd
 OUT_DIR = "out"
 NB_WORDS = 20
 TOTAL_LORAS = 10
-DISTRIBUTION="uniform"
 
 def create_test_prompts(
-    base_path: str
-) -> List[Tuple[str, SamplingParams, Optional[LoRARequest]]]:
+    distribution: str
+) -> List[Tuple[str, int]]:
     """Create a list of test prompts with their sampling parameters.
 
     2 requests for base model, 4 requests for the LoRA. We define 2
@@ -50,9 +49,9 @@ def create_test_prompts(
     return prompts
     '''
     num_requests=100
-    if DISTRIBUTION == "uniform":
+    if distribution == "uniform":
         lora_ids_list = np.random.randint(0, TOTAL_LORAS, size=num_requests)
-    elif DISTRIBUTION == "normal":
+    elif distribution == "normal":
         # Center the normal distribution around the middle of the LoRA range
         mean = (TOTAL_LORAS - 1)/2
         std_dev = TOTAL_LORAS/6 # This ensures ~99.7% of values fall within range ("68-95-99.7 rule")
@@ -62,25 +61,21 @@ def create_test_prompts(
         lora_ids_list = np.clip(lora_ids_list, 0, TOTAL_LORAS-1)
         lora_ids_list = np.round(lora_ids_list).astype(int)
     else:
-        raise ValueError(f"Unsupported distribution: {DISTRIBUTION}")
+        raise ValueError(f"Unsupported distribution: {distribution}")
 
     prompts = []
     for lora_id in lora_ids_list:
         prompts.append((
-                sentence,
-                SamplingParams(temperature=0.0,
-                            logprobs=1,
-                            prompt_logprobs=1,
-                            max_tokens=64,
-                            stop_token_ids=[128001]),
-                LoRARequest(f"lora{lora_id}", lora_id, f"{base_path}/lora{lora_id}")
-            ))
+            sentence,
+            lora_id
+        ))
         
     return prompts
 
 def process_requests(engine: LLMEngine,
                      test_prompts: List[Tuple[str, SamplingParams,
-                                              Optional[LoRARequest]]]):
+                                              Optional[LoRARequest]]],
+                     distribution: str) -> None:
     """Continuously process a list of prompts and handle the outputs."""
     metrics_list = []
 
@@ -103,6 +98,9 @@ def process_requests(engine: LLMEngine,
                 output = request_output.outputs[0]
                 metrics_list.append({
                     "request_id": request_output.request_id,
+                    "lora_policy": engine.lora_config.lora_policy,
+                    "num_iters_before_lora_reschedule": engine.lora_config.num_iters_before_reschedule,
+                    "distribution": distribution,
                     "lora_name": request_output.lora_request.lora_name,
                     "lora_id": request_output.lora_request.lora_int_id,
                     "arrival_time": metrics.arrival_time,
@@ -119,11 +117,10 @@ def process_requests(engine: LLMEngine,
                     "output_num_tokens": len(output.token_ids),
                 })
 
-    metrics_df = pd.DataFrame(metrics_list)
-    metrics_df.to_csv(f"{OUT_DIR}/metrics.csv", index=False)
+    return metrics_list
 
 
-def initialize_engine() -> LLMEngine:
+def initialize_engine(lora_policy: LoraPolicy, num_iters_before_lora_reschedule: int) -> LLMEngine:
     """Initialize the LLMEngine."""
     # max_loras: controls the number of LoRAs that can be used in the same
     #   batch. Larger numbers will cause higher memory usage, as each LoRA
@@ -139,17 +136,34 @@ def initialize_engine() -> LLMEngine:
                              max_cpu_loras=TOTAL_LORAS,
                              max_num_seqs=256,
                              enforce_eager=True,
-                             disable_async_output_proc=True
-                             
+                             disable_async_output_proc=True,
+                             lora_policy=lora_policy,
+                             num_iters_before_lora_reschedule=num_iters_before_lora_reschedule
                              )
     return LLMEngine.from_engine_args(engine_args)
 
 
 def main():
     """Main function that sets up and runs the prompt processing."""
-    engine = initialize_engine()
-    test_prompts = create_test_prompts(OUT_DIR)
-    process_requests(engine, test_prompts)
+    metrics_list = []
+    for distribution in ["uniform", "normal"]:
+        test_prompts = create_test_prompts(distribution)
+        for lora_policy in [LoraPolicy.NAIVE, LoraPolicy.ROUND_ROBIN]:
+            for num_iters_before_lora_reschedule in [1, 2, 4, 8, 16, 32, 64]:
+                engine = initialize_engine(lora_policy, num_iters_before_lora_reschedule)
+                prompts = [(
+                    sentence,
+                    SamplingParams(temperature=0.0,
+                        logprobs=1,
+                        prompt_logprobs=1,
+                        max_tokens=64,
+                        stop_token_ids=[128001]),
+                    LoRARequest(f"lora{lora_id}", lora_id, f"{OUT_DIR}/lora{lora_id}")
+                ) for sentence, lora_id in test_prompts]
+                metrics_list.extend(process_requests(engine, prompts, distribution))
+                del engine
+    metrics_df = pd.DataFrame(metrics_list)
+    metrics_df.to_csv(f"{OUT_DIR}/metrics.csv", index=False)
 
 
 if __name__ == '__main__':

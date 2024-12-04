@@ -1,16 +1,10 @@
 from collections import deque
-from enum import Enum
-from vllm.config import LoRAConfig
+from vllm.config import LoRAConfig, LoraPolicy
 from typing import List
 
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-class Policy(Enum):
-    ROUND_ROBIN = "round_robin"
-    NAIVE = "naive"
 
 
 class LoRAScheduler:
@@ -19,14 +13,10 @@ class LoRAScheduler:
     def __init__(
         self,
         lora_config: LoRAConfig,
-        num_iters_before_reschedule: int = 32,
-        policy: Policy = Policy.ROUND_ROBIN
     ):
-        logger.info(f"Initializing LoRA Scheduler with policy {policy} and {num_iters_before_reschedule} iterations before rescheduling. Lora_config {lora_config}")
+        logger.info(f"Initializing LoRA Scheduler with policy {lora_config.lora_policy} and {lora_config.num_iters_before_reschedule} iterations before rescheduling. Lora_config {lora_config}")
 
         self.lora_config = lora_config
-        self.num_iters_before_reschedule = num_iters_before_reschedule
-        self.policy = policy
         self.max_loras_each_iter = lora_config.max_loras
 
         self.active_loras = deque()
@@ -57,10 +47,10 @@ class LoRAScheduler:
 
     def schedule_loras(self):
         """Schedule which LoRAs requests can belong to for the next iteration."""
-        if self.policy == Policy.NAIVE:
+        if self.lora_config.lora_policy == LoraPolicy.NAIVE:
             return list(self.all_loras)
         
-        assert self.policy == Policy.ROUND_ROBIN
+        assert self.lora_config.lora_policy == LoraPolicy.ROUND_ROBIN
 
         scheduled_loras = []
         logger.info(f"LoRA scheduler has {len(self.active_loras)} active loras")
@@ -73,7 +63,7 @@ class LoRAScheduler:
         else:
             scheduled_loras = self.__prev_scheduled_loras
         
-        self.__counter = (self.__counter + 1) % self.num_iters_before_reschedule
+        self.__counter = (self.__counter + 1) % self.lora_config.num_iters_before_reschedule
         self.__prev_scheduled_loras = scheduled_loras
         return list(set([0] + scheduled_loras))
     
