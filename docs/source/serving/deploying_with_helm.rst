@@ -47,8 +47,6 @@ Architecture
 Values
 ------
 
-.. tabularcolumns:: |p{5cm}|p{5cm}|p{5cm}|p{5cm}|
-
 +---------------------+---------+-----------------------+-------------+
 | Key                 | Type    | Default               | Description |
 +=====================+=========+=======================+=============+
@@ -132,8 +130,8 @@ Values
 | gpuModels           | list    | ``["TYPE_GPU_USED"]`` | Type of gpu |
 |                     |         |                       | used        |
 +---------------------+---------+-----------------------+-------------+
-| image               | object  | ``{"comma             | Image       |
-|                     |         | nd":["vllm","serve"," | co          |
+| image               | object  | ``{"command":         | Image       |
+|                     |         | ["vllm","serve","     | co          |
 |                     |         | /data/","--served-mod | nfiguration |
 |                     |         | el-name","opt-125m"," |             |
 |                     |         | --host","0.0.0.0","-- |             |
@@ -306,11 +304,11 @@ Values
 | resources.reques    | int     | ``1``                 | Number of   |
 | ts.”nvidia.com/gpu” |         |                       | gpus used   |
 +---------------------+---------+-----------------------+-------------+
-| res                 | int     | ``4``                 | Number of   |
-| ources.requests.cpu |         |                       | CPUs        |
+| resources.          | int     | ``4``                 | Number of   |
+| requests.cpu        |         |                       | CPUs        |
 +---------------------+---------+-----------------------+-------------+
-| resour              | string  | ``"16Gi"``            | CPU memory  |
-| ces.requests.memory |         |                       | co          |
+| resources.          | string  | ``"16Gi"``            | CPU memory  |
+| requests.memory     |         |                       | co          |
 |                     |         |                       | nfiguration |
 +---------------------+---------+-----------------------+-------------+
 | secrets             | object  | ``{}``                | Secrets     |
