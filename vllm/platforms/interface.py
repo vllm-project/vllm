@@ -1,4 +1,5 @@
 import enum
+import platform
 import random
 from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 
@@ -35,6 +36,14 @@ class PlatformEnum(enum.Enum):
     NEURON = enum.auto()
     OPENVINO = enum.auto()
     UNSPECIFIED = enum.auto()
+
+
+class CpuArchEnum(enum.Enum):
+    X86 = enum.auto()
+    ARM = enum.auto()
+    POWERPC = enum.auto()
+    OTHER = enum.auto()
+    UNKNOWN = enum.auto()
 
 
 class DeviceCapability(NamedTuple):
@@ -183,6 +192,23 @@ class Platform:
             raise ValueError(
                 f"{quant} quantization is currently not supported in "
                 f"{cls.device_name}.")
+
+    @classmethod
+    def get_cpu_architecture(cls) -> CpuArchEnum:
+        """
+        Determine the CPU architecture of the current system.
+        Returns CpuArchEnum indicating the architecture type.
+        """
+        machine = platform.machine().lower()
+
+        if machine in ("x86_64", "amd64", "i386", "i686"):
+            return CpuArchEnum.X86
+        elif machine.startswith("arm") or machine.startswith("aarch"):
+            return CpuArchEnum.ARM
+        elif machine.startswith("ppc"):
+            return CpuArchEnum.POWERPC
+
+        return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
 
 
 class UnspecifiedPlatform(Platform):
