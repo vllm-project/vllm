@@ -51,10 +51,16 @@ class LogitsProcessor(nn.Module):
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
+
+        # TODO: better way to branch logits processor behavior based on
+        # v1 vs v0 (possibly by having a v1 LogitsProcessor class)
+        is_v0_sampling_or_no_metadata = (sampling_metadata is None or hasattr(
+            sampling_metadata, "selected_token_indices"))
+
         if self.logits_as_input:
             logits = hidden_states
         else:
-            if sampling_metadata is not None:
+            if is_v0_sampling_or_no_metadata and sampling_metadata is not None:
                 hidden_states = _prune_hidden_states(hidden_states,
                                                      sampling_metadata)
 
