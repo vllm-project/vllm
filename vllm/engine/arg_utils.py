@@ -120,7 +120,7 @@ class EngineArgs:
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
-    kv_store_space: float = 0 # GiB
+    kv_store_space: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256

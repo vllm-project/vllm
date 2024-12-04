@@ -923,30 +923,35 @@ def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
-def kv_store_copy_incomplete_blocks(src: torch.Tensor, dst: torch.Tensor,
-                           layer_id: int,
-                           incomplete_block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.kv_store_copy_incomplete_blocks(src, dst,
-                                                 layer_id,
-                                                 incomplete_block_mapping)
+
+def kv_store_copy_incomplete_blocks(
+        src: torch.Tensor, dst: torch.Tensor, layer_id: int,
+        incomplete_block_mapping: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.kv_store_copy_incomplete_blocks(
+        src, dst, layer_id, incomplete_block_mapping)
+
 
 def kv_store_copy_blocks2CPU(src: torch.Tensor, dst: torch.Tensor,
-                                  layer_id: int,
-                                  block_mapping: torch.Tensor) -> None:
+                             layer_id: int,
+                             block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.kv_store_copy_blocks2CPU(src, dst, layer_id,
-                                                        block_mapping)
+                                                    block_mapping)
 
-def kv_store_copy_blocks2GPU(src: torch.Tensor, dst: List[torch.Tensor],
-                             num_layers: int,
-                             block_mapping: torch.Tensor,
-                             block_offsets: torch.Tensor,
-                             req_ids: torch.Tensor,
-                             events: List[int], # the pointer of cudaEvent_t
-                             is_batch_layer: bool) -> None:
-    torch.ops._C_cache_ops.kv_store_copy_blocks2GPU(
-            src, dst, num_layers,
-            block_mapping, block_offsets,
-            req_ids, events, is_batch_layer)
+
+def kv_store_copy_blocks2GPU(
+        src: torch.Tensor,
+        dst: List[torch.Tensor],
+        num_layers: int,
+        block_mapping: torch.Tensor,
+        block_offsets: torch.Tensor,
+        req_ids: torch.Tensor,
+        events: List[int],  # the pointer of cudaEvent_t
+        is_batch_layer: bool) -> None:
+    torch.ops._C_cache_ops.kv_store_copy_blocks2GPU(src, dst, num_layers,
+                                                    block_mapping,
+                                                    block_offsets, req_ids,
+                                                    events, is_batch_layer)
+
 
 def convert_fp8(output: torch.Tensor,
                 input: torch.Tensor,

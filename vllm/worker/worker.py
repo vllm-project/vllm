@@ -414,10 +414,10 @@ class Worker(LocalOrDistributedWorkerBase):
             return
         kv_caches = (self.kv_cache[worker_input.virtual_engine]
                      if self.kv_cache is not None else None)
-        self.kv_store.get_blocks(BlockMappingFromCPU(
-                worker_input.kv_store_block_mapping,
-                worker_input.kv_store_block_offsets,
-                worker_input.kv_store_block_req_ids),
+        self.kv_store.get_blocks(
+            BlockMappingFromCPU(worker_input.kv_store_block_mapping,
+                                worker_input.kv_store_block_offsets,
+                                worker_input.kv_store_block_req_ids),
             kv_caches)
 
     def _get_cached_seq_group_metadata(

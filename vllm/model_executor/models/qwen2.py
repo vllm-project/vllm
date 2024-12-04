@@ -341,14 +341,14 @@ class Qwen2Model(nn.Module):
         if (self.kv_store is not None) and \
                 (self.kv_store.batch_layers_to_GPU):
             self.kv_store.get_stream_sync(
-                    attn_metadata.kv_store_meta.request_ids)
+                attn_metadata.kv_store_meta.request_ids)
 
         for i in range(self.start_layer, self.end_layer):
             layer_id = (i - self.start_layer)
             if (self.kv_store is not None) and \
                     (not self.kv_store.batch_layers_to_GPU):
                 self.kv_store.get_stream_layer_sync(
-                        layer_id, attn_metadata.kv_store_meta.request_ids)
+                    layer_id, attn_metadata.kv_store_meta.request_ids)
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
@@ -360,10 +360,9 @@ class Qwen2Model(nn.Module):
 
             if (self.kv_store is not None):
                 self.kv_store.put_block_layer(
-                        attn_metadata.kv_store_meta.incomplete_put_block_ids,
-                        attn_metadata.kv_store_meta.put_block_ids_mapping,
-                        layer_id, kv_caches[layer_id],
-                        torch.cuda.current_stream())
+                    attn_metadata.kv_store_meta.incomplete_put_block_ids,
+                    attn_metadata.kv_store_meta.put_block_ids_mapping,
+                    layer_id, kv_caches[layer_id], torch.cuda.current_stream())
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

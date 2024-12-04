@@ -163,17 +163,16 @@ class WorkerInput:
         Pop fields from the given tensor_dict and populate a new instance of
         WorkerInput.
         """
-        return cls(num_seq_groups=tensor_dict.pop("num_seq_groups"),
-                   blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
-                   blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
-                   blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
-                   virtual_engine=tensor_dict["virtual_engine"],
-                   num_steps=tensor_dict.pop("num_steps"),
-                   kv_store_block_mapping=tensor_dict.pop("kv_block_mapping"),
-                   kv_store_block_offsets=tensor_dict.pop(
-                       "kv_block_mapping_offsets"),
-                   kv_store_block_req_ids=tensor_dict.pop(
-                       "kv_block_mapping_req_ids"),
+        return cls(
+            num_seq_groups=tensor_dict.pop("num_seq_groups"),
+            blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
+            blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
+            blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
+            virtual_engine=tensor_dict["virtual_engine"],
+            num_steps=tensor_dict.pop("num_steps"),
+            kv_store_block_mapping=tensor_dict.pop("kv_block_mapping"),
+            kv_store_block_offsets=tensor_dict.pop("kv_block_mapping_offsets"),
+            kv_store_block_req_ids=tensor_dict.pop("kv_block_mapping_req_ids"),
         )
 
     def as_broadcastable_tensor_dict(

@@ -462,8 +462,9 @@ class Scheduler:
         if isinstance(request_id, str):
             request_id = (request_id, )
         request_ids = set(request_id)
-        for state_queue in [self.waiting, self.running,
-                            self.swapped, self.kv_store_waiting]:
+        for state_queue in [
+                self.waiting, self.running, self.swapped, self.kv_store_waiting
+        ]:
             aborted_groups: List[SequenceGroup] = []
             for seq_group in state_queue:
                 if not request_ids:
@@ -931,22 +932,19 @@ class Scheduler:
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         kv_store_leftover_waiting_sequences: Deque[SequenceGroup] = deque()
 
-        def _stop_schedule_prefill(num_new_tokens_uncached,
-                                  num_new_seqs,
-                                  max_num_batched_tokens,
-                                  budget):
+        def _stop_schedule_prefill(num_new_tokens_uncached, num_new_seqs,
+                                   max_num_batched_tokens, budget):
             ret = False
             if (budget.num_batched_tokens >=
                     self.scheduler_config.max_num_batched_tokens):
                 ret = True
-            if (num_new_tokens_uncached == 0 or
-                    not budget.can_schedule(
-                        num_new_tokens=num_new_tokens_uncached,
-                        num_new_seqs=num_new_seqs)):
+            if (num_new_tokens_uncached == 0 or not budget.can_schedule(
+                    num_new_tokens=num_new_tokens_uncached,
+                    num_new_seqs=num_new_seqs)):
                 ret = True
             return ret
 
-        kv_store_tmp_queue : Deque[SequenceGroup] = deque()
+        kv_store_tmp_queue: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and kv_store_waiting_queue:
 
             seq_group = kv_store_waiting_queue[0]
@@ -977,8 +975,8 @@ class Scheduler:
                     kv_store_waiting_queue.popleft()
                     continue
 
-            if (_stop_schedule_prefill(num_new_tokens_uncached,
-                    num_new_seqs,
+            if (_stop_schedule_prefill(
+                    num_new_tokens_uncached, num_new_seqs,
                     self.scheduler_config.max_num_batched_tokens, budget)):
                 break
 
@@ -1071,7 +1069,7 @@ class Scheduler:
 
             if (self.kv_store_manager is not None):
                 block_ids = self.block_manager.get_block_table(
-                        seq_group.get_seqs()[0])
+                    seq_group.get_seqs()[0])
                 block_mapping_from_cpu = \
                         self.kv_store_manager.get_block_mapping_from_python(
                                 block_ids)
@@ -1097,18 +1095,18 @@ class Scheduler:
             if (len(block_mapping_from_cpu) > 0):
                 waiting_queue.popleft()
                 kv_store_leftover_waiting_sequences.appendleft(seq_group)
-                kv_store_block_mapping.extend(
-                        block_mapping_from_cpu)
-                kv_store_block_mapping_offset.append(kv_store_block_mapping_cnt)
+                kv_store_block_mapping.extend(block_mapping_from_cpu)
+                kv_store_block_mapping_offset.append(
+                    kv_store_block_mapping_cnt)
                 kv_store_block_mapping_req_ids.append(
-                        seq_group.get_seqs()[0].seq_id)
+                    seq_group.get_seqs()[0].seq_id)
                 kv_store_block_mapping_cnt += len(block_mapping_from_cpu)
                 continue
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
-            if (_stop_schedule_prefill(num_new_tokens_uncached, num_new_seqs,
-                             self.scheduler_config.max_num_batched_tokens,
-                             budget)):
+            if (_stop_schedule_prefill(
+                    num_new_tokens_uncached, num_new_seqs,
+                    self.scheduler_config.max_num_batched_tokens, budget)):
                 # let it to the next running one
                 waiting_queue.popleft()
                 kv_store_leftover_waiting_sequences.appendleft(seq_group)
@@ -1141,13 +1139,12 @@ class Scheduler:
         if (self.kv_store_manager is not None) and \
                 (len(kv_store_block_mapping) > 0):
             self.kv_store_manager.close_send_flags(
-                    [items[1]
-                     for items in kv_store_block_mapping])
+                [items[1] for items in kv_store_block_mapping])
 
         kv_store_block_mapping_offset.append(kv_store_block_mapping_cnt)
         kv_store_block_mapping_from_cpu = BlockMappingFromCPU(
-                kv_store_block_mapping, kv_store_block_mapping_offset,
-                kv_store_block_mapping_req_ids)
+            kv_store_block_mapping, kv_store_block_mapping_offset,
+            kv_store_block_mapping_req_ids)
 
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,

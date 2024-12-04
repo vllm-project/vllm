@@ -41,8 +41,8 @@ class BlockMappingFromCPU:
 
     @staticmethod
     def null():
-        return BlockMappingFromCPU(
-                torch.Tensor(), torch.Tensor(), torch.Tensor())
+        return BlockMappingFromCPU(torch.Tensor(), torch.Tensor(),
+                                   torch.Tensor())
 
     def __str__(self):
         return "block_mapping: " + str(self.block_mapping) + \
@@ -417,8 +417,7 @@ class KVBlockStore:
                                                     layer_id,
                                                     incomplete_block_ids)
 
-    def get_blocks(self,
-                   block_mapping_from_cpu: BlockMappingFromCPU,
+    def get_blocks(self, block_mapping_from_cpu: BlockMappingFromCPU,
                    kv_caches: list[torch.Tensor]):
         block_mapping_tensor = block_mapping_from_cpu.block_mapping
         block_offset_tensor = block_mapping_from_cpu.block_offset
