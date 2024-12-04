@@ -99,7 +99,7 @@ class SampleRequest:
     prompt_len: int
     expected_output_len: int
     schema: dict
-    structure_type: str = 'json'
+    structure_type: str
     completion: str = None
 
 
@@ -354,17 +354,26 @@ async def benchmark(
     selected_percentiles: List[str],
     ignore_eos: bool,
     max_concurrency: Optional[int],
-    guided_decoding_rate: float = 1.0,
+    guided_decoding_ratio: float,
+    guided_decoding_backend: str,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
+    def prepare_extra_body(request) -> dict:
+        extra_body = {}
+        # Add the schema to the extra_body
+        extra_body[request.structure_type] = request.schema
+        # Add the specific guided_decoding_backend
+        extra_body["guided_decoding_backend"] = guided_decoding_backend
+        return extra_body
+
     print("Starting initial single prompt test run...")
     guided_decoding_req_idx = random.sample(
         range(len(input_requests)),
-        int(len(input_requests) * guided_decoding_rate))
+        int(len(input_requests) * guided_decoding_ratio))
 
     test_request = input_requests[0]
     test_input = RequestFuncInput(
@@ -374,7 +383,7 @@ async def benchmark(
         prompt_len=test_request.prompt_len,
         output_len=test_request.expected_output_len,
         ignore_eos=ignore_eos,
-        extra_body={test_request.structure_type: test_request.schema},
+        extra_body=prepare_extra_body(test_request),
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -393,7 +402,7 @@ async def benchmark(
             prompt_len=test_request.prompt_len,
             output_len=test_request.expected_output_len,
             ignore_eos=ignore_eos,
-            extra_body={test_request.structure_type: test_request.schema},
+            extra_body=prepare_extra_body(test_request),
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -430,9 +439,8 @@ async def benchmark(
     expected: List[str] = []
     async for i, request in get_request(input_requests, request_rate,
                                         burstiness):
-        extra_body = {
-            request.structure_type: request.schema
-        } if i in guided_decoding_req_idx else None
+        extra_body = prepare_extra_body(
+            request) if i in guided_decoding_req_idx else None
         request_func_input = RequestFuncInput(
             model=model_id,
             prompt=request.prompt,
@@ -671,7 +679,8 @@ def main(args: argparse.Namespace):
             ],
             ignore_eos=args.ignore_eos,
             max_concurrency=args.max_concurrency,
-            guided_decoding_rate=args.guided_decoding_ratio,
+            guided_decoding_ratio=args.guided_decoding_ratio,
+            guided_decoding_backend=args.guided_decoding_backend,
         ))
 
     # Save config and results to json
@@ -863,6 +872,11 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Guided Decoding requests")
+    parser.add_argument("--guided-decoding-backend",
+                        type=str,
+                        choices=["outlines", "lm-format-enforcer", "xgrammar"],
+                        default="xgrammar",
+                        help="Backend to use for guided decoding")
 
     args = parser.parse_args()
     main(args)
