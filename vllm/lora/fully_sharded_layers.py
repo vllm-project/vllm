@@ -62,6 +62,7 @@ def _mcp_apply(x, bias, layer: ColumnParallelLinearWithLoRA):
                                     layer.lora_b_stacked,
                                     layer.bias_stacked,
                                     layer.output_slices,
+                                    offset_start=0,
                                     add_input=True)
 
     output = output.view(*out_orig_shape)
@@ -297,14 +298,18 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # remains is a standard all_reduce. User should be aware though that
         # the output is not the same as a normal row_parallel, it should be
         # reduced before being used
-
-        buffer = buffer.squeeze(dim=0)
-        self.punica_wrapper.add_expand_fs_rowlinear(
+        # NOTE offset are based on the rank.
+        shard_size = self.lora_b_stacked[0].shape[2]
+        offset_start = self.tp_rank * shard_size
+        self.punica_wrapper.add_expand(
             output,
             buffer,
-            self.lora_b_stacked[0],
-            self.bias_stacked[0] if self.bias_stacked is not None else None,
-            add_input=True)
+            self.lora_b_stacked,
+            self.bias_stacked,
+            self.output_slices,
+            offset_start=offset_start,
+            add_input=True,
+        )
         output = output.view(*out_orig_shape)
         return output
 

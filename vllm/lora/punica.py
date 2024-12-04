@@ -450,21 +450,18 @@ class PunicaWrapper:
         bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
                           y_slice_size, add_input)
 
-    def apply_expand_slice(self,
-                           y: torch.Tensor,
-                           x: torch.Tensor,
-                           w_t_all: torch.Tensor,
-                           bias_stacked: Optional[torch.Tensor],
-                           y_offset: Optional[int],
-                           y_slice_size: Optional[int],
-                           add_input: bool = True):
+    def apply_expand(self,
+                     y: torch.Tensor,
+                     x: torch.Tensor,
+                     w_t_all: torch.Tensor,
+                     y_offset: Optional[int],
+                     y_slice_size: Optional[int],
+                     add_input: bool = True):
         """
-        Perform the ` y[:,y_offset:y_offset+y_slice_size]+=x@w_t_all+bias` 
+        Perform the ` y[:,y_offset:y_offset+y_slice_size]+=x@w_t_all` 
         computation, which is suitable for the
         GEMM of lora'b.
         """
-        if bias_stacked is not None:
-            y = self.apply_bias(self.token_lora_indices, y, bias_stacked)
 
         expand_slice_fun: Callable = (self.expand_slice_prefill
                                       if self.is_prefill else
@@ -472,30 +469,6 @@ class PunicaWrapper:
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_input)
 
     def apply_bias(
-        self,
-        indices: torch.Tensor,
-        output: torch.Tensor,
-        bias_stacked: torch.Tensor,
-    ):
-        """Applies bias to output
-
-        Input shapes:
-            bias_stacked:    (num_loras, output_dim)
-            indices:         (batch_size)
-            output:          (batch_size, output_dim)
-        """
-        org_output = output
-        output = output.view(-1, output.shape[-1])
-        indices = indices.view(-1)
-
-        bias_stacked = bias_stacked.view(-1, bias_stacked.shape[-1])
-        bias_stacked = bias_stacked[indices]
-        bias_stacked[indices == -1] = 0
-        output += bias_stacked
-
-        return output.view_as(org_output)
-
-    def apply_bias_packed_nslice(
         self,
         indices: torch.Tensor,
         output: torch.Tensor,
@@ -549,29 +522,6 @@ class PunicaWrapper:
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
-    def add_expand_fs_rowlinear(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        lora_b_stacked: torch.Tensor,
-        bias_stacked: Optional[torch.Tensor],
-        add_input: bool = True,
-    ):
-        """
-        Perform the ` y+=x@w_t_all+bias` computation, which is suitable for the
-        GEMM of lora'b.
-        When `is_prefill` is true, it indicates that it is currently the
-        prefill stage, and the `expand_prefill` function should be called.
-        Otherwise, it is the decode stage, and the expand_decode function
-        should be called.
-        """
-        if bias_stacked is not None:
-            y = self.apply_bias(self.token_lora_indices, y, bias_stacked)
-
-        expand_fun: Callable = (self.expand_prefill
-                                if self.is_prefill else self.expand_decode)
-        expand_fun(y, x, lora_b_stacked, add_input)
-
     def add_shrink(
         self,
         y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
@@ -610,6 +560,7 @@ class PunicaWrapper:
         lora_b_stacked: Tuple[torch.Tensor, ...],
         bias_stacked: Optional[Tuple[torch.Tensor, ...]],
         output_slices: Tuple[int, ...],
+        offset_start: int = 0,
         add_input=True,
     ) -> None:
         """
@@ -632,18 +583,19 @@ class PunicaWrapper:
             """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        offset_left = 0
+        offset_left = offset_start
         if bias_stacked is not None:
-            self.apply_bias_packed_nslice(self.token_lora_indices, y,
-                                          output_slices, bias_stacked)
+            self.apply_bias(self.token_lora_indices, y, output_slices,
+                            bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
-            self.apply_expand_slice(y,
-                                    x[slice_idx],
-                                    lora_b_stacked[slice_idx],
-                                    None,
-                                    offset_left,
-                                    output_slices[slice_idx],
-                                    add_input=add_input)
+            self.apply_expand(
+                y,
+                x[slice_idx],
+                lora_b_stacked[slice_idx],
+                offset_left,
+                output_slices[slice_idx],
+                add_input=add_input,
+            )
             offset_left += output_slices[slice_idx]
         y = y.view_as(y_org)
 
@@ -710,8 +662,8 @@ class PunicaWrapper:
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
         if bias_stacked is not None:
             assert len(bias_stacked) == len(output_slices)
-            y = self.apply_bias_packed_nslice(self.token_lora_indices, y,
-                                              output_slices, bias_stacked)
+            y = self.apply_bias(self.token_lora_indices, y, output_slices,
+                                bias_stacked)
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)

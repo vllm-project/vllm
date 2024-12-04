@@ -288,7 +288,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
         self.lora_config = lora_config
-
+        #
         if isinstance(self.base_layer, ReplicatedLinear):
             lora_a_out_size = lora_config.max_lora_rank
             lora_b_out_size = self.output_size
@@ -307,7 +307,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         else:
             raise NotImplementedError
 
-        lora_bias_out_size = self.output_size
         self.lora_a_stacked = tuple(
             torch.zeros(
                 max_loras,
@@ -327,6 +326,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 device=self.device,
             ) for _ in range(self.n_slices))
         if lora_config.bias_enabled:
+            lora_bias_out_size = lora_b_out_size
             self.bias_stacked = tuple(
                 torch.zeros(
                     max_loras,
@@ -342,6 +342,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
             if self.lora_config.bias_enabled:
+                # Make mypy happy
                 self.bias_stacked = cast(Tuple[torch.Tensor, ...],
                                          self.bias_stacked)
                 self.bias_stacked[s_index][index] = 0
