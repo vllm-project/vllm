@@ -30,7 +30,7 @@ def load_general_plugins():
         # see https://github.com/pytorch/pytorch/blob/8cada5cbe5450e17c26fb8b358116785324537b2/torch/_dynamo/config.py#L158  # noqa
         os.environ['TORCH_COMPILE_DISABLE'] = 'True'
     if current_platform.is_hpu():
-        # NOTE(kzawora): PT HPU lazy backend (PT_HPU_LAZY_MODE = 1) 
+        # NOTE(kzawora): PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
         # torch.compile support
@@ -38,7 +38,7 @@ def load_general_plugins():
         if is_lazy:
             # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
             torch._dynamo.config.disable = True
-            # NOTE(kzawora) mutli-HPU inference with HPUGraphs (lazy-only) 
+            # NOTE(kzawora) multi-HPU inference with HPUGraphs (lazy-only)
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
