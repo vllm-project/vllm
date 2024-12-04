@@ -1,10 +1,8 @@
-r"""Benchmark online serving throughput.
+r"""Benchmark online serving throughput with guided decoding.
 
 On the server side, run one of the following commands:
-    vLLM OpenAI API server
-    vllm serve <your_model> \
-        --swap-space 16 \
-        --disable-log-requests
+    (vLLM OpenAI API server)
+    vllm serve <your_model> --disable-log-requests
 
     (TGI backend)
     ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
@@ -13,8 +11,9 @@ On the client side, run:
     python benchmarks/benchmark_serving.py \
         --backend <backend> \
         --model <your_model> \
-        --dataset-name sharegpt \
-        --dataset-path <path to dataset> \
+        --dataset json \
+        --guided-decoding-ratio <guided_decoding_ratio> \ # By default <guided_decoding_ratio> is 1.0
+        --guided-decoding-backend <guided_decoding_backend> \ # By default <guided_decoding_backend> is xgrammar
         --request-rate <request_rate> \ # By default <request_rate> is inf
         --num-prompts <num_prompts> # By default <num_prompts> is 1000
 
