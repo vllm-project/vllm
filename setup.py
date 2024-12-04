@@ -274,7 +274,7 @@ class repackage_wheel(build_ext):
             import tempfile
 
             # create a temporary directory to store the wheel
-            temp_dir = tempfile.mkdtemp()
+            temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
             wheel_path = os.path.join(temp_dir, wheel_filename)
 
             print(f"Downloading wheel from {wheel_location} to {wheel_path}")
