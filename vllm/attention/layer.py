@@ -186,11 +186,11 @@ class MultiHeadAttention(nn.Module):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(
-            head_size, dtype, 
-            kv_cache_dtype=None,
-            block_size = 16, 
-            is_attention_free=False)
+        attn_backend = get_attn_backend(head_size,
+                                        dtype,
+                                        kv_cache_dtype=None,
+                                        block_size=16,
+                                        is_attention_free=False)
         if attn_backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1):
             attn_backend = _Backend.XFORMERS
 
@@ -222,7 +222,8 @@ class MultiHeadAttention(nn.Module):
                                                           value,
                                                           scale=self.scale)
         elif self.attn_backend == _Backend.TORCH_SDPA:
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+            query, key, value = (x.transpose(1, 2)
+                                 for x in (query, key, value))
             out = F.scaled_dot_product_attention(query,
                                                  key,
                                                  value,

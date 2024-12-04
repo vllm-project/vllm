@@ -4,7 +4,6 @@ from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
 
@@ -21,8 +20,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import SequenceData
-
-from .utils import get_vit_attn_backend
 
 
 def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -205,11 +202,8 @@ class BlipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(
-            self.num_heads_per_partition,
-            self.head_dim,
-            self.scale
-        )
+        self.attn = MultiHeadAttention(self.num_heads_per_partition,
+                                       self.head_dim, self.scale)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,

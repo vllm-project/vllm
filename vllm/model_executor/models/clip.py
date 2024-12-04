@@ -5,7 +5,6 @@ from typing import Iterable, List, Optional, Set, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from PIL import Image
 from transformers import CLIPVisionConfig
 
@@ -24,8 +23,6 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens,
                                    resolve_visual_encoder_outputs)
 from vllm.sequence import SequenceData
-
-from .utils import get_vit_attn_backend
 
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -235,11 +232,8 @@ class CLIPAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(
-            self.num_heads_per_partition,
-            self.head_dim,
-            self.scale
-        )
+        self.attn = MultiHeadAttention(self.num_heads_per_partition,
+                                       self.head_dim, self.scale)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
