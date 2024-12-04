@@ -63,7 +63,7 @@ Values
 | maxReplicas         |         |                       | replicas      |
 +---------------------+---------+-----------------------+---------------+
 | autoscaling.        | int     | ``1``                 | Minimum       |
-| minReplicas |         |                       | replicas      |
+| minReplicas         |         |                       | replicas      |
 +---------------------+---------+-----------------------+---------------+
 | autoscaling.        | int     | ``80``                | Target CPU    |
 | targetCPUUt         |         |                       | utilization   |
