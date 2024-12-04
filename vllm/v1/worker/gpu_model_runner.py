@@ -507,14 +507,15 @@ class GPUModelRunner:
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids_cpu=sampled_token_ids,
-            logprob_token_ids_cpu=(sampler_output.logprob_token_ids.cpu()
-                                   if do_logprobs else None),
-            logprobs_cpu=(sampler_output.logprobs.cpu()
+            logprob_token_ids_cpu=(
+                sampler_output.logprob_token_ids.cpu().numpy()
+                if do_logprobs else None),
+            logprobs_cpu=(sampler_output.logprobs.cpu().numpy()
                           if do_logprobs else None),
             prompt_logprob_token_ids_cpu=(
-                sampler_output.prompt_logprob_token_ids.cpu()
+                sampler_output.prompt_logprob_token_ids.cpu().numpy()
                 if do_prompt_logprobs else None),
-            prompt_logprobs_cpu=(sampler_output.prompt_logprobs.cpu()
+            prompt_logprobs_cpu=(sampler_output.prompt_logprobs.cpu().numpy()
                                  if do_prompt_logprobs else None))
         return model_runner_output
 

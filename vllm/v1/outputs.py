@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+import numpy.typing as npt
 import torch
 
 
@@ -33,11 +34,11 @@ class ModelRunnerOutput:
     sampled_token_ids_cpu: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids_cpu: Optional[torch.Tensor]
+    logprob_token_ids_cpu: Optional[npt.NDArray]
     # [num_reqs, max_num_logprobs + 1]
-    logprobs_cpu: Optional[torch.Tensor]
+    logprobs_cpu: Optional[npt.NDArray]
 
     # [num_reqs, max_num_prompt_logprobs]
-    prompt_logprob_token_ids_cpu: Optional[torch.Tensor]
+    prompt_logprob_token_ids_cpu: Optional[npt.NDArray]
     # [num_reqs, max_num_prompt_logprobs]
-    prompt_logprobs_cpu: Optional[torch.Tensor]
+    prompt_logprobs_cpu: Optional[npt.NDArray]
