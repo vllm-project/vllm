@@ -66,6 +66,9 @@ class Worker:
         self.rank = rank
         self.distributed_init_method = distributed_init_method
 
+        # see https://github.com/NVIDIA/nccl/issues/1234
+        os.environ['NCCL_CUMEM_ENABLE'] = '0'
+
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
