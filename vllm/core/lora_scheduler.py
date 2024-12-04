@@ -48,7 +48,7 @@ class LoRAScheduler:
     def schedule_loras(self):
         """Schedule which LoRAs requests can belong to for the next iteration."""
         if self.lora_config.lora_policy == LoraPolicy.NAIVE:
-            return list(self.all_loras)
+            return list(self.all_loras)[:self.lora_config.max_loras]
         
         assert self.lora_config.lora_policy == LoraPolicy.ROUND_ROBIN
 

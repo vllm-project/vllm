@@ -10,9 +10,11 @@ base_model_name = "meta-llama/Llama-3.2-1B"
 tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
 
+NB_WORDS = 1024 # Generate a long sentence so that the model keeps running for the entirety of max_tokens during benchmarking
+
 def generate_fake_data(num_samples):
     fake = Faker()
-    sentences = [f"lora: {fake.sentence()}" for _ in range(num_samples)]
+    sentences = [f"lora: {fake.sentence(nb_words=NB_WORDS)}" for _ in range(num_samples)]
     return {"text": sentences}
 
 def train_lora(name):
@@ -81,7 +83,7 @@ def test(model):
     outputs = model.generate(
         input_ids=input_ids,
         attention_mask=attention_mask,
-        max_new_tokens=20,
+        max_new_tokens=64,
         do_sample=False,
         temperature=None,
         top_p=None,

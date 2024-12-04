@@ -13,8 +13,7 @@ from faker import Faker
 import pandas as pd
 
 OUT_DIR = "out"
-NB_WORDS = 100
-TOTAL_LORAS = 10
+TOTAL_LORAS = 8
 
 def create_test_prompts(
     distribution: str
@@ -101,6 +100,7 @@ def process_requests(engine: LLMEngine,
                     "lora_policy": engine.lora_config.lora_policy,
                     "num_iters_before_lora_reschedule": engine.lora_config.num_iters_before_reschedule,
                     "distribution": distribution,
+                    "max_loras": engine.lora_config.max_loras,
                     "lora_name": request_output.lora_request.lora_name,
                     "lora_id": request_output.lora_request.lora_int_id,
                     "arrival_time": metrics.arrival_time,
@@ -120,7 +120,7 @@ def process_requests(engine: LLMEngine,
     return metrics_list
 
 
-def initialize_engine(lora_policy: LoraPolicy, num_iters_before_lora_reschedule: int) -> LLMEngine:
+def initialize_engine(max_loras: int, lora_policy: LoraPolicy, num_iters_before_lora_reschedule: int) -> LLMEngine:
     """Initialize the LLMEngine."""
     # max_loras: controls the number of LoRAs that can be used in the same
     #   batch. Larger numbers will cause higher memory usage, as each LoRA
@@ -131,7 +131,7 @@ def initialize_engine(lora_policy: LoraPolicy, num_iters_before_lora_reschedule:
     # max_cpu_loras: controls the size of the CPU LoRA cache.
     engine_args = EngineArgs(model="meta-llama/Llama-3.2-1B",
                              enable_lora=True,
-                             max_loras=2,
+                             max_loras=max_loras,
                              max_lora_rank=8,
                              max_cpu_loras=TOTAL_LORAS,
                              max_num_seqs=256,
@@ -146,22 +146,23 @@ def initialize_engine(lora_policy: LoraPolicy, num_iters_before_lora_reschedule:
 def main():
     """Main function that sets up and runs the prompt processing."""
     metrics_list = []
-    for distribution in ["uniform", "normal"]:
+    for distribution in ["uniform"]: #, "normal"]:
         test_prompts = create_test_prompts(distribution)
         for lora_policy in [LoraPolicy.NAIVE, LoraPolicy.ROUND_ROBIN]:
             for num_iters_before_lora_reschedule in [1, 4, 16, 64]:
-                engine = initialize_engine(lora_policy, num_iters_before_lora_reschedule)
-                prompts = [(
-                    sentence,
-                    SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
-                        max_tokens=64,
-                        stop_token_ids=[128001]),
-                    LoRARequest(f"lora{lora_id}", lora_id, f"{OUT_DIR}/lora{lora_id}")
-                ) for sentence, lora_id in test_prompts]
-                metrics_list.extend(process_requests(engine, prompts, distribution))
-                del engine
+                for max_loras in [1, 2, 4, 8]:
+                    engine = initialize_engine(max_loras, lora_policy, num_iters_before_lora_reschedule)
+                    prompts = [(
+                        sentence,
+                        SamplingParams(temperature=0.0,
+                            logprobs=1,
+                            prompt_logprobs=1,
+                            max_tokens=64,
+                            stop_token_ids=[128001]),
+                        LoRARequest(f"lora{lora_id}", lora_id, f"{OUT_DIR}/lora{lora_id}")
+                    ) for sentence, lora_id in test_prompts]
+                    metrics_list.extend(process_requests(engine, prompts, distribution))
+                    del engine
     metrics_df = pd.DataFrame(metrics_list)
     metrics_df.to_csv(f"{OUT_DIR}/metrics.csv", index=False)
 
