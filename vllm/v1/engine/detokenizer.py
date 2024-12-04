@@ -11,6 +11,7 @@ from vllm.transformers_utils.detokenizer_utils import (
     detokenize_logprob_incrementally_in_place)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
+import numpy.typing as npt
 
 logger = init_logger(__name__)
 
@@ -105,26 +106,62 @@ class IncrementalDetokenizer:
             logprobs=[] if do_logprobs else None,
             prompt_logprobs=[] if do_prompt_logprobs else None)
 
+    def _pythonize_maybe_detokenize_sample_logprobs(
+        new_logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]],
+        detokenize: bool,
+    ) -> SampleLogprobs:
+        pass
+
+    def _pythonize_maybe_detokenize_prompt_logprobs(
+        new_prompt_logprobs: Optional[npt.NDArray],
+        new_prompt_logprob_token_ids: Optional[npt.NDArray],
+        detokenize: bool,
+    ) -> PromptLogprobs:
+        pass
+
     def add_tokens(
         self,
         new_token_ids: List[int],
-        new_logprobs: Optional[SampleLogprobs],
-        new_prompt_logprobs: Optional[PromptLogprobs],
+        new_logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]],
+        new_prompt_logprobs: Optional[npt.NDArray],
+        new_prompt_logprob_token_ids: Optional[npt.NDArray],
         finish_reason: Optional[str],
         stop_reason: Optional[str],
     ) -> Optional[RequestOutput]:
         """
         Update RequestState for the request_id by:
-            1) Detokenize the new token ids incrementally.
-            1a) If necessary, detokenize logprobs incrementally
-            1b) If necessary, detokenize prompt logprobs incrementally
-            2) Update the RequestOutput with the new text.
+            1) If necessary, detokenize logprobs *non*-incrementally
+            2) If necessary, detokenize prompt logprobs *non*-incrementally
+            3) Detokenize the new token ids incrementally.
+            4) Update the RequestOutput with the new text.
         """
 
         do_logprobs = new_logprobs is not None and len(new_logprobs) > 0
         assert not do_logprobs or len(new_logprobs) == len(new_token_ids)
 
-        # 1) Detokenize the new token ids incrementally. If necessary,
+        # 1) If required, Pythonize & detokenize sample logprobs
+        if do_logprobs:
+            # Detokenize individual token logprobs in-place
+            logprob_dict = new_logprobs[tdx]
+            assert logprob_dict is not None
+            detokenize_logprob_incrementally_in_place(
+                tokenizer=self.tokenizer,
+                logprob_dict=logprob_dict,
+                input_ids_prefix=self.token_ids[0:-1],
+                prev_tokens=self.tokens,
+                prefix_offset=self.prefix_offset,
+                read_offset=self.read_offset,
+                skip_special_tokens=self.skip_special_tokens,
+                spaces_between_special_tokens=self.
+                spaces_between_special_tokens,
+            )
+            self.logprobs.append(logprob_dict)
+
+        # 2) If necessary, detokenize prompt logprobs incrementally
+        if new_prompt_logprobs is not None and len(new_prompt_logprobs) > 0:
+            self.prompt_logprobs.extend(new_prompt_logprobs)
+
+        # 3) Detokenize the new token ids incrementally. If necessary,
         #    detokenize logprobs.
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
@@ -143,33 +180,12 @@ class IncrementalDetokenizer:
                  spaces_between_special_tokens,
              )
 
-            if do_logprobs:
-                # Detokenize individual token logprobs in-place
-                logprob_dict = new_logprobs[tdx]
-                assert logprob_dict is not None
-                detokenize_logprob_incrementally_in_place(
-                    tokenizer=self.tokenizer,
-                    logprob_dict=logprob_dict,
-                    input_ids_prefix=self.token_ids[0:-1],
-                    prev_tokens=self.tokens,
-                    prefix_offset=self.prefix_offset,
-                    read_offset=self.read_offset,
-                    skip_special_tokens=self.skip_special_tokens,
-                    spaces_between_special_tokens=self.
-                    spaces_between_special_tokens,
-                )
-                self.logprobs.append(logprob_dict)
-
             self.tokens.extend(new_tokens)
             self.prefix_offset = prefix_offset
             self.read_offset = read_offset
             self.output_text += new_decoded_token_text
 
             decoded_text += new_decoded_token_text
-
-        # 1b) If necessary, detokenize prompt logprobs incrementally
-        if new_prompt_logprobs is not None and len(new_prompt_logprobs) > 0:
-            self.prompt_logprobs.extend(new_prompt_logprobs)
 
         # 2) Evaluate stop criteria.
         if self.stop:

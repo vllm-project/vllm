@@ -67,10 +67,10 @@ class Request:
             None if self.max_logprobs is None else [])
         # The number of prompt logprobs is known is advance, so preallocate an
         # NDArray
-        self.prompt_logprobs: Optional[np.NDArray] = (
+        self.prompt_logprobs: Optional[npt.NDArray] = (
             None if self.max_prompt_logprobs is None else np.empty(
                 (self.num_prompt_tokens, self.max_prompt_logprobs)))
-        self.prompt_logprob_token_ids: Optional[np.NDArray] = (
+        self.prompt_logprob_token_ids: Optional[npt.NDArray] = (
             None if self.max_prompt_logprobs is None else np.empty(
                 (self.num_prompt_tokens, self.max_prompt_logprobs),
                 dtype=np.int32))
