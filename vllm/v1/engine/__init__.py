@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import msgspec
-import numpy as np
 import numpy.typing as npt
 
 from vllm.lora.request import LoRARequest
@@ -59,8 +58,8 @@ class EngineCoreOutput(msgspec.Struct,
     new_token_ids: List[int]
     finished: bool
     logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]]
-    prompt_logprobs: Optional[np.NDArray]
-    prompt_logprobs_token_ids: Optional[np.NDArray]
+    prompt_logprobs: Optional[npt.NDArray]
+    prompt_logprobs_token_ids: Optional[npt.NDArray]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
 

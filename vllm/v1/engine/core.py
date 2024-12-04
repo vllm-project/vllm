@@ -128,6 +128,7 @@ class EngineCore:
         engine_core_outputs: List[EngineCoreOutput] = []
         for request in scheduler.running:
             req_id = request.request_id
+            prev_num_computed_tokens = request.num_computed_tokens
             request.num_computed_tokens += num_scheduled_tokens[req_id]
             req_index = model_runner_output.req_id_to_index[req_id]
             num_new_tokens = 1
@@ -155,29 +156,33 @@ class EngineCore:
                     # prompt logprobs were requested & a nonzero number of
                     # prompt tokens were computed in this step for this request.
                     #
+                    # Pythonization is deferred to outside the engine core.
+                    #
                     # Note that this scenario returns an EngineCoreOutput which
                     # is empty except for the prompt logprobs which were
                     # computed for these prompt tokens.
                     #
                     # Note: new_prompt_logprobs will be used later to build the
                     # engine core output
-
+                    logprob_cnt = max_prompt_logprobs
                     mr_output_slice_upper_index = (curr_prompt_base_idx +
                                                    num_new_prompt_tokens)
                     new_prompt_logprobs = (
                         model_runner_output.prompt_logprobs_cpu[
-                            curr_prompt_base_idx:mr_output_slice_upper_index])
+                            curr_prompt_base_idx:mr_output_slice_upper_index,
+                            0:logprob_cnt])
                     new_prompt_logprob_token_ids = (
                         model_runner_output.prompt_logprob_token_ids_cpu[
-                            curr_prompt_base_idx:mr_output_slice_upper_index])
+                            curr_prompt_base_idx:mr_output_slice_upper_index,
+                            0:logprob_cnt])
 
-                    req_slice_upper_index = (request.num_computed_tokens +
+                    req_slice_upper_index = (prev_num_computed_tokens +
                                              num_new_prompt_tokens)
                     request.prompt_logprobs[
-                        request.num_computed_tokens:
+                        prev_num_computed_tokens:
                         req_slice_upper_index] = new_prompt_logprobs
                     request.prompt_logprob_token_ids[
-                        request.num_computed_tokens:
+                        prev_num_computed_tokens:
                         req_slice_upper_index] = new_prompt_logprob_token_ids
                 else:
                     curr_prompt_base_idx += num_new_prompt_tokens
