@@ -12,10 +12,10 @@ On the client side, run:
         --backend <backend> \
         --model <your_model> \
         --dataset json \
-        --guided-decoding-ratio <guided_decoding_ratio> \ # By default <guided_decoding_ratio> is 1.0
-        --guided-decoding-backend <guided_decoding_backend> \ # By default <guided_decoding_backend> is xgrammar
-        --request-rate <request_rate> \ # By default <request_rate> is inf
-        --num-prompts <num_prompts> # By default <num_prompts> is 1000
+        --guided-decoding-ratio 1.0 \
+        --guided-decoding-backend xgrammar \
+        --request-rate 10 \
+        --num-prompts 1000
 
     when using tgi backend, add
         --endpoint /generate_stream
