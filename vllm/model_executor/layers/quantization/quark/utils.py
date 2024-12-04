@@ -1,5 +1,6 @@
 import re
-from typing import Any, Optional, Iterable
+from typing import Any, Iterable, Optional
+
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FUSED_LAYER_NAME_MAPPING)
 
