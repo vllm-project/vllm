@@ -338,7 +338,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
-        self.self_attn = DeepseekV2Attention(
+        # self.self_attn = DeepseekV2Attention(
+        self.self_attn = DeepseekV2MLAAttention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -404,6 +405,167 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+class DeepseekV2MLAAttention(nn.Module):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        hidden_size: int,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        # Note(simon): Added some symbols for shapes, hoping to help clarity.
+        self.hidden_size = hidden_size # H
+        self.qk_nope_head_dim = qk_nope_head_dim # P
+        self.qk_rope_head_dim = qk_rope_head_dim # R
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim # P + R
+        self.v_head_dim = v_head_dim # V
+
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank # L
+
+        self.num_heads = num_heads # N
+        tp_size = get_tensor_model_parallel_world_size()
+        assert num_heads % tp_size == 0
+        self.num_local_heads = num_heads // tp_size # N'
+
+        self.scaling = self.qk_head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+
+        # NOTE(simon): This needs to implemented with the matrices absorption algorithm.
+        assert q_lora_rank is None, "Currently not supported"
+
+        if self.q_lora_rank is not None:
+            self.q_a_proj = ReplicatedLinear(self.hidden_size,
+                                             self.q_lora_rank,
+                                             bias=False,
+                                             quant_config=quant_config,
+                                             prefix=f"{prefix}.q_a_proj")
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
+                                         eps=config.rms_norm_eps)
+            self.q_b_proj = ColumnParallelLinear(q_lora_rank,
+                                                 self.num_heads *
+                                                 self.qk_head_dim,
+                                                 bias=False,
+                                                 quant_config=quant_config,
+                                                 prefix=f"{prefix}.q_b_proj")
+        else:
+            # (H -> N(P+R))
+            self.q_proj = ColumnParallelLinear(self.hidden_size,
+                                               self.num_heads *
+                                               self.qk_head_dim,
+                                               bias=False,
+                                               quant_config=quant_config,
+                                               prefix=f"{prefix}.q_proj")
+
+        # (H -> (L+R))
+        self.kv_a_proj_with_mqa = ReplicatedLinear(
+            self.hidden_size,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa")
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
+                                      eps=config.rms_norm_eps)
+        # ((L -> (N(P+V)))
+        self.kv_b_proj = ColumnParallelLinear(
+            self.kv_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_b_proj")
+        # (NV -> H)
+        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
+                                        self.hidden_size,
+                                        bias=False,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.o_proj")
+
+        rope_scaling["rope_type"] = 'deepseek_yarn'
+        self.rotary_emb = get_rope(qk_rope_head_dim,
+                                   rotary_dim=qk_rope_head_dim,
+                                   max_position=max_position_embeddings,
+                                   base=rope_theta,
+                                   rope_scaling=rope_scaling,
+                                   is_neox_style=False)
+        if rope_scaling:
+            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
+            scaling_factor = rope_scaling["factor"]
+            mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
+            self.scaling = self.scaling * mscale * mscale
+
+        self.attn = Attention(num_heads=self.num_local_heads,
+                              head_size=256,
+                              scale=self.scaling,
+                              num_kv_heads=self.num_local_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        # BH -> B(N(P+R)) -> BN(P+R)
+        if self.q_lora_rank is not None:
+            q = self.q_a_proj(hidden_states)[0]
+            q = self.q_a_layernorm(q)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        else:
+            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+
+        # BN(P+R) -> BNP, BNR
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        # BH -> B(L+R)
+        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        # B(L+R) -> BL, BR
+        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        # B(L+R) -> B1(L+R)
+        latent_cache = latent_cache.unsqueeze(1)
+        # BL -> BL
+        kv_a = self.kv_a_layernorm(kv_a.contiguous())
+        # BL -> B(N'(P+V))
+        kv = self.kv_b_proj(kv_a)[0]
+        # B(N'(P+V)) -> BN'(P+V)
+        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+        # BN'(P+V) -> BN'P, BN'V
+        k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # B1(L+R) -> B1R
+        k_pe = latent_cache[:, :, self.kv_lora_rank:]
+        # BNR, B1R -> BNR, B1R
+        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        # BN(P+R)
+        q[..., self.qk_nope_head_dim:] = q_pe
+        # BN(P+R)
+        k = torch.empty_like(q)
+        k[..., :self.qk_nope_head_dim] = k_nope
+        k[..., self.qk_nope_head_dim:] = k_pe
+
+        q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0).view(-1, self.num_local_heads * 256)
+        k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0).view(-1, self.num_local_heads * 256)
+        v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0).view(-1, self.num_local_heads * 256)
+
+        # B(N'V)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = attn_output.view(-1, self.num_local_heads, 256)[..., :self.v_head_dim].reshape(-1, self.num_local_heads * self.v_head_dim)
+
+        # B(N'V) -> BH
+        output, _ = self.o_proj(attn_output)
+        return output
 
 @support_torch_compile
 class DeepseekV2Model(nn.Module):
