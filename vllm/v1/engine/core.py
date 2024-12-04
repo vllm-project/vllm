@@ -14,7 +14,6 @@ from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.sequence import Logprob
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
@@ -152,7 +151,6 @@ class EngineCore:
                                               and num_new_prompt_tokens > 0)
 
                 if request_do_prompt_logprobs:
-
                     # Construct prompt logprobs, under the condition that
                     # prompt logprobs were requested & a nonzero number of
                     # prompt tokens were computed in this step for this request.
@@ -160,34 +158,27 @@ class EngineCore:
                     # Note that this scenario returns an EngineCoreOutput which
                     # is empty except for the prompt logprobs which were
                     # computed for these prompt tokens.
+                    #
+                    # Note: new_prompt_logprobs will be used later to build the
+                    # engine core output
 
-                    slice_upper_index = (curr_prompt_base_idx +
-                                         num_new_prompt_tokens)
-                    prompt_logprob_token_ids = prompt_logprob_token_ids_list[
-                        curr_prompt_base_idx:slice_upper_index]
-                    prompt_logprob_values = prompt_logprob_values_list[
-                        curr_prompt_base_idx:slice_upper_index]
-                    curr_prompt_base_idx = slice_upper_index
+                    mr_output_slice_upper_index = (curr_prompt_base_idx +
+                                                   num_new_prompt_tokens)
+                    new_prompt_logprobs = (
+                        model_runner_output.prompt_logprobs_cpu[
+                            curr_prompt_base_idx:mr_output_slice_upper_index])
+                    new_prompt_logprob_token_ids = (
+                        model_runner_output.prompt_logprob_token_ids_cpu[
+                            curr_prompt_base_idx:mr_output_slice_upper_index])
 
-                    logprob_cnt = max_prompt_logprobs
-                    prompt_logprobs = [{
-                        lpt: Logprob(lpv, (idx + 1), None)
-                        for idx, (lpv, lpt) in enumerate(
-                            zip(plp_tok_values[0:logprob_cnt],
-                                plp_tok_token_ids[0:logprob_cnt]))
-                    } for plp_tok_values, plp_tok_token_ids in zip(
-                        prompt_logprob_values, prompt_logprob_token_ids)]
-
-                    if not request.prompt_logprobs:
-                        # Ensure that None is the first prompt logprob
-                        prompt_logprobs = [None] + prompt_logprobs
-
-                    curr_prompt_base_idx = slice_upper_index
-
-                    prompt_slice_range_upper = request.num_computed_tokens
-                    prompt_slice_range_lower = (prompt_slice_range_upper -
-                                                num_new_prompt_tokens)
-                    request.prompt_logprobs.extend(prompt_logprobs)
+                    req_slice_upper_index = (request.num_computed_tokens +
+                                             num_new_prompt_tokens)
+                    request.prompt_logprobs[
+                        request.num_computed_tokens:
+                        req_slice_upper_index] = new_prompt_logprobs
+                    request.prompt_logprob_token_ids[
+                        request.num_computed_tokens:
+                        req_slice_upper_index] = new_prompt_logprob_token_ids
                 else:
                     curr_prompt_base_idx += num_new_prompt_tokens
             else:
@@ -213,40 +204,11 @@ class EngineCore:
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
                 if request_do_logprobs:
-                    # Construct logprobs, if requested (TODO: assumes one
-                    # generated token).
-                    logprob_token_ids = logprob_token_ids_list[req_index]
-                    logprob_values = logprob_values_list[req_index]
-                    logprob_cnt = max_logprobs
-                    if token_id not in logprob_token_ids[0:max_logprobs]:
-                        # Sampled token is not in the in the top logprobs;
-                        # inject it & resort, ensuring that excess logprobs
-                        # not requested by the user have -inf probability
-                        logprob_values[max_logprobs:-1] = (
-                            [float('-inf')] *
-                            (len(logprob_values) - 1 - max_logprobs))
-
-                        indices = sorted(range(len(logprob_values)),
-                                         key=lambda k: logprob_values[k],
-                                         reverse=True)
-                        logprob_values = [logprob_values[i] for i in indices]
-                        logprob_token_ids = [
-                            logprob_token_ids[i] for i in indices
-                        ]
-
-                        # There will be one more logprob than the user requested
-                        logprob_cnt = max_logprobs + 1
-
-                    # Only keep the number of logprobs specified by the request
-                    # (plus possibly the sampled token id & its logprob)
-                    logprob_values = logprob_values[0:logprob_cnt]
-                    logprob_token_ids = logprob_token_ids[0:logprob_cnt]
-
-                    request.logprobs.append({
-                        lpt: Logprob(lpv, (idx + 1), None)
-                        for idx, (lpv, lpt) in enumerate(
-                            zip(logprob_values, logprob_token_ids))
-                    })
+                    # Slice out this request's sample logprobs; defer
+                    # pythonization to be carried out in the frontend.
+                    request.logprobs.append(
+                        (model_runner_output.logprobs_cpu[req_index],
+                         model_runner_output.logprob_token_ids_cpu[req_index]))
                 request.append_output_token_ids(token_id)
                 # TODO: Update the KV cache manager for prefix caching.
 
@@ -265,9 +227,9 @@ class EngineCore:
                     stop_reason=request.stop_reason,
                     logprobs=(request.logprobs[-num_new_tokens:]
                               if request_do_logprobs else None),
-                    prompt_logprobs=(prompt_logprobs
+                    prompt_logprobs=(new_prompt_logprobs
                                      if request_do_prompt_logprobs else None),
-                    prompt_logprobs_token_ids=(request.prompt_token_ids
+                    prompt_logprobs_token_ids=(new_prompt_logprob_token_ids
                                                if request_do_prompt_logprobs
                                                else None))
                 engine_core_outputs.append(output)
@@ -287,14 +249,9 @@ class EngineCore:
                         finish_reason=request.get_finished_reason(),
                         stop_reason=request.stop_reason,
                         logprobs=[] if request_do_logprobs else None,
-                        prompt_logprobs=(
-                            prompt_logprobs if request_do_prompt_logprobs else
-                            ([] if request_do_prompt_logprobs else None)),
-                        prompt_logprobs_token_ids=(
-                            request.prompt_token_ids[prompt_slice_range_lower:
-                                                     prompt_slice_range_upper]
-                            if request_do_prompt_logprobs else
-                            ([] if request_do_prompt_logprobs else None))))
+                        prompt_logprobs=new_prompt_logprobs,
+                        prompt_logprobs_token_ids=new_prompt_logprob_token_ids)
+                )
 
             new_running.append(request)
         scheduler.running = new_running

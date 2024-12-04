@@ -20,7 +20,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
 if TYPE_CHECKING:
@@ -474,7 +474,7 @@ class GPUModelRunner:
         hidden_states = hidden_states[:num_scheduled_tokens]
 
         # Sample the next token and get logprobs if needed.
-        sampler_output = self.model.sample(
+        sampler_output: SamplerOutput = self.model.sample(
             logits=self.model.compute_logits(hidden_states, None),
             sampling_metadata=sampling_metadata,
         )

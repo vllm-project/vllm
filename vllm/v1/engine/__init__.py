@@ -1,13 +1,14 @@
 import enum
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import msgspec
+import numpy as np
+import numpy.typing as npt
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import PromptLogprobs, SampleLogprobs
 
 
 @dataclass
@@ -57,9 +58,9 @@ class EngineCoreOutput(msgspec.Struct,
     request_id: str
     new_token_ids: List[int]
     finished: bool
-    logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
-    prompt_logprobs_token_ids: Optional[List[int]]
+    logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]]
+    prompt_logprobs: Optional[np.NDArray]
+    prompt_logprobs_token_ids: Optional[np.NDArray]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
 

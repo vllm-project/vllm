@@ -1,5 +1,8 @@
 import enum
-from typing import List, Optional, Union, Tuple
+from typing import List, Optional, Tuple, Union
+
+import numpy as np
+import numpy.typing as npt
 
 from vllm.inputs import DecoderOnlyInputs, SingletonInputsAdapter, token_inputs
 from vllm.lora.request import LoRARequest
@@ -8,8 +11,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.utils import ConstantList
-import numpy as np
-import numpy.typing as npt
 
 
 class Request:
@@ -69,6 +70,10 @@ class Request:
         self.prompt_logprobs: Optional[np.NDArray] = (
             None if self.max_prompt_logprobs is None else np.empty(
                 (self.num_prompt_tokens, self.max_prompt_logprobs)))
+        self.prompt_logprob_token_ids: Optional[np.NDArray] = (
+            None if self.max_prompt_logprobs is None else np.empty(
+                (self.num_prompt_tokens, self.max_prompt_logprobs),
+                dtype=np.int32))
         self.num_computed_tokens = 0
 
         mm_positions = self.inputs.multi_modal_placeholders
