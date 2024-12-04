@@ -301,8 +301,8 @@ Values
 | urces.limits.memory |         |                       | co          |
 |                     |         |                       | nfiguration |
 +---------------------+---------+-----------------------+-------------+
-| resources.reques    | int     | ``1``                 | Number of   |
-| ts.”nvidia.com/gpu” |         |                       | gpus used   |
+| resources.requests. | int     | ``1``                 | Number of   |
+| ”nvidia.com/gpu”    |         |                       | gpus used   |
 +---------------------+---------+-----------------------+-------------+
 | resources.          | int     | ``4``                 | Number of   |
 | requests.cpu        |         |                       | CPUs        |
