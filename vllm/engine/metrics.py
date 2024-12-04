@@ -473,13 +473,13 @@ class LoggingStatLogger(StatLoggerBase):
             )
             if (stats.cpu_prefix_cache_hit_rate >= 0
                     or stats.gpu_prefix_cache_hit_rate >= 0):
-                logger.info(
+                log_fn(
                     "Prefix cache hit rate: GPU: %.2f%%, CPU: %.2f%%",
                     stats.gpu_prefix_cache_hit_rate * 100,
                     stats.cpu_prefix_cache_hit_rate * 100,
                 )
             if self.spec_decode_metrics is not None:
-                logger.info(
+                log_fn(
                     self._format_spec_decode_metrics_str(
                         self.spec_decode_metrics))
 
@@ -599,9 +599,9 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.time_queue_requests)
         self._log_histogram(self.metrics.histogram_inference_time_request,
                             stats.time_inference_requests)
-        self._log_histogram(self.metrics.histogram_decode_time_request,
-                            stats.time_prefill_requests)
         self._log_histogram(self.metrics.histogram_prefill_time_request,
+                            stats.time_prefill_requests)
+        self._log_histogram(self.metrics.histogram_decode_time_request,
                             stats.time_decode_requests)
         self._log_histogram(self.metrics.histogram_time_in_queue_request,
                             stats.time_in_queue_requests)

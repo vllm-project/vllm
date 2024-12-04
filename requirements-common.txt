@@ -19,8 +19,9 @@ prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer >= 0.10.9, < 0.11
 outlines >= 0.0.43, < 0.1
+xgrammar >= 0.1.5; platform_machine == "x86_64"
 typing_extensions >= 4.10
-filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
+filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
 partial-json-parser # used for parsing partial JSON outputs
 pyzmq
 msgspec

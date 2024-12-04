@@ -18,14 +18,14 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.logger import init_logger
-from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
 
 def _get_embedding(
-    output: EmbeddingOutput,
+    output: PoolingOutput,
     encoding_format: Literal["float", "base64"],
 ) -> Union[List[float], str]:
     if encoding_format == "float":
@@ -40,7 +40,7 @@ def _get_embedding(
 
 
 def request_output_to_embedding_response(
-        final_res_batch: List[EmbeddingRequestOutput], request_id: str,
+        final_res_batch: List[PoolingRequestOutput], request_id: str,
         created_time: int, model_name: str,
         encoding_format: Literal["float", "base64"]) -> EmbeddingResponse:
     data: List[EmbeddingResponseData] = []
@@ -156,19 +156,20 @@ class OpenAIServingEmbedding(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                request_prompts, engine_prompts = self._preprocess_completion(
-                    request,
-                    tokenizer,
-                    request.input,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
-                    add_special_tokens=request.add_special_tokens,
-                )
+                (request_prompts,
+                 engine_prompts) = await self._preprocess_completion(
+                     request,
+                     tokenizer,
+                     request.input,
+                     truncate_prompt_tokens=truncate_prompt_tokens,
+                     add_special_tokens=request.add_special_tokens,
+                 )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
+        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
 
@@ -206,7 +207,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: List[Optional[EmbeddingRequestOutput]]
+        final_res_batch: List[Optional[PoolingRequestOutput]]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
@@ -214,7 +215,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(List[EmbeddingRequestOutput],
+            final_res_batch_checked = cast(List[PoolingRequestOutput],
                                            final_res_batch)
 
             response = request_output_to_embedding_response(

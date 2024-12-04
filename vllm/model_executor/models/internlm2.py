@@ -27,7 +27,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -319,7 +319,21 @@ class InternLM2Model(nn.Module):
         return hidden_states
 
 
-class InternLM2ForCausalLM(nn.Module, SupportsPP):
+class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+    packed_modules_mapping = {
+        "wqkv": ["wqkv"],
+        "gate_up_proj": ["w1", "w3"],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "wqkv",
+        "wo",
+        "gate_up_proj",
+        "w2",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(self,
                  *,
@@ -329,8 +343,12 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.config = config
         self.quant_config = quant_config
+        self.lora_config = lora_config
+
         self.model = model_type(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
         self.output = ParallelLMHead(config.vocab_size,

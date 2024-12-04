@@ -53,8 +53,8 @@ class CompletionOutput:
 
 
 @dataclass
-class EmbeddingOutput:
-    """The output data of one completion output of a request.
+class PoolingOutput:
+    """The output data of one pooling output of a request.
 
     Args:
         embedding: The embedding vector, which is a list of floats. The
@@ -63,7 +63,7 @@ class EmbeddingOutput:
     embedding: List[float]
 
     def __repr__(self) -> str:
-        return (f"EmbeddingOutput("
+        return (f"PoolingOutput("
                 f"embedding={len(self.embedding)})")
 
 
@@ -316,18 +316,18 @@ class RequestOutput:
                 f"multi_modal_placeholders={self.multi_modal_placeholders})")
 
 
-class EmbeddingRequestOutput:
+class PoolingRequestOutput:
     """
-    The output data of an embedding request to the LLM.
+    The output data of a pooling request to the LLM.
 
     Args:
-        request_id (str): A unique identifier for the embedding request.
-        outputs (EmbeddingOutput): The embedding results for the given input.
+        request_id (str): A unique identifier for the pooling request.
+        outputs (PoolingOutput): The pooling results for the given input.
         prompt_token_ids (List[int]): A list of token IDs used in the prompt.
-        finished (bool): A flag indicating whether the embedding is completed.
+        finished (bool): A flag indicating whether the pooling is completed.
     """
 
-    def __init__(self, request_id: str, outputs: "EmbeddingOutput",
+    def __init__(self, request_id: str, outputs: "PoolingOutput",
                  prompt_token_ids: List[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
@@ -336,11 +336,11 @@ class EmbeddingRequestOutput:
 
     @classmethod
     def from_seq_group(cls,
-                       seq_group: 'SequenceGroup') -> "EmbeddingRequestOutput":
+                       seq_group: 'SequenceGroup') -> "PoolingRequestOutput":
         if seq_group.embeddings is None:
             raise ValueError(
                 "Embeddings are missing in seq_group for EmbeddingRequest.")
-        output = EmbeddingOutput(seq_group.embeddings)
+        output = PoolingOutput(seq_group.embeddings)
         prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()
 
@@ -348,15 +348,15 @@ class EmbeddingRequestOutput:
 
     def __repr__(self):
         """
-        Returns a string representation of an EmbeddingRequestOutput instance.
+        Returns a string representation of an PoolingRequestOutput instance.
 
         The representation includes the request_id and the number of outputs,
-        providing a quick overview of the embedding request's results.
+        providing a quick overview of the pooling request's results.
 
         Returns:
-            str: A string representation of the EmbeddingRequestOutput instance.
+            str: A string representation of the PoolingRequestOutput instance.
         """
-        return (f"EmbeddingRequestOutput(request_id='{self.request_id}', "
+        return (f"PoolingRequestOutput(request_id='{self.request_id}', "
                 f"outputs={repr(self.outputs)}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"finished={self.finished})")
@@ -415,7 +415,30 @@ class RequestOutputFactory:
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
-            return EmbeddingRequestOutput.from_seq_group(seq_group)
+            return PoolingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group, use_cache,
                                                 seq_id_to_seq_group)
+
+
+def __getattr__(name: str):
+    import warnings
+
+    if name == "EmbeddingOutput":
+        msg = ("EmbeddingOutput has been renamed to PoolingOutput. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PoolingOutput
+
+    if name == "EmbeddingRequestOutput":
+        msg = ("EmbeddingRequestOutput has been renamed to "
+               "PoolingRequestOutput. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PoolingRequestOutput
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

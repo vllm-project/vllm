@@ -9,6 +9,7 @@ from typing_extensions import TypeAlias
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import ClassRegistry
 
 from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
@@ -62,8 +63,8 @@ class MultiModalRegistry:
             plugins: Sequence[MultiModalPlugin] = DEFAULT_PLUGINS) -> None:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
-        self._processor_factories: Dict[Type[nn.Module],
-                                        MultiModalProcessorFactory] = {}
+        self._processor_factories = ClassRegistry[nn.Module,
+                                                  MultiModalProcessorFactory]()
 
         # This is used for non-multimodal models
         self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
