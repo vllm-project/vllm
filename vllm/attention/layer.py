@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from vllm.attention import AttentionMetadata, AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
@@ -166,6 +167,68 @@ class Attention(nn.Module):
         s += f", scale={self.impl.scale}"  # type: ignore
         s += f", backend={self.impl.__class__.__name__}"
         return s
+
+
+class MultiHeadAttention(nn.Module):
+    """Multi-headed attention without any cache, used for ViT."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: Optional[int] = None,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = scale
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+
+        dtype = torch.get_default_dtype()
+        attn_backend = get_attn_backend(head_size,
+                                        dtype,
+                                        kv_cache_dtype=None,
+                                        block_size=16,
+                                        is_attention_free=False)
+        if attn_backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
+            attn_backend = _Backend.XFORMERS
+
+        self.attn_backend = attn_backend if attn_backend in {
+            _Backend.TORCH_SDPA, _Backend.XFORMERS
+        } else _Backend.TORCH_SDPA
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        """Input shape: batch_size x seq_len x hidden_size"""
+        # TODO(Isotr0py): Use existing backend implementations and support FA2
+        bsz, q_len, _ = query.size()
+        kv_len = key.size(1)
+
+        query = query.view(bsz, q_len, self.num_heads, self.head_size)
+        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+
+        if self.attn_backend == _Backend.XFORMERS:
+            from xformers import ops as xops
+
+            out = xops.memory_efficient_attention_forward(query,
+                                                          key,
+                                                          value,
+                                                          scale=self.scale)
+        elif self.attn_backend == _Backend.TORCH_SDPA:
+            query, key, value = (x.transpose(1, 2)
+                                 for x in (query, key, value))
+            out = F.scaled_dot_product_attention(query,
+                                                 key,
+                                                 value,
+                                                 scale=self.scale)
+            out = out.transpose(1, 2)
+        return out.view(bsz, q_len, -1)
 
 
 def unified_attention(

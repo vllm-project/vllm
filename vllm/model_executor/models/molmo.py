@@ -13,6 +13,7 @@ from torch.nn import functional as F
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.layer import MultiHeadAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -38,14 +39,12 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.platforms import _Backend
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.processor import get_processor
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
-                    is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -188,13 +187,11 @@ class MultiHeadDotProductAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
-        if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
-        }:
-            raise RuntimeError(
-                f"Molmo does not support {self.attn_backend} backend now.")
+        self.scale = self.head_dim**-0.5
+        self.attn = MultiHeadAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.scale,
+                                       num_kv_heads=self.num_kv_heads)
 
     def forward(self,
                 inputs_q: torch.Tensor,
@@ -210,25 +207,8 @@ class MultiHeadDotProductAttention(nn.Module):
         xq, _ = self.wq(inputs_q)
         xk, _ = self.wk(inputs_k)
         xv, _ = self.wv(inputs_v)
-        q_shape = xq.size()[:-1] + (self.num_heads, self.head_dim)
-        kv_shape = xk.size()[:-1] + (self.num_kv_heads, self.head_dim)
-        xq = xq.view(*q_shape)
-        xk = xk.view(*kv_shape)
-        xv = xv.view(*kv_shape)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            from flash_attn import flash_attn_func
-            output = flash_attn_func(xq, xk, xv, dropout_p=0.0, causal=False)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            xq, xk, xv = (rearrange(x, "b s h d -> b h s d")
-                          for x in (xq, xk, xv))
-            output = F.scaled_dot_product_attention(xq, xk, xv)
-            output = rearrange(output, "b h s d -> b s h d ")
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            output = xops.memory_efficient_attention_forward(xq, xk, xv, p=0)
-
-        output = rearrange(output, "b s h d -> b s (h d)").contiguous()
+        output = self.attn(xq, xk, xv)
         output, _ = self.wo(output)
 
         return output
