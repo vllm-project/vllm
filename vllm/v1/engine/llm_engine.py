@@ -14,7 +14,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -155,11 +155,14 @@ class LLMEngine:
     def step(self) -> List[RequestOutput]:
 
         # 1) Get EngineCoreOutput from the EngineCore.
-        engine_core_outputs: EngineCoreOutputs = self.engine_core.get_output()
+        engine_core_outputs: List[EngineCoreOutput] = (
+            self.engine_core.get_output()
+        )
 
         # 2) Detokenizer the EngineCoreOutput.
         request_outputs, requests_to_abort = self.detokenizer.step(
-            engine_core_outputs.outputs)
+            engine_core_outputs
+        )
 
         # 3) Abort requests that finished due to stopping criteria.
         if requests_to_abort:

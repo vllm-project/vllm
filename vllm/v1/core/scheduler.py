@@ -303,8 +303,7 @@ class Scheduler:
         )
 
         if self.log_stats:
-            self.stats_agent.record_scheduler_output(self.requests,
-                                                     scheduler_output)
+            self.stats_agent.record_scheduler_output(scheduler_output)
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -421,10 +420,6 @@ class Scheduler:
                     # in the decoder's KV cache.
                     self.encoder_cache_manager.free(request, input_id)
 
-            if request.num_output_tokens == 1 and self.log_stats:
-                # First token is generated at the engine core.
-                self.stats_agent.record_first_token_ts_ms(request)
-
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
                 # NOTE(woosuk): Currently, we assume that each request
@@ -481,7 +476,7 @@ class Scheduler:
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         if self.log_stats:
-            self.stats_agent.record_waiting_request(request)
+            self.stats_agent.record_queued_request(request)
         self.requests[request.request_id] = request
 
     def finish_requests(
@@ -514,8 +509,6 @@ class Scheduler:
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
-        if self.log_stats:
-            self.stats_agent.record_finished_request(request)
 
         self.kv_cache_manager.free(request)
         self.running_reqs_data.pop(request.request_id, None)
@@ -532,4 +525,5 @@ class Scheduler:
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
+            kv_cache_stats=self.kv_cache_manager.get_kv_cache_stats(),
         )

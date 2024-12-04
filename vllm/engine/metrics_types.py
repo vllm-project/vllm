@@ -13,7 +13,7 @@ do this in Python code and lazily import prometheus_client.
 
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol
 
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
@@ -26,44 +26,44 @@ class Stats:
 
     # System stats (should have _sys suffix)
     #   Scheduler State
-    num_running_sys: int
-    num_waiting_sys: int
-    num_swapped_sys: int
+    num_running_sys: int = 0
+    num_waiting_sys: int = 0
+    num_swapped_sys: int = 0
     #   KV Cache Usage in %
-    gpu_cache_usage_sys: float
-    cpu_cache_usage_sys: float
+    gpu_cache_usage_sys: float = 0.0
+    cpu_cache_usage_sys: float = 0.0
     #   Prefix caching block hit rate
-    cpu_prefix_cache_hit_rate: float
-    gpu_prefix_cache_hit_rate: float
+    cpu_prefix_cache_hit_rate: float = 0.0
+    gpu_prefix_cache_hit_rate: float = 0.0
 
     # Iteration stats (should have _iter suffix)
-    num_prompt_tokens_iter: int
-    num_generation_tokens_iter: int
-    num_tokens_iter: int
-    time_to_first_tokens_iter: List[float]
-    time_per_output_tokens_iter: List[float]
-    num_preemption_iter: int
+    num_prompt_tokens_iter: int = 0
+    num_generation_tokens_iter: int = 0
+    num_tokens_iter: int = 0
+    time_to_first_tokens_iter: List[float] = field(default_factory=list)
+    time_per_output_tokens_iter: List[float] = field(default_factory=list)
+    num_preemption_iter: int = 0
 
     # Request stats (should have _requests suffix)
     #   Latency
-    time_e2e_requests: List[float]
-    time_queue_requests: List[float]
-    time_inference_requests: List[float]
-    time_prefill_requests: List[float]
-    time_decode_requests: List[float]
-    time_in_queue_requests: List[float]
-    model_forward_time_requests: List[float]
-    model_execute_time_requests: List[float]
+    time_e2e_requests: List[float] = field(default_factory=list)
+    time_queue_requests: List[float] = field(default_factory=list)
+    time_inference_requests: List[float] = field(default_factory=list)
+    time_prefill_requests: List[float] = field(default_factory=list)
+    time_decode_requests: List[float] = field(default_factory=list)
+    time_in_queue_requests: List[float] = field(default_factory=list)
+    model_forward_time_requests: List[float] = field(default_factory=list)
+    model_execute_time_requests: List[float] = field(default_factory=list)
     #   Metadata
-    num_prompt_tokens_requests: List[int]
-    num_generation_tokens_requests: List[int]
-    n_requests: List[int]
-    max_num_generation_tokens_requests: List[int]
-    max_tokens_requests: List[int]
-    finished_reason_requests: List[str]
-    waiting_lora_adapters: List[str]
-    running_lora_adapters: List[str]
-    max_lora: str
+    num_prompt_tokens_requests: List[int] = field(default_factory=list)
+    num_generation_tokens_requests: List[int] = field(default_factory=list)
+    n_requests: List[int] = field(default_factory=list)
+    max_num_generation_tokens_requests: List[int] = field(default_factory=list)
+    max_tokens_requests: List[int] = field(default_factory=list)
+    finished_reason_requests: List[str] = field(default_factory=list)
+    waiting_lora_adapters: List[str] = field(default_factory=list)
+    running_lora_adapters: List[str] = field(default_factory=list)
+    max_lora: str = "0"
 
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 

@@ -131,16 +131,19 @@ class EngineCore:
     def profile(self, is_start=True):
         self.model_executor.worker.profile(is_start)
 
-    def finalize_stats_snapshot(self) -> EngineStatsSnapshot:
+    def make_stats_snapshot(self) -> EngineStatsSnapshot:
         """
-        Get the current stats snapshot and reset the agent to track the next
-        update.
+        Make a stats snapshot and reset the agent to track the next update.
         """
-
         assert self.stats_agent is not None, "Stats collection is disabled."
-        snapshot = self.stats_agent.get_and_reset_snapshot()
+        snapshot = EngineStatsSnapshot()
+
+        updates = self.stats_agent.take_requests_updates()
+        snapshot.requests_stats_updates = updates
+
         scheduler_stats = self.scheduler.get_scheduler_stats()
         snapshot.scheduler_stats = scheduler_stats
+
         return snapshot
 
 
@@ -362,9 +365,9 @@ class EngineCoreProc(EngineCore):
                     # overlap stats update polling with other work.
                     # TODO(rickyx): we could further optimize this by
                     # isolating the stats polling from this IO thread.
-                    snapshot = self.finalize_stats_snapshot()
+                    snapshot = self.make_stats_snapshot()
                     self._fill_engine_core_proc_stats(snapshot)
-
+                    assert self.stats_queue is not None
                     self.stats_queue.put_nowait(snapshot)
                     continue
 

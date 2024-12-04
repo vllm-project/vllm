@@ -1,10 +1,11 @@
 import threading
-from typing import Dict
-
+from typing import List
 from vllm.logger import init_logger
 from vllm.v1.core.common import SchedulerOutput
 from vllm.v1.request import Request
-from vllm.v1.stats.common import EngineStatsSnapshot
+from vllm.v1.stats.common import (
+    RequestStatsUpdate,
+)
 
 logger = init_logger(__name__)
 
@@ -24,63 +25,70 @@ class EngineStatsAgent:
     """
 
     def __init__(self):
-        self._snapshot = self._new_snapshot()
-
-    def _new_snapshot(self) -> EngineStatsSnapshot:
-        return EngineStatsSnapshot()
+        self._updates: List[RequestStatsUpdate] = []
 
     def record_scheduler_output(
         self,
-        requests: Dict[str, Request],
         scheduler_output: SchedulerOutput,
     ):
         for req in scheduler_output.scheduled_running_reqs:
-            request = requests[req.req_id]
-            self._snapshot.record_running_request(
-                request,
-                num_computed_tokens=req.num_computed_tokens,
-                # For a running sequence, cached tokens are irrelevant.
-                num_cached_tokens=None,
+            self._updates.append(
+                RequestStatsUpdate(
+                    request_id=req.req_id,
+                    type="running",
+                    was_running=True,
+                    num_computed_tokens=req.num_computed_tokens,
+                    # For a running sequence, cached tokens are irrelevant.
+                    num_cached_tokens=None,
+                )
             )
 
         for req in scheduler_output.scheduled_new_reqs:
-            request = requests[req.req_id]
-            self._snapshot.record_running_request(
-                request,
-                num_computed_tokens=req.num_computed_tokens,
-                # For a new sequence, a computed token is also a cached token.
-                num_cached_tokens=req.num_computed_tokens,
+            self._updates.append(
+                RequestStatsUpdate(
+                    request_id=req.req_id,
+                    type="running",
+                    was_running=False,
+                    num_computed_tokens=req.num_computed_tokens,
+                    # For a new sequence, a computed token is also a cached
+                    # token.
+                    num_cached_tokens=req.num_computed_tokens,
+                )
             )
 
         for req in scheduler_output.scheduled_resumed_reqs:
-            request = requests[req.req_id]
-            self._snapshot.record_running_request(
-                request,
-                num_computed_tokens=req.num_computed_tokens,
-                # For a resumed sequence, a computed token is also a cached
-                # token.
-                num_cached_tokens=req.num_computed_tokens,
+            self._updates.append(
+                RequestStatsUpdate(
+                    request_id=req.req_id,
+                    type="running",
+                    was_running=False,
+                    num_computed_tokens=req.num_computed_tokens,
+                    # For a resumed sequence, a computed token is also a cached
+                    # token.
+                    num_cached_tokens=req.num_computed_tokens,
+                )
             )
 
         for req_id in scheduler_output.preempted_req_ids:
-            self._snapshot.record_preempted_request(requests[req_id])
+            self._updates.append(
+                RequestStatsUpdate(
+                    request_id=req_id,
+                    type="preempted",
+                )
+            )
 
-    def record_finished_request(self, request: Request):
-        self._snapshot.record_finished_request(request)
+    def record_queued_request(self, request: Request):
+        self._updates.append(
+            RequestStatsUpdate(
+                request_id=request.request_id,
+                type="queued",
+            )
+        )
 
-    def record_waiting_request(self, request: Request):
-        self._snapshot.record_waiting_request(request)
-
-    def record_preempted_request(self, request: Request):
-        self._snapshot.record_preempted_request(request)
-
-    def record_first_token_ts_ms(self, request: Request):
-        self._snapshot.record_first_token_ts_ms(request)
-
-    def get_and_reset_snapshot(self) -> EngineStatsSnapshot:
-        snapshot = self._snapshot
-        self._snapshot = self._new_snapshot()
-        return snapshot
+    def take_requests_updates(self) -> List[RequestStatsUpdate]:
+        updates = self._updates
+        self._updates = []
+        return updates
 
 
 class ThreadSafeEngineStatsAgent(EngineStatsAgent):
@@ -93,25 +101,17 @@ class ThreadSafeEngineStatsAgent(EngineStatsAgent):
         super().__init__(*args, **kwargs)
 
     def record_scheduler_output(
-            self,
-            requests: Dict[str, Request],
-            scheduler_output: "SchedulerOutput",  # noqa: F821
+        self,
+        scheduler_output: "SchedulerOutput",  # noqa: F821
     ):
         with self._lock:
-            super().record_scheduler_output(requests, scheduler_output)
+            super().record_scheduler_output(scheduler_output)
 
-    def record_finished_request(self, request: Request):
+    def record_queued_request(self, request: Request):
         with self._lock:
-            super().record_finished_request(request)
+            super().record_queued_request(request)
 
-    def record_waiting_request(self, request: Request):
+    def take_requests_updates(self) -> List[RequestStatsUpdate]:
         with self._lock:
-            super().record_waiting_request(request)
+            return super().take_requests_updates()
 
-    def get_and_reset_snapshot(self) -> EngineStatsSnapshot:
-        with self._lock:
-            return super().get_and_reset_snapshot()
-
-    def record_first_token_ts_ms(self, request: Request):
-        with self._lock:
-            super().record_first_token_ts_ms(request)

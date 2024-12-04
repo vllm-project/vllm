@@ -23,8 +23,10 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.stats.stats_manager import (EngineStatsManager,
-                                         NoopEngineStatsManager)
+from vllm.v1.stats.stats_manager import (
+    NoopEngineStatsManager,
+    ThreadSafeEngineStatsManager,
+)
 
 logger = init_logger(__name__)
 
@@ -46,7 +48,7 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.log_requests = log_requests
-        self.log_stats = log_stats
+        self.log_stats = vllm_config.observability_config.log_stats
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
@@ -78,7 +80,7 @@ class AsyncLLM(EngineClient):
             usage_context=usage_context,
             multiprocess_mode=True,
             asyncio_mode=True,
-            log_stats=log_stats,
+            log_stats=self.log_stats,
         )
 
         # Async tasks that run in the background.
@@ -88,7 +90,15 @@ class AsyncLLM(EngineClient):
         self.stats_handler: Optional[asyncio.Task] = None
 
         if vllm_config.observability_config.log_stats:
-            self.stats_manager = EngineStatsManager(vllm_config, stat_loggers)
+            # The stats manager will be invoked from different threads:
+            # 1. stats_handler: a background busy event loop that pulls stats
+            # from the EngineCore periodically. The stats logging also happens
+            # on the background thread.
+            # 2. the main event loop when a request is added (and input
+            # processed).
+            self.stats_manager = ThreadSafeEngineStatsManager(
+                vllm_config, stat_loggers
+            )
         else:
             self.stats_manager = NoopEngineStatsManager()
 
@@ -156,9 +166,6 @@ class AsyncLLM(EngineClient):
         if self.detokenizer.is_request_active(request_id):
             raise KeyError(f"Request {request_id} already exists.")
 
-        # 0) Add the request to the stats manager to start tracking.
-        self.stats_manager.add_request(request_id)
-
         # 1) Create a new AsyncStream for the request.
         stream = self._add_request_to_streams(request_id)
 
@@ -166,6 +173,7 @@ class AsyncLLM(EngineClient):
         detokenizer_req, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
+        self.stats_manager.record_engine_input(engine_core_req)
 
         # 3) Add the request to Detokenizer (this process).
         self.detokenizer.add_request(detokenizer_req)
@@ -213,7 +221,7 @@ class AsyncLLM(EngineClient):
             self.output_handler = asyncio.create_task(
                 self._run_output_handler())
 
-        if self.stats_handler is None:
+        if self.stats_handler is None and self.log_stats:
             self.stats_handler = asyncio.create_task(self._run_stats_handler())
 
         async for output in await self.add_request(
@@ -239,6 +247,9 @@ class AsyncLLM(EngineClient):
 
         if request_id in self.request_streams:
             raise ValueError(f"Request id {request_id} already running.")
+
+        # Add the request to the stats manager to start tracking.
+        self.stats_manager.add_request(request_id)
 
         # Avoid streams having circular ref to parent AsyncLLM object.
         aborted_reqs = self.client_aborted_requests
@@ -286,6 +297,7 @@ class AsyncLLM(EngineClient):
         for request_output in request_outputs:
             request_id = request_output.request_id
             assert request_id in self.request_streams
+            self.stats_manager.record_request_output(request_output)
 
             # Each request in the API server pulls from the per-request stream.
             stream = self.request_streams.get(request_id)
@@ -306,6 +318,8 @@ class AsyncLLM(EngineClient):
                 # 1) Pull EngineCoreOutput from the EngineCore.
                 outputs: EngineCoreOutputs = (
                     await self.engine_core.get_output_async())
+                for output in outputs.outputs:
+                    self.stats_manager.record_engine_output(output)
 
                 # 2) Detokenize based on the output.
                 request_outputs, reqs_to_abort = self.detokenizer.step(
@@ -329,17 +343,28 @@ class AsyncLLM(EngineClient):
 
     async def _run_stats_handler(self):
         while True:
-            # Pull the stats from the EngineCore every X seconds.
-            await asyncio.sleep(VLLM_STATS_ENGINE_POLLING_INTERVAL_S)
+            try:
+                # Pull the stats from the EngineCore every X seconds.
+                await asyncio.sleep(VLLM_STATS_ENGINE_POLLING_INTERVAL_S)
 
-            # Pull the stats from the EngineCore before finalizing the snapshot
-            # for an updated view of the current stats.
-            stats_snapshot_from_engine = (await
-                                          self.engine_core.poll_stats_async())
+                # Pull the stats from the EngineCore before finalizing the
+                # snapshot for an updated view of the current stats.
+                stats_snapshot_from_engine = (
+                    await self.engine_core.poll_stats_async()
+                )
 
-            # Update the snapshot and make the stats.
-            self.stats_manager.update_snapshot(stats_snapshot_from_engine)
-            self.stats_manager.log_stats(self.stats_manager.make_stats())
+                # Make the stats.
+                stats = self.stats_manager.make_stats(
+                    stats_snapshot_from_engine
+                )
+                self.stats_manager.log_stats(stats)
+            except Exception:
+                logger.exception(
+                    "Error in stats handler. Suppressing exceptions and "
+                    "exiting stats handler. Please file an issue at "
+                    "https://github.com/vllm-project/vllm/issues/new/choose"
+                )
+                continue
 
     def _log_stats(self, stats: Stats):
         for stat_logger in self.stat_loggers.values():
