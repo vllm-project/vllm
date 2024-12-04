@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.store.kv_store import KVBlockStore, KVStoreMeta, BlockMappingFromCPU
+from vllm.store.kv_store import BlockMappingFromCPU, KVBlockStore, KVStoreMeta
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner

@@ -1,5 +1,6 @@
 from vllm import LLM, SamplingParams
 
+
 def print_outputs(llm, outputs):
     for output in outputs:
         prompt = output.prompt

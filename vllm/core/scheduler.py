@@ -16,8 +16,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
+from vllm.store.kv_store import BlockMappingFromCPU, KVBlockStoreManager
 from vllm.utils import Device, PyObjectCache
-from vllm.store.kv_store import KVBlockStoreManager,BlockMappingFromCPU
 
 logger = init_logger(__name__)
 

@@ -6,9 +6,10 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Any, Callable, DefaultDict, Dict, List, Mapping, Optional
+from typing import (TYPE_CHECKING, Any, Callable, DefaultDict, Dict, List,
+                    Mapping, Optional)
 from typing import Sequence as GenericSequence
-from typing import TYPE_CHECKING, Set, Tuple, Union
+from typing import Set, Tuple, Union
 
 import msgspec
 import torch
