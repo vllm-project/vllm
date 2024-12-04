@@ -6,7 +6,7 @@ Requires HuggingFace credentials for access to Llama2.
 """
 
 from typing import List, Optional, Tuple
-
+import numpy as np
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 from faker import Faker
@@ -14,6 +14,7 @@ from faker import Faker
 OUT_DIR = "out"
 NB_WORDS = 20
 TOTAL_LORAS = 10
+DISTRIBUTION="uniform"
 
 def create_test_prompts(
     base_path: str
@@ -31,6 +32,7 @@ def create_test_prompts(
 
     # TODO Atindra: Instead of hardcoding i, make i follow a distribution and generate 100 or so requests
     # NOTE: LoRA 0 means no LoRA in VLLM
+    '''
     prompts = []
     for _ in range(10):
         for i in range(TOTAL_LORAS):
@@ -45,7 +47,35 @@ def create_test_prompts(
             ))
 
     return prompts
+    '''
+    num_requests=100
+    if DISTRIBUTION == "uniform":
+        lora_ids_list = np.random.randint(0, TOTAL_LORAS, size=num_requests)
+    elif DISTRIBUTION == "normal":
+        # Center the normal distribution around the middle of the LoRA range
+        mean = (TOTAL_LORAS - 1)/2
+        std_dev = TOTAL_LORAS/6 # This ensures ~99.7% of values fall within range ("68-95-99.7 rule")
+        lora_ids_list = np.random.normal(mean, std_dev, size=num_requests)
 
+        # Clip values to ensure they're within valid range and convert to integers
+        lora_ids_list = np.clip(lora_ids_list, 0, TOTAL_LORAS-1)
+        lora_ids_list = np.round(lora_ids_list).astype(int)
+    else:
+        raise ValueError(f"Unsupported distribution: {DISTRIBUTION}")
+
+    prompts = []
+    for lora_id in lora_ids_list:
+        prompts.append((
+                sentence,
+                SamplingParams(temperature=0.0,
+                            logprobs=1,
+                            prompt_logprobs=1,
+                            max_tokens=64,
+                            stop_token_ids=[128001]),
+                LoRARequest(f"lora{lora_id}", lora_id, f"{base_path}/lora{lora_id}")
+            ))
+        
+    return prompts
 
 def process_requests(engine: LLMEngine,
                      test_prompts: List[Tuple[str, SamplingParams,
