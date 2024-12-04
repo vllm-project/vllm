@@ -1,9 +1,7 @@
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict, Any
 
 import torch
-from quark.torch.quantization.config.type import QSchemeType
-from quark.torch.quantization.config.config import QuantizationSpec
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 
@@ -28,12 +26,13 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         layer_quant_config = quant_config._find_matched_config(layer_name, 
                                                                module)
 
-        if layer_quant_config.output_tensors or layer_quant_config.bias:
+        if (layer_quant_config.get("output_tensors") 
+            or layer_quant_config.get("bias")):
             raise NotImplementedError("Currently, Quark models with "
                                       "output_tensors and bias "
                                       "quantized are not supported")
-        weight_config = layer_quant_config.weight
-        input_config = layer_quant_config.input_tensors
+        weight_config = layer_quant_config.get("weight")
+        input_config = layer_quant_config.get("input_tensors")
         
         if quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config)
@@ -44,20 +43,21 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
     def __init__(
             self,
-            weight_config: QuantizationSpec, 
-            input_config: QuantizationSpec
+            weight_config: Dict[str, Any], 
+            input_config: Dict[str, Any]
     ):
         self.weight_quant = weight_config
         self.input_quant = input_config
 
-        if not (self.weight_quant.qscheme == QSchemeType.per_tensor
-                and self.input_quant.qscheme == QSchemeType.per_tensor):
+        weight_qscheme = self.weight_quant.get("qscheme")
+        input_qscheme = self.input_quant.get("qscheme")
+        if not (weight_qscheme == "per_tensor" and input_qscheme == "per_tensor"):
             raise ValueError(
                 "For FP8 Fused MoE layers, only per-tensor scales"
                 "for weights and activations are supported. Found "
-                f"{self.weight_quant.qscheme.value}, {self.input_quant.qscheme.value}") # noqa E501
+                f"{weight_qscheme}, {input_qscheme}") # noqa E501
 
-        self.static_input_scales = not self.input_quant.is_dynamic
+        self.static_input_scales = not self.input_quant.get("is_dynamic")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,

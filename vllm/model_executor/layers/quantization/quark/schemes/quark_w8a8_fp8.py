@@ -1,7 +1,6 @@
 from typing import Callable, List, Optional
 
 import torch
-from quark.torch.quantization.config.type import QSchemeType
 from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
@@ -18,7 +17,7 @@ __all__ = ["QuarkW8A8Fp8"]
 
 class QuarkW8A8Fp8(QuarkScheme):
 
-    def __init__(self, qscheme: QSchemeType, is_static_input_scheme: bool):
+    def __init__(self, qscheme: str, is_static_input_scheme: Optional[bool]):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.cutlass_fp8_supported = cutlass_fp8_supported()
@@ -32,7 +31,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         # If per tensor, when we have a fused module (e.g. QKV) with per
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
-        if self.qscheme == QSchemeType.per_tensor:
+        if self.qscheme == "per_tensor":
             max_w_scale, weight = requantize_with_max_scale(
                 weight=layer.weight,
                 weight_scale=layer.weight_scale,
@@ -52,7 +51,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
 
         # If channelwise, scales are already lined up, so just transpose.
-        elif self.qscheme == QSchemeType.per_channel:
+        elif self.qscheme == "per_channel":
             weight = layer.weight
 
             if current_platform.is_rocm():
@@ -102,14 +101,14 @@ class QuarkW8A8Fp8(QuarkScheme):
         # WEIGHT SCALE
         # TODO: update create_xxx_parameter functions to return
         # the newly added parameters
-        if self.qscheme == QSchemeType.per_channel:
+        if self.qscheme == "per_channel":
             weight_scale = ChannelQuantScaleParameter(
                 data=torch.empty((sum(output_partition_sizes), 1),
                                  dtype=torch.float32),
                 output_dim=0,
                 weight_loader=weight_loader)
         else:
-            assert self.qscheme == QSchemeType.per_tensor
+            assert self.qscheme == "per_tensor"
             weight_scale = PerTensorScaleParameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
                                                    weight_loader=weight_loader)
