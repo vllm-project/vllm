@@ -528,9 +528,14 @@ def repackage_wheel(package_data: Dict[str, List[str]],
                     f"Failed to get vLLM wheel from {wheel_location}") from e
 
     with zipfile.ZipFile(wheel_filename) as wheel:
-        files_to_copy = filter(
-            lambda file: file.filename.endswith(".so") or file.filename.
-            startswith("vllm/vllm_flash_attn"), wheel.filelist)
+        files_to_copy = [
+            "vllm/_C.abi3.so",
+            "vllm/_moe_C.abi3.so",
+            "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
+            "vllm/vllm_flash_attn/flash_attn_interface.py",
+            "vllm/vllm_flash_attn/__init__.py",
+            # "vllm/_version.py", # not available in nightly wheels yet
+        ]
 
         for file in files_to_copy:
             print(
