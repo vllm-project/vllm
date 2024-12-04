@@ -24,7 +24,7 @@ class IPEXAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return IPEXAttentionMetadata
+        return FlashAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -182,8 +182,8 @@ def ipex_attn_chunked_prefill(
         return
 
     assert current_metadata is not None
-    assert isinstance(current_metadata, IPEXAttentionMetadata)
-    attn_metadata: IPEXAttentionMetadata = current_metadata
+    assert isinstance(current_metadata, FlashAttentionMetadata)
+    attn_metadata: FlashAttentionMetadata = current_metadata
     num_actual_tokens = attn_metadata.num_actual_tokens
 
     query = query.view(-1, num_heads, head_size)
@@ -226,15 +226,3 @@ def ipex_attn_chunked_prefill(
     )
 
 
-@dataclass
-class IPEXAttentionMetadata:
-    is_prefill_only: bool
-    is_decode_only: bool
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    seq_len_q: torch.Tensor  #??
-    max_seq_len: int
-    seq_start_loc: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
