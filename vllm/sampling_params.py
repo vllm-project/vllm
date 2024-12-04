@@ -293,8 +293,9 @@ class SamplingParams(
                 raise ValueError(
                     f"best_of must be greater than or equal to n, "
                     f"got n={self.n} and best_of={self.best_of}.")
-            self._real_n = self.n
-            self.n = self.best_of
+            if not self._real_n:
+                self._real_n = self.n
+                self.n = self.best_of
 
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
