@@ -437,6 +437,9 @@ Classification
     - ✅︎
     - ✅︎
 
+  * - :code:`JambaForSequenceClassification`
+    - Jamba
+
 .. note::
     As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
