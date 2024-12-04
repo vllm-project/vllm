@@ -23,25 +23,21 @@ On the client side, run:
     to the end of the command above.
 """
 import argparse
-import dataclasses
 import asyncio
-import base64
-import io
+import dataclasses
 import json
 import os
 import random
 import time
 import warnings
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
-import datasets
+from typing import AsyncGenerator, List, Optional, Tuple
 
+import datasets
 import numpy as np
+import pandas as pd
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
                                   RequestFuncOutput)
-from datasets import load_dataset
-from PIL.Image import Image
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -293,6 +289,7 @@ def calculate_metrics(
                 tpot = (outputs[i].latency - outputs[i].ttft) / (output_len -
                                                                  1)
                 tpots.append(tpot)
+            outputs[i].tpot = sum(tpots) / len(tpots) if len(tpots) else 0
             # Note: if output_len <= 1, we regard tpot as 0 for goodput
             all_tpots.append(tpot)
             itls += outputs[i].itl
@@ -365,7 +362,8 @@ async def benchmark(
 
     print("Starting initial single prompt test run...")
     guided_decoding_req_idx = random.sample(
-        range(len(input_requests)), int(len(input_requests) * guided_decoding_rate))
+        range(len(input_requests)),
+        int(len(input_requests) * guided_decoding_rate))
 
     test_request = input_requests[0]
     test_input = RequestFuncInput(
@@ -387,14 +385,15 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(model=model_id,
-                                         prompt=test_request.prompt,
-                                         api_url=base_url + "/start_profile",
-                                         prompt_len=test_request.prompt_len,
-                                         output_len=test_request.expected_output_len,
-                                         ignore_eos=ignore_eos,
-                                         extra_body={test_request.structure_type: test_request.schema},
-                                         )
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_request.prompt,
+            api_url=base_url + "/start_profile",
+            prompt_len=test_request.prompt_len,
+            output_len=test_request.expected_output_len,
+            ignore_eos=ignore_eos,
+            extra_body={test_request.structure_type: test_request.schema},
+        )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
@@ -427,16 +426,22 @@ async def benchmark(
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
-    async for i, request in get_request(input_requests, request_rate, burstiness):
-        extra_body = {request.structure_type: test_request.schema} if i in guided_decoding_req_idx else None
-        request_func_input = RequestFuncInput(model=model_id,
-                                              prompt=request.prompt,
-                                              api_url=api_url,
-                                              prompt_len=request.prompt_len,
-                                              output_len=request.expected_output_len,
-                                              ignore_eos=ignore_eos,
-                                              extra_body=extra_body,
-                                              )
+    expected: List[str] = []
+    async for i, request in get_request(input_requests, request_rate,
+                                        burstiness):
+        extra_body = {
+            request.structure_type: test_request.schema
+        } if i in guided_decoding_req_idx else None
+        request_func_input = RequestFuncInput(
+            model=model_id,
+            prompt=request.prompt,
+            api_url=api_url,
+            prompt_len=request.prompt_len,
+            output_len=request.expected_output_len,
+            ignore_eos=ignore_eos,
+            extra_body=extra_body,
+        )
+        expected.append(request.completion)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -486,21 +491,36 @@ async def benchmark(
                                     metrics.total_token_throughput))
 
     result = {
-        "duration": benchmark_duration,
-        "completed": metrics.completed,
-        "total_input_tokens": metrics.total_input,
-        "total_output_tokens": metrics.total_output,
-        "request_throughput": metrics.request_throughput,
-        "output_throughput": metrics.output_throughput,
-        "total_token_throughput": metrics.total_token_throughput,
+        "duration":
+        benchmark_duration,
+        "completed":
+        metrics.completed,
+        "total_input_tokens":
+        metrics.total_input,
+        "total_output_tokens":
+        metrics.total_output,
+        "request_throughput":
+        metrics.request_throughput,
+        "output_throughput":
+        metrics.output_throughput,
+        "total_token_throughput":
+        metrics.total_token_throughput,
+        "ttft_description":
+        pd.Series([output.ttft for output in outputs]).describe().to_dict(),
+        "tpot_description":
+        pd.Series([output.tpot for output in outputs]).describe().to_dict(),
         "input_lens": [output.prompt_len for output in outputs],
-        "output_lens": actual_output_lens,
+        "output_lens":
+        actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
         "itls": [output.itl for output in outputs],
         "errors": [output.error for output in outputs],
     }
-    
-    ret = [{'generated': output.generated_text, 'expected': None} for output in outputs]
+
+    ret = [{
+        'generated': output.generated_text,
+        'expected': gt
+    } for output, gt in zip(outputs, expected)]
 
     def process_one_metric(
         # E.g., "ttft"
@@ -567,11 +587,11 @@ def evaluate(ret, args):
         return re.match(args.regex, actual) is not None
 
     def _eval_correctness(expected, actual):
-        if args.structure_type == 'json':
+        if args.structure_type == 'guided_json':
             return _eval_correctness_json(expected, actual)
-        elif args.structure_type == 'regex':
+        elif args.structure_type == 'guided_regex':
             return _eval_correctness_regex(expected, actual)
-        elif args.structure_type == 'choice':
+        elif args.structure_type == 'guided_choice':
             return _eval_correctness_choice(expected, actual)
         else:
             return None
@@ -606,15 +626,15 @@ def main(args: argparse.Namespace):
 
     tokenizer = get_tokenizer(tokenizer_id,
                               trust_remote_code=args.trust_remote_code)
-    
+
     if args.dataset == 'grammar':
-        args.structure_type = 'grammar'
+        args.structure_type = 'guided_grammar'
     elif args.dataset == 'regex':
-        args.structure_type = 'regex'
+        args.structure_type = 'guided_regex'
     elif args.dataset == 'choice':
-        args.structure_type = 'choice'
+        args.structure_type = 'guided_choice'
     else:
-        args.structure_type = 'json'
+        args.structure_type = 'guided_json'
 
     if args.no_guided_decoding:
         args.guided_decoding_ratio = 0
@@ -658,14 +678,22 @@ def main(args: argparse.Namespace):
     print("correct_rate(%)", score, '\n')
     if args.save_results:
         results = {
-            "backend": backend,
-            "model_id": model_id,
-            "tokenizer_id": tokenizer_id,
-            "num_prompts": args.num_prompts,
-            "request_rate": args.request_rate if args.request_rate < float("inf") else "inf",
-            "burstiness": args.burstiness,
-            "max_concurrency": args.max_concurrency,
-            "correct_rate(%)": score
+            "backend":
+            backend,
+            "model_id":
+            model_id,
+            "tokenizer_id":
+            tokenizer_id,
+            "num_prompts":
+            args.num_prompts,
+            "request_rate":
+            args.request_rate if args.request_rate < float("inf") else "inf",
+            "burstiness":
+            args.burstiness,
+            "max_concurrency":
+            args.max_concurrency,
+            "correct_rate(%)":
+            score
         }
         results = {"outputs": ret, **results, **benchmark_result}
 
@@ -705,11 +733,10 @@ if __name__ == "__main__":
         "--dataset",
         default='json',
         choices=['json', 'grammar', 'regex', 'choice', 'xgrammar_bench'])
-    parser.add_argument(
-        "--json_schema_path",
-        type=str,
-        default=None,
-        help="Path to json schema.")
+    parser.add_argument("--json_schema_path",
+                        type=str,
+                        default=None,
+                        help="Path to json schema.")
     parser.add_argument(
         "--max-concurrency",
         type=int,
@@ -827,16 +854,14 @@ if __name__ == "__main__":
         "Default value is \"99\". "
         "Use \"--percentile-metrics\" to select metrics.",
     )
-    parser.add_argument(
-        "--no-guided-decoding",
-        action='store_true',
-        default=False,
-        help="Whether to disable JSON decoding or not.")
-    parser.add_argument(
-        "--guided-decoding-ratio",
-        type=float,
-        default=1.0,
-        help="Ratio of Guided Decoding requests")
+    parser.add_argument("--no-guided-decoding",
+                        action='store_true',
+                        default=False,
+                        help="Whether to disable JSON decoding or not.")
+    parser.add_argument("--guided-decoding-ratio",
+                        type=float,
+                        default=1.0,
+                        help="Ratio of Guided Decoding requests")
 
     args = parser.parse_args()
     main(args)

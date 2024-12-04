@@ -37,6 +37,7 @@ class RequestFuncOutput:
     ttft: float = 0.0  # Time to first token
     itl: List[float] = field(
         default_factory=list)  # List of inter-token latencies
+    tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
 
@@ -242,8 +243,9 @@ async def async_request_openai_completions(
             "logprobs": request_func_input.logprobs,
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
-            "extra_body": request_func_input.extra_body,
         }
+        if request_func_input.extra_body:
+            payload.update(request_func_input.extra_body)
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
@@ -337,8 +339,9 @@ async def async_request_openai_chat_completions(
             "max_completion_tokens": request_func_input.output_len,
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
-            "extra_body": request_func_input.extra_body,
         }
+        if request_func_input.extra_body:
+            payload.update(request_func_input.extra_body)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
