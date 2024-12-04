@@ -499,35 +499,39 @@ def get_requirements() -> List[str]:
 
 
 def repackage_wheel(package_data: Dict[str, List[str]],
-                    wheel_location) -> None:
+                    wheel_location: str) -> None:
     """Extracts libraries and other files from an existing wheel."""
     assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
 
     import zipfile
 
     if os.path.isfile(wheel_location):
-        wheel_filename = os.path.realpath(wheel_location)
-        print(f"Using existing wheel={wheel_filename}")
+        wheel_path = wheel_location
+        print(f"Using existing wheel={wheel_path}")
     else:
+        # Download the wheel from a given URL, assume
+        # the filename is the last part of the URL
+        wheel_filename = wheel_location.split("/")[-1]
+
+        import tempfile
+
+        # create a temporary directory to store the wheel
+        temp_dir = tempfile.mkdtemp()
+        wheel_path = os.path.join(temp_dir, wheel_filename)
+
+        print(f"Downloading wheel from {wheel_location} to {wheel_path}")
+
+        from urllib.request import urlretrieve
+
         try:
-            subprocess.check_call(
-                f"pip download --no-deps {wheel_location}".split(" "))
-        except subprocess.CalledProcessError:
-            # pip will not be available in PEP-517 style builds with
-            # build isolation, such as when running
-            #    `pip install <path|git+https://<url>`.
-            from urllib.request import urlretrieve
+            urlretrieve(wheel_location, filename=wheel_path)
+        except Exception as e:
+            from setuptools.errors import SetupError
 
-            print("Failed to download using pip, retrying using urlretrieve.")
-            try:
-                urlretrieve(wheel_location, filename=wheel_filename)
-            except Exception as e:
-                from setuptools.errors import SetupError
+            raise SetupError(
+                f"Failed to get vLLM wheel from {wheel_location}") from e
 
-                raise SetupError(
-                    f"Failed to get vLLM wheel from {wheel_location}") from e
-
-    with zipfile.ZipFile(wheel_filename) as wheel:
+    with zipfile.ZipFile(wheel_path) as wheel:
         files_to_copy = [
             "vllm/_C.abi3.so",
             "vllm/_moe_C.abi3.so",
