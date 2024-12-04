@@ -277,8 +277,8 @@ class GPUModelRunner:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
-        # NOTE(woosuk): We can't simply use token_indices // block_size here
-        # because M (max_model_len) is not necessarily divisibly by block_size.
+        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
+        # because M (max_model_len) is not necessarily divisible by block_size.
         block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
             req_indices * self.max_num_blocks_per_req +
             positions_np // self.block_size]
