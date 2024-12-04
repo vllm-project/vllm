@@ -10,6 +10,7 @@ import numpy as np
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 from faker import Faker
+import pandas as pd
 
 OUT_DIR = "out"
 NB_WORDS = 20
@@ -81,10 +82,9 @@ def process_requests(engine: LLMEngine,
                      test_prompts: List[Tuple[str, SamplingParams,
                                               Optional[LoRARequest]]]):
     """Continuously process a list of prompts and handle the outputs."""
-    request_id = 0
+    metrics_list = []
 
-    # TODO Scott: Add benchmarking here for ITL and TTFT
-    # Have dict mapping request to each of these
+    request_id = 0
 
     while test_prompts or engine.has_unfinished_requests():
         if test_prompts:
@@ -99,7 +99,28 @@ def process_requests(engine: LLMEngine,
 
         for request_output in request_outputs:
             if request_output.finished:
-                print(request_output)
+                metrics = request_output.metrics
+                output = request_output.outputs[0]
+                metrics_list.append({
+                    "request_id": request_output.request_id,
+                    "lora_name": request_output.lora_request.lora_name,
+                    "lora_id": request_output.lora_request.lora_int_id,
+                    "arrival_time": metrics.arrival_time,
+                    "last_token_time": metrics.last_token_time,
+                    "first_scheduled_time": metrics.first_scheduled_time,
+                    "time_in_queue": metrics.time_in_queue,
+                    "finished_time": metrics.finished_time,
+                    "scheduler_time": metrics.scheduler_time,
+                    "model_forward_time": metrics.model_forward_time,
+                    "model_execute_time": metrics.model_execute_time,
+                    "prompt": request_output.prompt,
+                    "prompt_num_tokens": len(request_output.prompt_token_ids),
+                    "output": output.text,
+                    "output_num_tokens": len(output.token_ids),
+                })
+
+    metrics_df = pd.DataFrame(metrics_list)
+    metrics_df.to_csv(f"{OUT_DIR}/metrics.csv", index=False)
 
 
 def initialize_engine() -> LLMEngine:
