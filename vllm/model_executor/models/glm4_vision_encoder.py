@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from torch.nn import LayerNorm
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -77,27 +78,16 @@ class Attention(nn.Module):
             quant_config=quant_config,
         )
 
+        self.attn = MultiHeadAttention(self.num_heads_per_rank, self.head_dim,
+                                       self.scale)
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, _ = x.shape
         qkv, _ = self.query_key_value(x)  # B, L, 3 * H * D
         q, k, v = qkv.chunk(3, dim=-1)
-        q = q.reshape(B, L, self.num_heads_per_rank,
-                      self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
-        k = k.reshape(B, L, self.num_heads_per_rank,
-                      self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
-        v = v.reshape(B, L, self.num_heads_per_rank,
-                      self.head_dim).permute(0, 2, 1, 3)  # B, H, L, D
 
-        out = torch.nn.functional.scaled_dot_product_attention(q,
-                                                               k,
-                                                               v,
-                                                               attn_mask=None,
-                                                               dropout_p=0.,
-                                                               is_causal=False)
-
-        output, _ = self.dense(out.transpose(1, 2).view(B, L, -1))
+        out = self.attn(q, k, v)
+        output, _ = self.dense(out)
         output = self.output_dropout(output)
         return output
 
