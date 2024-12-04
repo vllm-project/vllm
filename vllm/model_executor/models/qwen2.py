@@ -338,15 +338,15 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        if (self.kv_store != None) and \
-                (self.kv_store.batch_layers_to_GPU == True):
+        if (self.kv_store is not None) and \
+                (self.kv_store.batch_layers_to_GPU):
             self.kv_store.get_stream_sync(
                     attn_metadata.kv_store_meta.request_ids)
 
         for i in range(self.start_layer, self.end_layer):
             layer_id = (i - self.start_layer)
             if (self.kv_store is not None) and \
-                    (self.kv_store.batch_layers_to_GPU == False):
+                    (not self.kv_store.batch_layers_to_GPU):
                 self.kv_store.get_stream_layer_sync(
                         layer_id, attn_metadata.kv_store_meta.request_ids)
             layer = self.layers[i]

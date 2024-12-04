@@ -284,7 +284,7 @@ class SchedulerPrefillOutputs:
             seq_groups=[],
             ignored_seq_groups=[],
             num_lookahead_slots=0,
-            kv_store_block_mapping_from_cpu=None,
+            kv_store_block_mapping_from_cpu=BlockMappingFromCPU.null(),
         )
 
 
@@ -935,15 +935,16 @@ class Scheduler:
                                   num_new_seqs,
                                   max_num_batched_tokens,
                                   budget):
+            ret = False
             if (budget.num_batched_tokens >=
                     self.scheduler_config.max_num_batched_tokens):
-                return True
+                ret = True
             if (num_new_tokens_uncached == 0 or
                     not budget.can_schedule(
                         num_new_tokens=num_new_tokens_uncached,
                         num_new_seqs=num_new_seqs)):
-                return True
-            return False
+                ret = True
+            return ret
 
         kv_store_tmp_queue : Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and kv_store_waiting_queue:
@@ -1062,13 +1063,13 @@ class Scheduler:
                     waiting_queue.popleft()
                     continue
 
-            if (self.kv_store_manager != None):
+            if (self.kv_store_manager is not None):
                 self.kv_store_manager.is_prefill = seq_group.is_prefill()
 
             block_mapping_from_cpu = []
             self._allocate(seq_group)
 
-            if (self.kv_store_manager != None):
+            if (self.kv_store_manager is not None):
                 block_ids = self.block_manager.get_block_table(
                         seq_group.get_seqs()[0])
                 block_mapping_from_cpu = \
@@ -1137,7 +1138,7 @@ class Scheduler:
         if len(seq_groups) > 0:
             self.prev_prompt = True
 
-        if (self.kv_store_manager != None) and \
+        if (self.kv_store_manager is not None) and \
                 (len(kv_store_block_mapping) > 0):
             self.kv_store_manager.close_send_flags(
                     [items[1]

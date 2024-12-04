@@ -136,7 +136,7 @@ std::ostream& operator<<(std::ostream& os, const std::vector<int64_t>& vec) {
 }
 
 // src layout: [num_blocks, 2, num_layer, block_size, num_kv_heads*head_size]
-// kv_caches layout: [laysers, [2, num_blocks, block_size, num_kv_heads,
+// kv_caches layout: [layers, [2, num_blocks, block_size, num_kv_heads,
 // head_size]]
 void KVStore::CopyBlocks2GPUBatch(torch::Tensor& src,
                                   std::vector<torch::Tensor> const& kv_caches,
@@ -256,7 +256,7 @@ __global__ void kv_store_copy_blocks_kernel(
 namespace {
 
 // src layout: [num_blocks, 2, num_layer, block_size, num_kv_heads*head_size]
-// kv_caches layout: [laysers, [2, num_blocks, block_size, num_kv_heads,
+// kv_caches layout: [layers, [2, num_blocks, block_size, num_kv_heads,
 // head_size]]
 void CopyLayerBlocks2GPUKernelFunc(
     const torch::Tensor& src, std::vector<torch::Tensor> const& kv_caches,
@@ -333,7 +333,7 @@ void CopyLayerBlocks2GPUKernelFunc(
 }
 
 // src layout: [num_blocks, 2, num_layer, block_size, num_kv_heads*head_size]
-// kv_caches layout: [laysers, [2, num_blocks, block_size, num_kv_heads,
+// kv_caches layout: [layers, [2, num_blocks, block_size, num_kv_heads,
 // head_size]]
 void CopyLayerBlocks2GPUThreadFunc(
     const torch::Tensor& src, std::vector<torch::Tensor> const& kv_caches,
@@ -388,7 +388,7 @@ void CopyLayerBlocks2GPUThreadFunc(
 };  // namespace
 
 // src layout: [num_blocks, 2, num_layer, block_size, num_kv_heads*head_size]
-// kv_caches layout: [laysers, [2, num_blocks, block_size, num_kv_heads,
+// kv_caches layout: [layers, [2, num_blocks, block_size, num_kv_heads,
 // head_size]]
 void KVStore::CopyLayerBlocks2GPU(torch::Tensor& src,
                                   std::vector<torch::Tensor> const& kv_caches,

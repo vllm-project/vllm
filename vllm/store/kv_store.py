@@ -20,10 +20,12 @@ batch_layers_transmission_to_GPU = False
 
 @dataclass
 class BlockMappingFromCPU:
-    block_mapping: torch.Tensor  # 2-D tenso
-    block_offset: torch.Tensor  # 1-D tensor, like offset array in CSR format
+    # 2-D tensor
+    block_mapping: Optional[torch.Tensor]
+    # 1-D tensor, like offset array in CSR format
     # the offset of each request in block_mapping
-    request_ids: torch.Tensor  # request IDs
+    block_offset: Optional[torch.Tensor]
+    request_ids: Optional[torch.Tensor]  # request IDs
 
     def __init__(self, block_mapping: list[list[int, int]],
                  block_offset: list[int], request_ids: list[int]):
@@ -37,6 +39,11 @@ class BlockMappingFromCPU:
                                         device="cpu",
                                         dtype=torch.int64).view(-1)
 
+    @staticmethod
+    def null():
+        return BlockMappingFromCPU(
+                torch.Tensor(), torch.Tensor(), torch.Tensor())
+
     def __str__(self):
         return "block_mapping: " + str(self.block_mapping) + \
                 " block_offset: " + str(self.block_offset) + \
@@ -45,12 +52,14 @@ class BlockMappingFromCPU:
 
 @dataclass
 class KVStoreMeta:
-    incomplete_put_block_ids: torch.Tensor  # 4-D tensor:
+    # 4-D tensor:
     # vllm_block_id,
     # start_offset,end_offset,
     # store_block_id
-    put_block_ids_mapping: torch.Tensor  # 2-D tensor:
+    incomplete_put_block_ids: torch.Tensor
+    # 2-D tensor:
     # vllm_block_id, store_block_id
+    put_block_ids_mapping: torch.Tensor
     request_ids: torch.Tensor  # 1-D tensor
 
     @staticmethod
@@ -257,7 +266,7 @@ class KVBlockStoreManager:
         return ret_tensor
 
     def get_block_mapping_from_python(self, vllm_block_ids: list[int]) \
-            -> list[tuple[int, int]]:
+            -> list[list[int, int]]:
         if (not self.is_prefill) or \
                 (len(vllm_block_ids) == 0):
             return []

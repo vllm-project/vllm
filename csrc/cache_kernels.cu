@@ -88,7 +88,7 @@ void kv_store_copy_blocks2CPU(torch::Tensor& src, torch::Tensor& dst,
 }
 
 // src layout: [num_blocks, 2, num_layer, block_size, num_kv_heads*head_size]
-// kv_caches layout: [laysers, [2, num_blocks, block_size, num_kv_heads,
+// kv_caches layout: [layers, [2, num_blocks, block_size, num_kv_heads,
 // head_size]]
 void kv_store_copy_blocks2GPU(
     torch::Tensor& src, std::vector<torch::Tensor> const& kv_caches,
