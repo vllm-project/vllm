@@ -73,7 +73,7 @@ Another way to access the latest code is to use the docker images:
 .. code-block:: console
 
     $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-    $ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${VLLM_COMMIT}
+    $ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}
 
 These docker images are used for CI and testing only, and they are not intended for production use. They will be expired after several days.
 
