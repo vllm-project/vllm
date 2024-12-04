@@ -254,7 +254,6 @@ class repackage_wheel(build_ext):
     default_wheel = "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
     def run(self) -> None:
-        super().run()
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",
                                    self.default_wheel)
 
