@@ -101,7 +101,7 @@ Values
 |                     |         | ataDisabled": true}`` | container     |
 |                     |         |                       |               |
 +---------------------+---------+-----------------------+---------------+
-| extraInit.          | string | ``"50Gi"``            | Storage       |
+| extraInit.          | string  | ``"50Gi"``            | Storage       |
 | pvcStorage          |         |                       | size of the   |
 |                     |         |                       | s3            |
 +---------------------+---------+-----------------------+---------------+
