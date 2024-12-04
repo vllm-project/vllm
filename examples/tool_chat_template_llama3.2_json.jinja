@@ -26,13 +26,11 @@
     {%- endfor %}
 {%- endfor %}
 
-
 {#- This block extracts the system message, so we can slot it into the right place. #}
 {%- if messages[0]['role'] == 'system' %}
     {%- if messages[0]['content'] is string %}
         {%- set system_message = messages[0]['content']|trim %}
     {%- else %}
-        {#- Support vLLM's transforming of a content string to JSON. #}
         {%- set system_message = messages[0]['content'][0]['text']|trim %}
     {%- endif %}
     {%- set messages = messages[1:] %}
@@ -44,14 +42,8 @@
     {%- endif %}
 {%- endif %}
 
-{#- Including an image is not compatible with a system message #}
-{%- if image_ns.has_images and not system_message == "" %}
-    {{- raise_exception("Prompting with images is incompatible with system messages and tool use.") }}
-{%- endif %}
-
-
-{#- System message, if there are no images #}
-{%- if not image_ns.has_images %}
+{#- System message if there are no images, if the user supplied one, or if tools are used (default tool system message) #}
+{%- if system_message or not image_ns.has_images %}
     {{- "<|start_header_id|>system<|end_header_id|>\n\n" }}
     {%- if tools is not none %}
         {{- "Environment: ipython\n" }}
