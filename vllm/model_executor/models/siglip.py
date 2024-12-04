@@ -6,7 +6,6 @@ from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from torch import nn
 from transformers import SiglipVisionConfig
@@ -28,8 +27,6 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens,
                                    resolve_visual_encoder_outputs)
 from vllm.sequence import SequenceData
-
-from .utils import get_vit_attn_backend
 
 
 def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:

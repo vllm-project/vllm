@@ -9,6 +9,7 @@ from typing import Iterable, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.attention.layer import MultiHeadAttention
@@ -23,7 +24,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
 
 NORM2FN = {
     'rms_norm': RMSNorm,

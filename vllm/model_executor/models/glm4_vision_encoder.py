@@ -78,8 +78,8 @@ class Attention(nn.Module):
             quant_config=quant_config,
         )
 
-        self.attn = MultiHeadAttention(self.num_heads_per_rank,
-                                       self.head_dim, self.scale)
+        self.attn = MultiHeadAttention(self.num_heads_per_rank, self.head_dim,
+                                       self.scale)
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
