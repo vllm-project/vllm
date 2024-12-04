@@ -13,7 +13,7 @@ from faker import Faker
 import pandas as pd
 
 OUT_DIR = "out"
-NB_WORDS = 20
+NB_WORDS = 100
 TOTAL_LORAS = 10
 
 def create_test_prompts(
@@ -149,7 +149,7 @@ def main():
     for distribution in ["uniform", "normal"]:
         test_prompts = create_test_prompts(distribution)
         for lora_policy in [LoraPolicy.NAIVE, LoraPolicy.ROUND_ROBIN]:
-            for num_iters_before_lora_reschedule in [1, 2, 4, 8, 16, 32, 64]:
+            for num_iters_before_lora_reschedule in [1, 4, 16, 64]:
                 engine = initialize_engine(lora_policy, num_iters_before_lora_reschedule)
                 prompts = [(
                     sentence,
