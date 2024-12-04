@@ -136,7 +136,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.base_layer = base_layer
         self.embeddings_slice: Optional[Tuple[int, int]]
         self.embeddings_weights: Optional[torch.Tensor]
-        self.n_slices = 1
 
     def create_lora_weights(
             self,
@@ -170,36 +169,34 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             dtype=self.base_layer.weight.dtype,
             device=self.base_layer.weight.device,
         )
-        self.lora_a_stacked = tuple(
-            torch.zeros(
-                (
-                    max_loras,
-                    self.base_layer.org_vocab_size +
-                    lora_config.lora_extra_vocab_size,
-                    lora_config.max_lora_rank,
-                ),
-                dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
-            ) for _ in range(self.n_slices))
-        self.lora_b_stacked = tuple(
-            torch.zeros(
-                (
-                    max_loras,
-                    1,
-                    self.base_layer.embedding_dim,
-                    lora_config.max_lora_rank,
-                ),
-                dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
-            ) for _ in range(self.n_slices))
-        self.lora_a_stacked_2d = self.lora_a_stacked[0].view(
-            self.lora_a_stacked[0].shape[0] * self.lora_a_stacked[0].shape[1],
-            self.lora_a_stacked[0].shape[2],
+        self.lora_a_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.org_vocab_size +
+                lora_config.lora_extra_vocab_size,
+                lora_config.max_lora_rank,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.base_layer.weight.device,
+        )
+        self.lora_b_stacked = torch.zeros(
+            (
+                max_loras,
+                1,
+                self.base_layer.embedding_dim,
+                lora_config.max_lora_rank,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.base_layer.weight.device,
+        )
+        self.lora_a_stacked_2d = self.lora_a_stacked.view(
+            self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],
+            self.lora_a_stacked.shape[2],
         )
 
     def reset_lora(self, index: int):
-        self.lora_a_stacked[0][index] = 0
-        self.lora_b_stacked[0][index] = 0
+        self.lora_a_stacked[index] = 0
+        self.lora_b_stacked[index] = 0
         self.embeddings_tensors[index] = 0
 
     def set_lora(
@@ -211,12 +208,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
-        self.lora_a_stacked[0][
-            index, :lora_a.shape[0], :lora_a.shape[1]].copy_(lora_a,
-                                                             non_blocking=True)
-        self.lora_b_stacked[0][index,
-                               0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                   lora_b.T, non_blocking=True)
+        self.lora_a_stacked[index, :lora_a.shape[0], :lora_a.shape[1]].copy_(
+            lora_a, non_blocking=True)
+        self.lora_b_stacked[index,
+                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index, :embeddings_tensor.shape[0], :embeddings_tensor.
@@ -258,7 +254,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         # Embedding layer only need expand op
         self.punica_wrapper.add_expand(full_output,
                                        full_lora_a_embeddings,
-                                       self.lora_b_stacked[0],
+                                       self.lora_b_stacked,
                                        bias_all=None,
                                        add_input=True)
         return full_output.view_as(full_output_org)
@@ -714,7 +710,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                       self.kv_proj_shard_size * (self.kv_shard_id + 1)]
         bias = torch.cat([bias_q, bias_k, bias_v], dim=1)
         return bias
-    
+
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(cls, source_layer: nn.Module,
@@ -1066,7 +1062,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.sharded_to_full_mapping = sharded_to_full_mapping
-        self.n_slices = 1
 
     @property
     def logits_as_input(self):
@@ -1110,32 +1105,29 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         if 32000 < self.base_layer.vocab_size > 257024:
             raise ValueError("When using LoRA, vocab size must be "
                              "32000 >= vocab_size <= 257024")
-
-        self.lora_a_stacked = tuple(
-            torch.zeros(
-                (
-                    max_loras,
-                    1,
-                    lora_config.max_lora_rank,
-                    self.hidden_size,
-                ),
-                dtype=lora_config.lora_dtype,
-                device=self.device,
-            ) for _ in range(self.n_slices))
-        self.lora_b_stacked = tuple(
-            torch.zeros(
-                (
-                    max_loras,
-                    1,
-                    # Pad for kernel compatibility
-                    math.ceil(self.base_layer.vocab_size /
-                              lora_config.lora_vocab_padding_size) *
-                    lora_config.lora_vocab_padding_size,
-                    lora_config.max_lora_rank,
-                ),
-                dtype=lora_config.lora_dtype,
-                device=self.device,
-            ) for _ in range(self.n_slices))
+        self.lora_a_stacked = torch.zeros(
+            (
+                max_loras,
+                1,
+                lora_config.max_lora_rank,
+                self.hidden_size,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.lora_b_stacked = torch.zeros(
+            (
+                max_loras,
+                1,
+                # Pad for kernel compatibility
+                math.ceil(self.base_layer.vocab_size /
+                          lora_config.lora_vocab_padding_size) *
+                lora_config.lora_vocab_padding_size,
+                lora_config.max_lora_rank,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
         self.embeddings_tensors = torch.full(
             (max_loras, lora_config.lora_extra_vocab_size, self.hidden_size),
             fill_value=float("-inf"),
@@ -1149,11 +1141,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                 dtype=torch.long)
         else:
             self.sharded_to_full_mapping_gpu = None
-        self.output_slices = (self.lora_b_stacked[0].shape[2], )
 
     def reset_lora(self, index: int):
-        self.lora_a_stacked[0][index] = 0
-        self.lora_b_stacked[0][index] = 0
+        self.lora_a_stacked[index] = 0
+        self.lora_b_stacked[index] = 0
         self.embeddings_tensors[index] = float("-inf")
 
     def set_lora(
@@ -1165,12 +1156,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
-        self.lora_a_stacked[0][index,
-                               0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-                                   lora_a.T, non_blocking=True)
-        self.lora_b_stacked[0][index,
-                               0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                   lora_b.T, non_blocking=True)
+        self.lora_a_stacked[index,
+                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
+                                lora_a.T, non_blocking=True)
+        self.lora_b_stacked[index,
+                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index, :embeddings_tensor.shape[0], :embeddings_tensor.
@@ -1234,8 +1225,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
         # LogitsProcessorWithLoRA always using bgmv
         self.punica_wrapper.add_lora_logits(logits, hidden_states,
-                                            self.lora_a_stacked[0],
-                                            self.lora_b_stacked[0], 1.0)
+                                            self.lora_a_stacked,
+                                            self.lora_b_stacked, 1.0)
 
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]
