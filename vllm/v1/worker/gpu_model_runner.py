@@ -414,12 +414,22 @@ class GPUModelRunner:
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
+    def _update_states_prepare_sampling(
+        self,
+        scheduler_output,
+    ) -> SamplingMetadata:
+        self._update_states(scheduler_output)
+        # Sample the next token and get logprobs if needed.
+        return self._prepare_sampling(scheduler_output)
+
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        self._update_states(scheduler_output)
+
+        sampling_metadata = self._update_states_prepare_sampling(
+            scheduler_output)
 
         # Run the encoder.
         self._execute_encoder(scheduler_output)
@@ -462,10 +472,8 @@ class GPUModelRunner:
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
-        # Sample the next token and get logprobs if needed.
-        sampling_metadata = self._prepare_sampling(scheduler_output)
         sampler_output = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
