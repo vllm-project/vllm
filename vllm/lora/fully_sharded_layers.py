@@ -55,15 +55,14 @@ def _mcp_apply(x, bias, layer: ColumnParallelLinearWithLoRA):
         device=x.device,
     )
 
-    layer.punica_wrapper.add_shrink_packed_nslice(buffers, x,
-                                                  layer.lora_a_stacked, 1.0)
+    layer.punica_wrapper.add_shrink(buffers, x, layer.lora_a_stacked, 1.0)
     buffers = tensor_model_parallel_all_gather(buffers)
-    layer.punica_wrapper.add_expand_packed_nslice(output,
-                                                  buffers,
-                                                  layer.lora_b_stacked,
-                                                  layer.bias_stacked,
-                                                  layer.output_slices,
-                                                  add_input=True)
+    layer.punica_wrapper.add_expand(output,
+                                    buffers,
+                                    layer.lora_b_stacked,
+                                    layer.bias_stacked,
+                                    layer.output_slices,
+                                    add_input=True)
 
     output = output.view(*out_orig_shape)
     # now have column partitioned and packed output
@@ -289,8 +288,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             device=x.device,
         )
 
-        self.punica_wrapper.add_shrink_packed_nslice(buffer, x,
-                                                     self.lora_a_stacked, 1.0)
+        self.punica_wrapper.add_shrink(buffer, x, self.lora_a_stacked, 1.0)
         buffer = tensor_model_parallel_all_reduce(buffer)
 
         # following S-LoRA, allows the fusing of all_gather and all_reduce
@@ -300,10 +298,11 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # the output is not the same as a normal row_parallel, it should be
         # reduced before being used
 
-        # TODO:add DOC
         buffer = buffer.squeeze(dim=0)
         self.punica_wrapper.add_expand_fs_rowlinear(
-            output, buffer, self.lora_b_stacked[0],
+            output,
+            buffer,
+            self.lora_b_stacked[0],
             self.bias_stacked[0] if self.bias_stacked is not None else None,
             add_input=True)
         output = output.view(*out_orig_shape)

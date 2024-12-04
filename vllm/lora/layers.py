@@ -278,6 +278,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
         self.output_slices: Tuple[int, ...]
         self.tp_size: int
+        self.output_size: int
+        self.n_slices: int
 
     def create_lora_weights(
         self,
@@ -389,7 +391,6 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         super().__init__(base_layer, )
         # To ensure interface compatibility, set to 1 always.
         self.tp_size = 1
-
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 

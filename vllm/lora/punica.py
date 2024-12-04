@@ -572,9 +572,7 @@ class PunicaWrapper:
                                 if self.is_prefill else self.expand_decode)
         expand_fun(y, x, lora_b_stacked, add_input)
 
-
-
-    def add_shrink_packed_nslice(
+    def add_shrink(
         self,
         y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
         x: torch.Tensor,
@@ -605,7 +603,7 @@ class PunicaWrapper:
             self.apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
                               scale)
 
-    def add_expand_packed_nslice(
+    def add_expand(
         self,
         y: torch.Tensor,
         x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
@@ -723,13 +721,13 @@ class PunicaWrapper:
                 torch.zeros(
                     (x.size(0), r), dtype=torch.float32, device=x.device)
                 for _ in range(len(output_slices)))
-        self.add_shrink_packed_nslice(buffer, x, lora_a_stacked, scale)
-        self.add_expand_packed_nslice(y,
-                                      buffer,
-                                      lora_b_stacked,
-                                      None,
-                                      output_slices,
-                                      add_input=True)
+        self.add_shrink(buffer, x, lora_a_stacked, scale)
+        self.add_expand(y,
+                        buffer,
+                        lora_b_stacked,
+                        None,
+                        output_slices,
+                        add_input=True)
 
     def add_lora_logits(self,
                         y: torch.Tensor,
