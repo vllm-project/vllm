@@ -1,4 +1,3 @@
-
 import re
 import fnmatch
 from typing import Any, Dict, List, Optional, cast
@@ -7,8 +6,8 @@ import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FUSED_LAYER_NAME_MAPPING)
-from vllm.model_executor.layers.quantization.quark.utils import (deep_compare,
-                                                                 should_ignore_layer)
+from vllm.model_executor.layers.quantization.quark.utils import (
+    deep_compare, should_ignore_layer)
 
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
@@ -51,14 +50,11 @@ class QuarkConfig(QuantizationConfig):
 
     def get_name(self) -> str:
         return "quark"
-    
-    def get_quant_method(
-        self,
-        layer: torch.nn.Module,
-        prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
-        
+
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(List[str], self.quant_config.get("exclude"))
         if should_ignore_layer(prefix, ignore=exclude_layers):
@@ -70,7 +66,8 @@ class QuarkConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return QuarkKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return QuarkMoEMethod.get_moe_method(self, module=layer, 
+            return QuarkMoEMethod.get_moe_method(self,
+                                                 module=layer,
                                                  layer_name=prefix)
         return None
 
@@ -82,41 +79,47 @@ class QuarkConfig(QuantizationConfig):
                              "the configurations of Quark quantized model")
         kv_cache_group = cast(List[str], export_config.get("kv_cache_group"))
         pack_method = cast(str, export_config.get("pack_method"))
-        
+
         if len(kv_cache_group) == 0:
             kv_cache_config = None
         else:
             kv_cache_set = set(kv_cache_group)
-            layer_quant_config = cast(Dict[str, Any], 
+            layer_quant_config = cast(Dict[str, Any],
                                       config.get("layer_quant_config"))
             layer_quant_names = list(layer_quant_config.keys())
             layer_quant_set = set(layer_quant_names)
-            
+
             if not kv_cache_set.issubset(layer_quant_set):
                 raise ValueError("The Quark quantized model has the "
                                  "kv_cache_group parameter setting, "
                                  "but no kv_cache quantization settings "
                                  "were found in the quantization "
                                  "configuration.")
-            
-            q_configs = [layer_quant_config.get(name) for name in kv_cache_group]
-            if not all(deep_compare(q_config, q_configs[0]) for q_config in q_configs):
-                raise ValueError("The quantization method used for kv_cache should be the same, "
-                                 "but the quantization method for the kv_cache layer in the "
-                                 "config is different.")
+
+            q_configs = [
+                layer_quant_config.get(name) for name in kv_cache_group
+            ]
+            if not all(
+                    deep_compare(q_config, q_configs[0])
+                    for q_config in q_configs):
+                raise ValueError(
+                    "The quantization method used for kv_cache should be the same, "
+                    "but the quantization method for the kv_cache layer in the "
+                    "config is different.")
             kv_cache_config = q_configs[0].get("output_tensors")
             if kv_cache_config is None:
-                raise ValueError("The kv_cache quantization configuration is empty.")
+                raise ValueError(
+                    "The kv_cache quantization configuration is empty.")
 
-            # Since we have already set kv_cache quantization configurations, we will remove 
+            # Since we have already set kv_cache quantization configurations, we will remove
             # the quantization configuration for the output_tensors corresponding to the kv_cache layer.
             for q_config in q_configs:
                 q_config["output_tensors"] = None
-            
-        return cls(quant_config = config,
-                   kv_cache_group = kv_cache_group,
-                   kv_cache_config = kv_cache_config,
-                   pack_method = pack_method)
+
+        return cls(quant_config=config,
+                   kv_cache_group=kv_cache_group,
+                   kv_cache_config=kv_cache_config,
+                   pack_method=pack_method)
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -138,23 +141,22 @@ class QuarkConfig(QuantizationConfig):
             return supported
         else:
             return False
-        
-    def _is_fp8_w8a8(self, 
-                     weight_quant: Optional[Dict[str, Any]],
+
+    def _is_fp8_w8a8(self, weight_quant: Optional[Dict[str, Any]],
                      input_quant: Optional[Dict[str, Any]]) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
             return False
-        
+
         # Confirm weight scheme is supported
         is_fp8_dtype = (weight_quant.get("dtype") == "fp8_e4m3"
                         and input_quant.get("dtype") == "fp8_e4m3")
         is_static_weight = not weight_quant.get("is_dynamic")
-        is_per_tensor_or_channel_weight = (weight_quant.get("qscheme") in [
-            "per_tensor", "per_channel"
-        ])
-        
-        if not (is_fp8_dtype and is_static_weight and is_per_tensor_or_channel_weight):
+        is_per_tensor_or_channel_weight = (weight_quant.get("qscheme")
+                                           in ["per_tensor", "per_channel"])
+
+        if not (is_fp8_dtype and is_static_weight
+                and is_per_tensor_or_channel_weight):
             return False
 
         # Dynamic quantization is always supported if weights supported.
@@ -162,36 +164,34 @@ class QuarkConfig(QuantizationConfig):
             return True
 
         # Confirm activation scheme is supported.
-        is_per_tensor_activation = (
-            input_quant.get("qscheme") == "per_tensor")
+        is_per_tensor_activation = (input_quant.get("qscheme") == "per_tensor")
         return is_per_tensor_activation
-    
-    def _is_static_tensor_w8a8(self, 
-                               weight_quant: Optional[Dict[str, Any]],
+
+    def _is_static_tensor_w8a8(self, weight_quant: Optional[Dict[str, Any]],
                                input_quant: Optional[Dict[str, Any]]) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
             return False
-        
+
         is_int8_dtype = (weight_quant.get("dtype") == "int8"
-                        and input_quant.get("dtype") == "int8")
-        
-        is_tensor = (weight_quant.get("qscheme") in ["per_tensor", "per_channel"]
+                         and input_quant.get("dtype") == "int8")
+
+        is_tensor = (weight_quant.get("qscheme")
+                     in ["per_tensor", "per_channel"]
                      and input_quant.get("qscheme") == "per_tensor")
-        
-        is_static = (not weight_quant.get("is_dynamic") 
+
+        is_static = (not weight_quant.get("is_dynamic")
                      and not input_quant.get("is_dynamic"))
-        
+
         is_weight_symmetric = (weight_quant.get("symmetric") is True)
 
         # Both symmetric and asymmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
-    
-    def _find_matched_config(self, 
-                            layer_name: str, 
-                            module: torch.nn.Module) -> Dict[str, Any]:
-        
+
+    def _find_matched_config(self, layer_name: str,
+                             module: torch.nn.Module) -> Dict[str, Any]:
+
         proj_name = layer_name.split(".")[-1]
         if proj_name in FUSED_LAYER_NAME_MAPPING:
             shard_proj_names = FUSED_LAYER_NAME_MAPPING[proj_name]
@@ -203,57 +203,62 @@ class QuarkConfig(QuantizationConfig):
             ]
             shard_configs = [
                 self._find_matched_config(shard_name, module)
-                for shard_name in shard_names]
-            if not all(deep_compare(q_config, shard_configs[0]) for q_config in shard_configs):
-                raise ValueError(f"Found a different quantization configuration for "
-                                 f"{shard_proj_names} in {layer_name}. vLLM "
-                                 "requires all to use the same scheme.")
+                for shard_name in shard_names
+            ]
+            if not all(
+                    deep_compare(q_config, shard_configs[0])
+                    for q_config in shard_configs):
+                raise ValueError(
+                    f"Found a different quantization configuration for "
+                    f"{shard_proj_names} in {layer_name}. vLLM "
+                    "requires all to use the same scheme.")
             return shard_configs[0]
         else:
-            layer_quant_config = cast(Dict[str, Any], 
-                                      self.quant_config.get("layer_quant_config"))
+            layer_quant_config = cast(
+                Dict[str, Any], self.quant_config.get("layer_quant_config"))
             for name_pattern in layer_quant_config.keys():
                 if fnmatch.fnmatch(layer_name, name_pattern):
                     return layer_quant_config[name_pattern]
-            
+
             layer_type = type(module)
-            layer_type_quant_config = cast(Dict[str, Any],
-                                           self.quant_config.get("layer_type_quant_config"))
+            layer_type_quant_config = cast(
+                Dict[str, Any],
+                self.quant_config.get("layer_type_quant_config"))
             if layer_type in layer_type_quant_config:
                 return layer_type_quant_config[layer_type]
-            
-            global_quant_config = cast(Dict[str, Any],
-                                       self.quant_config.get("global_quant_config"))
+
+            global_quant_config = cast(
+                Dict[str, Any], self.quant_config.get("global_quant_config"))
             return global_quant_config
-    
+
     def _get_scheme_from_config(self, config: Dict[str, Any]) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
-            raise NotImplementedError("Currently, Quark models with output_tensors "
-                                      "and bias quantized are not supported")
+            raise NotImplementedError(
+                "Currently, Quark models with output_tensors "
+                "and bias quantized are not supported")
         weight_config = cast(Dict[str, Any], config.get("weight"))
         input_config = cast(Dict[str, Any], config.get("input_tensors"))
-        
+
         if self._is_fp8_w8a8(weight_config, input_config):
-            is_fp8_w8a8_supported = self._check_scheme_supported(QuarkW8A8Fp8.get_min_capability(), error=False)
+            is_fp8_w8a8_supported = self._check_scheme_supported(
+                QuarkW8A8Fp8.get_min_capability(), error=False)
             if is_fp8_w8a8_supported:
                 return QuarkW8A8Fp8(
-                    qscheme=weight_config.get("qscheme"), 
-                    is_static_input_scheme=(input_config and not input_config.get("is_dynamic")))
+                    qscheme=weight_config.get("qscheme"),
+                    is_static_input_scheme=(
+                        input_config and not input_config.get("is_dynamic")))
         elif self._is_static_tensor_w8a8(weight_config, input_config):
-            return QuarkW8A8Int8(
-                qscheme=weight_config.get("qscheme"),
-                is_static_input_scheme=True,
-                input_symmetric=input_config.get("symmetric"))
-        
+            return QuarkW8A8Int8(qscheme=weight_config.get("qscheme"),
+                                 is_static_input_scheme=True,
+                                 input_symmetric=input_config.get("symmetric"))
+
         raise NotImplementedError("No quark compatible scheme was found.")
 
-    def get_scheme(
-            self,
-            layer: torch.nn.Module,
-            layer_name: str) -> "QuarkScheme":
+    def get_scheme(self, layer: torch.nn.Module,
+                   layer_name: str) -> "QuarkScheme":
 
         layer_quant_config = self._find_matched_config(layer_name, layer)
-        
+
         # Find the quant_scheme
         scheme = self._get_scheme_from_config(layer_quant_config)
         # Raise error if device does not support the scheme
@@ -261,7 +266,7 @@ class QuarkConfig(QuantizationConfig):
         self._check_scheme_supported(scheme.get_min_capability())
 
         return scheme
-    
+
     def get_cache_scale(self, name: str) -> Optional[List[str]]:
         """
         Check whether the param name matches the format for k/v cache scales
@@ -273,20 +278,30 @@ class QuarkConfig(QuantizationConfig):
         """
         if self.kv_cache_group is None or len(self.kv_cache_group) == 0:
             return None
-        
-        kv_proj_names = [re.split(r"[*.]", kv_cache)[-1] for kv_cache in self.kv_cache_group]
+
+        kv_proj_names = [
+            re.split(r"[*.]", kv_cache)[-1] for kv_cache in self.kv_cache_group
+        ]
         if name.endswith(".output_scale"):
             if len(kv_proj_names) == 1 and kv_proj_names[0] in name:
                 kv_output_scale_name = "." + kv_proj_names[0] + ".output_scale"
-                return [name.replace(kv_output_scale_name, ".attn.k_scale"), 
-                        name.replace(kv_output_scale_name, ".attn.v_scale")]
+                return [
+                    name.replace(kv_output_scale_name, ".attn.k_scale"),
+                    name.replace(kv_output_scale_name, ".attn.v_scale")
+                ]
             elif len(kv_proj_names) == 2:
                 for kv_proj_name in kv_proj_names:
                     if kv_proj_name in name and kv_proj_name == "k_proj":
-                        return [name.replace(".k_proj.output_scale", ".attn.k_scale")]
+                        return [
+                            name.replace(".k_proj.output_scale",
+                                         ".attn.k_scale")
+                        ]
                     elif kv_proj_name in name and kv_proj_name == "v_proj":
-                        return [name.replace(".v_proj.output_scale", ".attn.v_scale")]
-        
+                        return [
+                            name.replace(".v_proj.output_scale",
+                                         ".attn.v_scale")
+                        ]
+
         # If no matches, return None
         return None
 

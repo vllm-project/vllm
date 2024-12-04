@@ -47,7 +47,7 @@ class QuarkW8A8Int8(QuarkScheme):
             layer.weight_scale = Parameter(layer.weight_scale.data,
                                            requires_grad=False)
         layer.weight_zero_point = None
-        
+
         # INPUT SCALE
         if self.is_static_input_scheme:
             if self.input_symmetric:
@@ -127,9 +127,10 @@ class QuarkW8A8Int8(QuarkScheme):
             weight_scale = PerTensorScaleParameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
                                                    weight_loader=weight_loader)
-            weight_zero_point = PerTensorScaleParameter(data=torch.zeros(
-                len(output_partition_sizes), dtype=torch.int8),
-                                                    weight_loader=weight_loader)
+            weight_zero_point = PerTensorScaleParameter(
+                data=torch.zeros(len(output_partition_sizes),
+                                 dtype=torch.int8),
+                weight_loader=weight_loader)
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_zero_point", weight_zero_point)
 

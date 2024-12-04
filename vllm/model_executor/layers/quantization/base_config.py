@@ -133,6 +133,6 @@ class QuantizationConfig(ABC):
             method.
         """
         raise NotImplementedError
-    
+
     def get_cache_scale(self, name: str) -> Optional[List[str]]:
         return None

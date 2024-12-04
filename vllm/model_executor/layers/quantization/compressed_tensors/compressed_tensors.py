@@ -411,10 +411,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())
         return scheme
-    
-    # move the get_compressed_tensors_cache_scale method from 
-    # utils.py to instance method of CompressedTensorsConfig 
-    # class. By doing this, different QuantizationConfig 
+
+    # move the get_compressed_tensors_cache_scale method from
+    # utils.py to instance method of CompressedTensorsConfig
+    # class. By doing this, different QuantizationConfig
     # classes can implement their own get_cache_scale method.
     def get_cache_scale(self, name: str) -> Optional[List[str]]:
         """
