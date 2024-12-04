@@ -31,14 +31,22 @@ class TestModel(torch.nn.Module):
         ]
 
     def forward(self, x):
-        resid = torch.relu(x)
+        resid = torch.sqrt(x)
         y = self.norm[0](x)
 
-        x2 = apply_fp8_linear(y, self.w[0], self.wscale[0], self.scale[0])
+        x2 = apply_fp8_linear(y,
+                              self.w[0],
+                              self.wscale[0],
+                              self.scale[0],
+                              use_per_token_if_dynamic=True)
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = apply_fp8_linear(y2, self.w[1], self.wscale[1], self.scale[1])
+        x3 = apply_fp8_linear(y2,
+                              self.w[1],
+                              self.wscale[1],
+                              self.scale[1],
+                              use_per_token_if_dynamic=True)
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
@@ -75,12 +83,15 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
     model2 = torch.compile(model, backend=backend)
     result2 = model2(x)
 
-    # Check that it gives the same answer, higher tol for dynamic
-    ATOL, RTOL = (1e-3, 1e-3) if static else (2e-2, 2e-2)
-    torch.testing.assert_close(result.to(dtype=torch.float32),
-                               result2.to(dtype=torch.float32),
-                               atol=ATOL,
-                               rtol=RTOL)
+    # Higher tol for dynamic, even higher for bfloat16
+    if static:
+        ATOL, RTOL = (1e-3, 1e-3)
+    elif dtype == torch.float16:
+        ATOL, RTOL = (2e-3, 2e-3)
+    else:
+        ATOL, RTOL = (1e-2, 1e-2)
+
+    torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
 
     # Check substitution worked
     pre_nodes = backend.graph_pre_pass.nodes
@@ -93,7 +104,7 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
     else:
         rms_quant = torch.ops._C.rms_norm_dynamic_per_token_quant.default
         add_rms_quant = torch.ops._C.rms_norm_dynamic_per_token_quant.default  # noqa: E501
-        fp8_quant = torch.ops._C.dynamic_scaled_fp8_quant.default
+        fp8_quant = torch.ops._C.dynamic_per_token_scaled_fp8_quant.default
 
     # In pre-nodes, fp8 quant should be present and fused kernels should not
     assert find_auto_fn_maybe(pre_nodes, rms_quant) is None

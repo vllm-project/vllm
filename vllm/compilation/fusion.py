@@ -163,7 +163,7 @@ RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
 QUANT_STATIC_FP8_OP = torch.ops._C.static_scaled_fp8_quant.default
-QUANT_DYNAMIC_FP8_OP = torch.ops._C.dynamic_scaled_fp8_quant.default
+QUANT_DYNAMIC_FP8_OP = torch.ops._C.dynamic_per_token_scaled_fp8_quant.default
 
 
 class RMSNormQuantPattern:
@@ -329,7 +329,8 @@ class RMSNormDynamicFP8QuantPattern(RMSNormQuantPattern):
             at2 = auto_functionalized(QUANT_DYNAMIC_FP8_OP,
                                       result=result,
                                       input=at1[1],
-                                      scale=scale)
+                                      scale=scale,
+                                      scale_ub=None)
 
             # result, scale
             return at2[1], at2[2]
@@ -427,7 +428,8 @@ class FusedAddRMSNormDynamicFP8QuantPattern(RMSNormQuantPattern):
             at1 = auto_functionalized(QUANT_DYNAMIC_FP8_OP,
                                       result=result,
                                       input=at[1],
-                                      scale=scale)
+                                      scale=scale,
+                                      scale_ub=None)
 
             # result, residual, scale
             return at1[1], at[2], at1[2]
@@ -559,12 +561,12 @@ class FusionPass(VllmInductorPass):
             FusedAddRMSNormStaticFP8QuantPattern(epsilon).register(
                 self.patterns, self.record_match)
 
-            # Fuse rms_norm + dynamic_scaled_fp8_quant into
+            # Fuse rms_norm + dynamic_per_token_scaled_fp8_quant into
             # rms_norm_dynamic_per_token_quant
             RMSNormDynamicFP8QuantPattern(epsilon).register(
                 self.patterns, self.record_match)
 
-            # Fuse fused_add_rms_norm + dynamic_scaled_fp8_quant into
+            # Fuse fused_add_rms_norm + dynamic_per_token_scaled_fp8_quant into
             # rms_norm_dynamic_per_token_quant
             FusedAddRMSNormDynamicFP8QuantPattern(epsilon).register(
                 self.patterns, self.record_match)
