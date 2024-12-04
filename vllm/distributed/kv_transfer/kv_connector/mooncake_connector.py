@@ -4,9 +4,9 @@ Mooncake KV Cache Connector for Distributed Machine Learning Inference
 The MooncakeConnector transfers KV caches between prefill vLLM worker (Cache 
 producer) and decode vLLM worker (Cache consumer) using MooncakePipe.
 """
+import os
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
-import os
 import torch
 
 from vllm import _custom_ops as ops
