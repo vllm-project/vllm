@@ -1,11 +1,11 @@
 import enum
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import msgspec
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
+from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 
@@ -35,9 +35,8 @@ class EngineCoreRequest:
     # always be tokenized?
     prompt: Optional[str]
     prompt_token_ids: List[int]
-    mm_data: Optional[MultiModalDataDict]
+    mm_inputs: Optional[List[MultiModalKwargs]]
     mm_placeholders: Optional[MultiModalPlaceholderDict]
-    mm_processor_kwargs: Optional[Dict[str, Any]]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float
