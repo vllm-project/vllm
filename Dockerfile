@@ -139,12 +139,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        pip --verbose wheel --use-pep517 --no-deps -w /workspace/dist --no-build-isolation git+https://github.com/vllm-project/flash-attention.git ; \
-    fi
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,source=.git,target=.git \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
     CAUSAL_CONV1D_FORCE_BUILD=TRUE CAUSAL_CONV1D_SKIP_CUDA_BUILD=FALSE pip --verbose wheel --use-pep517 --no-deps -w /workspace/dist --no-build-isolation --no-cache-dir git+https://github.com/Dao-AILab/causal-conv1d.git ; \
     fi
 
@@ -214,7 +208,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo vim python3-pip \
+    && apt-get install -y ccache software-properties-common git curl sudo vim python3-pip libnccl2\
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
