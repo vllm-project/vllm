@@ -1,7 +1,7 @@
 steps:
   - label: "Build wheel - CUDA 12.1"
     agents:
-      queue: cpu_queue
+      queue: cpu_queue_postmerge
     commands:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.1.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
@@ -18,7 +18,7 @@ steps:
   - label: "Build wheel - CUDA 11.8"
     # depends_on: block-build-cu118-wheel
     agents:
-      queue: cpu_queue
+      queue: cpu_queue_postmerge
     commands:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=11.8.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
