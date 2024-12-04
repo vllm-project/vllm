@@ -8,6 +8,7 @@ import inspect
 import itertools
 import math
 import os
+import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
@@ -96,22 +97,31 @@ def device_loading_context(module: torch.nn.Module,
 logger = init_logger(__name__)
 
 
-def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
+def _initialize_model(
+    vllm_config: VllmConfig,
+    *,
+    prefix: str = "",
+    architectures: Optional[list[str]] = None,
+) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
-    model_class, _ = get_model_architecture(model_config)
+    model_class, _ = get_model_architecture(model_config,
+                                            architectures=architectures)
+
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
         with set_current_vllm_config(vllm_config):
             return model_class(vllm_config=vllm_config, prefix=prefix)
+
     msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
            "input arguments. Possibly you have an old-style model class"
            " registered from out of tree and it is used for new vLLM version. "
            "Check https://docs.vllm.ai/en/latest/design/arch_overview.html "
            "for the design and update the model class accordingly.")
-    logger.warning(msg)
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
     logger.warning(
         "Trying to guess the arguments for old-style model class %s",
         model_class,
@@ -355,7 +365,7 @@ class DefaultModelLoader(BaseModelLoader):
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
-            # We only enable strict check for non-quantiized models
+            # We only enable strict check for non-quantized models
             # that have loaded weights tracking currently.
             if model_config.quantization is None and loaded_weights is not None:
                 weights_not_loaded = weights_to_load - loaded_weights
@@ -1058,7 +1068,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                  model_config.revision,
                                                  pre_quant, load_8bit))
 
-        model.load_weights(qweight_iterator)
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        loaded_weights = model.load_weights(qweight_iterator)
+        # Some models may have weights loading tracker unimplemented.
+        if loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError("Following weights were not initialized from "
+                                 f"checkpoint: {weights_not_loaded}")
 
         torch.cuda.empty_cache()
 
@@ -1090,9 +1107,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         shard_name, weight_name)
                     break
 
+            # Models like Clip/Siglip may skip some layers in initialization,
+            # causing unused quant_param_name in state_dict.
             if quant_param_name not in param_dict:
-                raise ValueError(
-                    f"Parameter {quant_param_name} not found in the model.")
+                continue
 
             if quant_param_name not in stacked_quant_state_dict:
                 stacked_quant_state_dict[quant_param_name] = {}
