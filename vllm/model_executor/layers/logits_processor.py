@@ -76,7 +76,7 @@ class LogitsProcessor(nn.Module):
                 logits *= self.scale
 
             # Apply logits processors (if any).
-            if sampling_metadata is not None:
+            if is_v0_sampling_or_no_metadata and sampling_metadata is not None:
                 logits = _apply_logits_processors(logits, sampling_metadata)
 
         return logits
