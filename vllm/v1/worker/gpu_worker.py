@@ -396,7 +396,7 @@ class WorkerProc:
         This runs a background process """
 
         def signal_handler(signum, frame):
-            raise SystemExit(f"Worker interrupted with signal={signum}")
+            raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker
         signal.signal(signal.SIGTERM, signal_handler)
@@ -410,8 +410,8 @@ class WorkerProc:
 
             worker.execute_model_busy_loop()
 
-        except SystemExit as e:
-            logger.debug(e)
+        except SystemExit:
+            logger.debug("Worker interrupted.")
 
         except BaseException as e:
             logger.exception(e)

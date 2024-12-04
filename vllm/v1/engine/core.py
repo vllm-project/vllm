@@ -229,7 +229,7 @@ class EngineCoreProc(EngineCore):
         """Launch EngineCore busy loop in background process."""
 
         def signal_handler(signum, frame):
-            raise SystemExit(f"EngineCore interrupted with signal={signum}")
+            raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the engine_core
         signal.signal(signal.SIGTERM, signal_handler)
