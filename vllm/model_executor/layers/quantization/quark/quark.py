@@ -60,7 +60,8 @@ class QuarkConfig(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
         
         # Check if the layer is skipped for quantization.
-        if should_ignore_layer(prefix, ignore=self.quant_config.get("exclude")):
+        exclude_layers = cast(List[str], self.quant_config.get("exclude"))
+        if should_ignore_layer(prefix, ignore=exclude_layers):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -86,7 +87,8 @@ class QuarkConfig(QuantizationConfig):
             kv_cache_config = None
         else:
             kv_cache_set = set(kv_cache_group)
-            layer_quant_config = config.get("layer_quant_config")
+            layer_quant_config = cast(Dict[str, Any], 
+                                      config.get("layer_quant_config"))
             layer_quant_names = list(layer_quant_config.keys())
             layer_quant_set = set(layer_quant_names)
             
@@ -208,24 +210,28 @@ class QuarkConfig(QuantizationConfig):
                                  "requires all to use the same scheme.")
             return shard_configs[0]
         else:
-            for name_pattern in self.quant_config.get("layer_quant_config").keys():
+            layer_quant_config = cast(Dict[str, Any], 
+                                      self.quant_config.get("layer_quant_config"))
+            for name_pattern in layer_quant_config.keys():
                 if fnmatch.fnmatch(layer_name, name_pattern):
-                    layer_quant_config = self.quant_config.get("layer_quant_config")
                     return layer_quant_config[name_pattern]
             
             layer_type = type(module)
-            if layer_type in self.quant_config.get("layer_type_quant_config"):
-                layer_type_quant_config = self.quant_config.get("layer_type_quant_config")
+            layer_type_quant_config = cast(Dict[str, Any],
+                                           self.quant_config.get("layer_type_quant_config"))
+            if layer_type in layer_type_quant_config:
                 return layer_type_quant_config[layer_type]
             
-            return self.quant_config.get("global_quant_config")
+            global_quant_config = cast(Dict[str, Any],
+                                       self.quant_config.get("global_quant_config"))
+            return global_quant_config
     
     def _get_scheme_from_config(self, config: Dict[str, Any]) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
             raise NotImplementedError("Currently, Quark models with output_tensors "
                                       "and bias quantized are not supported")
-        weight_config = config.get("weight")
-        input_config = config.get("input_tensors")
+        weight_config = cast(Dict[str, Any], config.get("weight"))
+        input_config = cast(Dict[str, Any], config.get("input_tensors"))
         
         if self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(QuarkW8A8Fp8.get_min_capability(), error=False)
