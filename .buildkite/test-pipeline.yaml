@@ -18,6 +18,7 @@
 # num_nodes(int): whether to simulate multi-node setup by launch multiple containers on one host, 
 #     in this case, commands must be specified. the first command runs on first host, the second
 #     command runs on the second host.
+
 # working_dir(str): specify the place where command should execute, default to /vllm-workspace/tests
 # source_file_dependencies(list): the list of prefix to opt-in the test for, if empty, the test will always run.
 
