@@ -398,7 +398,16 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if ("WH_ARCH_YAML" in os.environ) and os.environ["WH_ARCH_YAML"] == "wormhole_b0_80_arch_eth_dispatch.yaml":
             dispatch_core_type = ttnn.device.DispatchCoreType.ETH
         return dispatch_core_type
-    
+
+    def _get_dispatch_core_config(self, device_params):
+        dispatch_core_type = self._get_dispatch_core_type()
+        dispatch_core_axis = device_params.pop(
+            "dispatch_core_axis",
+            ttnn.DispatchCoreAxis.COL if os.environ["ARCH_NAME"] == "blackhole" else ttnn.DispatchCoreAxis.ROW,
+        )
+        dispatch_core_config = ttnn.DispatchCoreConfig(dispatch_core_type, dispatch_core_axis)
+        return dispatch_core_config
+
     def _open_t3k_mesh_device(self):
         if self.trace_mode:
             device_params = {"trace_region_size": 14227456}  # TODO: make this configurable
@@ -406,7 +415,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             device_params = {}
         mesh_device = ttnn.open_mesh_device(
             ttnn.MeshShape(2, 4),
-            dispatch_core_type=self._get_dispatch_core_type(),
+            dispatch_core_config=self._get_dispatch_core_config(device_params),
             **device_params,
             mesh_type=ttnn.MeshType.Ring,
         )
