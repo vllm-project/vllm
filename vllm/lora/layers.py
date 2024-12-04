@@ -250,13 +250,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[1],
                 -1,
             )
-
-        # Embedding layer only need expand op
-        self.punica_wrapper.add_expand(full_output,
-                                       full_lora_a_embeddings,
-                                       self.lora_b_stacked,
-                                       bias_all=None,
-                                       add_input=True)
+        self.punica_wrapper.add_lora_embedding(full_output,
+                                               full_lora_a_embeddings,
+                                               self.lora_b_stacked,
+                                               add_input=True)
         return full_output.view_as(full_output_org)
 
     @classmethod
@@ -277,8 +274,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.base_layer = base_layer
         self.input_size = self.base_layer.input_size
         self.device = _get_lora_device(self.base_layer)
-        self.output_slices: Tuple[int, ...]
         self.bias_stacked: Optional[Tuple[torch.Tensor, ...]] = None
+
+        self.output_slices: Tuple[int, ...]
+        self.tp_size: int
 
     def create_lora_weights(
         self,
@@ -287,14 +286,31 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
         self.lora_config = lora_config
-        lora_a_output_size_per_partition = (
-            lora_config.max_lora_rank if not lora_config.fully_sharded_loras
-            else divide(lora_config.max_lora_rank, self.tp_size))
+
+        if isinstance(self.base_layer, ReplicatedLinear):
+            lora_a_out_size = lora_config.max_lora_rank
+            lora_b_out_size = self.output_size
+
+        elif isinstance(self.base_layer, ColumnParallelLinear):
+            lora_a_out_size = (lora_config.max_lora_rank if
+                               not lora_config.fully_sharded_loras else divide(
+                                   lora_config.max_lora_rank, self.tp_size))
+            lora_b_out_size = self.output_size
+
+        elif isinstance(self.base_layer, RowParallelLinear):
+            lora_a_out_size = lora_config.max_lora_rank
+            lora_b_out_size = (self.output_size if
+                               not lora_config.fully_sharded_loras else divide(
+                                   self.output_size, self.tp_size))
+        else:
+            raise NotImplementedError
+
+        lora_bias_out_size = self.output_size
         self.lora_a_stacked = tuple(
             torch.zeros(
                 max_loras,
                 1,
-                lora_a_output_size_per_partition,
+                lora_a_out_size,
                 self.input_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -303,7 +319,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             torch.zeros(
                 max_loras,
                 1,
-                self.output_size,
+                lora_b_out_size,
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -313,7 +329,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 torch.zeros(
                     max_loras,
                     1,
-                    self.output_size,
+                    lora_bias_out_size,
                     dtype=lora_config.lora_dtype,
                     device=self.device,
                 ) for _ in range(self.n_slices))
@@ -337,7 +353,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
-
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
@@ -373,7 +388,9 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def __init__(self, base_layer: ReplicatedLinear) -> None:
         super().__init__(base_layer, )
-        self.tp_size = 1  #To ensure interface compatibility, it is set to 1
+        # To ensure interface compatibility, set to 1 always.
+        self.tp_size = 1
+
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 
@@ -412,8 +429,10 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     """
     LoRA on top of ColumnParallelLinear layer.
-
     LoRA B is sliced for tensor parallelism.
+    There are two types for the `base_layer`:
+    1. ColumnParallelLinear, e.g.`dense_h_to_4h` in `FalconForCausalLM`.
+    2. MergedColumnParallelLinear, e.g.`gate_up_proj` in `Phi3ForCausalLM`.
     """
 
     def __init__(self, base_layer: ColumnParallelLinear) -> None:
@@ -425,6 +444,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             base_layer) is MergedColumnParallelLinear
         self.tp_size = get_tensor_model_parallel_world_size()
         self.output_size = self.base_layer.output_size_per_partition
+        # There is only one LoRA layer
         self.n_slices = 1
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
@@ -513,6 +533,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
     def __init__(self, base_layer: MergedColumnParallelLinear) -> None:
         super().__init__(base_layer)
+        # There are two LoRA layers
         self.n_slices = 2
 
     def create_lora_weights(
@@ -676,6 +697,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                                    self.base_layer.head_size)
         self.kv_proj_total_size = (self.base_layer.total_num_kv_heads *
                                    self.base_layer.head_size)
+        # There is only one LoRA layer
         self.n_slices = 1
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
@@ -733,6 +755,7 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
 
     def __init__(self, base_layer: QKVParallelLinear) -> None:
         super().__init__(base_layer)
+        # There are three LoRA layer.
         self.n_slices = 3
 
     def create_lora_weights(
@@ -965,13 +988,16 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         # reset input_size
         self.input_size = self.base_layer.input_size_per_partition
         self.output_size = self.base_layer.output_size
+
+        self.tp_rank = get_tensor_model_parallel_rank()
+        # There is only one LoRA layer.
         self.n_slices = 1
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+
         shard_size = self.input_size
-        start_idx = tensor_model_parallel_rank * shard_size
-        end_idx = (tensor_model_parallel_rank + 1) * shard_size
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
         lora_a = lora_a[start_idx:end_idx, :]
         return lora_a
 
@@ -998,10 +1024,9 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             input_parallel = input_
         else:
             # TODO: simplify code below
-            tp_rank = get_tensor_model_parallel_rank()
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.base_layer.tp_size)
-            input_parallel = splitted_input[tp_rank].contiguous()
+            input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         output_parallel = self.apply(input_parallel)

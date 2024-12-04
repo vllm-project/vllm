@@ -1,5 +1,5 @@
 # pylint: disable=unused-argument
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
 
 import torch
 import torch.nn as nn
@@ -51,30 +51,35 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     # gather operation.
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         tp_rank = get_tensor_model_parallel_rank()
-        shard_size = self.lora_a_stacked.shape[2]
+        shard_size = self.lora_a_stacked[0].shape[2]
         start_idx = tp_rank * shard_size
         lora_a = lora_a[:, start_idx:start_idx + shard_size]
         return lora_a
 
-    def apply(self, x: torch.Tensor,
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         x = x.view(-1, x.shape[-1])
         output, out_orig_shape = output.view(-1,
                                              output.shape[-1]), output.shape
+        # TODO add doc
         buffer = torch.zeros(
-            (x.shape[0], self.lora_a_stacked.shape[2]),
+            (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
             dtype=torch.float32,
             device=x.device,
         )
-        self.punica_wrapper.add_shrink(buffer, x, self.lora_a_stacked, 1.0)
+        self.punica_wrapper.add_shrink_packed_nslice(buffer, x,
+                                                     self.lora_a_stacked, 1.0)
         buffer = tensor_model_parallel_all_gather(buffer)
-        self.punica_wrapper.add_expand(output,
-                                       buffer,
-                                       self.lora_b_stacked,
-                                       self.bias_stacked,
-                                       add_input=True)
+        self.punica_wrapper.add_expand_packed_nslice(output,
+                                                     buffer,
+                                                     self.lora_b_stacked,
+                                                     self.bias_stacked,
+                                                     self.output_slices,
+                                                     add_input=True)
+
         # now have column partitioned output
         output = output.view(*out_orig_shape)
         return output
@@ -109,29 +114,25 @@ def _mcp_apply(x, bias, layer: QKVParallelLinearWithLora):
     MergedColumnParallelLinearWithShardedLoRA.
     """
     # expecting 2 for column parallel and 3 for qkv
-    n = len(layer.lora_a_stacked)
+    assert len(layer.lora_a_stacked) == layer.n_slices
     output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
     buffers = torch.zeros(
-        (n, x.shape[0], layer.lora_a_stacked[0].shape[2]),
+        (layer.n_slices, x.shape[0], layer.lora_a_stacked[0].shape[2]),
         dtype=torch.float32,
         device=x.device,
     )
-    for idx in range(n):
-        layer.punica_wrapper.add_shrink(buffers[idx], x,
-                                        layer.lora_a_stacked[idx], 1.0)
-
+    layer.punica_wrapper.add_shrink_packed_nslice(buffers, x,
+                                                  layer.lora_a_stacked, 1.0)
     buffers = tensor_model_parallel_all_gather(buffers)
-    layer.punica_wrapper.add_expand_packed_nslice(
-        output,
-        buffers,
-        layer.lora_b_stacked,
-        layer.bias_stacked,
-        1.0,
-        layer.output_slices,
-    )
+    layer.punica_wrapper.add_expand_packed_nslice(output,
+                                                  buffers,
+                                                  layer.lora_b_stacked,
+                                                  layer.bias_stacked,
+                                                  layer.output_slices,
+                                                  add_input=True)
 
     output = output.view(*out_orig_shape)
     # now have column partitioned and packed output
@@ -161,8 +162,9 @@ class MergedColumnParallelLinearWithShardedLoRA(
         ]
         return lora_a
 
-    def apply(self, x: torch.Tensor,
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
 
     @classmethod
@@ -194,28 +196,33 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         tp_rank = get_tensor_model_parallel_rank()
-        shard_size = self.lora_a_stacked.shape[2]
+        shard_size = self.lora_a_stacked[0].shape[2]
         start_idx = tp_rank * shard_size
         lora_a = lora_a[:, start_idx:start_idx + shard_size]
         return lora_a
 
-    def apply(self, x: torch.Tensor,
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         x = x.view(-1, x.shape[-1])
         output, out_orig_shape = output.view(-1,
                                              output.shape[-1]), output.shape
-        buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
-                             dtype=torch.float32,
-                             device=x.device)
-        self.punica_wrapper.add_shrink(buffer, x, self.lora_a_stacked, 1.0)
+        buffer = torch.zeros(
+            (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
+            dtype=torch.float32,
+            device=x.device,
+        )
+        self.punica_wrapper.add_shrink_packed_nslice(buffer, x,
+                                                     self.lora_a_stacked, 1.0)
         buffer = tensor_model_parallel_all_gather(buffer)
-        self.punica_wrapper.add_expand(output,
-                                       buffer,
-                                       self.lora_b_stacked,
-                                       self.bias_stacked,
-                                       add_input=True)
+        self.punica_wrapper.add_expand_packed_nslice(output,
+                                                     buffer,
+                                                     self.lora_b_stacked,
+                                                     self.bias_stacked,
+                                                     self.output_slices,
+                                                     add_input=True)
         # now have column partitioned output
         output = output.view(*out_orig_shape)
         return output
@@ -259,8 +266,9 @@ class MergedQKVParallelLinearWithShardedLora(MergedQKVParallelLinearWithLora):
         ]
         return lora_a
 
-    def apply(self, x: torch.Tensor,
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
 
     @classmethod
@@ -293,7 +301,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     """
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
-        shard_size = self.lora_b_stacked.shape[2]
+        shard_size = self.lora_b_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         lora_b = lora_b[:, start_idx:end_idx]
@@ -302,25 +310,29 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         if bias is None:
             return bias
-        shard_size = self.bias_stacked.shape[2]
+        self.bias_stacked = cast(Tuple[torch.Tensor, ...], self.bias_stacked)
+        shard_size = self.bias_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         bias = bias[start_idx:end_idx]
         return bias
 
-    def apply(self, x: torch.Tensor) -> torch.Tensor:
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
 
         x = x.view(-1, x.shape[-1])
         output, out_orig_shape = output.view(-1,
                                              output.shape[-1]), output.shape
         buffer = torch.zeros(
-            (x.shape[0], self.lora_a_stacked.shape[2]),
+            (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
             dtype=torch.float32,
             device=x.device,
         )
 
-        self.punica_wrapper.add_shrink(buffer, x, self.lora_a_stacked, 1.0)
+        self.punica_wrapper.add_shrink_packed_nslice(buffer, x,
+                                                     self.lora_a_stacked, 1.0)
         buffer = tensor_model_parallel_all_reduce(buffer)
 
         # following S-LoRA, allows the fusing of all_gather and all_reduce
@@ -329,19 +341,15 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # remains is a standard all_reduce. User should be aware though that
         # the output is not the same as a normal row_parallel, it should be
         # reduced before being used
-        shard_size = self.lora_b_stacked.shape[2]
 
-        # To be compatible with the input of the add_expand_packed_nslice,
-        # there is only one slice.
-        buffer = buffer.unsqueeze(dim=0)
-        self.punica_wrapper.add_expand_packed_nslice(
-            output,
-            buffer,
-            (self.lora_b_stacked, ),
-            (self.bias_stacked, ) if self.bias_stacked is not None else None,
-            1.0,
-            (shard_size, ),
-        )
+        # TODO:add DOC
+        buffer = buffer.squeeze(dim=0)
+        shard_size = self.lora_b_stacked[0].shape[2]
+        start_idx = self.tp_rank * shard_size
+        self.punica_wrapper.add_expand_slice(
+            output, buffer, self.lora_b_stacked[0],
+            self.bias_stacked[0] if self.bias_stacked is not None else None,
+            start_idx, shard_size)
         output = output.view(*out_orig_shape)
         return output
 

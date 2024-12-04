@@ -454,7 +454,7 @@ class PunicaWrapper:
                            y: torch.Tensor,
                            x: torch.Tensor,
                            w_t_all: torch.Tensor,
-                           bias_all: Optional[torch.Tensor],
+                           bias_stacked: Optional[torch.Tensor],
                            y_offset: Optional[int],
                            y_slice_size: Optional[int],
                            add_input: bool = True):
@@ -463,8 +463,8 @@ class PunicaWrapper:
         computation, which is suitable for the
         GEMM of lora'b.
         """
-        if bias_all is not None:
-            y = self.apply_bias(self.token_lora_indices, y, bias_all)
+        if bias_stacked is not None:
+            y = self.apply_bias(self.token_lora_indices, y, bias_stacked)
 
         expand_slice_fun: Callable = (self.expand_slice_prefill
                                       if self.is_prefill else
@@ -542,16 +542,39 @@ class PunicaWrapper:
         Otherwise, it is the decode stage, and the shrink_decode function
         should be called.
         """
+        y_org = y
+        y = y.view(-1, y.shape[-1])
         shrink_fun: Callable = (self.shrink_prefill
                                 if self.is_prefill else self.shrink_decode)
         shrink_fun(y, x, w_t_all, scale)
+        y = y.view_as(y_org)
+
+    def add_shrink_packed_nslice(
+        self,
+        y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+        x: torch.Tensor,
+        lora_a_stacked: Tuple[torch.Tensor, ...],
+        scale: float,
+    ):
+        """
+        Perform the ` y[i]+=x@w_t_all[i]` computation, which is suitable for 
+        the GEMM of lora'a.
+        When `is_prefill is` true, it indicates that it is currently the
+        prefill stage, and the `shrink_prefill` function should be called.
+        Otherwise, it is the decode stage, and the shrink_decode function
+        should be called.
+        """
+        x = x.view(-1, x.shape[-1])
+        # TODO fuse these kernels
+        for slice_idx in range(len(lora_a_stacked)):
+            self.add_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
 
     def add_expand(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        bias_all: Optional[torch.Tensor],
+        bias_stacked: Optional[torch.Tensor],
         add_input: bool = True,
     ):
         """
@@ -562,19 +585,41 @@ class PunicaWrapper:
         Otherwise, it is the decode stage, and the expand_decode function
         should be called.
         """
-        if bias_all is not None:
-            y = self.apply_bias(self.token_lora_indices, y, bias_all)
+        if bias_stacked is not None:
+            y = self.apply_bias(self.token_lora_indices, y, bias_stacked)
 
         expand_fun: Callable = (self.expand_prefill
                                 if self.is_prefill else self.expand_decode)
         expand_fun(y, x, w_t_all, add_input)
 
-    def add_expand_packed_nslice(self, y: torch.Tensor, x: torch.Tensor,
-                                 lora_b_stacked: Tuple[torch.Tensor, ...],
-                                 bias_stacked: Optional[Tuple[torch.Tensor,
-                                                              ...]],
-                                 scale: float,
-                                 output_slices: Tuple[int, ...]) -> None:
+    def add_expand_slice(self,
+                         y: torch.Tensor,
+                         x: torch.Tensor,
+                         w_t_all: torch.Tensor,
+                         bias_stacked: Optional[torch.Tensor],
+                         y_offset: Optional[int],
+                         y_slice_size: Optional[int],
+                         add_input: bool = True):
+        """
+        Similar to `add_expand`
+        """
+        if bias_stacked is not None:
+            y = self.apply_bias(self.token_lora_indices, y, bias_stacked)
+
+        expand_slice_fun: Callable = (self.expand_slice_prefill
+                                      if self.is_prefill else
+                                      self.expand_slice_decode)
+        expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_input)
+
+    def add_expand_packed_nslice(
+        self,
+        y: torch.Tensor,
+        x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+        lora_b_stacked: Tuple[torch.Tensor, ...],
+        bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+        output_slices: Tuple[int, ...],
+        add_input=True,
+    ) -> None:
         """
         Similar to `add_expand`
         """
@@ -591,17 +636,38 @@ class PunicaWrapper:
                                     None,
                                     offset_left,
                                     output_slices[slice_idx],
-                                    add_input=True)
+                                    add_input=add_input)
             offset_left += output_slices[slice_idx]
 
         y = y.view_as(y_org)
+
+    def add_lora_embedding(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: torch.Tensor,
+        add_input: bool = True,
+    ):
+        """
+        Perform the ` y+=x@w_t_all` computation, which is suitable for the
+        GEMM of lora'b or embedding layer's lora.
+        When `is_prefill` is true, it indicates that it is currently the
+        prefill stage, and the `expand_prefill` function should be called.
+        Otherwise, it is the decode stage, and the expand_decode function
+        should be called.
+        """
+
+        # Embedding layer only need expand op
+        expand_fun: Callable = (self.expand_prefill
+                                if self.is_prefill else self.expand_decode)
+        expand_fun(y, x, w_t_all, add_input)
 
     def add_lora(self,
                  y: torch.Tensor,
                  x: torch.Tensor,
                  wa_t_all: torch.Tensor,
                  wb_t_all: torch.Tensor,
-                 bias_all: Optional[torch.Tensor],
+                 bias_stacked: Optional[torch.Tensor],
                  scale: float,
                  y_offset: Optional[int] = None,
                  y_slice_size: Optional[int] = None,
@@ -620,7 +686,7 @@ class PunicaWrapper:
             x (torch.Tensor): Input tensor
             wa_t_all (torch.Tensor): lora_a's weight
             wb_t_all (torch.Tensor): lora_b's weight
-            bias_all: (torch.Tensor): lora's bias
+            bias_stacked: (torch.Tensor): lora's bias
             scale (float): Scaling factor.
             y_offset (Optional[int], optional): Offset to apply to the starting
                 column of y.
@@ -637,11 +703,15 @@ class PunicaWrapper:
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,
                                  device=x.device)
-        if bias_all is not None:
-            y = self.apply_bias(self.token_lora_indices, y, bias_all)
+        if bias_stacked is not None:
+            y = self.apply_bias(self.token_lora_indices, y, bias_stacked)
         self.add_shrink(buffer, x, wa_t_all, scale)
         if y_offset is None and y_slice_size is None:
-            self.add_expand(y, buffer, wb_t_all, bias_all=None, add_input=True)
+            self.add_expand(y,
+                            buffer,
+                            wb_t_all,
+                            bias_stacked=None,
+                            add_input=True)
         else:
             self.apply_expand_slice(y,
                                     buffer,
@@ -652,32 +722,44 @@ class PunicaWrapper:
                                     add_input=True)
         y = y.view_as(y_org)
 
-    def add_lora_packed_nslice(self, y: torch.Tensor, x: torch.Tensor,
-                               lora_a_stacked: Tuple[torch.Tensor, ...],
-                               lora_b_stacked: Tuple[torch.Tensor, ...],
-                               bias_all: Optional[Tuple[torch.Tensor,
-                                                        ...]], scale: float,
-                               output_slices: Tuple[int, ...]) -> None:
+    def add_lora_packed_nslice(
+            self,
+            y: torch.Tensor,
+            x: torch.Tensor,
+            lora_a_stacked: Tuple[torch.Tensor, ...],
+            lora_b_stacked: Tuple[torch.Tensor, ...],
+            bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+            scale: float,
+            output_slices: Tuple[int, ...],
+            *,
+            buffer: Optional[Tuple[torch.Tensor, ...]] = None) -> None:
         """
         Applies lora to each input. Similar to add_lora, This method is 
         used for layers that are composed of multiple sublayers
         (slices) packed together.
         """
-        y_org = y
-        x = x.view(-1, x.shape[-1])
-        y = y.view(-1, y.shape[-1])
-        offset_left = 0
-        if bias_all is not None:
-            y = self.apply_bias_packed_nslice(self.token_lora_indices, y,
-                                              output_slices, bias_all)
-        # TODO fuse these kernels
-        for slice_idx in range(len(output_slices)):
-            self.add_lora(y, x, lora_a_stacked[slice_idx],
-                          lora_b_stacked[slice_idx], None, scale, offset_left,
-                          output_slices[slice_idx])
-            offset_left += output_slices[slice_idx]
 
-        y = y.view_as(y_org)
+        assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
+        if bias_stacked is not None:
+            assert len(bias_stacked) == len(output_slices)
+            y = self.apply_bias_packed_nslice(self.token_lora_indices, y,
+                                              output_slices, bias_stacked)
+
+        if buffer is None:
+            r = lora_b_stacked[0].size(-1)
+            # We set the buffer to be float32 by default ,refer to:
+            # https://github.com/triton-lang/triton/issues/1387
+            buffer = tuple(
+                torch.zeros(
+                    (x.size(0), r), dtype=torch.float32, device=x.device)
+                for _ in range(len(output_slices)))
+        self.add_shrink_packed_nslice(buffer, x, lora_a_stacked, scale)
+        self.add_expand_packed_nslice(y,
+                                      buffer,
+                                      lora_b_stacked,
+                                      None,
+                                      output_slices,
+                                      add_input=True)
 
     def add_lora_logits(self,
                         y: torch.Tensor,
