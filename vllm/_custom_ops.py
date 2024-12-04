@@ -269,7 +269,6 @@ def rms_norm_dynamic_per_token_quant(
     return output, scales
 
 
-# TODO is this necessary?
 @register_fake("_C::rms_norm_dynamic_per_token_quant")
 def _rms_norm_dynamic_per_token_quant_fake(
         output: torch.Tensor,
