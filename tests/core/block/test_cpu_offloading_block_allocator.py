@@ -29,16 +29,18 @@ def test_allocate_mutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
     assert allocator.get_num_free_blocks(Device.GPU) == 0
     assert len(allocator._uncached_blocks) == num_gpu_blocks
 
-    mapping = allocator.get_and_reset_swaps(0.0)
-    assert not mapping
+    blocks_to_swap_out, blocks_to_swap_in = allocator.get_and_reset_swaps(0.0)
+    assert len(blocks_to_swap_out) == 0
+    assert len(blocks_to_swap_in) == 0
     assert len(allocator._uncached_blocks) == num_gpu_blocks
 
     _ = [allocator.free(block) for block in gpu_blocks]
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
 
-    mapping = allocator.get_and_reset_swaps(1.0)
-    assert not mapping
+    blocks_to_swap_out, blocks_to_swap_in = allocator.get_and_reset_swaps(1.0)
+    assert len(blocks_to_swap_out) == 0
+    assert len(blocks_to_swap_in) == 0
     assert len(allocator._uncached_blocks) == 0
 
 
@@ -75,21 +77,23 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
     assert allocator.get_num_free_blocks(Device.GPU) == 0
     assert len(allocator._uncached_blocks) == num_gpu_blocks
 
-    mapping = allocator.get_and_reset_swaps(0.0)
-    assert not mapping
+    blocks_to_swap_out, blocks_to_swap_in = allocator.get_and_reset_swaps(0.0)
+    assert len(blocks_to_swap_out) == 0
+    assert len(blocks_to_swap_in) == 0
     assert len(allocator._uncached_blocks) == num_gpu_blocks
 
     allocator.mark_blocks_as_computed([block.block_id for block in gpu_blocks])
-    mapping = allocator.get_and_reset_swaps(1.0)
-    assert len(mapping) == num_gpu_blocks
+    blocks_to_swap_out, blocks_to_swap_in = allocator.get_and_reset_swaps(1.0)
+    assert len(blocks_to_swap_out) + len(blocks_to_swap_in) == num_gpu_blocks
     assert len(allocator._uncached_blocks) == 0
 
     _ = [allocator.free(block) for block in gpu_blocks]
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
 
-    mapping = allocator.get_and_reset_swaps(1.0)
-    assert len(mapping) == 0
+    blocks_to_swap_out, blocks_to_swap_in = allocator.get_and_reset_swaps(1.0)
+    assert len(blocks_to_swap_out) == 0
+    assert len(blocks_to_swap_in) == 0
     assert len(allocator._uncached_blocks) == 0
 
     # allocate another gpu sequence to flush out the GPU cache
@@ -110,8 +114,9 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
     _ = [allocator.free(block) for block in gpu_blocks]
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
 
-    mapping = allocator.get_and_reset_swaps(2.0)
-    assert len(mapping) == 0
+    blocks_to_swap_out, blocks_to_swap_in = allocator.get_and_reset_swaps(2.0)
+    assert len(blocks_to_swap_out) == 0
+    assert len(blocks_to_swap_in) == 0
     assert len(allocator._uncached_blocks) == 0
 
     # allocate original gpu sequence. It should hit CPU cache.
@@ -130,5 +135,5 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
         for block in gpu_blocks
     ])
 
-    mapping = allocator.get_and_reset_swaps(3.0)
+    blocks_to_swap_out, blocks_to_swap_in = allocator.get_and_reset_swaps(3.0)
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
