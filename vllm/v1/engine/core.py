@@ -1,6 +1,7 @@
 import multiprocessing
 import pickle
 import queue
+import signal
 import threading
 import time
 from multiprocessing.process import BaseProcess
@@ -227,17 +228,27 @@ class EngineCoreProc(EngineCore):
     def run_engine_core(*args, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
+        def signal_handler(signum, frame):
+            raise SystemExit(f"EngineCore interrupted with signal={signum}")
+
+        # Either SIGTERM or SIGINT will terminate the engine_core
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
             engine_core.run_busy_loop()
-            engine_core.shutdown()
 
-        except KeyboardInterrupt:
+        except SystemExit:
             logger.debug("EngineCore interrupted.")
 
         except BaseException as e:
             logger.exception(e)
             raise e
+
+        finally:
+            engine_core.shutdown()
+            engine_core = None
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
@@ -256,6 +267,8 @@ class EngineCoreProc(EngineCore):
                         logger.debug("EngineCore busy loop waiting.")
                         if self.should_shutdown:
                             return
+                    except BaseException:
+                        raise
 
             # 2) Handle any new client requests (Abort or Add).
             while not self.input_queue.empty():

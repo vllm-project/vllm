@@ -3,6 +3,7 @@ import gc
 import os
 import pickle
 import signal
+import sys
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -19,7 +20,7 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
                               set_custom_all_reduce)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
-from vllm.executor.multiproc_worker_utils import get_mp_context
+from vllm.executor.multiproc_worker_utils import _add_prefix, get_mp_context
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
@@ -313,6 +314,10 @@ class WorkerProc:
         self.worker = Worker(vllm_config, local_rank, rank,
                              distributed_init_method)
 
+        pid = os.getpid()
+        _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
+        _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
+
         # Initialize MessageQueue for receiving SchedulerOutput
         self.worker_request_mq = MessageQueue.create_from_handle(
             input_shm_handle, self.worker.rank)
@@ -391,7 +396,7 @@ class WorkerProc:
         This runs a background process """
 
         def signal_handler(signum, frame):
-            raise SystemExit("Worker interrupted")
+            raise SystemExit(f"Worker interrupted with signal={signum}")
 
         # Either SIGTERM or SIGINT will terminate the worker
         signal.signal(signal.SIGTERM, signal_handler)
@@ -405,8 +410,8 @@ class WorkerProc:
 
             worker.execute_model_busy_loop()
 
-        except SystemExit:
-            logger.debug("Worker interrupted.")
+        except SystemExit as e:
+            logger.debug(e)
 
         except BaseException as e:
             logger.exception(e)

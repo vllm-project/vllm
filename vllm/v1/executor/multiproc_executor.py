@@ -163,9 +163,14 @@ class MultiprocExecutor:
                 time.sleep(0.1)
             return False
 
-        # Send SIGTERM if still running
+        # Wait for workers to terminate gracefully
         active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
         self.workers = None
+        if wait_for_termination(active_procs, 5):
+            return
+
+        # Send SIGTERM if still running
+        active_procs = [p for p in active_procs if p.is_alive()]
         for p in active_procs:
             p.terminate()
         if wait_for_termination(active_procs, 5):
