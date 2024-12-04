@@ -381,87 +381,6 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 
-    # def create_lora_weights(
-    #     self,
-    #     max_loras: int,
-    #     lora_config: LoRAConfig,
-    #     model_config: Optional[PretrainedConfig] = None,
-    # ) -> None:
-    #     self.lora_config = lora_config
-    #     lora_a_output_size_per_partition = (
-    #         lora_config.max_lora_rank if not lora_config.fully_sharded_loras
-    #         else divide(lora_config.max_lora_rank, self.tp_size))
-    #     self.lora_a_stacked = tuple(
-    #         torch.zeros(
-    #             max_loras,
-    #             1,
-    #             lora_a_output_size_per_partition,
-    #             self.input_size,
-    #             dtype=lora_config.lora_dtype,
-    #             device=self.device,
-    #         ) for _ in range(self.n_slices))
-    #     self.lora_b_stacked = tuple(
-    #         torch.zeros(
-    #             max_loras,
-    #             1,
-    #             self.output_size,
-    #             lora_config.max_lora_rank,
-    #             dtype=lora_config.lora_dtype,
-    #             device=self.device,
-    #         ) for _ in range(self.n_slices))
-    #     if lora_config.bias_enabled:
-    #         self.bias_stacked = tuple(
-    #             torch.zeros(
-    #                 max_loras,
-    #                 1,
-    #                 self.output_size,
-    #                 dtype=lora_config.lora_dtype,
-    #                 device=self.device,
-    #             ) for _ in range(self.n_slices))
-    #     self.output_slices = (self.lora_b_stacked[0].shape[2], )
-
-    # def reset_lora(self, index: int):
-    #     for s_index in range(self.n_slices):
-    #         self.lora_a_stacked[s_index][index] = 0
-    #         self.lora_b_stacked[s_index][index] = 0
-    #         if self.lora_config.bias_enabled:
-    #             self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-    #                                      self.bias_stacked)
-    #             self.bias_stacked[s_index][index] = 0
-
-    # def set_lora(
-    #     self,
-    #     index: int,
-    #     lora_a: torch.Tensor,
-    #     lora_b: torch.Tensor,
-    #     embeddings_tensor: Optional[torch.Tensor],
-    #     bias: Optional[torch.Tensor] = None,
-    # ):
-    #     self.reset_lora(index)
-
-    #     self.lora_a_stacked[0][index,
-    #                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-    #                                lora_a.T, non_blocking=True)
-    #     self.lora_b_stacked[0][index,
-    #                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-    #                                lora_b.T, non_blocking=True)
-    #     if bias is not None:
-    #         self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-    #                                  self.bias_stacked)
-    #         self.bias_stacked[0][index,
-    #                              0, :bias.shape[0]].copy_(bias.T,
-    #                                                       non_blocking=True)
-
-    # def apply(self, x: torch.Tensor,
-    #           bias: Optional[torch.Tensor]) -> torch.Tensor:
-    #     output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-    #     self.punica_wrapper.add_lora_packed_nslice(output, x,
-    #                                                self.lora_a_stacked,
-    #                                                self.lora_b_stacked,
-    #                                                self.bias_stacked, 1.0,
-    #                                                self.output_slices)
-    #     return output
-
     def forward(self, input_):
         """Forward of ReplicatedLinearWithLoRA
 
@@ -511,59 +430,6 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.output_size = self.base_layer.output_size_per_partition
         self.n_slices = 1
-        # self.output_slices: Tuple[int, ...]
-        # self.bias_stacked: Optional[Tuple[torch.Tensor, ...]] = None
-        # self.n_slices = 1
-
-    # def create_lora_weights(
-    #     self,
-    #     max_loras: int,
-    #     lora_config: LoRAConfig,
-    #     model_config: Optional[PretrainedConfig] = None,
-    # ) -> None:
-    #     self.lora_config = lora_config
-    #     lora_a_output_size_per_partition = (
-    #         lora_config.max_lora_rank if not lora_config.fully_sharded_loras
-    #         else divide(lora_config.max_lora_rank, self.tp_size))
-    #     self.lora_a_stacked = tuple(
-    #         torch.zeros(
-    #             max_loras,
-    #             1,
-    #             lora_a_output_size_per_partition,
-    #             self.input_size,
-    #             dtype=lora_config.lora_dtype,
-    #             device=self.device,
-    #         ) for _ in range(self.n_slices))
-    #     self.lora_b_stacked = tuple(
-    #         torch.zeros(
-    #             max_loras,
-    #             1,
-    #             self.output_size,
-    #             lora_config.max_lora_rank,
-    #             dtype=lora_config.lora_dtype,
-    #             device=self.device,
-    #         ) for _ in range(self.n_slices))
-
-    #     if lora_config.bias_enabled:
-    #         self.bias_stacked = tuple(
-    #             torch.zeros(
-    #                 max_loras,
-    #                 1,
-    #                 self.output_size,
-    #                 dtype=lora_config.lora_dtype,
-    #                 device=self.device,
-    #             ) for _ in range(self.n_slices))
-    #     self.output_dim = self.lora_b_stacked[0].shape[2]
-    #     self.output_slices = (self.output_dim, )
-
-    # def reset_lora(self, index: int):
-    #     for s_index in range(self.n_slices):
-    #         self.lora_a_stacked[s_index][index] = 0
-    #         self.lora_b_stacked[s_index][index] = 0
-    #         if self.lora_config.bias_enabled:
-    #             self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-    #                                      self.bias_stacked)
-    #             self.bias_stacked[s_index][index] = 0
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         return lora_a
@@ -601,45 +467,6 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         end_idx = (tensor_model_parallel_rank + 1) * shard_size
         bias = bias[start_idx:end_idx]
         return bias
-
-    # def set_lora(
-    #     self,
-    #     index: int,
-    #     lora_a: torch.Tensor,
-    #     lora_b: torch.Tensor,
-    #     embeddings_tensor: Optional[torch.Tensor],
-    #     bias: Optional[torch.Tensor] = None,
-    # ):
-    #     self.reset_lora(index)
-
-    #     if self.tp_size > 1:
-    #         lora_a = self.slice_lora_a(lora_a)
-    #         lora_b = self.slice_lora_b(lora_b)
-    #         if bias is not None:
-    #             bias = self.slice_bias(bias)
-
-    #     self.lora_a_stacked[0][index,
-    #                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-    #                                lora_a.T, non_blocking=True)
-    #     self.lora_b_stacked[0][index,
-    #                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-    #                                lora_b.T, non_blocking=True)
-    #     if bias is not None:
-    #         self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-    #                                  self.bias_stacked)
-    #         self.bias_stacked[0][index,
-    #                              0, :bias.shape[0]].copy_(bias.T,
-    #                                                       non_blocking=True)
-
-    # def apply(self, x: torch.Tensor,
-    #           bias: Optional[torch.Tensor]) -> torch.Tensor:
-    #     output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-    #     self.punica_wrapper.add_lora_packed_nslice(output, x,
-    #                                                self.lora_a_stacked,
-    #                                                self.lora_b_stacked,
-    #                                                self.bias_stacked, 1.0,
-    #                                                self.output_slices)
-    #     return output
 
     def forward(self, input_):
         """Forward of ColumnParallelLinear
@@ -743,15 +570,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.output_dim = self.lora_b_stacked[0].shape[2]
         self.output_slices = (self.output_dim, self.output_dim)
 
-    # def reset_lora(self, index: int):
-    #     self.lora_a_stacked[0][index] = 0
-    #     self.lora_a_stacked[1][index] = 0
-    #     self.lora_b_stacked[0][index] = 0
-    #     self.lora_b_stacked[1][index] = 0
-    #     if self.lora_config.bias_enabled:
-    #         self.bias_stacked[0][index] = 0
-    #         self.bias_stacked[1][index] = 0
-
     def slice_lora_a(
         self, lora_a: List[Union[torch.Tensor, None]]
     ) -> List[Union[torch.Tensor, None]]:
@@ -826,14 +644,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                                  0, :bias[1].shape[0]].copy_(bias[1].T,
                                                              non_blocking=True)
 
-    # def apply(self, x: torch.Tensor,
-    #           bias: Optional[torch.Tensor]) -> torch.Tensor:
-    #     output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-    #     self.punica_wrapper.add_lora_packed_nslice(
-    #         output, x, self.lora_a_stacked, self.lora_b_stacked,
-    #         self.bias_stacked, 1.0, self.output_slices)
-    #     return output
-
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -862,7 +672,6 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
 
     def __init__(self, base_layer: QKVParallelLinear) -> None:
         super().__init__(base_layer)
-        self.tp_size = get_tensor_model_parallel_world_size()
         self.q_proj_total_size = (self.base_layer.total_num_heads *
                                   self.base_layer.head_size)
         self.q_proj_shard_size = (self.base_layer.num_heads *
@@ -905,35 +714,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                       self.kv_proj_shard_size * (self.kv_shard_id + 1)]
         bias = torch.cat([bias_q, bias_k, bias_v], dim=1)
         return bias
-
-    # def set_lora(
-    #     self,
-    #     index: int,
-    #     lora_a: torch.Tensor,
-    #     lora_b: torch.Tensor,
-    #     embeddings_tensor: Optional[torch.Tensor],
-    #     bias: Optional[torch.Tensor] = None,
-    # ):
-    #     self.reset_lora(index)
-    #     if self.tp_size > 1:
-    #         lora_a = self.slice_lora_a(lora_a)
-    #         lora_b = self.slice_lora_b(lora_b)
-    #         if bias is not None:
-    #             bias = self.slice_bias(bias)
-
-    #     self.lora_a_stacked[0][index,
-    #                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-    #                                lora_a.T, non_blocking=True)
-    #     self.lora_b_stacked[0][index,
-    #                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-    #                                lora_b.T, non_blocking=True)
-    #     if bias is not None:
-    #         self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-    #                                  self.bias_stacked)
-    #         self.bias_stacked[0][index,
-    #                              0, :bias.shape[0]].copy_(bias.T,
-    #                                                       non_blocking=True)
-
+    
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(cls, source_layer: nn.Module,
@@ -1065,18 +846,6 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         self.indices: torch.Tensor
         self.indices_len: List[int]
 
-    # def reset_lora(self, index: int):
-    #     self.lora_a_stacked[0][index] = 0
-    #     self.lora_b_stacked[0][index] = 0
-    #     self.lora_a_stacked[1][index] = 0
-    #     self.lora_b_stacked[1][index] = 0
-    #     self.lora_a_stacked[2][index] = 0
-    #     self.lora_b_stacked[2][index] = 0
-    #     if self.lora_config.bias_enabled:
-    #         self.bias_stacked[0][index] = 0
-    #         self.bias_stacked[1][index] = 0
-    #         self.bias_stacked[2][index] = 0
-
     def slice_lora_a(
         self, lora_a: List[Union[torch.Tensor, None]]
     ) -> List[Union[torch.Tensor, None]]:
@@ -1178,16 +947,6 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 self.bias_stacked[2][index, 0, :bias[2].shape[0]].copy_(
                     bias[2].T, non_blocking=True)
 
-    # def apply(self, x: torch.Tensor,
-    #           bias: Optional[torch.Tensor]) -> torch.Tensor:
-    #     output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-    #     self.punica_wrapper.add_lora_packed_nslice(output, x,
-    #                                                self.lora_a_stacked,
-    #                                                self.lora_b_stacked,
-    #                                                self.bias_stacked, 1.0,
-    #                                                self.output_slices)
-    #     return output
-
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -1203,81 +962,14 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
 
 class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
-    #     def __init__(self,base_layer,n_slices):
-    # self.base_layer = base_layer
-    # self.input_size = self.base_layer.input_size
-    # self.device = _get_lora_device(self.base_layer)
-    # self.output_slices: Tuple[int, ...]
-    # self.bias_stacked: Optional[Tuple[torch.Tensor, ...]] = None
-    # self.n_slices = n_slices
     def __init__(self, base_layer: RowParallelLinear) -> None:
         super().__init__(base_layer)
 
         self.tp_size = get_tensor_model_parallel_world_size()
+        # reset input_size
         self.input_size = self.base_layer.input_size_per_partition
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
-
-    # def create_lora_weights(
-    #     self,
-    #     max_loras: int,
-    #     lora_config: LoRAConfig,
-    #     model_config: Optional[PretrainedConfig] = None,
-    # ) -> None:
-    #     self.lora_config = lora_config
-    #     self.tp_rank = get_tensor_model_parallel_rank()
-    #     self.lora_a_stacked = tuple(
-    #         torch.zeros(
-    #             (
-    #                 max_loras,
-    #                 1,
-    #                 lora_config.max_lora_rank,
-    #                 self.input_size,
-    #             ),
-    #             dtype=lora_config.lora_dtype,
-    #             device=self.device,
-    #         ) for _ in range(self.n_slices))
-    #     tp_size = get_tensor_model_parallel_world_size()
-    #     lora_b_output_size_per_partition = (
-    #         self.output_size if not lora_config.fully_sharded_loras else
-    #         divide(self.output_size, tp_size))
-
-    #     self.lora_b_stacked = tuple(
-    #         torch.zeros(
-    #             (
-    #                 max_loras,
-    #                 1,
-    #                 lora_b_output_size_per_partition,
-    #                 lora_config.max_lora_rank,
-    #             ),
-    #             dtype=lora_config.lora_dtype,
-    #             device=self.device,
-    #         ) for _ in range(self.n_slices))
-
-    #     if lora_config.bias_enabled:
-    #         self.bias_stacked = tuple(
-    #             torch.zeros(
-    #                 (
-    #                     max_loras,
-    #                     1,
-    #                     self.output_size,
-    #                 ),
-    #                 dtype=lora_config.lora_dtype,
-    #                 device=self.device,
-    #             ) for _ in range(self.n_slices))
-    #     # Lazily initialized
-    #     self.output_slices = (self.lora_b_stacked[0].shape[2], )
-    #     self.indices: torch.Tensor
-    #     self.indices_len: List[int]
-
-    # def reset_lora(self, index: int):
-    #     for s_index in range(self.n_slices):
-    #         self.lora_a_stacked[s_index][index] = 0
-    #         self.lora_b_stacked[s_index][index] = 0
-    #         if self.lora_config.bias_enabled:
-    #             self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-    #                                      self.bias_stacked)
-    #             self.bias_stacked[s_index][index] = 0
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
@@ -1292,44 +984,6 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         return bias
-
-    # def set_lora(
-    #     self,
-    #     index: int,
-    #     lora_a: torch.Tensor,
-    #     lora_b: torch.Tensor,
-    #     embeddings_tensor: Optional[torch.Tensor],
-    #     bias: Optional[torch.Tensor] = None,
-    # ):
-    #     self.reset_lora(index)
-
-    #     if self.base_layer.tp_size > 1:
-    #         lora_a = self.slice_lora_a(lora_a)
-    #         lora_b = self.slice_lora_b(lora_b)
-    #         if bias is not None:
-    #             bias = self.slice_bias(bias)
-
-    #     self.lora_a_stacked[0][index,
-    #                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-    #                                lora_a.T, non_blocking=True)
-    #     self.lora_b_stacked[0][index,
-    #                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-    #                                lora_b.T, non_blocking=True)
-    #     if bias is not None:
-    #         self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-    #                                  self.bias_stacked)
-    #         self.bias_stacked[0][index,
-    #                              0, :bias.shape[0]].copy_(bias.T,
-    #                                                       non_blocking=True)
-
-    # def apply(self, x: torch.Tensor) -> torch.Tensor:
-    #     output = self.base_layer.quant_method.apply(self.base_layer, x)
-    #     self.punica_wrapper.add_lora_packed_nslice(output, x,
-    #                                                self.lora_a_stacked,
-    #                                                self.lora_b_stacked,
-    #                                                self.bias_stacked, 1.0,
-    #                                                self.output_slices)
-    #     return output
 
     def forward(self, input_):
         """Forward of RowParallelLinear
