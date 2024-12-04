@@ -5,6 +5,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
 from vllm.platforms import current_platform
+from vllm.store.kv_store import KVBlockStoreManager
 from vllm.utils import Device
 
 
@@ -26,7 +27,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         block_size: int,
-        kv_store_manager: Optional["KVStoreManager"],
+        kv_store_manager: Optional["KVBlockStoreManager"],
     ) -> DeviceAwareBlockAllocator:
         """Creates a CpuGpuBlockAllocator instance with the specified
         configuration.
@@ -89,6 +90,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_ids=cpu_block_ids,
+                kv_store_manager=None,
             )
         else:
             raise ValueError(f"Unknown allocator type {allocator_type=}")
@@ -308,12 +310,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         # Prefix caching only supported on GPU.
         device = Device.GPU
         return self._allocators[device].mark_blocks_as_computed(block_ids)
-
-    def mark_blocks_as_cached(self, blocks: List[Block]) -> None:
-        """Mark blocks as cached, only use for prefix caching with KV Store."""
-        # Prefix caching only supported on GPU.
-        device = Device.GPU
-        return self._allocators[device].mark_blocks_as_cached(blocks)
 
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:

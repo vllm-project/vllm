@@ -14,12 +14,12 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata)
+from vllm.store.kv_store import BlockMappingFromCPU, KVStoreMeta
 from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, update_environment_variables)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
-from vllm.store.kv_store import KVStoreMeta,BlockMappingFromCPU
 
 logger = init_logger(__name__)
 
@@ -150,7 +150,9 @@ class WorkerInput:
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
     num_steps: int = 1
-    kv_store_block_mapping_from_cpu: Optional[BlockMappingFromCPU] = None
+    kv_store_block_mapping: Optional[torch.Tensor] = None
+    kv_store_block_offsets: Optional[torch.Tensor] = None
+    kv_store_block_req_ids: Optional[torch.Tensor] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -161,18 +163,16 @@ class WorkerInput:
         Pop fields from the given tensor_dict and populate a new instance of
         WorkerInput.
         """
-        return cls(
-            num_seq_groups=tensor_dict.pop("num_seq_groups"),
-            blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
-            blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
-            blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
-            virtual_engine=tensor_dict["virtual_engine"],
-            num_steps=tensor_dict.pop("num_steps"),
-            kv_store_block_mapping_from_cpu=BlockMappingFromCPU(
-                tensor_dict.pop("kv_block_mapping"),
-                tensor_dict.pop("kv_block_mapping_offsets"),
-                tensor_dict.pop("kv_block_mapping_req_ids")
-            )
+        return cls(num_seq_groups=tensor_dict.pop("num_seq_groups"),
+                   blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
+                   blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
+                   blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
+                   virtual_engine=tensor_dict["virtual_engine"],
+                   kv_store_block_mapping=tensor_dict.pop("kv_block_mapping"),
+                   kv_store_block_offsets=tensor_dict.pop(
+                       "kv_block_mapping_offsets"),
+                   kv_store_block_req_ids=tensor_dict.pop(
+                       "kv_block_mapping_req_ids"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -187,12 +187,9 @@ class WorkerInput:
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
             "num_steps": self.num_steps,
-            "kv_block_mapping": \
-                    self.kv_store_block_mapping_from_cpu.block_mapping,
-            "kv_block_mapping_offsets": \
-                    self.kv_store_block_mapping_from_cpu.block_offset,
-            "kv_block_mapping_req_ids": \
-                    self.kv_store_block_mapping_from_cpu.request_ids
+            "kv_block_mapping": self.kv_store_block_mapping,
+            "kv_block_mapping_offsets": self.kv_store_block_offsets,
+            "kv_block_mapping_req_ids": self.kv_store_block_req_ids,
         }
 
         return tensor_dict
@@ -246,7 +243,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     @abstractmethod
     def prepare_kv_store_meta(self,
-                              is_prefill: bool,
+                              is_prefill: Optional[bool],
                               incomplete_put_block_ids: torch.Tensor,
                               put_block_ids: torch.Tensor,
                               seq_g_list: List[SequenceGroupMetadata]) \
@@ -270,7 +267,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         Issue the copy of the blocks from CPU to GPU with the given indices.
         """
         raise NotImplementedError
-
 
     @abstractmethod
     def execute_worker(self, worker_input: WorkerInput) -> None:
@@ -307,11 +303,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
-        model_input: ModelRunnerInputBase = (
-            self.model_runner.prepare_model_input(
-                execute_model_req.seq_group_metadata_list,
-                execute_model_req.virtual_engine,
-                execute_model_req.finished_requests_ids))
+        model_input = (self.model_runner.prepare_model_input(
+            execute_model_req.seq_group_metadata_list,
+            execute_model_req.virtual_engine,
+            execute_model_req.finished_requests_ids))
 
         incomplete_put_block_ids = \
                 model_input.attn_metadata.kv_store_meta.incomplete_put_block_ids

@@ -1,5 +1,5 @@
 """A block manager that manages token blocks."""
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
@@ -12,7 +12,9 @@ from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-from vllm.store.kv_store import KVBlockStoreManager
+
+if TYPE_CHECKING:
+    from vllm.store.kv_store import KVBlockStoreManager
 
 SeqId = int
 EncoderSeqId = str
@@ -63,7 +65,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
-        kv_store_manager : KVBlockStoreManager,
+        kv_store_manager: Optional["KVBlockStoreManager"],
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,

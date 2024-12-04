@@ -22,16 +22,16 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
+from vllm.store.kv_store import KVBlockStore, KVStoreMeta, BlockMappingFromCPU
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
-from vllm.utils import init_logger
-from vllm.store.kv_store import KVBlockStore, KVStoreMeta
 
 logger = init_logger(__name__)
+
 
 class Worker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
@@ -59,8 +59,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
         if (self.cache_config.enable_kv_store):
             self.cache_config.kv_store = KVBlockStore.from_configs(
-                    self.cache_config, self.model_config, self.parallel_config,
-                    torch.device(f"cuda:{self.local_rank}"))
+                self.cache_config, self.model_config, self.parallel_config,
+                torch.device(f"cuda:{self.local_rank}"))
         self.kv_store = self.cache_config.kv_store
         self.kv_store_manager = self.cache_config.kv_store_manager
 
@@ -122,7 +122,7 @@ class Worker(LocalOrDistributedWorkerBase):
             self.profiler = None
 
     def prepare_kv_store_meta(self,
-                              is_prefill: bool,
+                              is_prefill: Optional[bool],
                               incomplete_put_block_ids: torch.Tensor,
                               put_block_ids: torch.Tensor,
                               seq_g_list: List[SequenceGroupMetadata]) \
@@ -143,14 +143,12 @@ class Worker(LocalOrDistributedWorkerBase):
                 ret_seq_g_ids = torch.tensor(seq_g_ids,
                                              device="cpu",
                                              dtype=torch.int64).view(-1)
-        return KVStoreMeta(ret_incomplete_put_blocks,
-                           ret_put_blocks_mapping,
+        return KVStoreMeta(ret_incomplete_put_blocks, ret_put_blocks_mapping,
                            ret_seq_g_ids)
 
     def put_stream_sync(self):
         if (self.kv_store is not None):
             self.kv_store.put_stream_sync()
-
 
     def start_profile(self):
         if self.profiler is None:
@@ -386,8 +384,12 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
-            kv_store_block_mapping_from_cpu=\
-                    execute_model_req.kv_store_block_mapping_from_cpu,
+            kv_store_block_mapping=\
+                execute_model_req.kv_store_block_mapping_from_cpu.block_mapping,
+            kv_store_block_offsets=\
+                execute_model_req.kv_store_block_mapping_from_cpu.block_offset,
+            kv_store_block_req_ids=\
+                execute_model_req.kv_store_block_mapping_from_cpu.request_ids,
         )
 
     @torch.inference_mode()
@@ -408,15 +410,15 @@ class Worker(LocalOrDistributedWorkerBase):
 
     @torch.inference_mode()
     def issue_blocks_copy(self, worker_input: WorkerInput) -> None:
-        if (self.kv_store == None):
+        if (self.kv_store is None):
             return
-        kv_store_block_mapping_from_cpu = \
-                worker_input.kv_store_block_mapping_from_cpu
         kv_caches = (self.kv_cache[worker_input.virtual_engine]
                      if self.kv_cache is not None else None)
-        self.kv_store.get_blocks(
-                worker_input.kv_store_block_mapping_from_cpu,
-                kv_caches)
+        self.kv_store.get_blocks(BlockMappingFromCPU(
+                worker_input.kv_store_block_mapping,
+                worker_input.kv_store_block_offsets,
+                worker_input.kv_store_block_req_ids),
+            kv_caches)
 
     def _get_cached_seq_group_metadata(
             self,

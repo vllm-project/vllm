@@ -2,8 +2,8 @@
 import sys
 from bisect import bisect_left
 from os.path import commonprefix
-from typing import (Callable, Dict, FrozenSet, Iterable, List, Optional, Set,
-                    Tuple)
+from typing import (TYPE_CHECKING, Callable, Dict, FrozenSet, Iterable, List,
+                    Optional, Set, Tuple)
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -13,7 +13,9 @@ from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
 from vllm.sequence import Sequence
-from vllm.store.kv_store import KVBlockStoreManager
+
+if TYPE_CHECKING:
+    from vllm.store.kv_store import KVBlockStoreManager
 
 # NOTE: for debug the kvstore, may cause some assert errors
 only_enable_cpu_kvstore = False
@@ -69,8 +71,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self,
         num_blocks: int,
         block_size: int,
+        kv_store_manager: Optional["KVBlockStoreManager"],
         block_ids: Optional[Iterable[int]] = None,
-        kv_store_manager: Optional[KVBlockStoreManager] = None,
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
     ):
         if block_ids is None:
@@ -170,8 +172,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                             physical_block_id=None)
         assert block.content_hash is not None
 
-        if (only_enable_cpu_kvstore == False) or \
-                (self.kv_store_manager == None):
+        if (not only_enable_cpu_kvstore) or \
+                (self.kv_store_manager is None):
             cached_block_id = self._cached_blocks.get(block.content_hash, None)
             if cached_block_id is not None:
                 self.metric_data.query(hit=True)
@@ -179,14 +181,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 self._incr_refcount_cached_block(block)
                 return block
         self.metric_data.query(hit=False)
-        if (self.kv_store_manager != None) and \
+        if (self.kv_store_manager is not None) and \
                 (self.kv_store_manager.has(block.content_hash)):
             block_id = self._allocate_block_id()
             block.block_id = block_id
             # print("Found in kv store with hash: ", block.content_hash,
             #       "block_id: ", block_id)
-            self.kv_store_manager.remap_block_id(
-                    block.content_hash, block.block_id)
+            self.kv_store_manager.remap_block_id(block.content_hash,
+                                                 block.block_id)
             self.kv_store_manager.open_send_flag(block.block_id)
             self._cached_blocks[block.content_hash] = block_id
             block.computed = True
@@ -236,7 +238,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                             physical_block_id=block_id)
         assert not block.computed
         assert block.content_hash is None
-        if (self.kv_store_manager != None):
+        if (self.kv_store_manager is not None):
             self.kv_store_manager.allocate_block(-1, block.block_id)
         return block
 
@@ -470,9 +472,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert self._refcounter.get(block.block_id) > 0
 
         if block.content_hash not in self._cached_blocks:
-            if (self.kv_store_manager != None):
-                self.kv_store_manager.add_hash_map(
-                        block.content_hash, block.block_id)
+            if (self.kv_store_manager is not None):
+                self.kv_store_manager.add_hash_map(block.content_hash,
+                                                   block.block_id)
 
             # No cached content hash => Set this block as cached.
             # Note that this block cannot be marked as computed yet
@@ -493,10 +495,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # Note that in this case, the block is marked as computed
         self._incr_refcount_cached_block(block)
 
-        if (self.kv_store_manager != None):
-            self.kv_store_manager.add_hash_map(
-                    block.content_hash, block.block_id)
-
+        if (self.kv_store_manager is not None):
+            self.kv_store_manager.add_hash_map(block.content_hash,
+                                               block.block_id)
 
         return block.block_id
 

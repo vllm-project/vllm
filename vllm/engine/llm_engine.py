@@ -50,6 +50,7 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            SequenceGroup, SequenceGroupBase,
                            SequenceGroupMetadata, SequenceGroupOutput,
                            SequenceStatus)
+from vllm.store.kv_store import KVBlockStoreManager
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -61,7 +62,6 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
-from vllm.store.kv_store import KVBlockStoreManager
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -336,10 +336,9 @@ class LLMEngine:
         self.kv_store_manager: Optional[KVBlockStoreManager] = None
         if (self.cache_config.enable_kv_store):
             kv_store_manager = KVBlockStoreManager.from_configs(
-                    self.cache_config, self.model_config, self.parallel_config)
+                self.cache_config, self.model_config, self.parallel_config)
             self.kv_store_manager = kv_store_manager
             self.cache_config.kv_store_manager = kv_store_manager
-
 
         self.model_executor = executor_class(vllm_config=vllm_config, )
 
@@ -420,8 +419,7 @@ class LLMEngine:
         self.scheduler = [
             Scheduler(
                 self.scheduler_config, self.cache_config,
-                self.kv_store_manager,
-                self.lora_config,
+                self.kv_store_manager, self.lora_config,
                 self.parallel_config.pipeline_parallel_size,
                 self.async_callbacks[v_id]
                 if self.model_config.use_async_output_proc else None)
