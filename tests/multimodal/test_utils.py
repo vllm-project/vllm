@@ -139,7 +139,8 @@ def test_repeat_and_pad_placeholder_tokens(model):
             2,
             "<image><image><image>",
             [32000, 32000, 32000],
-            [{ "offset": 0, "length": 2 }]),
+            [{ "offset": 0, "length": 2 }],
+        ),
         (
             "<image><image>",
             [3, 2],

@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
@@ -15,12 +16,12 @@ from vllm.worker.cpu_model_runner import (CPUModelRunnerBase, ModelInputForCPU,
 @dataclasses.dataclass(frozen=True)
 class ModelInputForCPUWithPoolingMetadata(ModelInputForCPU):
     """
-    Used by the CPUEmbeddingModelRunner.
+    Used by the CPUPoolingModelRunner.
     """
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
-class CPUEmbeddingModelRunner(
+class CPUPoolingModelRunner(
         CPUModelRunnerBase[ModelInputForCPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForCPUWithPoolingMetadata] = (
         ModelInputForCPUWithPoolingMetadata)
@@ -49,6 +50,9 @@ class CPUEmbeddingModelRunner(
         ]
 
         model_executable = self.model
+        cross_enc_kwargs = {}
+        if model_input.token_type_ids is not None:
+            cross_enc_kwargs["token_type_ids"] = model_input.token_type_ids
         execute_model_kwargs = {
             "input_ids":
             model_input.input_tokens,
@@ -60,11 +64,13 @@ class CPUEmbeddingModelRunner(
             model_input.attn_metadata,
             **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
+            **cross_enc_kwargs,
             "intermediate_tensors":
             intermediate_tensors,
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+            hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.
         if not self.is_driver_worker:

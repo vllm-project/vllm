@@ -25,6 +25,7 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
 
 function cpu_tests() {
   set -e
+  export NUMA_NODE=$2
 
   # offline inference
   docker exec cpu-test-avx2-"$NUMA_NODE" bash -c "
@@ -57,6 +58,12 @@ function cpu_tests() {
     pytest -s -v \
     tests/quantization/test_ipex_quant.py"
 
+  # Run chunked-prefill and prefix-cache test
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
+    set -e
+    pytest -s -v -k cpu_model \
+    tests/basic_correctness/test_chunked_prefill.py"  
+
   # online inference
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
@@ -75,4 +82,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 25 mins.
 export -f cpu_tests
-timeout 25m bash -c "cpu_tests $CORE_RANGE"
+timeout 30m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"

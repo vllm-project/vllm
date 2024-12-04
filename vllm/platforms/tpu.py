@@ -1,4 +1,3 @@
-import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -17,6 +16,10 @@ logger = init_logger(__name__)
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
+    device_name: str = "tpu"
+    device_type: str = "tpu"
+    dispatch_key: str = "XLA"
+    supported_quantization: list[str] = ["tpu_int8"]
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -40,10 +43,23 @@ class TpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.config import CompilationLevel
         compilation_config = vllm_config.compilation_config
-        if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
+        if compilation_config.level == CompilationLevel.NO_COMPILATION:
+            # TPU does not support NO_COMPILATION
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
         assert compilation_config.level < CompilationLevel.PIECEWISE,\
             "TPU does not support Inductor."
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
+
+        assert vllm_config.speculative_config is None, \
+            "TPU does not support speculative decoding"
+
+        parallel_config = vllm_config.parallel_config
+        scheduler_config = vllm_config.scheduler_config
+        if parallel_config.worker_cls == "auto":
+            if scheduler_config.is_multi_step:
+                parallel_config.worker_cls = \
+                    "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"

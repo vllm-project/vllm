@@ -19,9 +19,6 @@ if not current_platform.is_tpu() and not current_platform.is_hpu():
     except ImportError as e:
         logger.warning("Failed to import from vllm._C with %r", e)
 
-if current_platform.is_rocm():
-    import vllm._rocm_C  # noqa: F401
-
 supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
@@ -343,33 +340,9 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                size_k: torch.SymInt,
                                is_k_full: bool,
                                has_zp: bool = False,
-                               use_fp32_reduce: bool = False) -> torch.Tensor:
+                               use_fp32_reduce: bool = False,
+                               is_zp_float: bool = False) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::ggml_dequantize")
-    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
-                              m: torch.SymInt,
-                              n: torch.SymInt) -> torch.Tensor:
-        return torch.empty((m, n), dtype=torch.float16, device=W.device)
-
-    @register_fake("_C::ggml_mul_mat_vec_a8")
-    def _ggml_mul_mat_vec_a8_fake(
-        W: torch.Tensor,
-        X: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-    ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=torch.float16, device=W.device)
-
-    @register_fake("_C::ggml_mul_mat_a8")
-    def _ggml_mul_mat_a8_fake(
-        W: torch.Tensor,
-        X: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-    ) -> torch.Tensor:
-        batch = X.size(0)
-        return torch.empty((batch, row), dtype=torch.float16, device=W.device)
 
     @register_fake("_C::marlin_qqq_gemm")
     def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -468,6 +441,34 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
             group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
+
+
+if hasattr(torch.ops._C, "ggml_dequantize"):
+
+    @register_fake("_C::ggml_dequantize")
+    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
+                              m: torch.SymInt,
+                              n: torch.SymInt) -> torch.Tensor:
+        return torch.empty((m, n), dtype=torch.float16, device=W.device)
+
+    @register_fake("_C::ggml_mul_mat_vec_a8")
+    def _ggml_mul_mat_vec_a8_fake(
+        W: torch.Tensor,
+        X: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+    ) -> torch.Tensor:
+        return torch.empty((1, row), dtype=torch.float16, device=W.device)
+
+    @register_fake("_C::ggml_mul_mat_a8")
+    def _ggml_mul_mat_a8_fake(
+        W: torch.Tensor,
+        X: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+    ) -> torch.Tensor:
+        batch = X.size(0)
+        return torch.empty((batch, row), dtype=torch.float16, device=W.device)
 
 
 # cutlass
@@ -601,11 +602,12 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      size_k: int,
                      is_k_full: bool,
                      has_zp: bool = False,
-                     use_fp32_reduce: bool = False) -> torch.Tensor:
+                     use_fp32_reduce: bool = False,
+                     is_zp_float: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
-                                         has_zp, use_fp32_reduce)
+                                         has_zp, use_fp32_reduce, is_zp_float)
 
 
 # fp8 marlin

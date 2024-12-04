@@ -73,7 +73,7 @@ Another way to access the latest code is to use the docker images:
 .. code-block:: console
 
     $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-    $ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${VLLM_COMMIT}
+    $ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}
 
 These docker images are used for CI and testing only, and they are not intended for production use. They will be expired after several days.
 
@@ -168,6 +168,18 @@ To build vLLM using an existing PyTorch installation:
     $ python use_existing_torch.py
     $ pip install -r requirements-build.txt
     $ pip install -e . --no-build-isolation
+
+
+Use the local cutlass for compilation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Currently, before starting the build process, vLLM fetches cutlass code from GitHub. However, there may be scenarios where you want to use a local version of cutlass instead.
+To achieve this, you can set the environment variable VLLM_CUTLASS_SRC_DIR to point to your local cutlass directory.
+
+.. code-block:: console
+
+    $ git clone https://github.com/vllm-project/vllm.git
+    $ cd vllm
+    $ VLLM_CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
 
 
 Troubleshooting

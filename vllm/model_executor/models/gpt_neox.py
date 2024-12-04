@@ -52,6 +52,7 @@ class GPTNeoXAttention(nn.Module):
         config: GPTNeoXConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
@@ -94,7 +95,8 @@ class GPTNeoXAttention(nn.Module):
                               self.head_size,
                               scaling,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -145,6 +147,7 @@ class GPTNeoXLayer(nn.Module):
         config: GPTNeoXConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.use_parallel_residual = config.use_parallel_residual
@@ -152,7 +155,10 @@ class GPTNeoXLayer(nn.Module):
                                             eps=config.layer_norm_eps)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
                                                      eps=config.layer_norm_eps)
-        self.attention = GPTNeoXAttention(config, cache_config, quant_config)
+        self.attention = GPTNeoXAttention(config,
+                                          cache_config,
+                                          quant_config,
+                                          prefix=f"{prefix}.attention")
         self.mlp = GPTNeoXMLP(config, quant_config)
 
     def forward(
@@ -205,7 +211,8 @@ class GPTNeoXModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: GPTNeoXLayer(config, cache_config, quant_config),
+            lambda prefix: GPTNeoXLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,

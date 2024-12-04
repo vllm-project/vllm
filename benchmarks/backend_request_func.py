@@ -54,6 +54,7 @@ async def async_request_tgi(
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
             "top_p": 0.99,  # TGI does not accept 1.0 top_p.
+            "truncate": request_func_input.prompt_len,
             # TGI does not accept ignore_eos flag.
         }
         payload = {

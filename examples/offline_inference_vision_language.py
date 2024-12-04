@@ -402,6 +402,23 @@ def run_idefics3(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# Aria
+def run_aria(question: str, modality: str):
+    assert modality == "image"
+    model_name = "rhymes-ai/Aria"
+
+    llm = LLM(model=model_name,
+              tokenizer_mode="slow",
+              trust_remote_code=True,
+              dtype="bfloat16")
+
+    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
+              "<|im_end|>\n<|im_start|>assistant\n")
+
+    stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -423,6 +440,7 @@ model_example_map = {
     "molmo": run_molmo,
     "glm4v": run_glm4v,
     "idefics3": run_idefics3,
+    "aria": run_aria,
 }
 
 

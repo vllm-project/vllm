@@ -31,6 +31,53 @@ def test_limit_mm_per_prompt_parser(arg, expected):
     assert args.limit_mm_per_prompt == expected
 
 
+def test_compilation_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # default value
+    args = parser.parse_args([])
+    assert args.compilation_config is None
+
+    # set to O3
+    args = parser.parse_args(["-O3"])
+    assert args.compilation_config.level == 3
+
+    # set to O 3 (space)
+    args = parser.parse_args(["-O", "3"])
+    assert args.compilation_config.level == 3
+
+    # set to O 3 (equals)
+    args = parser.parse_args(["-O=3"])
+    assert args.compilation_config.level == 3
+
+    # set to json
+    args = parser.parse_args(["--compilation-config", '{"level": 3}'])
+    assert args.compilation_config.level == 3
+
+    # set to json
+    args = parser.parse_args(['--compilation-config={"level": 3}'])
+    assert args.compilation_config.level == 3
+
+
+def test_prefix_cache_default():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args([])
+
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert (not engine_args.enable_prefix_caching
+            ), "prefix caching defaults to off."
+
+    # with flag to turn it on.
+    args = parser.parse_args(["--enable-prefix-caching"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_prefix_caching
+
+    # with disable flag to turn it off.
+    args = parser.parse_args(["--no-enable-prefix-caching"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert not engine_args.enable_prefix_caching
+
+
 def test_valid_pooling_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([

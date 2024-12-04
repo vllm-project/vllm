@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
-    VLLM_VIDEO_FETCH_TIMEOUT: int = 15
+    VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -67,8 +67,6 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_TORCH_COMPILE_LEVEL: int = 0
-    VLLM_TORCH_COMPILE_CONFIG: Optional[str] = None
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
@@ -155,7 +153,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If you are using multi-node inference, you should set this differently
     # on each node.
     'VLLM_HOST_IP':
-    lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
+    lambda: os.getenv('VLLM_HOST_IP', ""),
 
     # used in distributed environment to manually set the communication port
     # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
@@ -209,12 +207,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
-    "VLLM_TORCH_COMPILE_LEVEL":
-    lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
-
-    # Path to the config file for torch compile
-    "VLLM_TORCH_COMPILE_CONFIG":
-    lambda: os.environ.get("VLLM_TORCH_COMPILE_CONFIG", None),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id

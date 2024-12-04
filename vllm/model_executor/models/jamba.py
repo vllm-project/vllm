@@ -7,7 +7,7 @@ from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import _BATCH_SIZES_TO_CAPTURE, CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -25,8 +25,6 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
-                                      _get_graph_batch_size)
 
 from .interfaces import HasInnerState, SupportsLoRA
 from .utils import maybe_prefix
@@ -102,7 +100,8 @@ class JambaMambaDecoderLayer(nn.Module):
                  config: JambaConfig,
                  layer_idx: int,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.mamba = MambaMixer(hidden_size= config.hidden_size,
@@ -157,6 +156,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -198,6 +198,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            prefix=f"{prefix}.attn",
         )
 
         num_experts = config.layers_num_experts[layer_idx]
@@ -287,7 +288,8 @@ class JambaModel(nn.Module):
                 layer_class(config,
                             layer_idx=i,
                             cache_config=cache_config,
-                            quant_config=quant_config))
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.layers.{i}"))
         self.layers = nn.ModuleList(decoder_layers)
         self.final_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -400,7 +402,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
-            max_batch_size = (_get_graph_batch_size(
+            max_batch_size = (VllmConfig.get_graph_batch_size(
                 self.scheduler_config.max_num_seqs) if self.scheduler_config
                               else max(_BATCH_SIZES_TO_CAPTURE) + 2)
 

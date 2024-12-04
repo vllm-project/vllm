@@ -62,6 +62,7 @@ class OlmoAttention(nn.Module):
         config: OlmoConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -101,7 +102,8 @@ class OlmoAttention(nn.Module):
                               self.head_dim,
                               scale=self.scaling,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
@@ -184,10 +186,14 @@ class OlmoDecoderLayer(nn.Module):
     def __init__(self,
                  config: OlmoConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         # Attention block.
-        self.self_attn = OlmoAttention(config, cache_config, quant_config)
+        self.self_attn = OlmoAttention(config,
+                                       cache_config,
+                                       quant_config,
+                                       prefix=f"{prefix}.self_attn")
 
         # MLP block.
         self.mlp = OlmoMLP(config, quant_config)
@@ -238,8 +244,8 @@ class OlmoModel(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: OlmoDecoderLayer(config, cache_config, quant_config
-                                            ),
+            lambda prefix: OlmoDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = nn.LayerNorm(config.hidden_size,
                                  elementwise_affine=False,

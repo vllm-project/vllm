@@ -44,6 +44,11 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     Based on S-LoRA, slicing happens along the rank dim.
     """
 
+    # For all LoRA layers where the `base_layer` is `ColumnParallelLinear`,
+    # their `lora_a` and `lora_b` have different sharding patterns. After
+    # completing the `lora_a` GEMM , a gather operation is performed.
+    # Therefore, the sharding of `lora_a` only needs to correspond with the
+    # gather operation.
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.lora_a_stacked.shape[2]
@@ -68,15 +73,9 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         self.punica_wrapper.add_expand(output,
                                        buffer,
                                        self.lora_b_stacked,
+                                       self.bias_stacked,
                                        add_input=True)
         # now have column partitioned output
-
-        if self.bias_stacked is not None:
-            self.bias_stacked = self.bias_stacked.view(
-                -1, self.bias_stacked.shape[-1])
-            self.bias_stacked = self.bias_stacked[
-                self.punica_wrapper.token_lora_indices]
-            output += self.bias_stacked
 
         output = output.view(*out_orig_shape)
         return output
@@ -126,27 +125,14 @@ def _mcp_apply(x, bias, layer: QKVParallelLinearWithLora):
                                         layer.lora_a_stacked[idx], 1.0)
 
     buffers = tensor_model_parallel_all_gather(buffers)
-    left_offset = 0
-    for idx in range(n):
-        shard_size = layer.lora_b_stacked[idx].shape[2]
-
-        if layer.bias_stacked is not None:
-            bias = layer.bias_stacked[idx]
-            if bias is not None:
-                bias = bias.view(-1, bias.shape[-1])
-                bias = bias[layer.punica_wrapper.token_lora_indices]
-                bias[layer.punica_wrapper.token_lora_indices == -1] = 0
-                output[:, left_offset:left_offset + shard_size] += bias
-
-        layer.punica_wrapper.add_expand_slice(
-            output,
-            buffers[idx],
-            layer.lora_b_stacked[idx],
-            left_offset,
-            shard_size,
-            add_input=True,
-        )
-        left_offset += shard_size
+    layer.punica_wrapper.add_expand_packed_nslice(
+        output,
+        buffers,
+        layer.lora_b_stacked,
+        layer.bias_stacked,
+        1.0,
+        layer.output_slices,
+    )
 
     output = output.view(*out_orig_shape)
     # now have column partitioned and packed output
@@ -229,6 +215,7 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
         self.punica_wrapper.add_expand(output,
                                        buffer,
                                        self.lora_b_stacked,
+                                       self.bias_stacked,
                                        add_input=True)
         # now have column partitioned output
         output = output.view(*out_orig_shape)
@@ -345,15 +332,9 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # reduced before being used
         shard_size = self.lora_b_stacked.shape[2]
         start_idx = self.tp_rank * shard_size
-
-        if self.bias_stacked is not None:
-            bias = self.bias_stacked.view(-1, self.bias_stacked.shape[-1])
-            bias = bias[self.punica_wrapper.token_lora_indices]
-            bias[self.punica_wrapper.token_lora_indices == -1] = 0
-            output += bias
-
         self.punica_wrapper.add_expand_slice(output, buffer,
-                                             self.lora_b_stacked, start_idx,
+                                             self.lora_b_stacked,
+                                             self.bias_stacked, start_idx,
                                              shard_size)
         output = output.view(*out_orig_shape)
         return output

@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Protocol, Set, Tuple, Union, overload)
+from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
+                    Protocol, Set, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -173,8 +173,15 @@ class AutoWeightsLoader:
             module_load_weights = getattr(module, "load_weights", None)
             if callable(module_load_weights):
                 loaded_params = module_load_weights(weights)
-                yield from map(lambda x: self._get_qualname(base_prefix, x),
-                               loaded_params)
+                if loaded_params is None:
+                    logger.warning(
+                        "Unable to collect loaded parameters "
+                        "for module %s", module)
+                else:
+                    yield from map(
+                        lambda x: self._get_qualname(base_prefix, x),
+                        loaded_params,
+                    )
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
@@ -232,17 +239,24 @@ class AutoWeightsLoader:
 
 
 def init_vllm_registered_model(
-    hf_config: PretrainedConfig,
     vllm_config: VllmConfig,
+    *,
     prefix: str = "",
+    hf_config: Optional[PretrainedConfig] = None,
+    architectures: Optional[list[str]] = None,
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
     from vllm.model_executor.model_loader.loader import _initialize_model
-    vllm_config = vllm_config.with_hf_config(hf_config)
-    return _initialize_model(vllm_config, prefix)
+
+    if hf_config is not None:
+        vllm_config = vllm_config.with_hf_config(hf_config)
+
+    return _initialize_model(vllm_config=vllm_config,
+                             prefix=prefix,
+                             architectures=architectures)
 
 
 @overload
@@ -356,8 +370,7 @@ def embed_multimodal(
     input_ids: torch.Tensor,
     multimodal_token_id: int,
     get_text_embeds: Callable[[torch.Tensor], torch.Tensor],
-    get_multimodal_embeds: Callable[[torch.Tensor], Union[torch.Tensor,
-                                                          List[torch.Tensor]]],
+    multimodal_embeds: Union[torch.Tensor, List[torch.Tensor]],
 ) -> torch.Tensor:
     """
     Embed token IDs and multimodal inputs and combine their embeddings.
@@ -374,8 +387,6 @@ def embed_multimodal(
     is_text = ~is_multimodal
 
     text_embeds = get_text_embeds(input_ids[is_text])
-    multimodal_embeds = get_multimodal_embeds(input_ids[is_multimodal])
-
     merged_embeds = torch.empty(
         (input_ids.shape[0], text_embeds.shape[1]),
         dtype=text_embeds.dtype,
@@ -563,30 +574,6 @@ def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
     return make_empty_intermediate_tensors
 
 
-class LLMWrapper(nn.Module):
-    """
-    To align with the key names of LoRA trained with PEFT, we need to add an
-    additional layer to the llm's implementation.
-    """
-
-    def __init__(self, llm: nn.Module, name: str) -> None:
-        super().__init__()
-        self.model_name = name
-        setattr(self, name, llm)
-
-    def __getattr__(self, key: str):
-        llm = super().__getattr__(self.model_name)
-        if key == self.model_name:
-            return llm
-
-        return getattr(llm, key)
-
-    # We need to explicitly override this
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        llm = super().__getattr__(self.model_name)
-        return llm(*args, **kwargs)
-
-
 def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
     """
     Get the available attention backend for Vision Transformer.
@@ -629,3 +616,24 @@ def maybe_prefix(prefix: str, name: str) -> str:
         The string "prefix.name" if prefix was non-empty, otherwise just "name".
     """
     return name if not prefix else f"{prefix}.{name}"
+
+
+def extract_layer_index(layer_name: str) -> int:
+    """
+    Extract the layer index from the module name.
+    Examples:
+    - "encoder.layers.0" -> 0
+    - "encoder.layers.1.self_attn" -> 1
+    - "2.self_attn" -> 2
+    - "model.encoder.layers.0.sub.1" -> ValueError
+    """
+    subnames = layer_name.split(".")
+    int_vals: List[int] = []
+    for subname in subnames:
+        try:
+            int_vals.append(int(subname))
+        except ValueError:
+            continue
+    assert len(int_vals) == 1, (f"layer name {layer_name} should"
+                                " only contain one integer")
+    return int_vals[0]
