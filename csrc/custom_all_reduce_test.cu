@@ -135,24 +135,26 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
   void* rank_data;
   size_t rank_data_sz = 16 * 1024 * 1024;
   CUDACHECK(cudaMalloc(&rank_data, rank_data_sz));
-  std::vector<int64_t> offsets(nRanks, 0);
-  vllm::CustomAllreduce fa(buffer, rank_data, rank_data_sz, data_handles,
-                           offsets, myRank);
+  vllm::Signal* ipc_ptrs[8];
+  for (int i = 0; i < nRanks; i++) {
+    if (i == myRank)
+      ipc_ptrs[i] = buffer;
+    else
+      CUDACHECK(cudaIpcOpenMemHandle((void**)&ipc_ptrs[i], data_handles[i],
+                                     cudaIpcMemLazyEnablePeerAccess));
+  }
+  vllm::CustomAllreduce fa(ipc_ptrs, rank_data, rank_data_sz, myRank, nRanks);
   auto* self_data =
       reinterpret_cast<T*>(reinterpret_cast<char*>(buffer) +
                            sizeof(vllm::Signal) + data_size * sizeof(T));
   // hack buffer registration
   {
-    std::vector<std::string> handles;
-    handles.reserve(nRanks);
+    void* data[8];
     for (int i = 0; i < nRanks; i++) {
-      char* begin = (char*)&data_handles[i];
-      char* end = (char*)&data_handles[i + 1];
-      handles.emplace_back(begin, end);
+      data[i] =
+          ((char*)ipc_ptrs[i]) + sizeof(vllm::Signal) + data_size * sizeof(T);
     }
-    std::vector<int64_t> offsets(nRanks,
-                                 sizeof(vllm::Signal) + data_size * sizeof(T));
-    fa.register_buffer(handles, offsets, self_data);
+    fa.register_buffer(data);
   }
 
   double* ground_truth;
