@@ -40,10 +40,9 @@ class GritLMPooler(nn.Module):
         }
 
     @staticmethod
-    def _find_list(arr: array, target: array, start_idx: int) -> int:
+    def _find_array(arr: array, target: array, start_idx: int) -> int:
         """
-        Find the first starting index where the search_list appears
-        as a consecutive subsequence in main_list.
+        Find the first occurrence of target in arr starting from start_idx.
 
         Args:
         arr: The array to search within
@@ -55,25 +54,14 @@ class GritLMPooler(nn.Module):
         """
         if start_idx < 0:
             raise ValueError("start_idx must be non-negative")
-
-        found_index = -1
-
-        # Handle edge cases
         if not target or not arr:
-            return found_index
+            raise ValueError("Empty arr or target not allowed")
 
-        # Length of lists
-        arr_len = len(arr)
         target_len = len(target)
-
-        # Iterate through possible starting positions
-        for i in range(start_idx, arr_len - target_len + 1):
-            # Check if the subsequence matches
+        for i in range(start_idx, len(arr) - target_len + 1):
             if arr[i:i + target_len] == target:
-                found_index = i
-                break
-
-        return found_index
+                return i
+        return -1
 
     def _get_instruction_len(self, prompt_token_ids: array) -> bool:
         """
@@ -102,20 +90,22 @@ class GritLMPooler(nn.Module):
 
         # Find the user pattern in the prompt.
         user_token_ids = tokens_to_ids(["▁<", "|", "user", "|", ">", "<0x0A>"])
-        found_user_pattern = (__class__._find_list(prompt_token_ids,
-                                                   user_token_ids,
-                                                   start_idx=1) == 1)
+        found_user_pattern = (__class__._find_array(prompt_token_ids,
+                                                    user_token_ids,
+                                                    start_idx=1) == 1)
 
         # Find the embed pattern in the prompt.
         if found_user_pattern:
+            # If user pattern is found, that means there should be
+            # a newline token before the embed pattern.
             embed_token_ids = tokens_to_ids(
                 ["<0x0A>", "<", "|", "embed", "|", ">", "<0x0A>"])
         else:
             embed_token_ids = tokens_to_ids(
                 ["▁<", "|", "embed", "|", ">", "<0x0A>"])
-        found_embed_pattern_idx = __class__._find_list(prompt_token_ids,
-                                                       embed_token_ids,
-                                                       start_idx=1)
+        found_embed_pattern_idx = __class__._find_array(prompt_token_ids,
+                                                        embed_token_ids,
+                                                        start_idx=1)
 
         if found_embed_pattern_idx != -1:
             instruction_len = found_embed_pattern_idx + len(embed_token_ids)
