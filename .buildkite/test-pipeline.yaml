@@ -51,11 +51,8 @@ steps:
   - tests/test_utils
   - tests/worker
   - tests/standalone_tests/lazy_torch_compile.py
-  - tests/standalone_tests/python_only_compile.sh
-  - setup.py
   commands:
   - python3 standalone_tests/lazy_torch_compile.py
-  - bash standalone_tests/python_only_compile.sh
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
@@ -63,6 +60,13 @@ steps:
   - pytest -v -s multimodal
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
+
+- label: Python-only Installation Test
+  source_file_dependencies:
+  - tests/standalone_tests/python_only_compile.sh
+  - setup.py
+  commands:
+  - bash standalone_tests/python_only_compile.sh
 
 - label: Basic Correctness Test # 30min
   #mirror_hardwares: [amd]
