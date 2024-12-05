@@ -330,6 +330,11 @@ class RequestStats:
         self.model_forward_duration_s = 0.0
         self.model_execute_duration_s = 0.0
         self.first_token_ts_s = None
+        # NOTE: the below fields should not be reset:
+        # - prefill_start_ts_s_lst
+        # - arrival_ts_s
+        # - engine_request
+        # - input_processor_end_ts_s
 
 
 @dataclass
@@ -364,28 +369,12 @@ class EngineCoreProcessStats:
     output_queue_size: Optional[int] = None
 
 
-class EngineStatsSnapshot(msgspec.Struct,
-                          array_like=True,
-                          omit_defaults=True,
-                          gc=False):
+class EngineCoreStatsSnapshot(msgspec.Struct,
+                              array_like=True,
+                              omit_defaults=True,
+                              gc=False):
     """
-    A snapshot of the engine's current stats.
-    This represents a snapshot of the current engine core's stats over a
-    period of time.
-
-    A snapshot is created periodically (e.g. every 5 seconds) on the frontend of
-    the engine, and engine core stats would be gathered from the engine core:
-    including the current state of the scheduler, the requests updated since
-    the last snapshot.
-
-    This decouples stats collection from actual processing of the requests such
-    that:
-        1. Stats collection is lightweight and could be aligned with the same
-        interval as the upper level stats logging (e.g. Prometheus scraping
-        time, logging interval, etc.).
-        2. Stats collection could happen independently of the request processing
-        so even if no requests were processed, stats would still be propagated
-        reliably.
+    A snapshot of the EngineCore's current stats over a period of time.
     """
 
     # Snapshot of the scheduler stats.
