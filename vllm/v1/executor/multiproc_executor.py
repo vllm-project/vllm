@@ -1,6 +1,6 @@
+import atexit
 import os
 import time
-import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 
@@ -21,9 +21,9 @@ logger = init_logger(__name__)
 class MultiprocExecutor:
 
     def __init__(self, vllm_config: VllmConfig) -> None:
-        # Call self.shutdown when the executor is garbage collected
-        # to clean up and ensure workers will be terminated.
-        self._finalizer = weakref.finalize(self, self.shutdown)
+        # Call self.shutdown at exix to clean up
+        # and ensure workers will be terminated.
+        atexit.register(self.shutdown)
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
