@@ -161,7 +161,6 @@ class MPClient(EngineCoreClient):
     def shutdown(self):
         # Send shutdown signal to background process.
         self.should_shutdown = True
-        self.proc.join(5)
 
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)

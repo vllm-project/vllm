@@ -163,25 +163,17 @@ class MultiprocExecutor:
                 time.sleep(0.1)
             return False
 
-        # Wait for workers to terminate gracefully
-        active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
-        self.workers = None
-        if wait_for_termination(active_procs, 5):
-            return
-
         # Send SIGTERM if still running
-        active_procs = [p for p in active_procs if p.is_alive()]
+        active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
         for p in active_procs:
             p.terminate()
-        if wait_for_termination(active_procs, 5):
+        if wait_for_termination(active_procs, 4):
             return
 
         # Send SIGKILL if still running
         active_procs = [p for p in active_procs if p.is_alive()]
         for p in active_procs:
             p.kill()
-        if not wait_for_termination(active_procs, 5):
-            raise RuntimeError("Failed to terminate worker processes")
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""

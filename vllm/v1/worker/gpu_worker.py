@@ -14,7 +14,8 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-from vllm.distributed import (cleanup_dist_env_and_memory,
+from vllm.distributed import (destroy_model_parallel,
+                              destroy_distributed_environment,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -384,15 +385,23 @@ class WorkerProc:
     def shutdown(self):
         self.worker_request_mq = None
         self.model_output_mq = None
-        cleanup_dist_env_and_memory()
+        destroy_model_parallel()
+        destroy_distributed_environment()
 
     @staticmethod
     def run_worker(*args, **kwargs):
         """ Worker initialization and execution loops.
         This runs a background process """
 
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
         def signal_handler(signum, frame):
-            raise SystemExit()
+            nonlocal shutdown_requested
+            if not shutdown_requested:
+                shutdown_requested = True
+                raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker
         signal.signal(signal.SIGTERM, signal_handler)

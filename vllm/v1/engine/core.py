@@ -221,8 +221,15 @@ class EngineCoreProc(EngineCore):
     def run_engine_core(*args, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
         def signal_handler(signum, frame):
-            raise SystemExit()
+            nonlocal shutdown_requested
+            if not shutdown_requested:
+                shutdown_requested = True
+                raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the engine_core
         signal.signal(signal.SIGTERM, signal_handler)
