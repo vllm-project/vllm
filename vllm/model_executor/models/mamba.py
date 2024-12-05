@@ -49,7 +49,7 @@ class MambaDecoderLayer(nn.Module):
                                 use_conv_bias=config.use_conv_bias,
                                 use_bias=config.use_bias,
                                 use_rms_norm=self.is_falcon_mamba,
-                                rms_norm_affine=not self.is_falcon_mamba,
+                                rms_norm_has_weight=not self.is_falcon_mamba,
                                 rms_norm_eps=mixer_rms_eps,
                                 activation=config.hidden_act)
 
