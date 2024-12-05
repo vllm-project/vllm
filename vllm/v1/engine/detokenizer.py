@@ -28,6 +28,7 @@ class IncrementalDetokenizer:
     token_ids: List[int]
     request_logprobs: Optional[SampleLogprobs]
     request_prompt_logprobs: Optional[PromptLogprobs]
+    request_cumulative_logprob: Optional[float]
 
     # Stop strings
     stop: List[str]
@@ -115,7 +116,8 @@ class IncrementalDetokenizer:
             max_request_sample_logprobs=request.logprobs,
             max_request_prompt_logprobs=request.prompt_logprobs,
             request_logprobs=[] if do_request_logprobs else None,
-            request_prompt_logprobs=[] if do_request_prompt_logprobs else None)
+            request_prompt_logprobs=[] if do_request_prompt_logprobs else None,
+            request_cumulative_logprob=0 if do_request_logprobs else None)
 
     def _detokenize_ids(
         self,
@@ -160,7 +162,7 @@ class IncrementalDetokenizer:
         new_logprobs: List[Tuple[npt.NDArray, npt.NDArray]],
         new_token_ids: List[int],
         detokenize: bool,
-    ) -> SampleLogprobs:
+    ) -> Tuple[SampleLogprobs, float]:
         """Pythonize sample logprobs, maybe detokenize.
         
         Pythonization entails the conversion from a numpy (np)
@@ -170,6 +172,8 @@ class IncrementalDetokenizer:
 
         The Logprob.decoded_token field is only computed (detokenized
         from the associated top token id) if detokenize=True
+
+        Also computes cumulative logprob.
 
         Args:
           new_logprobs: List of (logprobs,logprob token ids) numpy array tuples
@@ -198,10 +202,12 @@ class IncrementalDetokenizer:
                 # There will be one more logprob than the user requested
                 logprob_cnt = max_logprobs + 1
 
-            self.request_logprobs.append(
-                self._pythonize_sequence_position(
-                    logprob_values[0:logprob_cnt],
-                    logprob_token_ids[0:logprob_cnt], detokenize))
+            new_pythonized_logprobs = self._pythonize_sequence_position(
+                logprob_values[0:logprob_cnt],
+                logprob_token_ids[0:logprob_cnt], detokenize)
+            self.request_logprobs.append(new_pythonized_logprobs)
+            self.request_cumulative_logprob += new_pythonized_logprobs[
+                token_id].logprob
 
     def _pythonize_maybe_detokenize_prompt_logprobs_for_request(
         self,
@@ -324,6 +330,7 @@ class IncrementalDetokenizer:
         logprobs = new_logprobs if delta else self.request_logprobs
         prompt_logprobs = (new_prompt_logprobs
                            if delta else self.request_prompt_logprobs)
+        cumulative_logprob = self.request_cumulative_logprob
 
         request_output = RequestOutput.new(
             self.request_id,
@@ -333,6 +340,7 @@ class IncrementalDetokenizer:
             token_ids,
             logprobs,
             prompt_logprobs,
+            cumulative_logprob,
             finished,
         )
 
