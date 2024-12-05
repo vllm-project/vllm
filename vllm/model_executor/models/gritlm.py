@@ -1,4 +1,4 @@
-import re
+from array import array
 from typing import List, Optional, Union
 
 import torch
@@ -8,14 +8,11 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 from vllm.attention import AttentionMetadata
 from vllm.attention.backends.xformers import XFormersImpl
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.pooling_params import PoolingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, IntermediateTensors,
                            PoolerOutput)
 
@@ -24,56 +21,111 @@ logger = init_logger(__name__)
 
 class GritLMPooler(nn.Module):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-    ):
+    def __init__(self, model_config: ModelConfig):
         super().__init__()
 
         self.model_config = model_config
 
-    def _get_instruction_lens(
-            self, device: torch.device,
-            pooling_metadata: PoolingMetadata) -> torch.Tensor:
-        """
-        Compute the number of tokens of each instruction using the tokenizer.
-        """
-        self.tokenizer = cached_get_tokenizer(
+        tokenizer = cached_get_tokenizer(
             self.model_config.tokenizer,
             tokenizer_mode=self.model_config.tokenizer_mode,
             tokenizer_revision=self.model_config.tokenizer_revision,
             trust_remote_code=self.model_config.trust_remote_code,
-            truncation_side="left",
         )
 
-        def query_instruction_missing(pooling_params: PoolingParams) -> bool:
-            return (pooling_params is None
-                    or pooling_params.additional_data is None
-                    or "instruction_seq" not in pooling_params.additional_data)
+        # Collect the tokens needed for pattern matching.
+        self.token_ids = {
+            tok: tokenizer.convert_tokens_to_ids([tok])[0]
+            for tok in ["<s>", "▁<", "<", "|", "embed", ">", "<0x0A>", "user"]
+        }
 
-        for seq_group in pooling_metadata.seq_groups:
-            if query_instruction_missing(seq_group[1]):
-                logger.warning(
-                    "Query instruction not found in prompt,"
-                    "thus using empty string instead. GritLM requires "
-                    "query instruction in prompt.")
+    @staticmethod
+    def _find_list(arr: array, target: array, start_idx: int) -> int:
+        """
+        Find the first starting index where the search_list appears
+        as a consecutive subsequence in main_list.
 
-        instruction_lens = torch.tensor(
-            [
-                len(
-                    self.tokenizer(
-                        ("" if query_instruction_missing(seq_group[1]) else
-                         seq_group[1].additional_data["instruction_seq"]),
-                        padding=False,
-                        truncation=True,
-                        add_special_tokens=True,
-                    )["input_ids"])
-                for seq_group in pooling_metadata.seq_groups
-            ],
-            device=device,
-        )
+        Args:
+        arr: The array to search within
+        target: The consecutive subsequence to find
+        start_idx: The starting index to search from
 
-        return instruction_lens
+        Returns:
+        int: The index of the first occurrence of target in arr.
+        """
+        if start_idx < 0:
+            raise ValueError("start_idx must be non-negative")
+
+        found_index = -1
+
+        # Handle edge cases
+        if not target or not arr:
+            return found_index
+
+        # Length of lists
+        arr_len = len(arr)
+        target_len = len(target)
+
+        # Iterate through possible starting positions
+        for i in range(start_idx, arr_len - target_len + 1):
+            # Check if the subsequence matches
+            if arr[i:i + target_len] == target:
+                found_index = i
+                break
+
+        return found_index
+
+    def _get_instruction_len(self, prompt_token_ids: array) -> bool:
+        """
+        Get the length of the instruction in the prompt.
+
+        We do a pattern matching to find the instruction in the prompt,
+        and then return the length of the instruction.
+
+        The pattern matching is done using integers instead of strings
+        because the prompt is given as a list of token IDs.
+        """
+
+        def tokens_to_ids(tokens: list[str]) -> List[int]:
+            return array("i", [self.token_ids[token] for token in tokens])
+
+        instruction_len = 0
+
+        found_bos_token = prompt_token_ids[0] == self.token_ids["<s>"]
+
+        # Return no instruction in case of missing BOS token.
+        if not found_bos_token:
+            logger.warning("BOS token not found in prompt,"
+                           "thus using empty string for instruction."
+                           "GritLM requires BOS token in prompt.")
+            return instruction_len
+
+        # Find the user pattern in the prompt.
+        user_token_ids = tokens_to_ids(["▁<", "|", "user", "|", ">", "<0x0A>"])
+        found_user_pattern = (__class__._find_list(prompt_token_ids,
+                                                   user_token_ids,
+                                                   start_idx=1) == 1)
+
+        # Find the embed pattern in the prompt.
+        if found_user_pattern:
+            embed_token_ids = tokens_to_ids(
+                ["<0x0A>", "<", "|", "embed", "|", ">", "<0x0A>"])
+        else:
+            embed_token_ids = tokens_to_ids(
+                ["▁<", "|", "embed", "|", ">", "<0x0A>"])
+        found_embed_pattern_idx = __class__._find_list(prompt_token_ids,
+                                                       embed_token_ids,
+                                                       start_idx=1)
+
+        if found_embed_pattern_idx != -1:
+            instruction_len = found_embed_pattern_idx + len(embed_token_ids)
+        else:
+            logger.warning("Query instruction not found in prompt,"
+                           "thus using BOS token as instruction instead."
+                           "GritLM requires query instruction in prompt.")
+            instruction_len = 1
+
+        return instruction_len
 
     def forward(
         self,
@@ -84,8 +136,18 @@ class GritLMPooler(nn.Module):
         Pool the hidden states by summing the embeddings of
         non-instruction tokens.
         """
-        instruction_lens = self._get_instruction_lens(
-            device=hidden_states.device, pooling_metadata=pooling_metadata)
+        prompts_token_ids = [
+            token_ids.prompt_token_ids_array
+            for _, token_ids in pooling_metadata.seq_data.items()
+        ]
+
+        instruction_lens = torch.tensor(
+            [
+                self._get_instruction_len(prompt_token_ids)
+                for prompt_token_ids in prompts_token_ids
+            ],
+            device=hidden_states.device,
+        )
 
         prompt_lens = PoolingTensors.from_pooling_metadata(
             pooling_metadata, hidden_states.device).prompt_lens
@@ -124,41 +186,6 @@ class GritLMPooler(nn.Module):
         return PoolerOutput(outputs=pooled_outputs)
 
 
-def input_processor_for_gritlm(ctx: InputContext, inputs: DecoderOnlyInputs):
-    """
-    Extracts query instruction from prompt and adds it to token inputs.
-    """
-    model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer)
-
-    prompt = inputs.get("prompt", None)
-    instruction = ""
-
-    if prompt is None and "prompt_token_ids" in inputs:
-        prompt = tokenizer.decode(inputs["prompt_token_ids"])
-
-    if prompt is not None:
-        match_instruction = re.match(r"(<s> )?(<\|user\|>\n.*\n<\|embed\|>\n)",
-                                     prompt)
-        match_empty_instruction = re.match(r"(<s> )?(<\|embed\|>\n)", prompt)
-
-        if match_instruction and match_instruction.group(2):
-            instruction = match_instruction.group(2)
-        elif match_empty_instruction:
-            instruction = match_empty_instruction.group(2)
-        else:
-            logger.warning("Query instruction not found in prompt,"
-                           "thus using empty string instead. GritLM requires "
-                           "query instruction in prompt.")
-
-    return token_inputs(
-        prompt_token_ids=inputs["prompt_token_ids"],
-        prompt=prompt,
-        instruction_seq=instruction,
-    )
-
-
-@INPUT_REGISTRY.register_input_processor(input_processor_for_gritlm)
 class GritLM(LlamaForCausalLM):
     """This class implements the embedding model for parasail-ai/GritLM-7B-vllm.
 
@@ -171,11 +198,9 @@ class GritLM(LlamaForCausalLM):
     LlamaForCausalLM is that GritLM ignores the query instruction in the prompt
     when pooling the hidden states.
 
-    Instructions can be passed to the model in two ways:
-    1. By prepending the instruction to the prompt. The instruction should be
-    in the format "<|user|>\n<instruction>\n<|embed|>\n".
-    2. By passing the instruction as additional data in the pooling parameters
-    (e.g. extra_body of client.embeddings.create).
+    Prompt must be in the following format:
+    - With instruction: "<|user|>\nINSTRUCTION\n<|embed|>\nPROMPT".
+    - Without instruction: "<|embed|>\nPROMPT".
     """
 
     def __init__(
@@ -186,12 +211,16 @@ class GritLM(LlamaForCausalLM):
     ) -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-        self._pooler = GritLMPooler(model_config=vllm_config.model_config)
+        if vllm_config.model_config.task != "embedding":
+            raise ValueError(f"Task must be 'embedding' for GritLM, but got "
+                             f"'{vllm_config.model_config.task}'")
+
+        self._pooler = GritLMPooler(vllm_config.model_config)
 
         assert isinstance(
-            self.model.layers[0].self_attn.attn.impl,
-            XFormersImpl), "GritLM is only supported by XFormers backend, "
-        "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS"
+            self.model.layers[0].self_attn.attn.impl, XFormersImpl), (
+                "GritLM is only supported by XFormers backend, "
+                "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS")
 
     def forward(
         self,

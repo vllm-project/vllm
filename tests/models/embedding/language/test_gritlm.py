@@ -1,5 +1,6 @@
 import math
 import os
+from array import array
 from typing import List
 
 import openai
@@ -8,6 +9,7 @@ import pytest_asyncio
 from scipy.spatial.distance import cosine
 
 import vllm
+from vllm.model_executor.models.gritlm import GritLMPooler
 
 from ....utils import RemoteOpenAIServer
 
@@ -15,6 +17,25 @@ MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 
 # GritLM implementation is only supported by XFormers backend.
 os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
+
+
+def _arr(arr):
+    """
+    Convert a list of integers to an array of integers.
+    """
+    return array("i", arr)
+
+
+def test_find_list():
+    arr = _arr([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+    assert GritLMPooler._find_list(arr, _arr([3, 4, 5]), start_idx=0) == 3
+    assert GritLMPooler._find_list(arr, _arr([3, 4, 5]), start_idx=1) == 3
+    assert GritLMPooler._find_list(arr, _arr([3, 4, 5]), start_idx=5) == -1
+    assert GritLMPooler._find_list(arr, _arr([3, 5]), start_idx=0) == -1
+
+    with pytest.raises(ValueError):
+        GritLMPooler._find_list(arr, _arr([3, 4, 5]), start_idx=-1)
 
 
 @pytest.fixture(scope="module")
@@ -33,28 +54,17 @@ async def client(server):
         yield async_client
 
 
-def run_llm_encode(llm: vllm.LLM, queries: List[str], instruction: str,
-                   use_instruction_arg: bool) -> List[float]:
-    pooling_params = vllm.PoolingParams(
-        additional_data={"instruction_seq": instruction
-                         }) if use_instruction_arg else None
-    outputs = llm.encode(
-        [instruction + q for q in queries],
-        pooling_params=pooling_params,
-    )
+def run_llm_encode(llm: vllm.LLM, queries: List[str],
+                   instruction: str) -> List[float]:
+    outputs = llm.encode([instruction + q for q in queries], )
     return [output.outputs.embedding for output in outputs]
 
 
 async def run_client_embeddings(client: vllm.LLM, queries: List[str],
-                                instruction: str,
-                                use_instruction_arg: bool) -> List[float]:
-    additional_data = {
-        "instruction_seq": instruction
-    } if use_instruction_arg else None
+                                instruction: str) -> List[float]:
     outputs = await client.embeddings.create(
         model=MODEL_NAME,
         input=[instruction + q for q in queries],
-        extra_body={"additional_data": additional_data},
     )
     return [data.embedding for data in outputs.data]
 
@@ -100,8 +110,7 @@ def validate_output(q_rep: List[float], d_rep: List[float]):
     assert math.isclose(cosine_sim_q1_d1, 0.532, abs_tol=0.001)
 
 
-@pytest.mark.parametrize("use_instruction_arg", [True, False])
-def test_gritlm_offline(use_instruction_arg: bool):
+def test_gritlm_offline():
     queries, q_instruction, documents, d_instruction = get_test_data()
 
     llm = vllm.LLM(MODEL_NAME, task="embedding")
@@ -110,35 +119,29 @@ def test_gritlm_offline(use_instruction_arg: bool):
         llm,
         documents,
         d_instruction,
-        use_instruction_arg=use_instruction_arg,
     )
     q_rep = run_llm_encode(
         llm,
         queries,
         q_instruction,
-        use_instruction_arg=use_instruction_arg,
     )
 
     validate_output(q_rep, d_rep)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("use_instruction_arg", [True, False])
-async def test_gritlm_api_server(client: openai.AsyncOpenAI,
-                                 use_instruction_arg: bool):
+async def test_gritlm_api_server(client: openai.AsyncOpenAI):
     queries, q_instruction, documents, d_instruction = get_test_data()
 
     d_rep = await run_client_embeddings(
         client,
         documents,
         d_instruction,
-        use_instruction_arg=use_instruction_arg,
     )
     q_rep = await run_client_embeddings(
         client,
         queries,
         q_instruction,
-        use_instruction_arg=use_instruction_arg,
     )
 
     validate_output(q_rep, d_rep)
