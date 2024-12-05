@@ -467,7 +467,6 @@ class GPUModelRunner:
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
-        # Update the
 
         # NOTE: CPU-GPU synchronization happens here.
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
@@ -690,7 +689,7 @@ class InputBatch:
                                             pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
-
+        # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, vocab_size),
                                                dtype=torch.float,
                                                device=device)
@@ -702,7 +701,7 @@ class InputBatch:
         self.frequency_penalties_cpu = \
             self.frequency_penalties_cpu_tensor.numpy()
         self.frequency_penalties_reqs: Set[str] = set()
-
+        # Presence penalty related data structures
         self.presence_penalties = torch.empty((max_num_reqs, vocab_size),
                                               dtype=torch.float,
                                               device=device)
@@ -714,7 +713,7 @@ class InputBatch:
         self.presence_penalties_cpu = \
             self.presence_penalties_cpu_tensor.numpy()
         self.presence_penalties_reqs: Set[str] = set()
-
+        # Repetition penalty related data structures
         self.repetition_penalties = torch.empty((max_num_reqs, vocab_size),
                                                 dtype=torch.float,
                                                 device=device)
@@ -916,7 +915,13 @@ class InputBatch:
         for req_id in self.req_ids[:self.num_reqs]:
             assert req_id is not None
             request = requests[req_id]
-            # Currently we create a tensor from the
+            # Currently we create a tensor for output_token_ids from scratch
+            # at each step. However, for the penalties computation what we
+            # need is stats about the token ids present in the output. This
+            # stats can be maintained incrementally instead of computing it
+            # from scratch at each step.
+            # TODO - Replace this with incremental update to output token
+            # statistics.
             output_token_ids.append(request.output_token_ids)
             min_tokens.append(request.sampling_params.min_tokens)
             stop_token_ids.append(request.sampling_params.all_stop_token_ids)
@@ -952,6 +957,8 @@ class InputBatch:
             prompt_token_ids.append(request.prompt_token_ids)
         prompt_tokens_cpu_tensor = make_tensor_with_pad(
             prompt_token_ids,
+            # use the value of vocab_size as a pad since we don't have a
+            # token_id of this value.
             pad=vocab_size,
             device="cpu",
             dtype=torch.int64,
