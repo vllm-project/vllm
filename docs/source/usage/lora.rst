@@ -1,7 +1,7 @@
 .. _lora:
 
-Using LoRA adapters
-===================
+LoRA Adapters
+=============
 
 This document shows you how to use `LoRA adapters <https://arxiv.org/abs/2106.09685>`_ with vLLM on top of a base model.
 
