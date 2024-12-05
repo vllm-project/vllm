@@ -17,8 +17,8 @@ To input multi-modal data, follow this schema in :class:`vllm.inputs.PromptType`
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`.
 
-Image input
-^^^^^^^^^^^
+Image
+^^^^^
 
 You can pass a single image to the :code:`'image'` field of the multi-modal dictionary, as shown in the following examples:
 
@@ -122,23 +122,23 @@ Multi-image input can be extended to perform video captioning. We show this with
         generated_text = o.outputs[0].text
         print(generated_text)
 
-Video input
-^^^^^^^^^^^
+Video
+^^^^^
 
 You can pass a list of NumPy arrays directly to the :code:`'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
 Please refer to `examples/offline_inference_vision_language.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language.py>`_ for more details.
 
-Audio input
-^^^^^^^^^^^
+Audio
+^^^^^
 
 You can pass a tuple :code:`(array, sampling_rate)` to the :code:`'audio'` field of the multi-modal dictionary.
 
 Please refer to `examples/offline_inference_audio_language.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_audio_language.py>`_ for more details.
 
-Embedding input
-^^^^^^^^^^^^^^^
+Embedding
+^^^^^^^^^
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape :code:`(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
@@ -216,8 +216,8 @@ Our OpenAI-compatible server accepts multi-modal data via the `Chat Completions 
     The chat template can be inferred based on the documentation on the model's HuggingFace repo.
     For example, LLaVA-1.5 (``llava-hf/llava-1.5-7b-hf``) requires a chat template that can be found `here <https://github.com/vllm-project/vllm/blob/main/examples/template_llava.jinja>`__.
 
-Image input
-^^^^^^^^^^^
+Image
+^^^^^
 
 Image input is supported according to `OpenAI Vision API <https://platform.openai.com/docs/guides/vision>`_.
 Here is a simple example using Phi-3.5-Vision.
@@ -296,8 +296,8 @@ A full code example can be found in `examples/openai_chat_completion_client_for_
 
         $ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
-Video input
-^^^^^^^^^^^
+Video
+^^^^^
 
 Instead of :code:`image_url`, you can pass a video file via :code:`video_url`.
 
@@ -312,8 +312,8 @@ You can use `these tests <https://github.com/vllm-project/vllm/blob/main/tests/e
 
         $ export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
 
-Audio input
-^^^^^^^^^^^
+Audio
+^^^^^
 
 Instead of :code:`image_url`, you can pass an audio file via :code:`audio_url`.
 
@@ -328,8 +328,8 @@ A full code example can be found in `examples/openai_chat_completion_client_for_
 
         $ export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
 
-Embedding input
-^^^^^^^^^^^^^^^
+Embedding
+^^^^^^^^^
 
 vLLM's Embeddings API is a superset of OpenAI's `Embeddings API <https://platform.openai.com/docs/api-reference/embeddings>`_,
 where a list of chat ``messages`` can be passed instead of batched ``inputs``. This enables multi-modal inputs to be passed to embedding models.
