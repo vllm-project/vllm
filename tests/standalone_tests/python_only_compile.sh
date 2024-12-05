@@ -7,8 +7,8 @@ pip3 uninstall -y vllm
 mv test_docs/vllm ./vllm
 
 # remove all compilers
-unlink $(which gcc)
-unlink $(which g++)
+unlink "$(which gcc)"
+unlink "$(which g++)"
 
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
