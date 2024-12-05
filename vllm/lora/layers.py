@@ -18,9 +18,14 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
 from vllm.lora.punica import PunicaWrapper
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear, LinearBase, MergedColumnParallelLinear,
-    QKVParallelLinear, ReplicatedLinear, RowParallelLinear)
+# yapf: enable
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearBase,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
+# yapf: enable                                             
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
