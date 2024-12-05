@@ -123,7 +123,7 @@ class EngineCore:
         if do_prompt_logprobs:
             # Index into prompt tokens, for building
             # prompt logprobs output data structure
-            curr_prompt_base_idx = 0
+            mr_output_slice_lower_index = 0
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
         for request in scheduler.running:
@@ -143,9 +143,11 @@ class EngineCore:
                 # token is discarded and all sequence offsets are prompt
                 # offsets), otherwise it is the number of scheduled
                 # tokens minus one (for the sampled token)
+                req_is_not_partial = (scheduler_output.partial_req_index !=
+                                      req_index)
                 num_new_prompt_tokens = (
                     num_scheduled_tokens[request.request_id] -
-                    int(scheduler_output.partial_req_index != req_index))
+                    int(req_is_not_partial))
 
                 request_do_prompt_logprobs = (max_prompt_logprobs is not None
                                               and max_prompt_logprobs > 0
@@ -165,16 +167,16 @@ class EngineCore:
                     # Note: new_prompt_logprobs will be used later to build the
                     # engine core output
                     logprob_cnt = max_prompt_logprobs
-                    mr_output_slice_upper_index = (curr_prompt_base_idx +
-                                                   num_new_prompt_tokens)
+                    mr_output_slice_upper_index = (
+                        mr_output_slice_lower_index + num_new_prompt_tokens)
                     new_prompt_logprobs = (
                         model_runner_output.prompt_logprobs_cpu[
-                            curr_prompt_base_idx:mr_output_slice_upper_index,
-                            0:logprob_cnt])
+                            mr_output_slice_lower_index:
+                            mr_output_slice_upper_index, 0:logprob_cnt])
                     new_prompt_logprob_token_ids = (
                         model_runner_output.prompt_logprob_token_ids_cpu[
-                            curr_prompt_base_idx:mr_output_slice_upper_index,
-                            0:logprob_cnt])
+                            mr_output_slice_lower_index:
+                            mr_output_slice_upper_index, 0:logprob_cnt])
 
                     req_slice_upper_index = (prev_num_computed_tokens +
                                              num_new_prompt_tokens)
@@ -184,8 +186,9 @@ class EngineCore:
                     request.prompt_logprob_token_ids[
                         prev_num_computed_tokens:
                         req_slice_upper_index] = new_prompt_logprob_token_ids
+                    mr_output_slice_lower_index = mr_output_slice_upper_index
                 else:
-                    curr_prompt_base_idx += num_new_prompt_tokens
+                    mr_output_slice_lower_index += num_new_prompt_tokens
             else:
                 request_do_prompt_logprobs = False
 
