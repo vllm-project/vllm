@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import override_backend_env_variable
-from vllm import SamplingParams
+from vllm import CompletionOutput, SamplingParams
 
 from ...conftest import VllmRunner
 
@@ -104,6 +104,14 @@ def _assert_incr_detok_str_matches_non_incr_detok_str(
     rgx = r'[^a-zA-Z0-9]+'
     assert (re.sub(rgx, '', incremental_detokenization_str) == re.sub(
         rgx, '', non_incremental_detokenization_str)), (msg)
+
+
+def _compute_correct_cumulative_logprob(
+        completion_output: CompletionOutput) -> float:
+    token_ids = completion_output.token_ids
+    logprobs = completion_output.logprobs
+    assert logprobs is not None
+    return sum([lp[tok_id].logprob for tok_id, lp in zip(token_ids, logprobs)])
 
 
 def _test_case_get_logprobs_and_prompt_logprobs(
@@ -235,6 +243,16 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                         assert isinstance(sample_logprob.decoded_token, str), (
                             "The token should be decoded by the time it is"
                             " returned to the user.")
+
+            # At this point we know the sample logprobs are correct for this
+            # request. Validate that cumulative_logprob is actually the sum.
+            # For each request, assert that the returned cumulative logprob
+            # matches the correct value, which is computed below.
+            torch.testing.assert_close(
+                vllm_result.outputs[0].cumulative_logprob,
+                _compute_correct_cumulative_logprob(vllm_result.outputs[0]),
+                atol=1e-6,
+                rtol=1e-6)
         else:
             # Logprobs disabled for this request; should be None
             assert vllm_result.outputs[0].logprobs is None
