@@ -6,7 +6,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+# from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -166,6 +166,7 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # Compute attention and update output up to `num_actual_tokens`.
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
         flash_attn_varlen_func(
             q=query[:num_actual_tokens],
             k=key_cache,

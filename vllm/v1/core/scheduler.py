@@ -203,6 +203,9 @@ class Scheduler:
                     num_computed_tokens -= 1
                     num_new_tokens = 1
                     computed_blocks.pop()
+                # if current request can't be fully scheduled, skip and don't schedule it
+                if num_new_tokens > token_budget:
+                    break
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
