@@ -47,7 +47,7 @@ logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# Reminder: Please update docs/source/usage/compatibility_matrix.rst
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -1540,9 +1540,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[type[T], _V]):
+class ClassRegistry(UserDict[Type[T], _V]):
 
-    def __getitem__(self, key: type[T]) -> _V:
+    def __getitem__(self, key: Type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
