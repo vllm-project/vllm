@@ -596,13 +596,18 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    @property
+    def _is_deepseek_v2(self) -> bool:
+        return hasattr(self.hf_text_config, "model_type") and self.hf_text_config.model_type == 'deepseek_v2'
+
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config, "model_type"
-                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+        if self._is_deepseek_v2:
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
-            return 256
+            # return 256
+            # TODO(simon): feature flag MLA
+            return self.hf_text_config.kv_lora_rank # + self.hf_text_config.qk_rope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -661,6 +666,10 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
+        if self._is_deepseek_v2:
+            # TODO(simon): feature flag MLA
+            return 1
+
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
@@ -1788,15 +1797,15 @@ class PoolerConfig:
 
     step_tag_id: Optional[int] = None
     """
-    If set, only the score corresponding to the ``step_tag_id`` in the 
+    If set, only the score corresponding to the ``step_tag_id`` in the
     generated sentence should be returned. Otherwise, the scores for all tokens
     are returned.
     """
 
     returned_token_ids: Optional[List[int]] = None
     """
-    A list of indices for the vocabulary dimensions to be extracted, 
-    such as the token IDs of ``good_token`` and ``bad_token`` in the 
+    A list of indices for the vocabulary dimensions to be extracted,
+    such as the token IDs of ``good_token`` and ``bad_token`` in the
     ``math-shepherd-mistral-7b-prm`` model.
     """
 
@@ -2139,7 +2148,7 @@ class CompilationConfig(BaseModel):
             from Python, functions can also be passed directly via Python object
             constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
         - custom inductor passes: see PassConfig for more details
-    
+
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
         for the same size. We need to capture all the sizes we want to use.
