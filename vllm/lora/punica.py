@@ -362,7 +362,7 @@ class PunicaWrapper:
         long_lora_len = self.indices_len[4]
         return self._long_lora_indices[:long_lora_len]
 
-    def shrink_prefill(
+    def _shrink_prefill(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -380,7 +380,7 @@ class PunicaWrapper:
             scale,
         )
 
-    def shrink_decode(
+    def _shrink_decode(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -389,7 +389,7 @@ class PunicaWrapper:
     ):
         bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
-    def expand_prefill(
+    def _expand_prefill(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -407,7 +407,7 @@ class PunicaWrapper:
             add_input,
         )
 
-    def expand_decode(
+    def _expand_decode(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -416,7 +416,7 @@ class PunicaWrapper:
     ):
         bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_input)
 
-    def expand_slice_prefill(
+    def _expand_slice_prefill(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -438,7 +438,7 @@ class PunicaWrapper:
             add_input,
         )
 
-    def expand_slice_decode(
+    def _expand_slice_decode(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -450,25 +450,25 @@ class PunicaWrapper:
         bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
                           y_slice_size, add_input)
 
-    def apply_expand(self,
-                     y: torch.Tensor,
-                     x: torch.Tensor,
-                     w_t_all: torch.Tensor,
-                     y_offset: Optional[int],
-                     y_slice_size: Optional[int],
-                     add_input: bool = True):
+    def _apply_expand(self,
+                      y: torch.Tensor,
+                      x: torch.Tensor,
+                      w_t_all: torch.Tensor,
+                      y_offset: Optional[int],
+                      y_slice_size: Optional[int],
+                      add_input: bool = True):
         """
         Perform the ` y[:,y_offset:y_offset+y_slice_size]+=x@w_t_all` 
         computation, which is suitable for the
         GEMM of lora'b.
         """
 
-        expand_slice_fun: Callable = (self.expand_slice_prefill
+        expand_slice_fun: Callable = (self._expand_slice_prefill
                                       if self.is_prefill else
-                                      self.expand_slice_decode)
+                                      self._expand_slice_decode)
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_input)
 
-    def apply_bias(
+    def _apply_bias(
         self,
         indices: torch.Tensor,
         output: torch.Tensor,
@@ -500,7 +500,7 @@ class PunicaWrapper:
 
         return output.view_as(org_output)
 
-    def apply_shrink(
+    def _apply_shrink(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -511,14 +511,14 @@ class PunicaWrapper:
         Perform the ` y+=x@w_t_all` computation, which is suitable for the
         GEMM of lora'a.
         When `is_prefill is` true, it indicates that it is currently the
-        prefill stage, and the `shrink_prefill` function should be called.
-        Otherwise, it is the decode stage, and the shrink_decode function
+        prefill stage, and the `_shrink_prefill` function should be called.
+        Otherwise, it is the decode stage, and the _shrink_decode function
         should be called.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        shrink_fun: Callable = (self.shrink_prefill
-                                if self.is_prefill else self.shrink_decode)
+        shrink_fun: Callable = (self._shrink_prefill
+                                if self.is_prefill else self._shrink_decode)
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
@@ -532,8 +532,8 @@ class PunicaWrapper:
         """
         Performs GEMM  for multiple slices of lora_a.
         When `is_prefill is` true, it indicates that it is currently the
-        prefill stage, and the `shrink_prefill` function should be called.
-        Otherwise, it is the decode stage, and the shrink_decode function
+        prefill stage, and the `_shrink_prefill` function should be called.
+        Otherwise, it is the decode stage, and the _shrink_decode function
         should be called.
             
         Semantics:
@@ -550,8 +550,8 @@ class PunicaWrapper:
         x = x.view(-1, x.shape[-1])
         # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
-            self.apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
-                              scale)
+            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
+                               scale)
 
     def add_expand(
         self,
@@ -586,10 +586,10 @@ class PunicaWrapper:
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start
         if lora_bias_stacked is not None:
-            self.apply_bias(self.token_lora_indices, y, output_slices,
-                            lora_bias_stacked)
+            self._apply_bias(self.token_lora_indices, y, output_slices,
+                             lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
-            self.apply_expand(
+            self._apply_expand(
                 y,
                 x[slice_idx],
                 lora_b_stacked[slice_idx],
@@ -622,8 +622,8 @@ class PunicaWrapper:
         """
 
         # Embedding layer only need expand op
-        expand_fun: Callable = (self.expand_prefill
-                                if self.is_prefill else self.expand_decode)
+        expand_fun: Callable = (self._expand_prefill
+                                if self.is_prefill else self._expand_decode)
         expand_fun(y, x, lora_b_stacked, add_input)
 
     def add_lora_linear(
@@ -663,8 +663,8 @@ class PunicaWrapper:
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
         if lora_bias_stacked is not None:
             assert len(lora_bias_stacked) == len(output_slices)
-            y = self.apply_bias(self.token_lora_indices, y, output_slices,
-                                lora_bias_stacked)
+            y = self._apply_bias(self.token_lora_indices, y, output_slices,
+                                 lora_bias_stacked)
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
