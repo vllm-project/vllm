@@ -1,3 +1,4 @@
+import re
 from typing import List, Tuple
 
 import pytest
@@ -73,6 +74,36 @@ def _get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
         ]
     else:
         raise ValueError("Invalid logprobs batch configuration for test.")
+
+
+def _assert_incr_detok_str_matches_non_incr_detok_str(
+    incremental_detokenization_str: str,
+    non_incremental_detokenization_str: str,
+    msg: str,
+) -> None:
+    """Compare incrementally detok. text to non-incrementally detok. text
+    
+    Fail if the strings mismatch after non-alphanumeric characters are stripped
+    out.
+
+    Rationale: incremental detokenization in the text generation process allows
+    the tokenizer to adjust the next token text output based on the token's
+    context in the string. However, logprobs detokenization detokenizes each
+    token individually, and the resultant strings may include some
+    non-alphanumeric placeholder characters where there could be i.e.
+    whitespace. So, this function compares only the alphanumeric text
+    between two strings and fails if there is a mismatch, which helps
+    with validating logprobs detokenization.
+
+    Args:
+      incremental_detokenization_str: incrementally-detokenized generated text
+      non_incremental_detokenization_str: non-incrementally-detokenized logprob
+                                          tokens
+      msg: error message if `assert` fails
+    """
+    rgx = r'[^a-zA-Z0-9]+'
+    assert (re.sub(rgx, '', incremental_detokenization_str) == re.sub(
+        rgx, '', non_incremental_detokenization_str)), (msg)
 
 
 def _test_case_get_logprobs_and_prompt_logprobs(
@@ -180,7 +211,8 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             if detokenize:
                 output_string_from_most_likely_tokens = "".join(
                     output_string_from_most_likely_tokens_lst)
-                assert output_text == output_string_from_most_likely_tokens, (
+                _assert_incr_detok_str_matches_non_incr_detok_str(
+                    output_text, output_string_from_most_likely_tokens,
                     "The output text from the top logprob for each token "
                     "position should be the same as the output text in the "
                     "result.")
