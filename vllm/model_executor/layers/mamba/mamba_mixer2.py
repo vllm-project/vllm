@@ -47,12 +47,12 @@ class Mixer2RMSNormGated(CustomOp):
 
         from vllm import _custom_ops as ops
 
-        # the original code casted gate to float32 before silu
-        # hidden_states * nn.functional.silu(gate.to(torch.float32))
+        # cast gate to float32 before silu
         out = torch.empty_like(x)
+        y = x * nn.functional.silu(gate.to(torch.float32))
         ops.rms_norm(
             out,
-            x * nn.functional.silu(gate),
+            y.to(x.dtype),
             self.weight.data,
             self.variance_epsilon,
         )
