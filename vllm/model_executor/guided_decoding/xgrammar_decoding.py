@@ -164,8 +164,7 @@ class GrammarConfig:
                         "Failed to convert the grammar from Lark to GBNF. "
                         "Please either use GBNF grammar directly or specify"
                         " --guided-decoding-backend=outlines.\n"
-                        f"Conversion error: {str(e)}"
-                    ) from e
+                        f"Conversion error: {str(e)}") from e
             else:
                 grammar_str = guided_params.grammar
             return cls(grammar_str=grammar_str,

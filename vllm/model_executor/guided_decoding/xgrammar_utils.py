@@ -46,13 +46,6 @@ def convert_lark_to_gbnf(grammar_str: str) -> str:
     Lark grammar reference:
     https://lark-parser.readthedocs.io/en/latest/grammar.html
     
-    Supports:
-    - Lark rule definitions to GBNF productions
-    - String literals with proper escaping
-    - Multi-line rules with alternatives (|)
-    - Basic terminal definitions
-    - Comments (both # and // style)
-    
     Args:
         grammar_str: Input grammar in Lark format
         
@@ -66,34 +59,46 @@ def convert_lark_to_gbnf(grammar_str: str) -> str:
     """
     if not isinstance(grammar_str, str):
         raise ValueError(f"Grammar must be a string, got {type(grammar_str)}")
-
     if not grammar_str.strip():
         raise ValueError("Grammar string cannot be empty")
 
-    # Track rules for validation while being lenient about rule names
     defined_rules = set()
     referenced_rules = set()
+    output_lines = []
 
-    # First identify what rule should be used as root
+    def clean_line(line: str) -> str:
+        """Remove comments and whitespace from line."""
+        return re.sub(r'(#|//).*$', '', line).strip()
+
+    def check_quotes(text: str, rule_name: str, line_num: int) -> None:
+        """Validate quote matching in text."""
+        if text.count("'") % 2 != 0 or text.count('"') % 2 != 0:
+            raise ValueError(
+                f"Mismatched quotes in {rule_name} on line {line_num}")
+
+    def extract_references(text: str) -> set:
+        """Extract rule references from text."""
+        # Remove quoted strings and special characters
+        text = re.sub(r'"[^"]*"', '', text)
+        text = re.sub(r'[+*?()|\[\]{}]', ' ', text)
+        return set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', text))
+
+    # First pass: Find root rule and validate rule definitions
+    lines = [clean_line(line) for line in grammar_str.split('\n')]
     first_rule = None
-    lines = grammar_str.split('\n')
 
     for line_num, line in enumerate(lines, 1):
-        # Remove both comment styles
-        line = re.sub(r'(#|//).*$', '', line).strip()
-        if not line:
+        if not line or line.startswith('|'):
             continue
 
-        if ':' in line and not line.startswith('|'):
+        if ':' in line:
             try:
                 name = line.split(':', 1)[0].strip().strip('?')
                 defined_rules.add(name)
-
                 if first_rule is None:
                     first_rule = name
-                if name == 'start':  # If we find 'start', use it
+                if name == 'start':
                     first_rule = 'start'
-
             except IndexError as e:
                 raise ValueError(f"Invalid rule format on line {line_num}. "
                                  "Expected 'rule_name: definition'") from e
@@ -101,85 +106,54 @@ def convert_lark_to_gbnf(grammar_str: str) -> str:
     if not defined_rules:
         raise ValueError("No valid rules found in grammar")
 
-    root_rule = first_rule
-    output_lines = [f"root ::= {root_rule}"]
+    # Add root rule
+    output_lines.append(f"root ::= {first_rule}")
 
+    # Second pass: Process rule definitions and alternatives
     current_rule = None
     current_definition = []
 
     for line_num, line in enumerate(lines, 1):
-        line = re.sub(r'(#|//).*$', '', line).strip()
         if not line:
             continue
 
-        if ':' in line and not line.startswith('|'):
-            if current_rule:
-                output_lines.append(
-                    f"{current_rule} ::= {' | '.join(current_definition)}")
+        try:
+            if ':' in line and not line.startswith('|'):
+                # Save previous rule if exists
+                if current_rule:
+                    output_lines.append(
+                        f"{current_rule} ::= {' | '.join(current_definition)}")
 
-            try:
+                # Process new rule
                 name, definition = line.split(':', 1)
                 current_rule = name.strip().strip('?')
 
-                # Basic quote validation to catch obvious errors
-                if definition.count("'") % 2 != 0 or definition.count(
-                        '"') % 2 != 0:
-                    raise ValueError("Mismatched quotes in rule "
-                                     f"'{current_rule}' on line {line_num}")
-
-                # Convert string literals from single to double quotes
+                check_quotes(definition, f"rule '{current_rule}'", line_num)
                 definition = re.sub(r"'([^']*)'", r'"\1"', definition)
-
-                # Extract referenced rules (excluding quoted strings and
-                # special characters)
-                # Remove quoted strings
-                temp = re.sub(r'"[^"]*"', '', definition)
-                # Remove special chars
-                temp = re.sub(r'[+*?()|\[\]{}]', ' ', temp)
-                tokens = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', temp)
-                referenced_rules.update(tokens)
-
+                referenced_rules.update(extract_references(definition))
                 current_definition = [definition.strip()]
 
-            except ValueError as e:
-                raise ValueError("Error parsing rule definition on "
-                                 f"line {line_num}: {str(e)}") from e
-            except Exception as e:
-                raise ValueError("Unexpected error parsing rule on "
-                                 f"line {line_num}: {str(e)}") from e
+            elif line.startswith('|'):
+                if not current_rule:
+                    raise ValueError(f"Alternative '|' on line {line_num} "
+                                     "without a preceding rule definition")
 
-        elif line.startswith('|'):
-            if not current_rule:
-                raise ValueError(f"Alternative '|' on line {line_num} "
-                                 "without a preceding rule definition")
+                alt_def = line[1:].strip()
+                check_quotes(alt_def, f"alternative for rule '{current_rule}'",
+                             line_num)
+                alt_def = re.sub(r"'([^']*)'", r'"\1"', alt_def)
+                referenced_rules.update(extract_references(alt_def))
+                current_definition.append(alt_def)
 
-            try:
-                # Convert string literals from single to double quotes
-                line = re.sub(r"'([^']*)'", r'"\1"', line[1:].strip())
+        except ValueError as e:
+            raise ValueError(f"Error on line {line_num}: {str(e)}") from e
 
-                # Basic quote validation
-                if line.count("'") % 2 != 0 or line.count('"') % 2 != 0:
-                    raise ValueError(
-                        "Mismatched quotes in alternative for "
-                        f"rule '{current_rule}' on line {line_num}")
-
-                # Extract referenced rules (same as above)
-                temp = re.sub(r'"[^"]*"', '', line)
-                temp = re.sub(r'[+*?()|\[\]{}]', ' ', temp)
-                tokens = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', temp)
-                referenced_rules.update(tokens)
-
-                current_definition.append(line)
-
-            except ValueError as e:
-                raise ValueError("Error parsing alternative on line "
-                                 f"{line_num}: {str(e)}") from e
-
+    # Add final rule if exists
     if current_rule:
         output_lines.append(
             f"{current_rule} ::= {' | '.join(current_definition)}")
 
-    # Check for undefined rules, excluding common terminals and special cases
+    # Validate all rules are defined
     undefined_rules = referenced_rules - defined_rules - {'root'}
     if undefined_rules:
         raise ValueError("Referenced rules are not defined: "
