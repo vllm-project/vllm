@@ -1,4 +1,4 @@
-# SwiftKV
+# SwiftKV on vLLM
 
 SwiftKV is a technique developed by Snowflake AI Research that reduces computational overhead during prompt processing by combining model rewiring and knowledge-preserving self-distillation.
 
