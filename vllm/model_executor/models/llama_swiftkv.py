@@ -643,20 +643,31 @@ class LlamaSwiftKVModel(nn.Module):
             g = self.cuda_graphs.get(padded_size)
             cuda_graph_hidden_states = self.cuda_graph_tensors["hidden_states"]
             if g is None:
+                g = torch.cuda.CUDAGraph()
+                # Run a few times first to ensure the captured graph does not
+                # include kernel launches for initial benchmarking (e.g., Triton
+                # autotune). Note that once is not enough for torch.jit.script.
+                for _ in range(2):
+                    h = self._run_swiftkv_layers(
+                        positions,
+                        hidden_states,
+                        residual,
+                        kv_states,
+                        kv_caches,
+                        swiftkv_metadata,
+                    )
+                    cuda_graph_hidden_states[:padded_size].copy_(h)
                 print("Capture SwiftKV CUDA graph for batch size", padded_size)
-                with graph_capture() as capture_context:
-                    g = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(g, stream=capture_context.stream):
-                        hidden_states = self._run_swiftkv_layers(
-                            positions,
-                            hidden_states,
-                            residual,
-                            kv_states,
-                            kv_caches,
-                            swiftkv_metadata,
-                        )
-                        cuda_graph_hidden_states[:padded_size].copy_(
-                            hidden_states)
+                with graph_capture() as c, torch.cuda.graph(g, stream=c.stream):
+                    hidden_states = self._run_swiftkv_layers(
+                        positions,
+                        hidden_states,
+                        residual,
+                        kv_states,
+                        kv_caches,
+                        swiftkv_metadata,
+                    )
+                    cuda_graph_hidden_states[:padded_size].copy_(hidden_states)
                 self.cuda_graphs[padded_size] = g
             else:
                 g.replay()

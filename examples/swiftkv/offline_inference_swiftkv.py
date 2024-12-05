@@ -1,6 +1,6 @@
 from vllm import LLM, SamplingParams
 
-llm = LLM(model="Snowflake/Llama-3.1-SwiftKV-8B-Instruct", enforce_eager=True)
+llm = LLM(model="Snowflake/Llama-3.1-SwiftKV-8B-Instruct")
 
 print("=" * 80)
 
