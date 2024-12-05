@@ -47,7 +47,7 @@ logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# Reminder: Please update docs/source/usage/compatibility_matrix.rst
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
