@@ -357,7 +357,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     ):
         # Except for QKVParallelLinearWithLora and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
-        # have a tuple size of 1. These two layers will override this function.
+        # store weights in a tuple of size 1. These two layers will
+        # override this function.
         assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
                 self.n_slices == 1)
 
