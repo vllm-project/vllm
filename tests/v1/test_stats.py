@@ -62,7 +62,7 @@ def test_lifecycle_updates():
     assert stats.sampling_params == sampling_params
 
     assert stats.first_token_ts_s is None
-    assert stats.first_scheduled_ts_s is None
+    assert stats.prefill_ts_s is None
 
     # Test QUEUED
     queued_update = RequestStatsUpdate(
@@ -71,7 +71,7 @@ def test_lifecycle_updates():
         monotonic_ts_s=queued_ts,
     )
     stats.update_from(queued_update)
-    assert stats.waiting_ts_s == queued_ts
+    assert stats.queued_ts_s == queued_ts
     assert stats.last_updated_ts_s == queued_ts
 
     # Test RUNNING
@@ -79,34 +79,34 @@ def test_lifecycle_updates():
         request_id=request_id,
         type=RequestStatsUpdate.Type.RUNNING,
         monotonic_ts_s=running_ts,
-        was_running=False,
+        new_prefill=True,
         num_computed_tokens=3,
         num_cached_tokens=1,
     )
     stats.update_from(running_update)
-    assert stats.first_scheduled_ts_s == running_ts
+    assert stats.prefill_ts_s == running_ts
     assert stats.num_computed_tokens == 3
     assert stats.num_cached_tokens == 1
-    assert stats.queue_duration_s == running_ts - arrived_ts
+    assert stats.queue_duration_s == running_ts - queued_ts
 
-    # Test RUNNING again shouldn't update first_scheduled_ts_s
+    # Test RUNNING again shouldn't update prefill_ts_s
     running_update = RequestStatsUpdate(
         request_id=request_id,
         type=RequestStatsUpdate.Type.RUNNING,
         monotonic_ts_s=running_2_ts,
-        was_running=True,
+        new_prefill=False,
         num_computed_tokens=6,
         num_cached_tokens=0,
     )
     stats.update_from(running_update)
-    assert stats.first_scheduled_ts_s == running_ts
+    assert stats.prefill_ts_s == running_ts
     assert stats.num_computed_tokens == 6
     # num_cached_tokens is not updated
     assert stats.num_cached_tokens == 1
     assert stats.last_updated_ts_s == running_2_ts
-    # running_ts_s_lst should only contain the first running/resumed running
-    # update
-    assert stats.running_ts_s_lst == [
+    # prefill_start_ts_s_lst should only contain the first running/resumed
+    # running prefill update.
+    assert stats.prefill_start_ts_s_lst == [
         running_ts,
     ]
 
@@ -169,16 +169,16 @@ def test_lifecycle_updates():
         request_id=request_id,
         type=RequestStatsUpdate.Type.RUNNING,
         monotonic_ts_s=resumed_ts,
-        was_running=False,
+        new_prefill=True,
         num_computed_tokens=6,
         num_cached_tokens=2,
     )
     stats.update_from(resumed_update)
-    # First scheduled ts should NOT be updated
-    assert stats.first_scheduled_ts_s == running_ts
+    # Resumed prefill timestamp should be updated
+    assert stats.prefill_ts_s == resumed_ts
     assert stats.num_computed_tokens == 6
     assert stats.num_cached_tokens == 2
-    assert stats.running_ts_s_lst == [
+    assert stats.prefill_start_ts_s_lst == [
         running_ts,
         resumed_ts,
     ]
@@ -206,7 +206,7 @@ def test_lifecycle_updates():
     stats.update_from(finished_update)
     assert stats.last_updated_ts_s == finished_ts
     assert stats.e2e_latency_s == finished_ts - arrived_ts
-    assert stats.inference_latency_s == finished_ts - running_ts
+    assert stats.inference_latency_s == finished_ts - resumed_ts
     assert stats.decode_latency_s == finished_ts - decoded_3_ts
     assert stats.is_finished
     assert stats.finish_reason == "test_reason"
@@ -242,7 +242,7 @@ def test_finish_reason(finish_reason: Optional[str]):
         RequestStatsUpdate(
             request_id=request_id,
             type=RequestStatsUpdate.Type.RUNNING,
-            was_running=False,
+            new_prefill=True,
             monotonic_ts_s=3,
             num_computed_tokens=3,
         ),

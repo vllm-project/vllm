@@ -24,13 +24,14 @@ class RequestStatsUpdate(msgspec.Struct,
 
     NOTE:
     - We should try to keep the size of this struct minimal by avoiding
-      keeping references to additional objects if not necessary, especially
+      keeping references to additional objects that are unnecessary, especially
       when the referenced object could have been GCed already if not for
       this reference (examples include per decoded token RequestOutput,
       EngineCoreOutput, etc.).
     """
 
     class Type(IntEnum):
+        """See `RequestStats` for the lifecycle of a request."""
         # Request arrived at the engine frontend.
         ARRIVED = 0
         # Input processed by the input processor.
@@ -51,7 +52,7 @@ class RequestStatsUpdate(msgspec.Struct,
     type: Type
 
     # Timestamp when the update is recorded. This is used to record time
-    # intervals between events.
+    # intervals between events rather than wall clock time.
     monotonic_ts_s: float = msgspec_field(
         default_factory=lambda: time.monotonic())
 
@@ -59,20 +60,24 @@ class RequestStatsUpdate(msgspec.Struct,
     # Metadata associated with the update.
     ############################################################
     # For input_processed.
+    # NOTE: it's fine to keep a reference to the engine request here
+    # because there will only be 1 event with this reference for a
+    # request. We need metadata (e.g. prompt tokens, sampling_param)
+    # from the request.
     engine_request: Optional[EngineCoreRequest] = None
 
     # For running.
-    # If the request was already running.
-    was_running: Optional[bool] = None
-    # Number of tokens computed.
+    # If the request was a newly scheduled request running for prefill.
+    new_prefill: Optional[bool] = None
+    # Number of tokens computed when scheduled to run.
     num_computed_tokens: Optional[int] = None
-    # Number of cached tokens.
+    # Number of cached tokens when scheduled to run.
     num_cached_tokens: Optional[int] = None
 
     # For decoded.
     # The perfcounter timestamp for each output token.
     token_perf_ts_ns: Optional[int] = None
-    # The number of new output tokens.
+    # The number of new output tokens generated.
     num_new_tokens: Optional[int] = None
 
     # For both detokenized and decoded.
@@ -82,19 +87,21 @@ class RequestStatsUpdate(msgspec.Struct,
 
 @dataclass
 class RequestStats:
-    """Stats associated with a request.
+    """Stats associated with a request (`Request`)
 
     A request would go through the following lifecycles upon arriving
-    the llm engine:
+    at the llm engine:
     - Arrival: when the request is first added to the llm engine.
     - Inputs processed: when the input processor is completed.
-    - Waiting: added to the waiting queue of the scheduler in the EngineCore.
-    - Scheduled: when the request is scheduled by the scheduler.
+    - Queued: added to the waiting queue of the scheduler in the EngineCore.
+    - Running(prefill): when the request is scheduled by the scheduler
+        for prefill.
     - [Preempted]: a request could be temporarily unscheduled by the scheduler
-                   under contention of resources. This will go back to the
-                   waiting queue of the scheduler, and the request will be
-                   scheduled again.
-    - Finished: a request is finished (aborted or stopped)
+        under contention of resources. This will go back to the waiting queue
+        of the scheduler, and the request will be scheduled again.
+    - Decoding: when a request is in decoding stage, and tokens are generated.
+    - Detokenized: when tokens are detokenized by the detokenizer.
+    - Finished: a request is finished.
     """
 
     ############################################################
@@ -120,15 +127,14 @@ class RequestStats:
     # Number of tokens computed.
     num_computed_tokens: int = 0
 
-    # The timestamp when the request was first added to the scheduler, waiting
-    # in the queue.
-    waiting_ts_s: Optional[float] = None
+    # The timestamp when the request become waiting in the queue.
+    queued_ts_s: Optional[float] = None
 
     # When the input processor is completed.
     input_processor_end_ts_s: Optional[float] = None
 
     # A sorted list of timestamps when the request was scheduled to run.
-    running_ts_s_lst: List[float] = dataclass_field(default_factory=list)
+    prefill_start_ts_s_lst: List[float] = dataclass_field(default_factory=list)
 
     # A sorted list of perf counter timestamps for each output token.
     output_token_perf_counter_ns_lst: List[int] = dataclass_field(
@@ -162,8 +168,10 @@ class RequestStats:
                 if self.engine_request else None)
 
     @property
-    def first_scheduled_ts_s(self) -> Optional[float]:
-        return self.running_ts_s_lst[0] if self.running_ts_s_lst else None
+    def prefill_ts_s(self) -> Optional[float]:
+        """The timestamp when the request started prefilling."""
+        return (self.prefill_start_ts_s_lst[-1]
+                if self.prefill_start_ts_s_lst else None)
 
     @property
     def e2e_latency_s(self) -> Optional[float]:
@@ -174,17 +182,21 @@ class RequestStats:
 
     @property
     def queue_duration_s(self) -> Optional[float]:
-        if self.first_scheduled_ts_s is None or self.arrival_ts_s is None:
+        """How long the request was waiting to run."""
+        if self.queued_ts_s is None or self.prefill_ts_s is None:
+            # Either not queued or not running yet.
             return None
-        assert self.first_scheduled_ts_s >= self.arrival_ts_s
-        return self.first_scheduled_ts_s - self.arrival_ts_s
+        assert self.queued_ts_s <= self.prefill_ts_s
+        return self.prefill_ts_s - self.queued_ts_s
 
     @property
     def inference_latency_s(self) -> Optional[float]:
-        if self.e2e_latency_s is None or self.queue_duration_s is None:
+        """How long the request was running inference
+        (prefill and decode)."""
+        if self.finished_ts_s is None or self.prefill_ts_s is None:
             return None
-        assert self.e2e_latency_s >= self.queue_duration_s
-        return self.e2e_latency_s - self.queue_duration_s
+        assert self.finished_ts_s >= self.prefill_ts_s
+        return self.finished_ts_s - self.prefill_ts_s
 
     @property
     def first_token_latency_s(self) -> Optional[float]:
@@ -195,10 +207,10 @@ class RequestStats:
 
     @property
     def prefill_latency_s(self) -> Optional[float]:
-        if self.first_token_ts_s is None or self.first_scheduled_ts_s is None:
+        if self.first_token_ts_s is None or self.prefill_ts_s is None:
             return None
-        assert self.first_token_ts_s >= self.first_scheduled_ts_s
-        return self.first_token_ts_s - self.first_scheduled_ts_s
+        assert self.first_token_ts_s >= self.prefill_ts_s
+        return self.first_token_ts_s - self.prefill_ts_s
 
     @property
     def decode_latency_s(self) -> Optional[float]:
@@ -242,13 +254,13 @@ class RequestStats:
             self.input_processor_end_ts_s = ts
             self.engine_request = update.engine_request
         elif update.type == RequestStatsUpdate.Type.QUEUED:
-            self.waiting_ts_s = ts
+            self.queued_ts_s = ts
         elif update.type == RequestStatsUpdate.Type.RUNNING:
-            assert (update.was_running is not None
+            assert (update.new_prefill is not None
                     and update.num_computed_tokens is not None)
             self._record_running(
                 update.num_computed_tokens,
-                update.was_running,
+                update.new_prefill,
                 ts,
                 update.num_cached_tokens,
             )
@@ -270,13 +282,14 @@ class RequestStats:
     def _record_running(
         self,
         num_computed_tokens: int,
-        was_running: bool,
+        new_prefill: bool,
         ts_s: float,
         num_cached_tokens: Optional[int] = None,
     ):
-        if not was_running:
-            # Was preempted or newly run.
-            self.running_ts_s_lst.append(ts_s)
+        if new_prefill:
+            # Was preempted or a newly scheduled request - record the
+            # prefill start timestamp.
+            self.prefill_start_ts_s_lst.append(ts_s)
             self.num_cached_tokens = num_cached_tokens
 
         self.num_computed_tokens = num_computed_tokens
@@ -291,7 +304,9 @@ class RequestStats:
         # Update if first output token is generated.
         if len(self.output_token_perf_counter_ns_lst) == 0:
             self.first_token_ts_s = ts_s
-            assert self.first_scheduled_ts_s is not None
+            assert (
+                self.prefill_ts_s is not None
+            ), "Request must be running before generating output tokens."
 
         self.output_token_perf_counter_ns_lst.extend([perf_ts_ns] *
                                                      num_new_tokens)
