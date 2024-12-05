@@ -18,7 +18,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
 from vllm.lora.punica import PunicaWrapper
-# yapf: enable
+# yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
