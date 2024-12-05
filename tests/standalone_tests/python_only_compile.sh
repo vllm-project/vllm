@@ -1,3 +1,4 @@
+#!/bin/bash
 # This script tests if the python only compilation works correctly
 # for users who do not have any compilers installed on their system
 
