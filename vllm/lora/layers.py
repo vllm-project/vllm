@@ -545,7 +545,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def __init__(self, base_layer: MergedColumnParallelLinear) -> None:
         super().__init__(base_layer)
         # There are two LoRA layers
-        self.n_slices = 2
+        self.n_slices = len(self.base_layer.output_sizes)
 
     def create_lora_weights(
         self,
@@ -559,7 +559,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         """
         self.lora_config = lora_config
 
-        if not (len(self.base_layer.output_sizes) == self.n_slices
+        if not (len(self.base_layer.output_sizes) == self.n_slices == 2
                 and self.base_layer.output_sizes[0]
                 == self.base_layer.output_sizes[1]):
             raise ValueError(
@@ -769,7 +769,9 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def __init__(self, base_layer: QKVParallelLinear) -> None:
         super().__init__(base_layer)
         # There are three LoRA layer.
-        self.n_slices = 3
+        self.n_slices = len(self.base_layer.output_sizes)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
 
     def create_lora_weights(
         self,
@@ -782,8 +784,11 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         weight dimensions in qkv lora.
         """
         self.lora_config = lora_config
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+
+        if not (len(self.base_layer.output_sizes) == self.n_slices == 3):
+            raise ValueError(
+                "LoRAColumnParallelLinear3Slice requires 3 slices.")
+
         self.q_proj_shard_size = (self.base_layer.num_heads *
                                   self.base_layer.head_size)
         self.kv_proj_shard_size = (self.base_layer.num_kv_heads *

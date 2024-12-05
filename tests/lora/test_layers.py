@@ -589,7 +589,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
 
         lora_linear.create_lora_weights(max_loras, lora_config)
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
-            lora_linear.lora_b_stacked))
+            lora_linear.lora_b_stacked) == 1)
         if bias_enabled:
             assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
         else:
@@ -711,7 +711,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
                            ColumnParallelLinearWithShardedLoRA(linear))
         lora_linear.create_lora_weights(max_loras, lora_config)
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
-            lora_linear.lora_b_stacked))
+            lora_linear.lora_b_stacked) == 1)
         if bias_enabled:
             assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
         else:
@@ -849,11 +849,12 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             num_key_value_heads = 32
             num_attention_heads = 32
 
+        n_slices = repeats
         lora_linear.create_lora_weights(max_loras,
                                         lora_config,
                                         model_config=FakeConfig())
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
-            lora_linear.lora_b_stacked))
+            lora_linear.lora_b_stacked) == n_slices)
         if bias_enabled:
             assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
         else:
