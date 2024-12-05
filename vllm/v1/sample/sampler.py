@@ -37,7 +37,6 @@ class Sampler(nn.Module):
             topk_logprobs = None
             topk_indices = None
 
-
         # NOTE: CPU-GPU synchronization happens here.
         sampler_output = SamplerOutput(
             sampled_token_ids=sampled.tolist(),

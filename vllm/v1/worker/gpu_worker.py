@@ -14,8 +14,8 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-from vllm.distributed import (destroy_model_parallel,
-                              destroy_distributed_environment,
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -397,6 +397,7 @@ class WorkerProc:
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
         shutdown_requested = False
+
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
             if not shutdown_requested:

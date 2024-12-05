@@ -225,6 +225,7 @@ class EngineCoreProc(EngineCore):
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
         shutdown_requested = False
+
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
             if not shutdown_requested:
