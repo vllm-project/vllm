@@ -102,7 +102,8 @@ ENV TOKENIZERS_PARALLELISM=false
 ENV HIP_FORCE_DEV_KERNARG=1
 
 # install development dependencies (for testing)
-RUN python3 -m pip install -e tests/vllm_test_utils
+RUN cd ${COMMON_WORKDIR}/vllm \
+    && python3 -m pip install -e tests/vllm_test_utils
 
 CMD ["/bin/bash"]
 
