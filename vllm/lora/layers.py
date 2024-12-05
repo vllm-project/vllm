@@ -274,7 +274,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.base_layer = base_layer
         self.input_size = self.base_layer.input_size
         self.device = _get_lora_device(self.base_layer)
-        self.bias_stacked: Optional[Tuple[torch.Tensor, ...]] = None
+        self.lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]] = None
 
         self.output_slices: Tuple[int, ...]
         self.tp_size: int
@@ -327,7 +327,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             ) for _ in range(self.n_slices))
         if lora_config.bias_enabled:
             lora_bias_out_size = lora_b_out_size
-            self.bias_stacked = tuple(
+            self.lora_bias_stacked = tuple(
                 torch.zeros(
                     max_loras,
                     1,
@@ -343,9 +343,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             self.lora_b_stacked[s_index][index] = 0
             if self.lora_config.bias_enabled:
                 # Make mypy happy
-                self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-                                         self.bias_stacked)
-                self.bias_stacked[s_index][index] = 0
+                self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+                                              self.lora_bias_stacked)
+                self.lora_bias_stacked[s_index][index] = 0
 
     def set_lora(
         self,
@@ -353,14 +353,20 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        lora_bias: Optional[torch.Tensor] = None,
     ):
+        # Except for QKVParallelLinearWithLora and
+        # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
+        # have a tuple size of 1. These two layers will override this function.
+        assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
+                self.n_slices == 1)
+
         self.reset_lora(index)
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
-            if bias is not None:
-                bias = self.slice_bias(bias)
+            if lora_bias is not None:
+                lora_bias = self.slice_bias(lora_bias)
 
         self.lora_a_stacked[0][index,
                                0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
@@ -368,12 +374,13 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[0][index,
                                0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                    lora_b.T, non_blocking=True)
-        if bias is not None:
-            self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-                                     self.bias_stacked)
-            self.bias_stacked[0][index,
-                                 0, :bias.shape[0]].copy_(bias.T,
-                                                          non_blocking=True)
+        if lora_bias is not None:
+
+            self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+                                          self.lora_bias_stacked)
+            assert len(self.lora_bias_stacked)
+            self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
+                lora_bias.T, non_blocking=True)
 
     def apply(self,
               x: torch.Tensor,
@@ -381,7 +388,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
         self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
                                             self.lora_b_stacked,
-                                            self.bias_stacked, 1.0,
+                                            self.lora_bias_stacked, 1.0,
                                             self.output_slices)
         return output
 
@@ -543,6 +550,10 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
+        """
+        The main reason for overriding this function is to enhance  code 
+        maintainability.
+        """
         self.lora_config = lora_config
 
         if not (len(self.base_layer.output_sizes) == self.n_slices
@@ -577,7 +588,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 device=self.device,
             ) for _ in range(self.n_slices))
         if lora_config.bias_enabled:
-            self.bias_stacked = tuple(
+            self.lora_bias_stacked = tuple(
                 torch.zeros(
                     max_loras,
                     1,
@@ -625,15 +636,15 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        lora_bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
-            if bias is not None:
-                bias = self.slice_bias(bias)
+            if lora_bias is not None:
+                lora_bias = self.slice_bias(lora_bias)
 
         if lora_a[0] is not None:
             self.lora_a_stacked[0][
@@ -642,12 +653,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             self.lora_b_stacked[0][
                 index, 0, :lora_b[0].shape[1], :lora_b[0].shape[0]].copy_(
                     lora_b[0].T, non_blocking=True)
-        if bias is not None and bias[0] is not None:
-            self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-                                     self.bias_stacked)
-            self.bias_stacked[0][index,
-                                 0, :bias[0].shape[0]].copy_(bias[0].T,
-                                                             non_blocking=True)
+        if lora_bias is not None and lora_bias[0] is not None:
+            self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+                                          self.lora_bias_stacked)
+            self.lora_bias_stacked[0][index, 0, :lora_bias[0].shape[0]].copy_(
+                lora_bias[0].T, non_blocking=True)
         if lora_a[1] is not None:
             self.lora_a_stacked[1][
                 index, 0, :lora_a[1].shape[1], :lora_a[1].shape[0]].copy_(
@@ -655,12 +665,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             self.lora_b_stacked[1][
                 index, 0, :lora_b[1].shape[1], :lora_b[1].shape[0]].copy_(
                     lora_b[1].T, non_blocking=True)
-        if bias is not None and bias[1] is not None:
-            self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-                                     self.bias_stacked)
-            self.bias_stacked[1][index,
-                                 0, :bias[1].shape[0]].copy_(bias[1].T,
-                                                             non_blocking=True)
+        if lora_bias is not None and lora_bias[1] is not None:
+            self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+                                          self.lora_bias_stacked)
+            self.lora_bias_stacked[1][index, 0, :lora_bias[1].shape[0]].copy_(
+                lora_bias[1].T, non_blocking=True)
 
     @classmethod
     @_not_fully_sharded_can_replace
@@ -765,6 +774,10 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
+        """
+        The main reason for overloading this function is to handle inconsistent 
+        weight dimensions in qkv lora.
+        """
         self.lora_config = lora_config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -832,7 +845,7 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             ),
         )
         if lora_config.bias_enabled:
-            self.bias_stacked = (
+            self.lora_bias_stacked = (
                 torch.zeros(
                     max_loras,
                     1,
@@ -915,15 +928,15 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        lora_bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
-            if bias is not None:
-                bias = self.slice_bias(bias)
+            if lora_bias is not None:
+                lora_bias = self.slice_bias(lora_bias)
 
         if lora_b[0] is not None:
             lora_b_q = lora_b[0]
@@ -954,18 +967,24 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 index, 0, :lora_a[2].shape[1], :lora_a[2].shape[0]].copy_(
                     lora_a[2].T, non_blocking=True)
 
-        if bias is not None:
-            self.bias_stacked = cast(Tuple[torch.Tensor, ...],
-                                     self.bias_stacked)
-            if bias[0] is not None:
-                self.bias_stacked[0][index, 0, :bias[0].shape[0]].copy_(
-                    bias[0].T, non_blocking=True)
-            if bias[1] is not None:
-                self.bias_stacked[1][index, 0, :bias[1].shape[0]].copy_(
-                    bias[1].T, non_blocking=True)
-            if bias[2] is not None:
-                self.bias_stacked[2][index, 0, :bias[2].shape[0]].copy_(
-                    bias[2].T, non_blocking=True)
+        if lora_bias is not None:
+            self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+                                          self.lora_bias_stacked)
+            if lora_bias[0] is not None:
+                self.lora_bias_stacked[0][index,
+                                          0, :lora_bias[0].shape[0]].copy_(
+                                              lora_bias[0].T,
+                                              non_blocking=True)
+            if lora_bias[1] is not None:
+                self.lora_bias_stacked[1][index,
+                                          0, :lora_bias[1].shape[0]].copy_(
+                                              lora_bias[1].T,
+                                              non_blocking=True)
+            if lora_bias[2] is not None:
+                self.lora_bias_stacked[2][index,
+                                          0, :lora_bias[2].shape[0]].copy_(
+                                              lora_bias[2].T,
+                                              non_blocking=True)
 
     @classmethod
     @_not_fully_sharded_can_replace

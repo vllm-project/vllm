@@ -39,8 +39,8 @@ def _mcp_apply(x, bias, layer: ColumnParallelLinearWithLoRA):
     """
     assert (layer.n_slices == len(layer.lora_a_stacked) == len(
         layer.lora_b_stacked) == len(layer.output_slices))
-    if layer.bias_stacked is not None:
-        assert layer.n_slices == len(layer.bias_stacked)
+    if layer.lora_bias_stacked is not None:
+        assert layer.n_slices == len(layer.lora_bias_stacked)
 
     output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
 
@@ -60,7 +60,7 @@ def _mcp_apply(x, bias, layer: ColumnParallelLinearWithLoRA):
     layer.punica_wrapper.add_expand(output,
                                     buffers,
                                     layer.lora_b_stacked,
-                                    layer.bias_stacked,
+                                    layer.lora_bias_stacked,
                                     layer.output_slices,
                                     offset_start=0,
                                     add_input=True)
@@ -268,8 +268,9 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         if bias is None:
             return bias
-        self.bias_stacked = cast(Tuple[torch.Tensor, ...], self.bias_stacked)
-        shard_size = self.bias_stacked[0].shape[2]
+        self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+                                      self.lora_bias_stacked)
+        shard_size = self.lora_bias_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         bias = bias[start_idx:end_idx]
@@ -305,7 +306,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             output,
             buffer,
             self.lora_b_stacked,
-            self.bias_stacked,
+            self.lora_bias_stacked,
             self.output_slices,
             offset_start=offset_start,
             add_input=True,

@@ -591,9 +591,9 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
             lora_linear.lora_b_stacked))
         if bias_enabled:
-            assert len(lora_linear.bias_stacked) == lora_linear.n_slices
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
         else:
-            assert lora_linear.bias_stacked is None
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
@@ -713,9 +713,9 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
             lora_linear.lora_b_stacked))
         if bias_enabled:
-            assert len(lora_linear.bias_stacked) == lora_linear.n_slices
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
         else:
-            assert lora_linear.bias_stacked is None
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
@@ -855,9 +855,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
             lora_linear.lora_b_stacked))
         if bias_enabled:
-            assert len(lora_linear.bias_stacked) == lora_linear.n_slices
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
         else:
-            assert lora_linear.bias_stacked is None
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
