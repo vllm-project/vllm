@@ -6,9 +6,8 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.attention import get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, PromptAdapterConfig,
-                         SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, VllmConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -16,9 +15,11 @@ from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
-from vllm.worker.cpu_model_runner import CPUModelRunner
+from vllm.worker.cpu_model_runner import CPUModelRunner, CPUModelRunnerBase
+from vllm.worker.cpu_pooling_model_runner import CPUPoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerInput)
+                                     LoraNotSupportedWorkerBase, WorkerBase,
+                                     WorkerInput)
 
 logger = init_logger(__name__)
 
@@ -121,31 +122,20 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
-        lora_config: Optional[LoRAConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[CPUModelRunner]] = None,
     ) -> None:
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.load_config = load_config
+        WorkerBase.__init__(self, vllm_config=vllm_config)
+
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
-        self.lora_config = lora_config
-        self.prompt_adapter_config = prompt_adapter_config
+
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -162,24 +152,34 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
-        ModelRunnerClass: Type[CPUModelRunner] = CPUModelRunner
-        if self._is_encoder_decoder_model():
+        # Return hidden states from target model if the draft model is an
+        # mlp_speculator
+        speculative_config = self.speculative_config
+        model_config = self.model_config
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.model ==
+                model_config.model) \
+            or (speculative_config.draft_model_config.hf_config.model_type
+                not in ["medusa", "mlp_speculator", "eagle"]) \
+                    else {"return_hidden_states": True}
+        ModelRunnerClass: Type[CPUModelRunnerBase] = CPUModelRunner
+        if self.model_config.task == "embedding":
+            ModelRunnerClass = CPUPoolingModelRunner
+        elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
-        self.model_runner: CPUModelRunner = ModelRunnerClass(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config=self.load_config,
-            lora_config=self.lora_config,
+        self.model_runner: CPUModelRunnerBase = ModelRunnerClass(
+            vllm_config=vllm_config,
             kv_cache_dtype=kv_cache_dtype,
-            prompt_adapter_config=self.prompt_adapter_config,
-            is_driver_worker=is_driver_worker)
+            is_driver_worker=is_driver_worker,
+            **speculative_args,
+        )
+        if model_runner_cls is not None:
+            self.model_runner = model_runner_cls(self.model_runner)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CPUCacheEngine]
-        self.cpu_cache: List[List[torch.Tensor]]
+        # Initialize cpu_cache as embedding models don't initialize kv_caches
+        self.cpu_cache: Optional[List[List[torch.Tensor]]] = None
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -207,15 +207,12 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
 
-    def _is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
-
     def init_device(self) -> None:
         if self.local_omp_cpuid != "all":
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
-
+        self.device = torch.device("cpu")
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
@@ -314,6 +311,14 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return self.cpu_cache
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_runner.vocab_size
+
+    @property
+    def max_model_len(self) -> int:
+        return self.model_config.max_model_len
 
     def execute_worker(
         self,

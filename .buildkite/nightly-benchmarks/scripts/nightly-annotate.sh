@@ -16,10 +16,10 @@ main() {
     fi
 
     # initial annotation
-    description="$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/nightly-descriptions.md"
+    #description="$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/nightly-descriptions.md"
 
     # download results
-    cd $VLLM_SOURCE_CODE_LOC/benchmarks
+    cd "$VLLM_SOURCE_CODE_LOC/benchmarks"
     mkdir -p results/
     /workspace/buildkite-agent artifact download 'results/*nightly_results.json' results/
     ls
@@ -30,15 +30,15 @@ main() {
     /workspace/buildkite-agent artifact upload "results.zip"
 
     # upload benchmarking scripts
-    cd $VLLM_SOURCE_CODE_LOC/
+    cd "$VLLM_SOURCE_CODE_LOC/"
     zip -r nightly-benchmarks.zip .buildkite/ benchmarks/
     /workspace/buildkite-agent artifact upload "nightly-benchmarks.zip"
 
-    cd $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/
+    cd "$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/"
     # upload benchmarking pipeline
     /workspace/buildkite-agent artifact upload "nightly-pipeline.yaml"
 
-    cd $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/
+    cd "$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/"
     /workspace/buildkite-agent annotate --style "success" --context "nightly-benchmarks-results" --append < nightly-annotation.md
     
 

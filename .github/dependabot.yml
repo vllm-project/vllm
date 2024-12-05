@@ -5,3 +5,27 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 5
+    reviewers: ["khluu", "simon-mo"]
+    allow:
+      - dependency-type: "all"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+      - dependency-name: "torch"
+      - dependency-name: "torchvision"
+      - dependency-name: "xformers"
+      - dependency-name: "lm-format-enforcer"
+      - dependency-name: "gguf"
+      - dependency-name: "compressed-tensors"
+      - dependency-name: "ray[adag]"
+      - dependency-name: "lm-eval"
+    groups:
+      minor-update:
+        applies-to: version-updates
+        update-types: ["minor"]

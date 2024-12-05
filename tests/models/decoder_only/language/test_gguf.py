@@ -33,8 +33,6 @@ class GGUFTestConfig(NamedTuple):
         return hf_hub_download(self.gguf_repo, filename=self.gguf_filename)
 
 
-TRANSFORMERS_REQUIREMENT = parse(transformers.__version__) >= parse("4.46.0")
-
 LLAMA_CONFIG = GGUFTestConfig(
     original_model="meta-llama/Llama-3.2-1B-Instruct",
     gguf_repo="bartowski/Llama-3.2-1B-Instruct-GGUF",
@@ -87,7 +85,18 @@ MODELS = [
 
 @pytest.mark.skipif(not is_quant_method_supported("gguf"),
                     reason="gguf is not supported on this GPU type.")
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(("original_model", "gguf_id", "gguf_path"), [
+    ("meta-llama/Llama-3.2-1B-Instruct",
+     "bartowski/Llama-3.2-1B-Instruct-GGUF",
+     "Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
+    ("meta-llama/Llama-3.2-1B-Instruct",
+     "bartowski/Llama-3.2-1B-Instruct-GGUF",
+     "Llama-3.2-1B-Instruct-IQ4_XS.gguf"),
+    ("Qwen/Qwen2-1.5B-Instruct", "Qwen/Qwen2-1.5B-Instruct-GGUF",
+     "qwen2-1_5b-instruct-q4_k_m.gguf"),
+    ("Qwen/Qwen2-1.5B-Instruct", "legraphista/Qwen2-1.5B-Instruct-IMat-GGUF",
+     "Qwen2-1.5B-Instruct.IQ4_XS.gguf"),
+])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -104,10 +113,6 @@ def test_models(
 ) -> None:
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
-
-    if not model.run_requirement:
-        pytest.skip(
-            f"Model not supported in transformers=={transformers.__version__}")
 
     tokenizer = AutoTokenizer.from_pretrained(model.original_model)
     if tokenizer.chat_template is not None:

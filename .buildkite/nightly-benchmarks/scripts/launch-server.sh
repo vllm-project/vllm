@@ -50,31 +50,30 @@ launch_trt_server() {
   git clone https://github.com/triton-inference-server/tensorrtllm_backend.git
   git lfs install
   cd tensorrtllm_backend
-  git checkout $trt_llm_version
-  tensorrtllm_backend_dir=$(pwd)
+  git checkout "$trt_llm_version"
   git submodule update --init --recursive
 
   # build trtllm engine
   cd /tensorrtllm_backend
-  cd ./tensorrt_llm/examples/${model_type}
+  cd "./tensorrt_llm/examples/${model_type}"
   python3 convert_checkpoint.py \
-    --model_dir ${model_path} \
-    --dtype ${model_dtype} \
-    --tp_size ${model_tp_size} \
-    --output_dir ${trt_model_path}
+    --model_dir "${model_path}" \
+    --dtype "${model_dtype}" \
+    --tp_size "${model_tp_size}" \
+    --output_dir "${trt_model_path}"
   trtllm-build \
-    --checkpoint_dir ${trt_model_path} \
+    --checkpoint_dir "${trt_model_path}" \
     --use_fused_mlp \
     --reduce_fusion disable \
     --workers 8 \
-    --gpt_attention_plugin ${model_dtype} \
-    --gemm_plugin ${model_dtype} \
-    --tp_size ${model_tp_size} \
-    --max_batch_size ${max_batch_size} \
-    --max_input_len ${max_input_len} \
-    --max_seq_len ${max_seq_len} \
-    --max_num_tokens ${max_num_tokens} \
-    --output_dir ${trt_engine_path}
+    --gpt_attention_plugin "${model_dtype}" \
+    --gemm_plugin "${model_dtype}" \
+    --tp_size "${model_tp_size}" \
+    --max_batch_size "${max_batch_size}" \
+    --max_input_len "${max_input_len}" \
+    --max_seq_len "${max_seq_len}" \
+    --max_num_tokens "${max_num_tokens}" \
+    --output_dir "${trt_engine_path}"
 
   # handle triton protobuf files and launch triton server
   cd /tensorrtllm_backend
@@ -82,15 +81,15 @@ launch_trt_server() {
   cp -r all_models/inflight_batcher_llm/* triton_model_repo/
   cd triton_model_repo
   rm -rf ./tensorrt_llm/1/*
-  cp -r ${trt_engine_path}/* ./tensorrt_llm/1
+  cp -r "${trt_engine_path}"/* ./tensorrt_llm/1
   python3 ../tools/fill_template.py -i tensorrt_llm/config.pbtxt triton_backend:tensorrtllm,engine_dir:/tensorrtllm_backend/triton_model_repo/tensorrt_llm/1,decoupled_mode:true,batching_strategy:inflight_fused_batching,batch_scheduler_policy:guaranteed_no_evict,exclude_input_in_output:true,triton_max_batch_size:2048,max_queue_delay_microseconds:0,max_beam_width:1,max_queue_size:2048,enable_kv_cache_reuse:false
-  python3 ../tools/fill_template.py -i preprocessing/config.pbtxt triton_max_batch_size:2048,tokenizer_dir:$model_path,preprocessing_instance_count:5
-  python3 ../tools/fill_template.py -i postprocessing/config.pbtxt triton_max_batch_size:2048,tokenizer_dir:$model_path,postprocessing_instance_count:5,skip_special_tokens:false
-  python3 ../tools/fill_template.py -i ensemble/config.pbtxt triton_max_batch_size:$max_batch_size
-  python3 ../tools/fill_template.py -i tensorrt_llm_bls/config.pbtxt triton_max_batch_size:$max_batch_size,decoupled_mode:true,accumulate_tokens:"False",bls_instance_count:1
+  python3 ../tools/fill_template.py -i preprocessing/config.pbtxt "triton_max_batch_size:2048,tokenizer_dir:$model_path,preprocessing_instance_count:5"
+  python3 ../tools/fill_template.py -i postprocessing/config.pbtxt "triton_max_batch_size:2048,tokenizer_dir:$model_path,postprocessing_instance_count:5,skip_special_tokens:false"
+  python3 ../tools/fill_template.py -i ensemble/config.pbtxt triton_max_batch_size:"$max_batch_size"
+  python3 ../tools/fill_template.py -i tensorrt_llm_bls/config.pbtxt "triton_max_batch_size:$max_batch_size,decoupled_mode:true,accumulate_tokens:False,bls_instance_count:1"
   cd /tensorrtllm_backend
   python3 scripts/launch_triton_server.py \
-    --world_size=${model_tp_size} \
+    --world_size="${model_tp_size}" \
     --model_repo=/tensorrtllm_backend/triton_model_repo &
 
 }
@@ -98,10 +97,7 @@ launch_trt_server() {
 launch_tgi_server() {
   model=$(echo "$common_params" | jq -r '.model')
   tp=$(echo "$common_params" | jq -r '.tp')
-  dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
-  dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
   port=$(echo "$common_params" | jq -r '.port')
-  num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
   server_args=$(json2args "$server_params")
 
   if echo "$common_params" | jq -e 'has("fp8")' >/dev/null; then
@@ -129,10 +125,7 @@ launch_tgi_server() {
 launch_lmdeploy_server() {
   model=$(echo "$common_params" | jq -r '.model')
   tp=$(echo "$common_params" | jq -r '.tp')
-  dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
-  dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
   port=$(echo "$common_params" | jq -r '.port')
-  num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
   server_args=$(json2args "$server_params")
 
   server_command="lmdeploy serve api_server $model \
@@ -149,10 +142,7 @@ launch_sglang_server() {
 
   model=$(echo "$common_params" | jq -r '.model')
   tp=$(echo "$common_params" | jq -r '.tp')
-  dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
-  dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
   port=$(echo "$common_params" | jq -r '.port')
-  num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
   server_args=$(json2args "$server_params")
 
   if echo "$common_params" | jq -e 'has("fp8")' >/dev/null; then
@@ -185,10 +175,7 @@ launch_vllm_server() {
 
   model=$(echo "$common_params" | jq -r '.model')
   tp=$(echo "$common_params" | jq -r '.tp')
-  dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
-  dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
   port=$(echo "$common_params" | jq -r '.port')
-  num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
   server_args=$(json2args "$server_params")
 
   if echo "$common_params" | jq -e 'has("fp8")' >/dev/null; then
@@ -217,19 +204,19 @@ launch_vllm_server() {
 
 main() {
 
-  if [[ $CURRENT_LLM_SERVING_ENGINE == "trt" ]]; then
+  if [[ "$CURRENT_LLM_SERVING_ENGINE" == "trt" ]]; then
     launch_trt_server
   fi
 
-  if [[ $CURRENT_LLM_SERVING_ENGINE == "tgi" ]]; then
+  if [[ "$CURRENT_LLM_SERVING_ENGINE" == "tgi" ]]; then
     launch_tgi_server
   fi
 
-  if [[ $CURRENT_LLM_SERVING_ENGINE == "lmdeploy" ]]; then
+  if [[ "$CURRENT_LLM_SERVING_ENGINE" == "lmdeploy" ]]; then
     launch_lmdeploy_server
   fi
 
-  if [[ $CURRENT_LLM_SERVING_ENGINE == "sglang" ]]; then
+  if [[ "$CURRENT_LLM_SERVING_ENGINE" == "sglang" ]]; then
     launch_sglang_server
   fi
 

@@ -5,6 +5,7 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
@@ -52,18 +53,17 @@ class CompletionOutput:
 
 
 @dataclass
-class EmbeddingOutput:
-    """The output data of one completion output of a request.
+class PoolingOutput:
+    """The output data of one pooling output of a request.
 
     Args:
         embedding: The embedding vector, which is a list of floats. The
         length of vector depends on the model as listed in the embedding guide.
     """
-
     embedding: List[float]
 
     def __repr__(self) -> str:
-        return (f"EmbeddingOutput("
+        return (f"PoolingOutput("
                 f"embedding={len(self.embedding)})")
 
 
@@ -83,10 +83,11 @@ class RequestOutput:
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
-        encoder_prompt: The encoder prompt string of the request; 
-                        None if decoder-only
-        encoder_prompt_token_ids: The token IDs of the encoder prompt;
-                                  None if decoder-only
+        encoder_prompt: The encoder prompt string of the request.
+                        None if decoder-only.
+        encoder_prompt_token_ids: The token IDs of the encoder prompt.
+                                  None if decoder-only.
+        num_cached_tokens: The number of tokens with prefix cache hit.
     """
 
     def __init__(
@@ -101,10 +102,14 @@ class RequestOutput:
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
+        num_cached_tokens: Optional[int] = None,
+        *,
+        multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.multi_modal_placeholders = multi_modal_placeholders or {}
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
@@ -112,6 +117,37 @@ class RequestOutput:
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
+        self.num_cached_tokens = num_cached_tokens
+
+    @classmethod
+    def new(
+        cls,
+        request_id: str,
+        prompt: Optional[str],
+        prompt_token_ids: Optional[List[int]],
+        text: str,
+        token_ids: List[int],
+        finished: bool = False,
+    ) -> "RequestOutput":
+        """Initialize a new RequestOutput object."""
+
+        # TODO: Support `n` > 1.
+        completion_output = CompletionOutput(
+            index=0,
+            text=text,
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,  # TODO
+        )
+
+        return RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            prompt_logprobs=None,  # TODO
+            outputs=[completion_output],
+            finished=finished,
+        )
 
     @classmethod
     def from_seq_group(
@@ -162,6 +198,8 @@ class RequestOutput:
 
         outputs = []
         include_prompt = True
+        # num_cached_tokens should be the same for all the sequences
+        num_cached_tokens = None
         for i, seq in enumerate(top_n_seqs):
             output_text = seq.get_output_text_to_return(
                 text_buffer_length, delta)
@@ -169,6 +207,7 @@ class RequestOutput:
             output_token_ids = seq.get_output_token_ids_to_return(delta)
             num_output_tokens = 1 if isinstance(output_token_ids,
                                                 int) else len(output_token_ids)
+            num_cached_tokens = seq.data.get_num_cached_tokens()
 
             output_logprobs = seq.output_logprobs if include_logprobs else None
 
@@ -239,17 +278,26 @@ class RequestOutput:
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
 
-        init_args = (seq_group.request_id, prompt, prompt_token_ids,
-                     prompt_logprobs, outputs, finished, seq_group.metrics,
-                     seq_group.lora_request, encoder_prompt,
-                     encoder_prompt_token_ids)
+        init_kwargs = {
+            "request_id": seq_group.request_id,
+            "prompt": prompt,
+            "prompt_token_ids": prompt_token_ids,
+            "prompt_logprobs": prompt_logprobs,
+            "outputs": outputs,
+            "finished": finished,
+            "metrics": seq_group.metrics,
+            "lora_request": seq_group.lora_request,
+            "encoder_prompt": encoder_prompt,
+            "encoder_prompt_token_ids": encoder_prompt_token_ids,
+            "num_cached_tokens": num_cached_tokens,
+            "multi_modal_placeholders": seq_group.multi_modal_placeholders
+        }
 
         if use_cache:
             request_output = seq_group.cached_request_output
-            request_output.__init__(*init_args)  # type: ignore
-
+            request_output.__init__(**init_kwargs)  # type: ignore
         else:
-            request_output = cls(*init_args)
+            request_output = cls(**init_kwargs)  # type: ignore
 
         return request_output
 
@@ -263,21 +311,23 @@ class RequestOutput:
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "
                 f"metrics={self.metrics}, "
-                f"lora_request={self.lora_request})")
+                f"lora_request={self.lora_request}, "
+                f"num_cached_tokens={self.num_cached_tokens}, "
+                f"multi_modal_placeholders={self.multi_modal_placeholders})")
 
 
-class EmbeddingRequestOutput:
+class PoolingRequestOutput:
     """
-    The output data of an embedding request to the LLM.
+    The output data of a pooling request to the LLM.
 
     Args:
-        request_id (str): A unique identifier for the embedding request.
-        outputs (EmbeddingOutput): The embedding results for the given input.
+        request_id (str): A unique identifier for the pooling request.
+        outputs (PoolingOutput): The pooling results for the given input.
         prompt_token_ids (List[int]): A list of token IDs used in the prompt.
-        finished (bool): A flag indicating whether the embedding is completed.
+        finished (bool): A flag indicating whether the pooling is completed.
     """
 
-    def __init__(self, request_id: str, outputs: "EmbeddingOutput",
+    def __init__(self, request_id: str, outputs: "PoolingOutput",
                  prompt_token_ids: List[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
@@ -286,11 +336,11 @@ class EmbeddingRequestOutput:
 
     @classmethod
     def from_seq_group(cls,
-                       seq_group: 'SequenceGroup') -> "EmbeddingRequestOutput":
+                       seq_group: 'SequenceGroup') -> "PoolingRequestOutput":
         if seq_group.embeddings is None:
             raise ValueError(
                 "Embeddings are missing in seq_group for EmbeddingRequest.")
-        output = EmbeddingOutput(seq_group.embeddings)
+        output = PoolingOutput(seq_group.embeddings)
         prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()
 
@@ -298,18 +348,62 @@ class EmbeddingRequestOutput:
 
     def __repr__(self):
         """
-        Returns a string representation of an EmbeddingRequestOutput instance.
+        Returns a string representation of an PoolingRequestOutput instance.
+
+        The representation includes the request_id and the number of outputs,
+        providing a quick overview of the pooling request's results.
+
+        Returns:
+            str: A string representation of the PoolingRequestOutput instance.
+        """
+        return (f"PoolingRequestOutput(request_id='{self.request_id}', "
+                f"outputs={repr(self.outputs)}, "
+                f"prompt_token_ids={self.prompt_token_ids}, "
+                f"finished={self.finished})")
+
+
+@dataclass
+class ScoreOutput:
+    """The output data of one completion output of a request.
+
+    Args:
+        score: The score, which is a list of floats. 
+        index: The correspondent text index of the score.
+    """
+    index: int
+    score: List[float]
+
+    def __repr__(self) -> str:
+        return (f"ScoreOutput("
+                f"score={self.score}), "
+                f"index={self.index})")
+
+
+class ScoreRequestOutput:
+    """
+    The output data of an score request to the LLM.
+
+    Args:
+        request_id (str): A unique identifier for the score request.
+        outputs (score): The embedding results for the given input.
+    """
+
+    def __init__(self, request_id: str, outputs: "ScoreOutput"):
+        self.request_id = request_id
+        self.outputs = outputs
+
+    def __repr__(self):
+        """
+        Returns a string representation of an ScoreRequestOutput instance.
 
         The representation includes the request_id and the number of outputs,
         providing a quick overview of the embedding request's results.
 
         Returns:
-            str: A string representation of the EmbeddingRequestOutput instance.
+            str: A string representation of the ScoreRequestOutput instance.
         """
-        return (f"EmbeddingRequestOutput(request_id='{self.request_id}', "
-                f"outputs={repr(self.outputs)}, "
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"finished={self.finished})")
+        return (f"ScoreRequestOutput(request_id='{self.request_id}', "
+                f"outputs={repr(self.outputs)}")
 
 
 class RequestOutputFactory:
@@ -321,7 +415,30 @@ class RequestOutputFactory:
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
-            return EmbeddingRequestOutput.from_seq_group(seq_group)
+            return PoolingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group, use_cache,
                                                 seq_id_to_seq_group)
+
+
+def __getattr__(name: str):
+    import warnings
+
+    if name == "EmbeddingOutput":
+        msg = ("EmbeddingOutput has been renamed to PoolingOutput. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PoolingOutput
+
+    if name == "EmbeddingRequestOutput":
+        msg = ("EmbeddingRequestOutput has been renamed to "
+               "PoolingRequestOutput. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PoolingRequestOutput
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

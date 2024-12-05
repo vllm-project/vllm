@@ -1,14 +1,14 @@
 """Minimal implementation of CLIPVisionModel intended to be only used
 within a vision language model."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import CLIPVisionConfig
-from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import DecoderOnlyInputs, token_inputs
@@ -19,14 +19,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   repeat_and_pad_placeholder_tokens)
+                                   consecutive_placeholder_ranges,
+                                   repeat_and_pad_placeholder_tokens,
+                                   resolve_visual_encoder_outputs)
 from vllm.sequence import SequenceData
-
-try:
-    from xformers import ops as xops
-    USE_XFORMERS_OPS = True
-except ImportError:
-    USE_XFORMERS_OPS = False
 
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -49,14 +45,13 @@ def get_max_clip_image_tokens(hf_config: CLIPVisionConfig) -> int:
     return get_clip_image_feature_size(hf_config)
 
 
-def dummy_seq_data_for_clip(
-    hf_config: CLIPVisionConfig,
-    seq_len: int,
-    num_images: int,
-    *,
-    image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
-):
+def dummy_seq_data_for_clip(hf_config: CLIPVisionConfig,
+                            seq_len: int,
+                            num_images: int,
+                            *,
+                            image_token_id: int,
+                            image_feature_size_override: Optional[int] = None,
+                            mm_key: str = "image"):
     if image_feature_size_override is None:
         image_feature_size = get_clip_image_feature_size(hf_config)
     else:
@@ -65,7 +60,11 @@ def dummy_seq_data_for_clip(
     return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
-    )
+    ), {
+        mm_key:
+        consecutive_placeholder_ranges(num_items=num_images,
+                                       item_size=image_feature_size)
+    }
 
 
 def dummy_image_for_clip(
@@ -117,6 +116,11 @@ def input_processor_for_clip(
     if multi_modal_data is None or "image" not in multi_modal_data:
         return inputs
 
+    if "multi_modal_placeholders" in inputs and "image" in inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return inputs
+
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
@@ -130,7 +134,7 @@ def input_processor_for_clip(
     else:
         image_feature_size = image_feature_size_override
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         inputs.get("prompt"),
         inputs["prompt_token_ids"],
@@ -141,7 +145,8 @@ def input_processor_for_clip(
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": ranges})
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
@@ -187,7 +192,7 @@ class CLIPVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class CLIPParallelAttention(nn.Module):
+class CLIPAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
@@ -227,6 +232,9 @@ class CLIPParallelAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
+        self.attn = MultiHeadAttention(self.num_heads_per_partition,
+                                       self.head_dim, self.scale)
+
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
                            self.head_dim).transpose(1, 2).contiguous()
@@ -236,27 +244,10 @@ class CLIPParallelAttention(nn.Module):
         hidden_states: torch.Tensor,
     ):
         """Input shape: Batch x Time x Channel"""
-        bsz, tgt_len, _ = hidden_states.size()
 
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
-
-        query_states = query_states.view(bsz, tgt_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        key_states = key_states.view(bsz, tgt_len,
-                                     self.num_heads_per_partition,
-                                     self.head_dim)
-        value_states = value_states.view(bsz, tgt_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-
-        out = xops.memory_efficient_attention_forward(query_states,
-                                                      key_states,
-                                                      value_states,
-                                                      p=self.dropout,
-                                                      scale=self.scale)
-        out = out.view(bsz, tgt_len, -1)
+        out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
 
         return attn_output, None
@@ -301,17 +292,11 @@ class CLIPEncoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        num_heads = config.num_attention_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = CLIPParallelAttention(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.self_attn",
-            )
-        else:
-            self.self_attn = CLIPSdpaAttention(config)
+        self.self_attn = CLIPAttention(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = CLIPMLP(config,
@@ -367,12 +352,20 @@ class CLIPEncoder(nn.Module):
             for layer_idx in range(num_hidden_layers)
         ])
 
-    def forward(self, inputs_embeds: torch.Tensor):
-
+    def forward(
+        self, inputs_embeds: torch.Tensor, return_all_hidden_states: bool
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        hidden_states_pool = []
         hidden_states = inputs_embeds
+
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
-
+            if return_all_hidden_states:
+                hidden_states_pool.append(hidden_states)
+        # If we have multiple feature sample layers, we return all hidden
+        # states in order and grab the ones we need by index.
+        if return_all_hidden_states:
+            return hidden_states_pool
         return hidden_states
 
 
@@ -397,6 +390,7 @@ class CLIPVisionTransformer(nn.Module):
         # NOTE: This typo of "layrnorm" is not fixed on purpose to match
         # the original transformers code and name of the model weights.
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+
         self.encoder = CLIPEncoder(
             config=config,
             quant_config=quant_config,
@@ -424,16 +418,26 @@ class CLIPVisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
 
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
-        hidden_states = self.encoder(inputs_embeds=hidden_states)
 
-        if self.post_layernorm is None:
-            return hidden_states
+        return_all_hidden_states = feature_sample_layers is not None
 
-        return self.post_layernorm(hidden_states)
+        # Produces either the last layer output or all of the hidden states,
+        # depending on if we have feature_sample_layers or not
+        encoder_outputs = self.encoder(
+            inputs_embeds=hidden_states,
+            return_all_hidden_states=return_all_hidden_states)
+
+        # Handle post-norm (if applicable) and stacks feature layers if needed
+        encoder_outputs = resolve_visual_encoder_outputs(
+            encoder_outputs, feature_sample_layers, self.post_layernorm,
+            self.config.num_hidden_layers)
+
+        return encoder_outputs
 
 
 class CLIPVisionModel(nn.Module):
@@ -451,21 +455,19 @@ class CLIPVisionModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        tp_size = get_tensor_model_parallel_world_size()
-        num_heads = config.num_attention_heads
-        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
-
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=f"{prefix}.vision_model",
-        )
+            prefix=f"{prefix}.vision_model")
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        return self.vision_model(pixel_values)
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        feature_sample_layers: Optional[list[int]] = None,
+    ) -> torch.Tensor:
+        return self.vision_model(pixel_values, feature_sample_layers)
 
     @property
     def device(self):
@@ -473,14 +475,16 @@ class CLIPVisionModel(nn.Module):
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-        ] if self.shard_weight else []
+        ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
@@ -498,8 +502,9 @@ class CLIPVisionModel(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                name = name.replace(weight_name, param_name)
 
-                param = params_dict[name.replace(weight_name, param_name)]
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -508,3 +513,5 @@ class CLIPVisionModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

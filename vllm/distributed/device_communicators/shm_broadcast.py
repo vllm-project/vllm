@@ -1,3 +1,4 @@
+import os
 import pickle
 import time
 from contextlib import contextmanager
@@ -17,12 +18,6 @@ from vllm.logger import init_logger
 from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
-
-# time to wait if the queue is full or empty
-# if we sleep for too short, it will consume too much CPU
-# if we sleep for too long, it will slow down the writer/reader
-# 0.1 us is a good balance
-RINGBUFFER_SLEEP_INTERVAL = 1e-7
 
 logger = init_logger(__name__)
 
@@ -333,8 +328,8 @@ class MessageQueue:
                     # if this block is not ready to write,
                     # we need to wait until it is read by all readers
 
-                    # wait for a while
-                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
+                    # Release the processor to other threads
+                    os.sched_yield()
 
                     # if we wait for a long time, we should warn the user
                     if (time.monotonic() - start_time >
@@ -387,8 +382,8 @@ class MessageQueue:
                     # if this block is not ready,
                     # we need to wait until it is written
 
-                    # wait for a while
-                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
+                    # Release the processor to other threads
+                    os.sched_yield()
 
                     # if we wait for a long time, we should warn the user
                     if (time.monotonic() - start_time >

@@ -57,9 +57,6 @@ class NeuronQuantConfig(QuantizationConfig):
                 "Neuron Quantization is only supported through"
                 " transformers_neuronx.")
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
     def get_quantization_config(self):
         from transformers_neuronx.config import QuantizationConfig
         return QuantizationConfig(quant_dtype=self.quant_dtype,

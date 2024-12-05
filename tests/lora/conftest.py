@@ -153,6 +153,11 @@ def sql_lora_files(sql_lora_huggingface_id):
 
 
 @pytest.fixture(scope="session")
+def lora_bias_files():
+    return snapshot_download(repo_id="followumesh/granite-3b-lora8-bias")
+
+
+@pytest.fixture(scope="session")
 def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
@@ -248,11 +253,10 @@ def llama_2_7b_engine_extra_embeddings():
     cleanup_dist_env_and_memory(shutdown_ray=True)
     get_model_old = get_model
 
-    def get_model_patched(*, model_config, device_config, **kwargs):
-        kwargs["lora_config"] = LoRAConfig(max_loras=4, max_lora_rank=8)
-        return get_model_old(model_config=model_config,
-                             device_config=device_config,
-                             **kwargs)
+    def get_model_patched(**kwargs):
+        kwargs["vllm_config"].lora_config = LoRAConfig(max_loras=4,
+                                                       max_lora_rank=8)
+        return get_model_old(**kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
         engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)

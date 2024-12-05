@@ -52,6 +52,8 @@ class SizeType(Enum):
 class CustomTestOptions(NamedTuple):
     inputs: List[Tuple[List[str], List[Union[List[Image], Image]]]]
     limit_mm_per_prompt: Dict[str, int]
+    # kwarg to pass multimodal data in as to vllm/hf runner instances.
+    runner_mm_key: str = "images"
 
 
 class ImageSizeWrapper(NamedTuple):
@@ -95,6 +97,9 @@ class VLMTestInfo(NamedTuple):
 
     # Optional callable which gets a list of token IDs from the model tokenizer
     get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]] = None
+    # Optional list of strings to stop generation, useful when stop tokens are
+    # not special tokens in the tokenizer
+    stop_str: Optional[List[str]] = None
 
     # Exposed options for HF runner
     model_kwargs: Optional[Dict[str, Any]] = None
@@ -141,13 +146,12 @@ class VLMTestInfo(NamedTuple):
         Callable[[PosixPath, str, Union[List[ImageAsset], _ImageAssets]],
                  str]] = None  # noqa: E501
 
-    # kwarg to pass multimodal data in as to vllm/hf runner instances
-    runner_mm_key: str = "images"
-
     # Allows configuring a test to run with custom inputs
     custom_test_opts: Optional[List[CustomTestOptions]] = None
 
     marks: Optional[List[MarkDecorator]] = None
+
+    tokenizer_mode: str = "auto"
 
     def get_non_parametrized_runner_kwargs(self):
         """Returns a dictionary of expandable kwargs for items that are used
@@ -159,6 +163,7 @@ class VLMTestInfo(NamedTuple):
             "max_model_len": self.max_model_len,
             "max_num_seqs": self.max_num_seqs,
             "task": self.task,
+            "tensor_parallel_size": self.tensor_parallel_size,
             "hf_output_post_proc": self.hf_output_post_proc,
             "vllm_output_post_proc": self.vllm_output_post_proc,
             "auto_cls": self.auto_cls,
@@ -166,9 +171,10 @@ class VLMTestInfo(NamedTuple):
             "postprocess_inputs": self.postprocess_inputs,
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
+            "stop_str": self.stop_str,
             "model_kwargs": self.model_kwargs,
             "patch_hf_runner": self.patch_hf_runner,
-            "runner_mm_key": self.runner_mm_key,
+            "tokenizer_mode": self.tokenizer_mode
         }
 
 

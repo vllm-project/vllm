@@ -1,13 +1,12 @@
 import dataclasses
-import importlib
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-from vllm.config import ObservabilityConfig
+from vllm.config import ObservabilityConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -15,7 +14,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
-                        update_environment_variables)
+                        resolve_obj_by_qualname, update_environment_variables)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -28,6 +27,23 @@ class WorkerBase(ABC):
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
     """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
 
     @abstractmethod
     def init_device(self) -> None:
@@ -395,23 +411,14 @@ class WorkerWrapperBase:
     We first instantiate the WorkerWrapper, which remembers the worker module
     and class name. Then, when we call `update_environment_variables`, and the
     real initialization happens in `init_worker`.
-
-    If worker_class_fn is specified, it will be executed to get the worker
-    class.
-    Otherwise, the worker class will be obtained by dynamically importing it
-    using worker_module_name and worker_class_name.
     """
 
     def __init__(
         self,
-        worker_module_name: str,
-        worker_class_name: str,
-        trust_remote_code: bool = False,
-        worker_class_fn: Optional[Callable[[],
-                                           Type[WorkerBase]]] = None) -> None:
-        self.worker_module_name = worker_module_name
-        self.worker_class_name = worker_class_name
-        self.worker_class_fn = worker_class_fn
+        vllm_config: VllmConfig,
+    ) -> None:
+        self.vllm_config = vllm_config
+        trust_remote_code = vllm_config.model_config.trust_remote_code
         self.worker: Optional[WorkerBase] = None
         if trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -440,12 +447,8 @@ class WorkerWrapperBase:
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
-        if self.worker_class_fn:
-            worker_class = self.worker_class_fn()
-        else:
-            mod = importlib.import_module(self.worker_module_name)
-            worker_class = getattr(mod, self.worker_class_name)
-
+        worker_class = resolve_obj_by_qualname(
+            self.vllm_config.parallel_config.worker_cls)
         self.worker = worker_class(*args, **kwargs)
         assert self.worker is not None
 
@@ -463,6 +466,9 @@ class WorkerWrapperBase:
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e
+
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
 
 
 def extract_previous_hidden_states(

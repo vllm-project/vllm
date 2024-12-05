@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
 import torch
@@ -9,10 +9,10 @@ from torch import nn
 from transformers import ChameleonConfig, ChameleonVQVAEConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -29,14 +29,17 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   consecutive_placeholder_ranges,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix, merge_multimodal_embeddings)
 
 # These configs are not part of the model config but the preprocessor
 # and processor files, so we hardcode them in the model file for now.
@@ -73,7 +76,11 @@ def dummy_seq_data_for_chameleon(
     return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
-    )
+    ), {
+        "image":
+        consecutive_placeholder_ranges(num_items=num_images,
+                                       item_size=image_feature_size)
+    }
 
 
 def dummy_image_for_chameleon(
@@ -97,14 +104,14 @@ def dummy_data_for_chameleon(ctx: InputContext, seq_len: int,
                              mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
 
-    seq_data = dummy_seq_data_for_chameleon(
+    seq_data, ranges = dummy_seq_data_for_chameleon(
         seq_len,
         num_images,
         image_token_id=CHAMELEON_IMAGE_TOKEN_ID,
     )
 
     mm_data = dummy_image_for_chameleon(num_images)
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data, ranges)
 
 
 def input_processor_for_chameleon(ctx: InputContext,
@@ -120,9 +127,14 @@ def input_processor_for_chameleon(ctx: InputContext,
     if multi_modal_data is None or "image" not in multi_modal_data:
         return inputs
 
+    if "multi_modal_placeholders" in inputs and "image" in inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return inputs
+
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         inputs.get("prompt"),
         inputs["prompt_token_ids"],
@@ -212,6 +224,7 @@ class ChameleonAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -265,7 +278,8 @@ class ChameleonAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def _apply_qk_norm(self, q: torch.Tensor,
                        k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -302,6 +316,7 @@ class ChameleonDecoderLayer(nn.Module):
         config: ChameleonConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -325,6 +340,7 @@ class ChameleonDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=False,
             cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = ChameleonMLP(
             hidden_size=self.hidden_size,
@@ -375,6 +391,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
         config: ChameleonConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -398,6 +415,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=False,
             cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = ChameleonMLP(
             hidden_size=self.hidden_size,
@@ -821,14 +839,13 @@ class ChameleonImageVocabularyMapping:
 
 class ChameleonModel(nn.Module):
 
-    def __init__(
-        self,
-        config: ChameleonConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -845,7 +862,8 @@ class ChameleonModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: decoder_layer(config=config,
                                          cache_config=cache_config,
-                                         quant_config=quant_config),
+                                         quant_config=quant_config,
+                                         prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -914,17 +932,14 @@ class ChameleonModel(nn.Module):
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
-    def __init__(
-        self,
-        config: ChameleonConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-        self.model = ChameleonModel(config, cache_config, quant_config)
+        self.model = ChameleonModel(vllm_config=vllm_config,
+                                    prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
@@ -936,7 +951,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -973,6 +988,29 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             data=self._validate_pixel_values(pixel_values),
         )
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        assert self.model.vqmodel is not None
+        image_tokens = self.model.get_image_tokens(image_input["data"].to(
+            self.config.torch_dtype))
+        vision_embeddings = self.model.get_input_embeddings(image_tokens)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+
+        inputs_embeds = self.model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.model.vocabulary_mapping.image_token_id)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -980,27 +1018,27 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
 
         if intermediate_tensors is not None:
+            inputs_embeds = None
+
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
             input_ids = None
-        else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
 
-            if image_input is not None:
-                assert self.model.vqmodel is not None
-                image_tokens = self.model.get_image_tokens(
-                    image_input["data"].to(self.config.torch_dtype))
-                image_token_id = self.model.vocabulary_mapping.image_token_id
-                special_image_mask = input_ids == image_token_id
-                image_tokens = image_tokens.to(input_ids.device,
-                                               input_ids.dtype)
-                input_ids = input_ids.masked_scatter(special_image_mask,
-                                                     image_tokens)
-
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+        hidden_states = self.model(input_ids,
+                                   positions,
+                                   kv_caches,
+                                   attn_metadata,
+                                   intermediate_tensors,
+                                   inputs_embeds=inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -1027,7 +1065,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1037,6 +1076,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1104,3 +1144,5 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
