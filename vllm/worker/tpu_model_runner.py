@@ -19,6 +19,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
+from vllm.store.kv_store import KVStoreMeta
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -183,6 +184,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     num_prefill_tokens=batch_size * seq_len,
                     num_decode_tokens=0,
                     slot_mapping=slot_mapping,
+                    kv_store_meta=KVStoreMeta.null(),
                     multi_modal_placeholder_index_maps=None,
                     block_tables=None,
                     context_lens=None,
@@ -205,6 +207,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     block_tables=block_tables,
                     context_lens=context_lens,
                     effective_query_lens=effective_query_lens,
+                    kv_store_meta=KVStoreMeta.null(),
                 )
         else:
             assert seq_len == 1

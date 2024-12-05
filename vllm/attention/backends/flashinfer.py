@@ -237,7 +237,9 @@ class FlashInferState(AttentionState):
             q_data_type=self.runner.model_config.dtype,
             use_cuda_graph=True,
             decode_wrapper=self._graph_decode_wrapper,
-            prefill_wrapper=None)
+            prefill_wrapper=None,
+            kv_store_meta=KVStoreMeta.null(),
+        )
         attn_metadata.begin_forward()
         return attn_metadata
 

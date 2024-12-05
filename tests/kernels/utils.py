@@ -13,6 +13,7 @@ from torch._prims_common import TensorLikeType
 
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.store.kv_store import KVStoreMeta
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
                         STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
 
@@ -925,7 +926,9 @@ def make_test_metadata(
             cross_slot_mapping=(None if cross_kv_mmap is None else
                                 cross_kv_mmap.slot_mapping),
             cross_block_tables=(None if cross_kv_mmap is None else
-                                cross_kv_mmap.block_tables))
+                                cross_kv_mmap.block_tables),
+            kv_store_meta=KVStoreMeta.null(),
+        )
 
     else:  # not is_prompt
         # Decode-phase scenario
@@ -975,7 +978,9 @@ def make_test_metadata(
             cross_slot_mapping=(None if cross_kv_mmap is None else
                                 cross_kv_mmap.slot_mapping),
             cross_block_tables=(None if cross_kv_mmap is None else
-                                cross_kv_mmap.block_tables))
+                                cross_kv_mmap.block_tables),
+            kv_store_meta=KVStoreMeta.null(),
+        )
 
 
 def assert_actual_matches_ideal(test_params: PhaseTestParameters,
