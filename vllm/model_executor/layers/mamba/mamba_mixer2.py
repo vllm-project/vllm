@@ -18,12 +18,17 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined)
 from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.distributed import (divide, get_tensor_model_parallel_world_size,
+                              get_tensor_model_parallel_rank,
+                              tensor_model_parallel_all_reduce)
+from vllm.model_executor.model_loader.weight_utils import (
+    composed_weight_loader, sharded_weight_loader, LoaderFunction)
 
-
-from typing import Tuple, Union, Optional
+from typing import Tuple, Union, Optional, List
 from vllm.model_executor.custom_op import CustomOp
 
 # Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
+# also referenced https://github.com/vllm-project/vllm/pull/9292
 @CustomOp.register("mixer2_gated_rms_norm")
 class Mixer2RMSNormGated(CustomOp):
     def __init__(self, hidden_size, eps=1e-6):
@@ -31,13 +36,31 @@ class Mixer2RMSNormGated(CustomOp):
         self.hidden_size = hidden_size
         self.variance_epsilon = eps
         self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.tp_size = get_tensor_model_parallel_world_size()
+        set_weight_attrs(self.weight,
+                         {"weight_loader": sharded_weight_loader(0)})
 
     def forward_native(
         self,
         x: torch.Tensor,
         gate: torch.Tensor,
     ):
-        pass
+        input_dtype = x.dtype
+        x = x * nn.functional.silu(gate.to(torch.float32))
+
+        if self.tp_size > 1:
+            # Compute local sum and then reduce to obtain global sum
+            local_sums = x.pow(2).sum(dim=-1, keepdim=True)
+            global_sums = tensor_model_parallel_all_reduce(local_sums)
+            # Calculate the variance
+            count = self.tp_size * x.shape[-1]
+            variance = (global_sums / count)
+
+        else:
+            variance = x.pow(2).mean(-1, keepdim=True)
+
+        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * x.to(input_dtype)
 
     def forward_cuda(
         self,
@@ -45,9 +68,12 @@ class Mixer2RMSNormGated(CustomOp):
         gate: torch.Tensor,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
 
+        if self.tp_size > 1:
+            return self.forward_native(x, gate)
+
         from vllm import _custom_ops as ops
 
-        # cast gate to float32 before silu
+        # cast x and gate to float32 before silu
         out = torch.empty_like(x)
         y = x * nn.functional.silu(gate.to(torch.float32))
         ops.rms_norm(
@@ -57,6 +83,57 @@ class Mixer2RMSNormGated(CustomOp):
             self.variance_epsilon,
         )
         return out
+
+def extra_groups_for_head_shards(ngroups: int, tp_size: int):
+    """Compute the extra (logical) groups to account for head shards"""
+
+    # in the case ngoups % tp_size == 0, this will be zero
+    if ngroups % tp_size == 0:
+        return 0
+
+    return tp_size - ngroups % tp_size
+
+def mamba_v2_sharded_weight_loader(
+    shard_spec: List[int], tp_size: int, tp_rank: int,
+) -> LoaderFunction:
+    """Create a weight loader for mamba v2. This ensures that the projections are
+    correctly sharded so that they can be split into x, B, C. It also ensures the 
+    the all the groups corresponding to a head shard is placed together with it.
+    """
+
+    def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+
+        # - track boundary of (sharded) param, and loaded_weight, respectively
+        boundary, loaded_boundary = 0, 0
+        for full_dim, extra, ratio in shard_spec:
+            # - full dim is the expected size of the model
+            # - if extra > 0, this means there was some expansion
+
+            # - num of dims expected to be loaded
+            shard_size = full_dim // tp_size
+
+            # - compute where to take the loaded shard from
+            rank = tp_rank // ratio
+
+            # - should start from here (determined by rank)
+            loaded_skip = rank * shard_size # take these number dims from loaded
+            loaded_start_idx = loaded_boundary + loaded_skip
+
+            # - these many number dims to take from loaded_weight
+            take = min(shard_size, full_dim - extra - loaded_skip)
+
+            # - always shard on dim 0
+            param.data[
+                boundary:boundary+take,...
+            ] = loaded_weight[
+                loaded_start_idx:loaded_start_idx+take
+            ]
+
+            # move boundaries
+            boundary += shard_size
+            loaded_boundary += (full_dim - extra)
+
+    return loader
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 @CustomOp.register("mamba_mixer2") 
@@ -76,7 +153,6 @@ class MambaMixer2(CustomOp):
                  ssm_state_size: int,
                  conv_kernel_size: int,
                  intermediate_size: int,
-                 time_step_rank: int,
                  use_conv_bias: bool,
                  use_bias: bool,
                  use_rms_norm: bool,
@@ -87,7 +163,22 @@ class MambaMixer2(CustomOp):
                  activation="silu",
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.time_step_rank = time_step_rank
+
+        # For TP, the sharding plan is as follows:
+        # - for the conv modules, since 
+        #   conv_dim = intermediate_size * 2 * n_groups * ssm_state_size,
+        #   we shard intermediate_size and n_groups
+        # - since intermediate_size = n_heads * head_dim, sharding on
+        #   intermediate_size is achieved by sharding on n_heads.
+        # - so if world_size divides groups, then sharding 
+        #   (n_groups / world_size, n_heads / world_size)
+        #   also maintains the invariant n_heads % n_groups == 0
+        # - HOWEVER< if world_size DOES NOT divide groups, then we need to allocate
+        #   extra space in the shard, such that the WHOLE GROUP must be placed
+        #   together with the HEAD SHARD.
+        self.tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
         self.ssm_state_size = ssm_state_size
         self.use_rms_norm = use_rms_norm
         self.activation = activation
@@ -96,8 +187,17 @@ class MambaMixer2(CustomOp):
         self.intermediate_size = intermediate_size
         self.head_dim = head_dim
         self.num_heads = num_heads
+
         self.n_groups = n_groups
-        self.conv_dim = intermediate_size + 2 * n_groups * ssm_state_size
+        if n_groups % self.tp_size != 0:
+            # - for TP we shard conv_dim by sharding on n_groups, 
+            # - but if n_groups cannot divide tp_size, we need to 
+            #   extend some extra groups
+            self.n_groups = n_groups + extra_groups_for_head_shards(n_groups, self.tp_size)
+
+        self.conv_dim = (
+            intermediate_size + 2 * self.n_groups * ssm_state_size
+        )
         self.conv1d = ColumnParallelLinear(
             input_size=conv_kernel_size,
             output_size=self.conv_dim,
@@ -116,22 +216,66 @@ class MambaMixer2(CustomOp):
             bias=use_bias,
             quant_config=quant_config)
 
-        # unlike mamba_mixer.py (v1), we do not TP the A matrix as it is 
-        # already quite small. 
-        # - same for dt_bias and D
+        # - because in_proj is a concatenation of 3 weights, we 
+        #   need to interleave them before sharding
+        # - use the custom weight loader mamba_v2_sharded_weight_loader
+        #   for conv1d.bias, covn1d.weight and in_proj.weight
+        # - need to set these settings, to assign the groups to the head shards
+        group_shard_settings = (
+            self.n_groups * self.ssm_state_size, # expected model size
+            (self.n_groups - n_groups) * self.ssm_state_size, # extra dims assigned
+            self.num_heads // n_groups, # ratio for mapping back to original group
+        )
+        intemediate_settings = (intermediate_size, 0, 1)
+        head_setings = (self.num_heads, 0, 1)
 
-        def A_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            param.data.copy_(-torch.exp(loaded_weight.float()))
+        delattr(self.conv1d.bias, "weight_loader")
+        set_weight_attrs(self.conv1d.bias, {
+            "weight_loader": mamba_v2_sharded_weight_loader(
+                [
+                    intemediate_settings, group_shard_settings, group_shard_settings,
+                ],
+                self.tp_size, tp_rank,
+            )
+        })
 
+        delattr(self.conv1d.weight, "weight_loader")
+        set_weight_attrs(self.conv1d.weight, {
+            "weight_loader": mamba_v2_sharded_weight_loader(
+                [
+                    intemediate_settings, group_shard_settings, group_shard_settings,
+                ],
+                self.tp_size, tp_rank
+            )
+        })
+
+        delattr(self.in_proj.weight, "weight_loader")
+        set_weight_attrs(self.in_proj.weight, {
+            "weight_loader": mamba_v2_sharded_weight_loader(
+                [
+                    intemediate_settings, # for gate
+                    intemediate_settings, group_shard_settings, group_shard_settings,
+                    head_setings,  # for dt
+                ],
+                self.tp_size, tp_rank
+            )
+        })
+
+        # - these are TPed by heads to reduce the size of the 
+        #   temporal shape
         self.A = nn.Parameter(
             torch.empty(
-                num_heads,
-                dtype=torch.float32,
+                divide(num_heads, self.tp_size), dtype=torch.float32,
             ))
-        set_weight_attrs(self.A, {"weight_loader": A_weight_loader})
+        self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
+        self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
 
-        self.dt_bias = nn.Parameter(torch.ones(num_heads))
-        self.D = nn.Parameter(torch.ones(num_heads))
+        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
+        a_weight_loader = composed_weight_loader(
+            sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
+        set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
+        set_weight_attrs(self.dt_bias,
+                         {"weight_loader": sharded_weight_loader(0)})
 
         self.out_proj = RowParallelLinear(
             intermediate_size,
@@ -141,7 +285,7 @@ class MambaMixer2(CustomOp):
             quant_config=quant_config)
 
         self.norm = Mixer2RMSNormGated(
-            intermediate_size, eps=rms_norm_eps
+            intermediate_size // self.tp_size, eps=rms_norm_eps
         )
 
     def forward_native(self, hidden_states: torch.Tensor,
@@ -171,7 +315,11 @@ class MambaMixer2(CustomOp):
         projected_states, _ = self.in_proj(hidden_states)
         gate, hidden_states_B_C, dt = torch.split(
             projected_states,
-            [self.intermediate_size, self.conv_dim, self.num_heads],
+            [
+                self.intermediate_size // self.tp_size, 
+                self.conv_dim // self.tp_size, 
+                self.num_heads // self.tp_size,
+            ],
             dim=-1,
         )
 
@@ -212,7 +360,11 @@ class MambaMixer2(CustomOp):
         # - get hidden_states, B and C after depthwise convolution.
         hidden_states, B, C = torch.split(
             hidden_states_B_C,
-            [self.intermediate_size, groups_time_state_size, groups_time_state_size],
+            [
+                self.intermediate_size // self.tp_size, 
+                groups_time_state_size // self.tp_size,
+                groups_time_state_size // self.tp_size,
+            ],
             dim=-1,
         )
 
@@ -233,11 +385,11 @@ class MambaMixer2(CustomOp):
             #     ]
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
-                hidden_states.view(1, seq_len, -1, self.head_dim),
+                hidden_states.view(1, seq_len, self.num_heads // self.tp_size, self.head_dim),
                 dt.unsqueeze(0),
                 self.A,
-                B.view(1, seq_len, self.n_groups, -1),
-                C.view(1, seq_len, self.n_groups, -1),
+                B.view(1, seq_len, self.n_groups // self.tp_size, -1),
+                C.view(1, seq_len, self.n_groups // self.tp_size, -1),
                 chunk_size=self.chunk_size,
                 D=self.D,
                 z=None,
@@ -261,13 +413,14 @@ class MambaMixer2(CustomOp):
         else:
 
             # NOTE: can be optimized? 
+            n_groups = self.n_groups // self.tp_size
             A = self.A[:, None, ...][:, :, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D = self.D[:, None, ...].expand(-1, self.head_dim)
-            B = B.view(-1, self.n_groups, B.shape[1] // self.n_groups)
-            C = C.view(-1, self.n_groups, C.shape[1] // self.n_groups)
-            hidden_states_reshaped = hidden_states.view(-1, self.num_heads, self.head_dim)
+            B = B.view(-1, n_groups, B.shape[1] // n_groups)
+            C = C.view(-1, n_groups, C.shape[1] // n_groups)
+            hidden_states_reshaped = hidden_states.view(-1, self.num_heads // self.tp_size, self.head_dim)
 
             # - the hidden is reshaped into number of current batches
             # - in this case there is no more prefil, so the batches gen
@@ -290,7 +443,9 @@ class MambaMixer2(CustomOp):
                 dt_softplus=True,
                 state_batch_indices=mamba_cache_params.state_indices_tensor,
             )
-            hidden_states = hidden_states.view(-1, self.num_heads * self.head_dim)
+            hidden_states = hidden_states.view(
+                -1, (self.num_heads // self.tp_size) * self.head_dim
+            )
 
         # # 4. gated MLP
         hidden_states = self.norm(hidden_states, gate)
