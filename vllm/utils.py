@@ -1656,27 +1656,3 @@ def get_token_bin_counts_and_mask(
     mask = bin_counts > 0
 
     return bin_counts, mask
-
-
-def apply_sampling_penalties(
-        logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
-        output_tokens_tensor: torch.Tensor, presence_penalties: torch.Tensor,
-        frequency_penalties: torch.Tensor,
-        repetition_penalties: torch.Tensor) -> torch.Tensor:
-    """
-    Applies presence, frequency and repetition penalties to the logits.
-    """
-    num_seqs, vocab_size = logits.shape
-    _, prompt_mask = get_token_bin_counts_and_mask(prompt_tokens_tensor,
-                                                   vocab_size, num_seqs)
-    output_bin_counts, output_mask = get_token_bin_counts_and_mask(
-        output_tokens_tensor, vocab_size, num_seqs)
-    repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
-    repetition_penalties[~(prompt_mask | output_mask)] = 1.0
-    logits[logits > 0] /= repetition_penalties[logits > 0]
-    logits[logits <= 0] *= repetition_penalties[logits <= 0]
-    # We follow the definition in OpenAI API.
-    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts
-    logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
-    return logits

@@ -4,7 +4,8 @@ from typing import Dict, List, Set, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.utils import apply_sampling_penalties, make_tensor_with_pad
+from vllm.utils import (get_token_bin_counts_and_mask, is_pin_memory_available,
+                        make_tensor_with_pad)
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -21,11 +22,13 @@ class Sampler(nn.Module):
         _apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
                                    sampling_metadata.stop_token_ids,
                                    sampling_metadata.min_tokens)
-        _apply_penalties(logits, sampling_metadata.prompt_token_ids,
-                         sampling_metadata.output_token_ids,
-                         sampling_metadata.presence_penalties,
-                         sampling_metadata.frequency_penalties,
-                         sampling_metadata.repetition_penalties)
+        if not sampling_metadata.no_penalties:
+            assert sampling_metadata.prompt_token_ids is not None
+            _apply_penalties(logits, sampling_metadata.prompt_token_ids,
+                             sampling_metadata.presence_penalties,
+                             sampling_metadata.frequency_penalties,
+                             sampling_metadata.repetition_penalties,
+                             sampling_metadata.output_token_ids)
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         logits = self.apply_top_k_top_p(logits, sampling_metadata)
         probs = self.get_probs(logits)
@@ -183,67 +186,43 @@ def _apply_min_token_penalties(logits: torch.Tensor,
         logits[tuple(zip(*min_tokens_logits_to_penalize))] = -float("inf")
 
 
-def _apply_penalties(logits: torch.Tensor, prompt_token_ids: List[List[int]],
-                     output_token_ids: List[List[int]],
-                     presence_penalties: List[float],
-                     frequency_penalties: List[float],
-                     repetition_penalties: List[float]):
+def _apply_penalties(logits: torch.Tensor, prompt_token_ids: torch.Tensor,
+                     presence_penalties: torch.Tensor,
+                     frequency_penalties: torch.Tensor,
+                     repetition_penalties: torch.Tensor,
+                     output_token_ids: List[List[int]]):
     """
     Applies presence, frequency and repetition penalties to the logits.
     """
-    apply_penalties = any(p != 0.0 for p in presence_penalties) or any(
-        f != 0.0
-        for f in frequency_penalties) or any(r != 1.0
-                                             for r in repetition_penalties)
-    if apply_penalties:
-        _, vocab_size = logits.shape
-        (prompt_tokens_t, output_tokens_t, frequency_penalties_t,
-        presence_penalties_t, repetition_penalties_t) = \
-            _convert_to_tensors(
-                prompt_token_ids, output_token_ids, frequency_penalties,
-                presence_penalties, repetition_penalties, vocab_size,
-                logits.device)
-        apply_sampling_penalties(logits, prompt_tokens_t, output_tokens_t,
-                                 presence_penalties_t, frequency_penalties_t,
-                                 repetition_penalties_t)
+    num_seqs, vocab_size = logits.shape
+    output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size,
+                                          logits.device)
+    _, prompt_mask = get_token_bin_counts_and_mask(prompt_token_ids,
+                                                   vocab_size, num_seqs)
+    output_bin_counts, output_mask = get_token_bin_counts_and_mask(
+        output_tokens_t, vocab_size, num_seqs)
+    logits[logits > 0] /= torch.where(prompt_mask | output_mask,
+                                      repetition_penalties, 1.0)[logits > 0]
+    logits[logits <= 0] *= torch.where(prompt_mask | output_mask,
+                                       repetition_penalties, 1.0)[logits <= 0]
+    # We follow the definition in OpenAI API.
+    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
+    logits -= frequency_penalties * output_bin_counts
+    logits -= presence_penalties * output_mask
+
+    return logits
 
 
-def _convert_to_tensors(prompt_token_ids: List[List[int]],
-                        output_token_ids: List[List[int]],
-                        frequency_penalties: List[float],
-                        presence_penalties: List[float],
-                        repetition_penalties: List[float], vocab_size: int,
-                        device: torch.device) -> Tuple[torch.Tensor, ...]:
+def _convert_to_tensors(output_token_ids: List[List[int]], vocab_size: int,
+                        device: torch.device) -> torch.Tensor:
     """
     Convert the different list data structures to tensors.
     """
-    prompt_tokens_tensor = make_tensor_with_pad(
-        prompt_token_ids,
-        vocab_size,
-        device=device,
-        dtype=torch.int64,
-    )
     output_tokens_tensor = make_tensor_with_pad(
         output_token_ids,
         vocab_size,
-        device=device,
+        device="cpu",
         dtype=torch.int64,
+        pin_memory=is_pin_memory_available(),
     )
-    frequency_penalties_tensor = torch.tensor(
-        frequency_penalties,
-        device=device,
-        dtype=torch.float,
-    )
-    presence_penalties_tensor = torch.tensor(
-        presence_penalties,
-        device=device,
-        dtype=torch.float,
-    )
-    repetition_penalties_tensor = torch.tensor(
-        repetition_penalties,
-        device=device,
-        dtype=torch.float,
-    )
-    return (prompt_tokens_tensor, output_tokens_tensor,
-            frequency_penalties_tensor, presence_penalties_tensor,
-            repetition_penalties_tensor)
+    return output_tokens_tensor.to(device, non_blocking=True)
