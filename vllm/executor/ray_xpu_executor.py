@@ -19,8 +19,7 @@ class RayXPUExecutor(RayGPUExecutor, XPUExecutor):
         worker_node_and_gpu_ids = []
         for worker in [self.driver_dummy_worker] + self.workers:
             worker_node_and_gpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote()) \
-            ) # type: ignore[attr-defined]
+                ray.get(worker.get_node_and_gpu_ids.remote()))  # type: ignore
 
         VLLM_INSTANCE_ID = get_vllm_instance_id()
 
