@@ -89,6 +89,9 @@ class IncrementalDetokenizer:
         do_prompt_logprobs = (request.prompt_logprobs is not None
                               and request.prompt_logprobs > 0)
 
+        if do_logprobs:
+            self.
+
         return cls(
             output_text="",
             tokens=tokens,
