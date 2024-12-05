@@ -157,7 +157,15 @@ class GrammarConfig:
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
-                grammar_str = convert_lark_to_gbnf(guided_params.grammar)
+                try:
+                    grammar_str = convert_lark_to_gbnf(guided_params.grammar)
+                except ValueError as e:
+                    raise ValueError(
+                        "Failed to convert the grammar from Lark to GBNF. "
+                        "Please either use GBNF grammar directly or specify"
+                        " --guided-decoding-backend=outlines.\n"
+                        f"Conversion error: {str(e)}"
+                    ) from e
             else:
                 grammar_str = guided_params.grammar
             return cls(grammar_str=grammar_str,
