@@ -385,7 +385,7 @@ class Scheduler:
         model_runner_output: "ModelRunnerOutput",
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
-        sampled_token_ids = model_runner_output.sampled_token_ids_cpu
+        sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []

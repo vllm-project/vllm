@@ -235,6 +235,7 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
             engine_core.run_busy_loop()
@@ -247,8 +248,9 @@ class EngineCoreProc(EngineCore):
             raise e
 
         finally:
-            engine_core.shutdown()
-            engine_core = None
+            if engine_core is not None:
+                engine_core.shutdown()
+                engine_core = None
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""

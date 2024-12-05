@@ -407,6 +407,7 @@ class WorkerProc:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        worker = None
         try:
             worker = WorkerProc(*args, **kwargs)
             worker.model_initialization_loop(
@@ -424,8 +425,9 @@ class WorkerProc:
 
         finally:
             # Clean up once worker exits busy loop
-            worker.shutdown()
-            worker = None
+            if worker is not None:
+                worker.shutdown()
+                worker = None
 
     @staticmethod
     def wait_for_startup(

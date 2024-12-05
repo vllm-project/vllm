@@ -31,7 +31,7 @@ class ModelRunnerOutput:
     req_id_to_index: Dict[str, int]
 
     # [num_reqs]
-    sampled_token_ids_cpu: List[int]
+    sampled_token_ids: List[int]
 
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids_cpu: Optional[torch.Tensor]

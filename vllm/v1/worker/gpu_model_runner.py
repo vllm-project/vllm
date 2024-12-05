@@ -511,7 +511,7 @@ class GPUModelRunner:
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids_cpu=sampled_token_ids,
+            sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
         )
