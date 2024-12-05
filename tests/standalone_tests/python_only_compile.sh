@@ -1,6 +1,9 @@
 # This script tests if the python only compilation works correctly
 # for users who do not have compilers installed on their system
 
+set -e
+set -x
+
 # uninstall vllm
 pip3 uninstall -y vllm
 # restore the original files
