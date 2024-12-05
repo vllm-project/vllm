@@ -6,6 +6,7 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
 from tqdm import tqdm
+from typing_extensions import deprecated
 
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -26,7 +27,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest, LLMGuidedOptions)
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -185,8 +186,14 @@ class LLM:
             kwargs["disable_log_stats"] = True
 
         if compilation_config is not None:
-            compilation_config_instance = CompilationConfig.from_cli(
-                json.dumps(compilation_config))
+            if isinstance(compilation_config, (int)):
+                compilation_config_instance = CompilationConfig.from_cli(
+                    str(compilation_config))
+            elif isinstance(compilation_config, (dict)):
+                compilation_config_instance = CompilationConfig.from_cli(
+                    json.dumps(compilation_config))
+            else:
+                compilation_config_instance = compilation_config
         else:
             compilation_config_instance = None
 
@@ -250,6 +257,7 @@ class LLM:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     @overload  # LEGACY: single (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: str,
@@ -262,6 +270,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: List[str],
@@ -274,6 +283,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: Optional[str] = None,
@@ -287,6 +297,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: Optional[List[str]] = None,
@@ -300,6 +311,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: None,
@@ -665,6 +677,7 @@ class LLM:
         )
 
     @overload  # LEGACY: single (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: str,
@@ -673,10 +686,11 @@ class LLM:
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[EmbeddingRequestOutput]:
+    ) -> List[PoolingRequestOutput]:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: List[str],
@@ -685,10 +699,11 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[EmbeddingRequestOutput]:
+    ) -> List[PoolingRequestOutput]:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: Optional[str] = None,
@@ -698,10 +713,11 @@ class LLM:
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[EmbeddingRequestOutput]:
+    ) -> List[PoolingRequestOutput]:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: Optional[List[str]] = None,
@@ -711,10 +727,11 @@ class LLM:
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[EmbeddingRequestOutput]:
+    ) -> List[PoolingRequestOutput]:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: None,
@@ -722,7 +739,7 @@ class LLM:
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[EmbeddingRequestOutput]:
+    ) -> List[PoolingRequestOutput]:
         ...
 
     @overload
@@ -735,7 +752,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[EmbeddingRequestOutput]:
+    ) -> List[PoolingRequestOutput]:
         ...
 
     @deprecate_kwargs(
@@ -753,7 +770,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> List[EmbeddingRequestOutput]:
+    ) -> List[PoolingRequestOutput]:
         """Generates the completions for the input prompts.
 
         This class automatically batches the given prompts, considering
@@ -772,7 +789,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of ``EmbeddingRequestOutput`` objects containing the
+            A list of ``PoolingRequestOutput`` objects containing the
             generated embeddings in the same order as the input prompts.
 
         Note:
@@ -815,7 +832,7 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs,
-                                                  EmbeddingRequestOutput)
+                                                  PoolingRequestOutput)
 
     def score(
         self,
@@ -826,7 +843,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> List[EmbeddingRequestOutput]:
+    ) -> List[PoolingRequestOutput]:
         """Generates similarity scores for all pairs <text,text_pair>.
 
         The inputs can be 1 -> 1, 1 -> N or N -> N. In the 1 - N case
@@ -848,7 +865,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of ``EmbeddingRequestOutput`` objects containing the
+            A list of ``PoolingRequestOutput`` objects containing the
             generated scores in the same order as the input prompts.
         """
         task = self.llm_engine.model_config.task
@@ -937,7 +954,7 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs,
-                                                  EmbeddingRequestOutput)
+                                                  PoolingRequestOutput)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
@@ -1079,7 +1096,7 @@ class LLM:
 
     def _run_engine(
             self, *, use_tqdm: bool
-    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    ) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -1092,7 +1109,7 @@ class LLM:
             )
 
         # Run the engine.
-        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
+        outputs: List[Union[RequestOutput, PoolingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():

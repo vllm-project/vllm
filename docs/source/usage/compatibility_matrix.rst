@@ -118,7 +118,7 @@ Feature x Feature
      - 
      - 
    * - :ref:`SD <spec_decode>`
-     - ✗
+     - ✅
      - ✅
      - ✗
      - ✅
@@ -393,7 +393,7 @@ Feature x Hardware
      - ✅
      - ✅
      - ✅
-     - ✗
+     - ?
    * - :abbr:`enc-dec (Encoder-Decoder Models)`
      - ✅
      - ✅

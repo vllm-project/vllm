@@ -67,6 +67,7 @@ Documentation
    getting_started/openvino-installation
    getting_started/cpu-installation
    getting_started/gaudi-installation
+   getting_started/arm-installation
    getting_started/neuron-installation
    getting_started/tpu-installation
    getting_started/xpu-installation
@@ -84,13 +85,9 @@ Documentation
    serving/deploying_with_nginx
    serving/distributed_serving
    serving/metrics
-   serving/env_vars
-   serving/usage_stats
    serving/integrations
    serving/tensorizer
    serving/runai_model_streamer
-   serving/compatibility_matrix
-   serving/faq
 
 .. toctree::
    :maxdepth: 1
@@ -99,12 +96,21 @@ Documentation
    models/supported_models
    models/adding_model
    models/enabling_multimodal_inputs
-   models/engine_args
-   models/lora
-   models/vlm
-   models/structured_outputs
-   models/spec_decode
-   models/performance
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Usage
+
+   usage/lora
+   usage/multimodal_inputs
+   usage/structured_outputs
+   usage/spec_decode
+   usage/compatibility_matrix
+   usage/performance
+   usage/faq
+   usage/engine_args
+   usage/env_vars
+   usage/usage_stats
 
 .. toctree::
    :maxdepth: 1

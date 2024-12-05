@@ -8,8 +8,8 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm.compilation.compile_context import set_compile_context
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -99,7 +99,11 @@ class GPUModelRunner:
                                == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
-        self.cudagraph_batch_sizes = [1, 2, 4] + [i for i in range(8, 513, 8)]
+        # The convention is different.
+        # self.cudagraph_batch_sizes sorts in ascending order.
+        # The batch sizes in the config are in descending order.
+        self.cudagraph_batch_sizes = list(
+            reversed(self.vllm_config.compilation_config.capture_sizes))
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
@@ -256,7 +260,8 @@ class GPUModelRunner:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
-        token_indices = positions_np + req_indices * self.max_model_len
+        token_indices = (positions_np +
+                         req_indices * self.input_batch.token_ids_cpu.shape[1])
         token_indices = torch.from_numpy(token_indices)
         input_ids = torch.empty((total_num_scheduled_tokens, ),
                                 dtype=torch.int32,
@@ -269,9 +274,15 @@ class GPUModelRunner:
                            out=input_ids)
 
         # Calculate the slot mapping.
+        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+        # where K is the max_num_blocks_per_req and the block size is 2.
+        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
+        # because M (max_model_len) is not necessarily divisible by block_size.
         block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
-            token_indices // self.block_size]
-        block_offsets = token_indices % self.block_size
+            req_indices * self.max_num_blocks_per_req +
+            positions_np // self.block_size]
+        block_offsets = torch.from_numpy(positions_np % self.block_size)
         slot_mapping = torch.empty((total_num_scheduled_tokens, ),
                                    dtype=torch.int32,
                                    device="cpu",
@@ -362,7 +373,8 @@ class GPUModelRunner:
         # 2. A list (length: num_images) of tensors, each of shape
         # [feature_size, hidden_size] in case when the feature size is
         # dynamic depending on input images.
-        encoder_outputs = self.model.process_mm_inputs(**batched_mm_inputs)
+        encoder_outputs = self.model.get_multimodal_embeddings(
+            **batched_mm_inputs)
 
         # Cache the encoder outputs.
         for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
@@ -546,10 +558,9 @@ class GPUModelRunner:
             torch.tensor([], dtype=torch.float32, device=self.device)
             for _ in range(self.num_attn_layers)
         ]
-        with set_compile_context(self.cudagraph_batch_sizes):
-            # Trigger compilation for general shape.
-            hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                            dummy_kv_caches)
+        # Trigger compilation for general shape.
+        hidden_states = self._dummy_run(self.model, self.max_num_tokens,
+                                        dummy_kv_caches)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
@@ -570,8 +581,9 @@ class GPUModelRunner:
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        for num_tokens in reversed(self.cudagraph_batch_sizes):
-            self._dummy_run(self.model, num_tokens, self.kv_caches)
+        with graph_capture():
+            for num_tokens in reversed(self.cudagraph_batch_sizes):
+                self._dummy_run(self.model, num_tokens, self.kv_caches)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
