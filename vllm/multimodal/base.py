@@ -226,16 +226,16 @@ class MultiModalPlugin(ABC):
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
+        from vllm.model_executor.models import supports_multimodal
 
         model_cls, _ = get_model_architecture(model_config)
 
-        if model_cls not in self._input_mappers:
+        if not supports_multimodal(model_cls):
             return 0
 
         max_mm_tokens = self._max_mm_tokens.get(model_cls)
         if max_mm_tokens is None:
-            raise KeyError(f"No maximum number of multi-modal tokens is given "
-                           f"for model class {model_cls.__name__} in {self}.")
+            return 0
 
         if callable(max_mm_tokens):
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(

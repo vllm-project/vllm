@@ -315,6 +315,8 @@ class MultiModalRegistry:
         self,
         metadata_factory: Callable[[InputProcessingContext],
                                    MultiModalProcessingMetadata],
+        get_dummy_mm_kwargs: Callable[
+            [InputProcessingContext, Mapping[str, int]], MultiModalKwargs],
     ):
         """
         Convenience method to register a multi-modal processor to a model class
@@ -328,8 +330,16 @@ class MultiModalRegistry:
             - :ref:`enabling_multimodal_inputs`
         """
 
+        class ConcreteMultiModalProcessor(MultiModalProcessor):
+
+            def _get_dummy_mm_kwargs(
+                self,
+                mm_counts: Mapping[str, int],
+            ) -> MultiModalKwargs:
+                return get_dummy_mm_kwargs(self.ctx, mm_counts)
+
         def factory(ctx: InputProcessingContext):
-            return MultiModalProcessor(
+            return ConcreteMultiModalProcessor(
                 ctx=ctx,
                 metadata=metadata_factory(ctx),
             )

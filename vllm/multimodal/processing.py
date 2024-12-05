@@ -529,7 +529,7 @@ def iter_placeholders(
             yield placeholder
 
 
-class MultiModalProcessor:
+class MultiModalProcessor(ABC):
     """
     Helper class to process multi-modal inputs to be used in vLLM.
     """
@@ -743,6 +743,17 @@ class MultiModalProcessor:
             mm_placeholders=mm_placeholders,
         )
 
+    @abstractmethod
+    def _get_dummy_mm_kwargs(
+        self,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalKwargs:
+        """
+        Build the input that corresponds to `mm_max_tokens` in
+        :meth:`get_dummy_data`.
+        """
+        raise NotImplementedError
+
     def get_dummy_data(
         self,
         seq_len: int,
@@ -784,7 +795,7 @@ class MultiModalProcessor:
 
         return DummyData(
             seq_data=SequenceData.from_seqs(prompt_token_ids),
-            multi_modal_data=None,
+            multi_modal_data=self._get_dummy_mm_kwargs(mm_counts),
             multi_modal_placeholders={
                 modality: [p.to_range() for p in placeholders]
                 for modality, placeholders in mm_placeholders.items()

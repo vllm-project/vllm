@@ -230,10 +230,12 @@ class InputRegistry:
             This should be called after
             :meth:`~MultiModalRegistry.init_mm_limits_per_prompt`.
         """
-        if mm_registry.has_processor(model_config):
-            # Avoid circular import
-            from vllm.multimodal.utils import cached_get_tokenizer
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_architecture
+        from vllm.multimodal import MultiModalKwargs
+        from vllm.multimodal.utils import cached_get_tokenizer
 
+        if mm_registry.has_processor(model_config):
             tokenizer = cached_get_tokenizer(
                 model_config.tokenizer,
                 trust_remote_code=model_config.trust_remote_code,
@@ -247,9 +249,6 @@ class InputRegistry:
             dummy_data = processor.get_dummy_data(seq_len, mm_counts,
                                                   mm_max_tokens)
         else:
-            # Avoid circular import
-            from vllm.model_executor.model_loader import get_model_architecture
-
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:
                 dummy_factory = self._get_dummy_encoder_data_factory(model_cls)
@@ -274,7 +273,9 @@ class InputRegistry:
                 raise AssertionError(
                     f"Expected at least {seq_len} dummy tokens for profiling, "
                     f"but found {len(num_tokens)} tokens instead.")
-        if dummy_data.multi_modal_data is not None:
+
+        if (dummy_data.multi_modal_data is not None and
+                not isinstance(dummy_data.multi_modal_data, MultiModalKwargs)):
             for k, v in dummy_data.multi_modal_data.items():
                 num_items = len(v) if isinstance(v, list) else 1
                 num_expected = mm_counts[k]

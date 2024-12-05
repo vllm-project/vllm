@@ -1,6 +1,6 @@
 from functools import cached_property
-from typing import (Iterable, List, Literal, Optional, Protocol, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, List, Literal, Mapping, Optional, Protocol, Set,
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -19,17 +19,20 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 from vllm.multimodal.processing import (InputProcessingContext,
                                         ModalityProcessingMetadata,
                                         MultiModalProcessingMetadata,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
 
-from .clip import CLIPVisionModel, get_max_clip_image_tokens
+from .clip import (CLIPVisionModel, dummy_image_for_clip,
+                   get_max_clip_image_tokens)
 from .interfaces import SupportsMultiModal, SupportsPP
-from .pixtral import PixtralHFVisionModel, get_max_pixtral_hf_image_tokens
-from .siglip import SiglipVisionModel, get_max_siglip_image_tokens
+from .pixtral import (PixtralHFVisionModel, dummy_image_for_pixtral_hf,
+                      get_max_pixtral_hf_image_tokens)
+from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
+                     get_max_siglip_image_tokens)
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -107,6 +110,27 @@ def get_max_llava_image_tokens(ctx: InputContext):
         return num_image_tokens
     else:
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
+
+
+def dummy_mm_kwargs_for_llava(ctx: InputProcessingContext,
+                              mm_counts: Mapping[str, int]):
+    hf_config = ctx.get_hf_config(LlavaConfig)
+    vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
+
+    if isinstance(vision_config, CLIPVisionConfig):
+        data = dummy_image_for_clip(vision_config, num_images)
+    elif isinstance(vision_config, SiglipVisionConfig):
+        data = dummy_image_for_siglip(vision_config, num_images)
+    elif isinstance(vision_config, PixtralVisionConfig):
+        data = dummy_image_for_pixtral_hf(vision_config, num_images)
+    else:
+        msg = f"Unsupported vision config: {type(vision_config)}"
+        raise NotImplementedError(msg)
+
+    image_processor = ctx.get_hf_processor().image_processor  # type: ignore
+    hf_inputs = image_processor(images=data["image"])
+    return MultiModalKwargs(hf_inputs)
 
 
 def create_metadata_for_llava(
@@ -212,7 +236,8 @@ def init_vision_tower_for_llava(
 
 
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
-@MULTIMODAL_REGISTRY.register_processor_by_metadata(create_metadata_for_llava)
+@MULTIMODAL_REGISTRY.register_processor_by_metadata(create_metadata_for_llava,
+                                                    dummy_mm_kwargs_for_llava)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     # BitandBytes specific attributes
     bitsandbytes_stacked_params_mapping = {
