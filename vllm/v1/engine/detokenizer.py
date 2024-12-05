@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
+import numpy as np
 import numpy.typing as npt
 
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -156,6 +157,7 @@ class IncrementalDetokenizer:
     def _pythonize_maybe_detokenize_sample_logprobs_for_request(
         self,
         new_logprobs: List[Tuple[npt.NDArray, npt.NDArray]],
+        new_token_ids: List[int],
         detokenize: bool,
     ) -> SampleLogprobs:
         """Pythonize sample logprobs, maybe detokenize.
@@ -175,10 +177,26 @@ class IncrementalDetokenizer:
         Returns:
           Sample logprobs, Pythonized and possibly detokenized
         """
-        for logprob_values, logprob_token_ids in new_logprobs:
+        max_logprobs = self.max_request_sample_logprobs
+        for (logprob_values,
+             logprob_token_ids), token_id in zip(new_logprobs, new_token_ids):
             # Only keep the number of logprobs specified by the request
             # (plus possibly the sampled token id & its logprob)
-            logprob_cnt = self.max_request_sample_logprobs
+            logprob_cnt = max_logprobs
+            if token_id not in logprob_token_ids[0:logprob_cnt]:
+                # Sampled token is not in the in the top logprobs;
+                # inject it & resort, ensuring that excess logprobs
+                # not requested by the user have -inf probability
+                logprob_values[max_logprobs:-1] = float('-inf')
+                # Get indices that would sort logprob_values in descending order
+                indices = np.argsort(logprob_values)[::-1]
+                # Use these indices to reorder logprob_values and
+                # logprob_token_ids
+                logprob_values = logprob_values[indices]
+                logprob_token_ids = logprob_token_ids[indices]
+                # There will be one more logprob than the user requested
+                logprob_cnt = max_logprobs + 1
+
             self.request_logprobs.append(
                 self._pythonize_sequence_position(
                     logprob_values[0:logprob_cnt],
@@ -261,7 +279,7 @@ class IncrementalDetokenizer:
         # 1) If required, Pythonize & detokenize sample logprobs
         if do_request_sample_logprobs:
             self._pythonize_maybe_detokenize_sample_logprobs_for_request(
-                new_logprobs, detokenize=True)
+                new_logprobs, new_token_ids, detokenize=True)
 
         # 2) If necessary, detokenize prompt logprobs incrementally
         if do_request_prompt_logprobs:
