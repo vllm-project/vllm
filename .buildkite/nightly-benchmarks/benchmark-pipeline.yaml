@@ -21,7 +21,7 @@ steps:
         podSpec:
           priorityClassName: perf-benchmark
           containers:
-          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
             command:
             - bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
             resources:
@@ -51,7 +51,7 @@ steps:
       queue: H200
     plugins:
     - docker#v5.12.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
         command:
         - bash
         - .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
@@ -65,13 +65,18 @@ steps:
         - VLLM_USAGE_SOURCE
         - HF_TOKEN
 
+  - block: "Run H100 Benchmark"
+    key: block-h100
+    depends_on: ~
+
   - label: "H100"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H100
+    depends_on: block-h100
     plugins:
     - docker#v5.12.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
         command:
         - bash
         - .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh

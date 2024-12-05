@@ -43,6 +43,7 @@ class WorkerBase(ABC):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
 
     @abstractmethod
     def init_device(self) -> None:
@@ -465,6 +466,9 @@ class WorkerWrapperBase:
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e
+
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
 
 
 def extract_previous_hidden_states(

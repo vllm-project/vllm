@@ -106,30 +106,30 @@ class PyNcclCommunicator:
             self.stream.synchronize()
             del data
 
-        # by default it is disabled, e.g. in profiling models and prefill phase.
-        # to use it, use under `with obj.change_state(enable=True)`, usually
-        # when we are using CUDA graph.
-        self.disabled = True
-
     def all_reduce(self,
-                   tensor: torch.Tensor,
+                   in_tensor: torch.Tensor,
                    op: ReduceOp = ReduceOp.SUM,
-                   stream=None):
+                   stream=None) -> torch.Tensor:
         if self.disabled:
-            return
+            return None
         # nccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
-        assert tensor.device == self.device, (
+        assert in_tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {tensor.device}")
+            f"but the input tensor is on {in_tensor.device}")
+
+        out_tensor = torch.empty_like(in_tensor)
+
         if stream is None:
             stream = self.stream
-        self.nccl.ncclAllReduce(buffer_type(tensor.data_ptr()),
-                                buffer_type(tensor.data_ptr()), tensor.numel(),
-                                ncclDataTypeEnum.from_torch(tensor.dtype),
+        self.nccl.ncclAllReduce(buffer_type(in_tensor.data_ptr()),
+                                buffer_type(out_tensor.data_ptr()),
+                                in_tensor.numel(),
+                                ncclDataTypeEnum.from_torch(in_tensor.dtype),
                                 ncclRedOpTypeEnum.from_torch(op), self.comm,
                                 cudaStream_t(stream.cuda_stream))
+        return out_tensor
 
     def all_gather(self,
                    output_tensor: torch.Tensor,
@@ -196,6 +196,25 @@ class PyNcclCommunicator:
         self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                            ncclDataTypeEnum.from_torch(tensor.dtype), src,
                            self.comm, cudaStream_t(stream.cuda_stream))
+
+    def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
+        if self.disabled:
+            return
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
+        if src == self.rank:
+            sendbuff = buffer_type(tensor.data_ptr())
+            # NCCL requires the sender also to have a receive buffer
+            recvbuff = buffer_type(tensor.data_ptr())
+        else:
+            sendbuff = buffer_type()
+            recvbuff = buffer_type(tensor.data_ptr())
+        self.nccl.ncclBroadcast(sendbuff, recvbuff, tensor.numel(),
+                                ncclDataTypeEnum.from_torch(tensor.dtype), src,
+                                self.comm, cudaStream_t(stream.cuda_stream))
 
     @contextmanager
     def change_state(self,
