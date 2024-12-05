@@ -25,8 +25,8 @@ class IncrementalDetokenizer:
     output_text: str
     tokens: List[str]
     token_ids: List[int]
-    logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
+    request_logprobs: Optional[SampleLogprobs]
+    request_prompt_logprobs: Optional[PromptLogprobs]
 
     # Stop strings
     stop: List[str]
@@ -52,6 +52,10 @@ class IncrementalDetokenizer:
     # Accounting for stop string buffering
     stop_buffer_length: int
     _last_output_text_offset: int = 0
+
+    # Maximum number of sample logprobs for this request
+    request_max_sample_logprobs: Optional[int]
+    request_max_prompt_logprobs: Optional[int]
 
     @property
     def output_token_ids(self) -> List[int]:
@@ -81,6 +85,7 @@ class IncrementalDetokenizer:
 
         # Logprobs & prompt logprobs settings
         do_logprobs = request.logprobs is not None and request.logprobs > 0
+        
         do_prompt_logprobs = (request.prompt_logprobs is not None
                               and request.prompt_logprobs > 0)
 
@@ -106,13 +111,49 @@ class IncrementalDetokenizer:
             logprobs=[] if do_logprobs else None,
             prompt_logprobs=[] if do_prompt_logprobs else None)
 
-    def _pythonize_maybe_detokenize_sample_logprobs(
-        new_logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]],
+    def _pythonize_maybe_detokenize_sample_logprobs_for_request(
+        new_logprobs: List[Tuple[npt.NDArray, npt.NDArray]],
         detokenize: bool,
     ) -> SampleLogprobs:
-        pass
+        for logprob_values, logprob_token_ids in new_logprobs:
 
-    def _pythonize_maybe_detokenize_prompt_logprobs(
+
+        # Construct logprobs, if requested (TODO: assumes one
+        # generated token).
+        logprob_token_ids = logprob_token_ids_list[req_index]
+        logprob_values = logprob_values_list[req_index]
+        logprob_cnt = max_logprobs
+        if token_id not in logprob_token_ids[0:max_logprobs]:
+            # Sampled token is not in the in the top logprobs;
+            # inject it & resort, ensuring that excess logprobs
+            # not requested by the user have -inf probability
+            logprob_values[max_logprobs:-1] = (
+                [float('-inf')] *
+                (len(logprob_values) - 1 - max_logprobs))
+
+            indices = sorted(range(len(logprob_values)),
+                                key=lambda k: logprob_values[k],
+                                reverse=True)
+            logprob_values = [logprob_values[i] for i in indices]
+            logprob_token_ids = [
+                logprob_token_ids[i] for i in indices
+            ]
+
+            # There will be one more logprob than the user requested
+            logprob_cnt = max_logprobs + 1
+
+        # Only keep the number of logprobs specified by the request
+        # (plus possibly the sampled token id & its logprob)
+        logprob_values = logprob_values[0:logprob_cnt]
+        logprob_token_ids = logprob_token_ids[0:logprob_cnt]
+
+        request.logprobs.append({
+            lpt: Logprob(lpv, (idx + 1), None)
+            for idx, (lpv, lpt) in enumerate(
+                zip(logprob_values, logprob_token_ids))
+        })
+
+    def _pythonize_maybe_detokenize_prompt_logprobs_for_request(
         new_prompt_logprobs: Optional[npt.NDArray],
         new_prompt_logprob_token_ids: Optional[npt.NDArray],
         detokenize: bool,
@@ -141,6 +182,12 @@ class IncrementalDetokenizer:
 
         # 1) If required, Pythonize & detokenize sample logprobs
         if do_logprobs:
+
+            self.request_logprobs.append(self._pythonize_maybe_detokenize_sample_logprobs_for_request(
+                new_logprobs,
+                detokenize=True
+            ))
+
             # Detokenize individual token logprobs in-place
             logprob_dict = new_logprobs[tdx]
             assert logprob_dict is not None
@@ -155,11 +202,11 @@ class IncrementalDetokenizer:
                 spaces_between_special_tokens=self.
                 spaces_between_special_tokens,
             )
-            self.logprobs.append(logprob_dict)
+            self.request_logprobs.append(logprob_dict)
 
         # 2) If necessary, detokenize prompt logprobs incrementally
         if new_prompt_logprobs is not None and len(new_prompt_logprobs) > 0:
-            self.prompt_logprobs.extend(new_prompt_logprobs)
+            self.request_prompt_logprobs.extend(new_prompt_logprobs)
 
         # 3) Detokenize the new token ids incrementally. If necessary,
         #    detokenize logprobs.
@@ -212,8 +259,8 @@ class IncrementalDetokenizer:
         delta = self.output_kind == RequestOutputKind.DELTA
         output_text = self._get_next_output_text(finished, delta)
         token_ids = new_token_ids if delta else self.output_token_ids
-        logprobs = new_logprobs if delta else self.logprobs
-        prompt_logprobs = new_prompt_logprobs if delta else self.prompt_logprobs
+        logprobs = new_logprobs if delta else self.request_logprobs
+        prompt_logprobs = new_prompt_logprobs if delta else self.request_prompt_logprobs
 
         request_output = RequestOutput.new(
             self.request_id,
