@@ -269,16 +269,18 @@ def rms_norm_dynamic_per_token_quant(
     return output, scales
 
 
-@register_fake("_C::rms_norm_dynamic_per_token_quant")
-def _rms_norm_dynamic_per_token_quant_fake(
-        output: torch.Tensor,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        scales: torch.Tensor,
-        epsilon: float,
-        scale_ub: Optional[torch.Tensor] = None,
-        residual: Optional[torch.Tensor] = None) -> None:
-    return None
+if hasattr(torch.ops._C, "rms_norm_dynamic_per_token_quant"):
+
+    @register_fake("_C::rms_norm_dynamic_per_token_quant")
+    def _rms_norm_dynamic_per_token_quant_fake(
+            output: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            scales: torch.Tensor,
+            epsilon: float,
+            scale_ub: Optional[torch.Tensor] = None,
+            residual: Optional[torch.Tensor] = None) -> None:
+        return None
 
 
 # quantization ops
