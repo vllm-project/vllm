@@ -120,9 +120,10 @@ class IncrementalDetokenizer:
     def _detokenize_ids(
         self,
         token_id_list: int,
+        skip_special_tokens=False,
     ) -> List[str]:
         return self.tokenizer.convert_ids_to_tokens(
-            token_id_list, skip_special_tokens=self.skip_special_tokens)
+            token_id_list, skip_special_tokens=skip_special_tokens)
 
     def _pythonize_sequence_position(
         self,
@@ -201,25 +202,6 @@ class IncrementalDetokenizer:
                 self._pythonize_sequence_position(
                     logprob_values[0:logprob_cnt],
                     logprob_token_ids[0:logprob_cnt], detokenize))
-
-        # if token_id not in logprob_token_ids[0:max_logprobs]:
-        #     # Sampled token is not in the in the top logprobs;
-        #     # inject it & resort, ensuring that excess logprobs
-        #     # not requested by the user have -inf probability
-        #     logprob_values[max_logprobs:-1] = (
-        #         [float('-inf')] *
-        #         (len(logprob_values) - 1 - max_logprobs))
-
-        #     indices = sorted(range(len(logprob_values)),
-        #                         key=lambda k: logprob_values[k],
-        #                         reverse=True)
-        #     logprob_values = [logprob_values[i] for i in indices]
-        #     logprob_token_ids = [
-        #         logprob_token_ids[i] for i in indices
-        #     ]
-
-        #     # There will be one more logprob than the user requested
-        #     logprob_cnt = max_logprobs + 1
 
     def _pythonize_maybe_detokenize_prompt_logprobs_for_request(
         self,
