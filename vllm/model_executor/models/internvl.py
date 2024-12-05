@@ -510,6 +510,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.mlp1 = self._init_mlp1(config)
 
         self.img_context_token_id = None
+        self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
@@ -683,13 +684,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         image_embeds = image_embeds.split(image_feature_sizes)
         return image_embeds
 
-    def _get_visual_token_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _set_visual_token_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self.is_mono:
-            visual_token_mask = (
+            self.visual_token_mask = (
                 input_ids == self.img_context_token_id).reshape(-1, 1)
         else:
-            visual_token_mask = None
-        return visual_token_mask
+            self.visual_token_mask = None
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -706,6 +706,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             assert self.img_context_token_id is not None
+            self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.img_context_token_id)
@@ -722,7 +723,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         **kwargs: object,
     ) -> Union[SamplerOutput, IntermediateTensors]:
 
-        visual_token_mask = None
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
