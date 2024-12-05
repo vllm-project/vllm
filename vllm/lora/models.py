@@ -555,17 +555,17 @@ class LoRAModelManager(AdapterModelManager):
                         input_dim,
                         output_dim,
                         rank,
-                        module.lora_a_stacked.dtype,
+                        module.lora_a_stacked[0].dtype,
                         "cpu",
                         embeddings_tensor_dim=embeddings_tensor_dim,
                         bias_enabled=bias_enabled)
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
-                        module.lora_a_stacked.shape[-1],
-                        module.lora_b_stacked.shape[-2],
+                        module.lora_a_stacked[0].shape[-1],
+                        module.lora_b_stacked[0].shape[-2],
                         rank,
-                        module.lora_a_stacked.dtype,
+                        module.lora_a_stacked[0].dtype,
                         "cpu",
                         bias_enabled=bias_enabled,
                     )

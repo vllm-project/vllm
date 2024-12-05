@@ -565,7 +565,9 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
-def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
+@pytest.mark.parametrize("bias_enabled", [True, False])
+def test_linear_replicated(dist_init, num_loras, device, stage,
+                           bias_enabled) -> None:
 
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -573,7 +575,8 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             bias_enabled=bias_enabled)
 
     def create_random_linear_replicated_layer():
 
@@ -585,7 +588,12 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
         lora_linear = ReplicatedLinearWithLoRA(linear)
 
         lora_linear.create_lora_weights(max_loras, lora_config)
-
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == 1)
+        if bias_enabled:
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
+        else:
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
@@ -669,8 +677,9 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
 @pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("bias_enabled", [True, False])
 def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
-                         device, stage) -> None:
+                         device, stage, bias_enabled) -> None:
 
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -679,7 +688,8 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              fully_sharded_loras=fully_shard,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             bias_enabled=bias_enabled)
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
@@ -700,7 +710,12 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
                            if not fully_shard else
                            ColumnParallelLinearWithShardedLoRA(linear))
         lora_linear.create_lora_weights(max_loras, lora_config)
-
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == 1)
+        if bias_enabled:
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
+        else:
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
@@ -784,8 +799,9 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 @pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("bias_enabled", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
-                                device, stage) -> None:
+                                device, stage, bias_enabled) -> None:
 
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -794,7 +810,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              fully_sharded_loras=fully_shard,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             bias_enabled=bias_enabled)
 
     def create_column_parallel_packed_layer():
         if repeats == 2:
@@ -832,10 +849,16 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             num_key_value_heads = 32
             num_attention_heads = 32
 
+        n_slices = repeats
         lora_linear.create_lora_weights(max_loras,
                                         lora_config,
                                         model_config=FakeConfig())
-
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == n_slices)
+        if bias_enabled:
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
+        else:
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
@@ -911,7 +934,6 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             512,
             lora_config.lora_extra_vocab_size,
         )
-        # lora_linear.set_mapping(*mapping_info)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
