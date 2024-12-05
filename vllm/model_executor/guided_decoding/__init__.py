@@ -15,6 +15,40 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
+    """Check if JSON schema contains features unsupported by xgrammar."""
+
+    def check_object(obj: dict) -> bool:
+        if not isinstance(obj, dict):
+            return False
+
+        # Check for pattern restrictions
+        if "pattern" in obj:
+            return True
+
+        # Check for numeric ranges
+        if obj.get("type") in ("integer", "number") and any(
+                key in obj for key in [
+                    "minimum", "maximum", "exclusiveMinimum",
+                    "exclusiveMaximum", "multipleOf"
+                ]):
+            return True
+
+        # Recursively check all nested objects and arrays
+        for value in obj.values():
+            if isinstance(value, dict):
+                if check_object(value):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict) and check_object(item):
+                        return True
+
+        return False
+
+    return check_object(schema)
+
+
 def maybe_backend_fallback(
         guided_params: GuidedDecodingParams) -> GuidedDecodingParams:
     # lm-format-enforce doesn't support grammar, fallback to xgrammar
@@ -45,6 +79,15 @@ def maybe_backend_fallback(
               and "::=" not in guided_params.grammar):
             logger.warning("xgrammar only supports EBNF grammars. "
                            "Falling back to use outlines instead.")
+            guided_params.backend = "outlines"
+
+        # xgrammar doesn't support some JSON schema features
+        elif (guided_params.json is not None
+              and has_xgrammar_unsupported_json_features(guided_params.json)):
+            logger.warning(
+                "xgrammar does not support advanced JSON schema features like "
+                "patterns or numeric ranges. "
+                "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
 
     return guided_params
