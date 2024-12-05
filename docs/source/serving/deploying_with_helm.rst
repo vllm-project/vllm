@@ -48,7 +48,7 @@ Values
 ------
 
 .. list-table:: Values
-   :widths: 25 25 25, 25
+   :widths: 25 25 25 25
    :header-rows: 1
 
     * - Key
