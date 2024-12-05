@@ -260,7 +260,8 @@ class GPUModelRunner:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
-        token_indices = positions_np + req_indices * self.max_model_len
+        token_indices = (positions_np +
+                         req_indices * self.input_batch.token_ids_cpu.shape[1])
         token_indices = torch.from_numpy(token_indices)
         input_ids = torch.empty((total_num_scheduled_tokens, ),
                                 dtype=torch.int32,
@@ -273,9 +274,15 @@ class GPUModelRunner:
                            out=input_ids)
 
         # Calculate the slot mapping.
+        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+        # where K is the max_num_blocks_per_req and the block size is 2.
+        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
+        # because M (max_model_len) is not necessarily divisible by block_size.
         block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
-            token_indices // self.block_size]
-        block_offsets = token_indices % self.block_size
+            req_indices * self.max_num_blocks_per_req +
+            positions_np // self.block_size]
+        block_offsets = torch.from_numpy(positions_np % self.block_size)
         slot_mapping = torch.empty((total_num_scheduled_tokens, ),
                                    dtype=torch.int32,
                                    device="cpu",
