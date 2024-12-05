@@ -106,10 +106,10 @@ def test_guided_complex_json_completion(sample_complex_json_schema, llm):
 
 @pytest.mark.skip_global_cleanup
 def test_guided_definition_json_completion(sample_definition_json_schema, llm):
-    sampling_params = SamplingParams(
-        temperature=1.0,
-        max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(json=sample_definition_json_schema))
+    sampling_params = SamplingParams(temperature=1.0,
+                                     max_tokens=1000,
+                                     guided_decoding=GuidedDecodingParams(
+                                         json=sample_definition_json_schema))
     outputs = llm.generate(prompts=[
         f"Give an example JSON for solving 8x + 7 = -23 "
         f"that fits this schema: {sample_definition_json_schema}"
