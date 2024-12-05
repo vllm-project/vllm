@@ -54,8 +54,8 @@ steps:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
   commands:
-  - python3 tests/standalone_tests/lazy_torch_compile.py
-  - bash tests/standalone_tests/python_only_compile.sh
+  - python3 standalone_tests/lazy_torch_compile.py
+  - bash standalone_tests/python_only_compile.sh
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py

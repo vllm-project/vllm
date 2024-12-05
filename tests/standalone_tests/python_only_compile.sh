@@ -5,6 +5,8 @@
 set -e
 set -x
 
+cd /vllm-workspace/
+
 # uninstall vllm
 pip3 uninstall -y vllm
 # restore the original files
