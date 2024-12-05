@@ -131,9 +131,6 @@ class FlashAttentionMetadata(AttentionMetadata):
     # captured.
     block_tables: Optional[torch.Tensor]
 
-    # CPU KV store metadata
-    kv_store_meta: Optional[KVStoreMeta]
-
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.

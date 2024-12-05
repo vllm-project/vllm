@@ -366,6 +366,8 @@ class KVBlockStore:
         self.event_map: dict[int, Optional[torch.cuda.Event,
                                            list[torch.cuda.Event]]] = {}
         self.batch_layers_to_GPU = batch_layers_transmission_to_GPU
+        self._put_blocks_cur_layer = 0
+        self._get_blocks_sync_cur_layer = 0
         with torch.cuda.device(device):
             self.store = torch.empty(
                 [self.num_blocks, 2, num_layer, num_block_slot, num_item],
@@ -417,6 +419,16 @@ class KVBlockStore:
                                                     layer_id,
                                                     incomplete_block_ids)
 
+    # called by each attention layer
+    def put_blocks(self, incomplete_block_ids: torch.Tensor,
+                   block_ids_mapping: torch.Tensor, kv_cache: torch.Tensor,
+                   forward_stream: torch.cuda.Stream):
+        layer_id = self._put_blocks_cur_layer
+        self.put_block_layer(incomplete_block_ids, block_ids_mapping, layer_id,
+                             kv_cache, forward_stream)
+        self._put_blocks_cur_layer = \
+                (self._put_blocks_cur_layer + 1) % self.num_layer
+
     def get_blocks(self, block_mapping_from_cpu: BlockMappingFromCPU,
                    kv_caches: list[torch.Tensor]):
         block_mapping_tensor = block_mapping_from_cpu.block_mapping
@@ -447,7 +459,7 @@ class KVBlockStore:
                 [event.cuda_event for event in event_list], is_batch_layer)
 
     # pair used with get_blocks_batch
-    def get_stream_sync(self, request_ids: torch.Tensor):
+    def get_stream_batch_sync(self, request_ids: torch.Tensor):
         if (request_ids.numel() == 0):
             return
         for req_id in request_ids.numpy():
@@ -475,6 +487,15 @@ class KVBlockStore:
                 event_list = self.event_map[req_id]
                 self.event_pool.put_events(event_list)
                 del self.event_map[req_id]
+
+    def get_blocks_sync(self, request_ids: torch.Tensor):
+        layer_id = self._get_blocks_sync_cur_layer
+        if (self.batch_layers_to_GPU) and (layer_id == 0):
+            self.get_stream_batch_sync(request_ids)
+        if (not self.batch_layers_to_GPU):
+            self.get_stream_layer_sync(layer_id, request_ids)
+        self._get_blocks_sync_cur_layer = \
+            (self._get_blocks_sync_cur_layer + 1) % self.num_layer
 
     def put_stream_sync(self):
         self.put_stream.synchronize()

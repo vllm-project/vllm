@@ -56,7 +56,6 @@ class WorkerBase(ABC):
         self.kv_store = self.cache_config.kv_store
         self.kv_store_manager = self.cache_config.kv_store_manager
 
-
     @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device

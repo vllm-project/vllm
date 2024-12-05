@@ -119,6 +119,17 @@ class Attention(nn.Module):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
 
+        assert (cache_config is not None)
+        self.kv_store = cache_config.kv_store
+
+    def put_blocks(self, incomplete_put_block_ids: torch.Tensor,
+                   put_block_ids_mapping: torch.Tensor,
+                   kv_cache: torch.Tensor) -> None:
+        if self.kv_store is not None:
+            self.kv_store.put_blocks(incomplete_put_block_ids,
+                                     put_block_ids_mapping, kv_cache,
+                                     torch.cuda.current_stream())
+
     def forward(
         self,
         query: torch.Tensor,
@@ -129,15 +140,23 @@ class Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
 
+        if (self.kv_store is not None):
+            self.kv_store.get_blocks_sync(
+                attn_metadata.kv_store_meta.request_ids)
+
         if self.use_direct_call:
-            return self.impl.forward(query,
-                                     key,
-                                     value,
-                                     kv_cache,
-                                     attn_metadata,
-                                     self._k_scale,
-                                     self._v_scale,
-                                     attn_type=attn_type)
+            ret = self.impl.forward(query,
+                                    key,
+                                    value,
+                                    kv_cache,
+                                    attn_metadata,
+                                    self._k_scale,
+                                    self._v_scale,
+                                    attn_type=attn_type)
+            self.put_blocks(
+                attn_metadata.kv_store_meta.incomplete_put_block_ids,
+                attn_metadata.kv_store_meta.put_block_ids_mapping, kv_cache)
+            return ret
         elif self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -153,11 +172,17 @@ class Attention(nn.Module):
             torch.ops.vllm.unified_attention_with_output(
                 query, key, value, output, kv_cache, attn_type,
                 self.layer_name)
+            self.put_blocks(
+                attn_metadata.kv_store_meta.incomplete_put_block_ids,
+                attn_metadata.kv_store_meta.put_block_ids_mapping, kv_cache)
             return output.view(-1, hidden_size)
         else:
-            return torch.ops.vllm.unified_attention(query, key, value,
-                                                    kv_cache, attn_type,
-                                                    self.layer_name)
+            ret = torch.ops.vllm.unified_attention(query, key, value, kv_cache,
+                                                   attn_type, self.layer_name)
+            self.put_blocks(
+                attn_metadata.kv_store_meta.incomplete_put_block_ids,
+                attn_metadata.kv_store_meta.put_block_ids_mapping, kv_cache)
+            return ret
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

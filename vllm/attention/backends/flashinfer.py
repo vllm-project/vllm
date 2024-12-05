@@ -30,6 +30,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.store.kv_store import KVStoreMeta
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
 
@@ -711,6 +712,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            kv_store_meta=KVStoreMeta.null(),
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             max_prefill_seq_len=max_prefill_seq_len,

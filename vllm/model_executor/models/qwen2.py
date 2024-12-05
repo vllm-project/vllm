@@ -313,9 +313,6 @@ class Qwen2Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.enable_prefix_caching = cache_config.enable_prefix_caching
-        self.kv_store = cache_config.kv_store
-
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -338,32 +335,15 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        if (self.kv_store is not None) and \
-                (self.kv_store.batch_layers_to_GPU):
-            self.kv_store.get_stream_sync(
-                attn_metadata.kv_store_meta.request_ids)
-
         for i in range(self.start_layer, self.end_layer):
-            layer_id = (i - self.start_layer)
-            if (self.kv_store is not None) and \
-                    (not self.kv_store.batch_layers_to_GPU):
-                self.kv_store.get_stream_layer_sync(
-                    layer_id, attn_metadata.kv_store_meta.request_ids)
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[layer_id],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
             )
-
-            if (self.kv_store is not None):
-                self.kv_store.put_block_layer(
-                    attn_metadata.kv_store_meta.incomplete_put_block_ids,
-                    attn_metadata.kv_store_meta.put_block_ids_mapping,
-                    layer_id, kv_caches[layer_id], torch.cuda.current_stream())
-
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,

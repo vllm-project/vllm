@@ -7,6 +7,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
 import torch
 
 from vllm.multimodal import MultiModalPlaceholderMap
+from vllm.store.kv_store import KVStoreMeta
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import (ModelRunnerBase,
@@ -114,6 +115,9 @@ class AttentionMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
+
+    # CPU KV store metadata
+    kv_store_meta: KVStoreMeta
 
     # The index maps that relate multi-modal embeddings to the corresponding
     # placeholders.
