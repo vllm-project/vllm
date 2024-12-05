@@ -341,9 +341,6 @@ class WorkerProc:
         self.worker.initialize()
         self.worker.load_model()
 
-    def _handle_sigterm(self, signum, frame):
-        self.shutdown()
-
     @staticmethod
     def make_worker_process(
             vllm_config: VllmConfig,
@@ -371,10 +368,9 @@ class WorkerProc:
             "initialization_output_path": initialization_input_path,
         }
         # Run EngineCore busy loop in background process.
-        # Process is non-daemonic so it can clean up properly.
         proc = context.Process(target=WorkerProc.run_worker,
                                kwargs=process_kwargs,
-                               daemon=False)
+                               daemon=True)
         proc.start()
 
         # Wait for startup
