@@ -1,6 +1,5 @@
 import pytest
 import torch
-from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
