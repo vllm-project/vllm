@@ -194,8 +194,8 @@ class Scheduler:
                 # constraint.
                 if self.lora_config and request.lora_request:
                     req_lora_id = request.lora_request.lora_int_id
-                    if len(requested_loras) == self.lora_config.max_loras and \
-                        req_lora_id not in requested_loras:
+                    if len(requested_loras) == self.lora_config.max_loras and (
+                            req_lora_id not in requested_loras):
                         # cannot schedule
                         break
                     requested_loras.add(req_lora_id)

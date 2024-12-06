@@ -3,7 +3,7 @@ Define LoRA adapter for model runner.
 """
 
 from contextlib import contextmanager
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch.nn as nn
@@ -105,11 +105,12 @@ class LoRAModelRunnerMixin:
                                            num_scheduled_tokens)
 
             # Make dummy lora requests
-            lora_requests: set[LoRARequest] = \
-                [LoRARequest(lora_name = f"warmup_{lora_id}",
-                             lora_int_id = lora_id,
-                              lora_path = "/not/a/real/path") \
-                    for lora_id in range(1, num_loras + 1)]
+            lora_requests: List[LoRARequest] = [
+                LoRARequest(lora_name=f"warmup_{lora_id}",
+                            lora_int_id=lora_id,
+                            lora_path="/not/a/real/path")
+                for lora_id in range(1, num_loras + 1)
+            ]
 
             with self.lora_manager.dummy_lora_cache():
                 # Add the dummy LoRAs here so _set_active_loras doesn't try to

@@ -234,9 +234,9 @@ class Detokenizer:
 
         assert (request.request_id not in self.request_states)
 
-        req_tokenizer = self._base_tokenizer \
-            if request.lora_request is None else \
-                    get_lora_tokenizer(request.lora_request)
+        req_tokenizer = self._base_tokenizer if (
+            request.lora_request is None) else get_lora_tokenizer(
+                request.lora_request)
 
         request_state = IncrementalDetokenizer.from_new_request(
             req_tokenizer, request)
