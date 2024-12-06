@@ -420,7 +420,7 @@ class PiecewiseBackend:
             self.first_run_finished = True
             # no specific sizes to compile
             if self.is_last_graph and not self.to_be_compiled_sizes:
-                end_monitoring_torch_compile(self.compilation_configs)
+                end_monitoring_torch_compile(self.vllm_config)
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
@@ -449,7 +449,7 @@ class PiecewiseBackend:
 
             # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:
-                end_monitoring_torch_compile(self.compilation_configs)
+                end_monitoring_torch_compile(self.vllm_config)
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
