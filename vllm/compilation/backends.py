@@ -23,6 +23,7 @@ logger = init_logger(__name__)
 def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config,
+                  compilation_config: CompilationConfig,
                   do_logging=False,
                   runtime_shape: Optional[int] = None,
                   use_inductor: bool = True):
@@ -48,6 +49,7 @@ def wrap_inductor(graph,
     if do_logging:
         now = time.time()
         elapsed = now - compilation_start_time
+        compilation_config.compilation_time += elapsed
         if runtime_shape is None:
             logger.info("Compiling a graph for general shape takes %.2f s",
                         elapsed)
@@ -169,6 +171,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 submod,
                 args,
                 self.compilation_configs.inductor_compile_config,
+                self.compilation_configs,
                 runtime_shape=None,
                 do_logging=index == len(self.compile_submod_names) - 1,
                 use_inductor=self.compilation_configs.use_inductor)
@@ -419,6 +422,7 @@ class PiecewiseBackend:
                 self.graph,
                 args,
                 self.compilation_configs.inductor_compile_config,
+                self.compilation_configs,
                 runtime_shape=runtime_shape,
                 do_logging=self.is_last_graph,
                 use_inductor=self.compilation_configs.use_inductor)
