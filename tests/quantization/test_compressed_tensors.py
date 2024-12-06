@@ -179,9 +179,17 @@ def test_compressed_tensors_kv_cache(vllm_runner):
         output = llm.generate_greedy("Hello world!", max_tokens=20)
         assert output
 
-@pytest.mark.parametrize(
-    "args_2of4",
-    [("nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-2of4-testing", "channel", "token")])
+
+@pytest.mark.parametrize("args_2of4", [
+    ("nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-2of4-testing", "channel",
+     "token"),
+    ("nm-testing/Meta-Llama-3-8B-Instruct-FP8-Static-Per-Tensor-testing",
+     "channel", "tensor"),
+    ("nm-testing/Meta-Llama-3-8B-Instruct-FP8-Static-testing", "tensor",
+     "tensor"),
+    ("nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-IA-Per-Tensor-Weight-testing",
+     "tensor", "token")
+])
 def test_compressed_tensors_2of4(vllm_runner, args_2of4):
     model, weight_strategy, input_strategy = args_2of4
     with vllm_runner(model) as llm:

@@ -388,13 +388,12 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
                                     sparsity_scheme=sparsity_scheme):
-            # Have a valid sparsity scheme 
+            # Have a valid sparsity scheme
             # Validate layer is supported by Cutlass 2:4 Kernel
-            scheme = CompressedTensors24(
-                quantized=weight_quant is not None or input_quant is not None,
-                weight_quant=weight_quant,
-                input_quant=input_quant
-            )
+            scheme = CompressedTensors24(quantized=weight_quant is not None
+                                         or input_quant is not None,
+                                         weight_quant=weight_quant,
+                                         input_quant=input_quant)
         else:
             # Find the quant_scheme
             scheme = self._get_scheme_from_parts(
