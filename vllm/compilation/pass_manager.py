@@ -7,6 +7,7 @@ from vllm.logger import init_logger
 
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
+from .activation_quant_fusion import ActivationQuantFusionPass
 from .inductor_pass import InductorPass
 from .reshapes import RedundantReshapesPass
 
@@ -46,6 +47,7 @@ class PostGradPassManager:
 
         if True:
             self.passes += [FusionPass.instance(pass_config)]
+            self.passes += [ActivationQuantFusionPass.instance(pass_config)]
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 
