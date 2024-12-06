@@ -765,11 +765,10 @@ class MultiModalProcessor(ABC):
 
         tokenizer = self._get_tokenizer()
 
-        mm_placeholders = dict[str, list[_PlaceholderInfo]]()
+        mm_placeholders = dict[str, _PlaceholderInfo]()
         offset = 0
 
-        for modality, num_items in mm_counts.items():
-            max_tokens = mm_max_tokens[modality]
+        for modality, max_tokens in mm_max_tokens.items():
             if max_tokens == 0:
                 continue
 
@@ -784,20 +783,18 @@ class MultiModalProcessor(ABC):
                 unit_count=max_tokens // len(repl_token_ids),
             )
 
-            mm_placeholders[modality] = [placeholders] * num_items
+            mm_placeholders[modality] = placeholders
             offset += placeholders.length
 
-        prompt_token_ids = flatten_2d_lists([
-            p.unit * p.unit_count for placeholders in mm_placeholders.values()
-            for p in placeholders
-        ])
+        prompt_token_ids = flatten_2d_lists(
+            [p.unit * p.unit_count for p in mm_placeholders.values()])
         prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
 
         return DummyData(
             seq_data=SequenceData.from_seqs(prompt_token_ids),
             multi_modal_data=self._get_dummy_mm_kwargs(mm_counts),
             multi_modal_placeholders={
-                modality: [p.to_range() for p in placeholders]
-                for modality, placeholders in mm_placeholders.items()
+                modality: [p.to_range()]
+                for modality, p in mm_placeholders.items()
             },
         )
