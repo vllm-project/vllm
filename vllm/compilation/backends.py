@@ -31,16 +31,6 @@ def wrap_inductor(graph,
 
     compilation_counter.num_inductor_compilations += 1
 
-    if do_logging:
-        now = time.time()
-        elapsed = now - compilation_start_time
-        if runtime_shape is None:
-            logger.info("Compiling a graph for general shape takes %.2f s",
-                        elapsed)
-        else:
-            logger.info("Compiling a graph for shape %s takes %.2f s",
-                        runtime_shape, elapsed)
-
     from torch._inductor import config
     current_config = config.shallow_copy_dict()
     from torch._inductor.compile_fx import compile_fx
@@ -51,7 +41,19 @@ def wrap_inductor(graph,
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
-    return compile_fx(graph, example_inputs, config_patches=current_config)
+    output = compile_fx(graph, example_inputs, config_patches=current_config)
+
+    if do_logging:
+        now = time.time()
+        elapsed = now - compilation_start_time
+        if runtime_shape is None:
+            logger.info("Compiling a graph for general shape takes %.2f s",
+                        elapsed)
+        else:
+            logger.info("Compiling a graph for shape %s takes %.2f s",
+                        runtime_shape, elapsed)
+
+    return output
 
 
 @dataclasses.dataclass
