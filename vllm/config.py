@@ -2082,7 +2082,7 @@ class KVTransferConfig(BaseModel):
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
-        """Parse the CLI value for the compilation config."""
+        """Parse the CLI value for the kv cache transfer config."""
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
