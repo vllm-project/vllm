@@ -27,15 +27,19 @@ def _arr(arr):
 
 
 def test_find_array():
+    # Create an LLM object to get the model config.
+    llm = vllm.LLM(MODEL_NAME, task="embedding")
+    pooler = GritLMPooler(model_config=llm.llm_engine.model_config)
+
     arr = _arr([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
-    assert GritLMPooler._find_array(arr, _arr([3, 4, 5]), start_idx=0) == 3
-    assert GritLMPooler._find_array(arr, _arr([3, 4, 5]), start_idx=1) == 3
-    assert GritLMPooler._find_array(arr, _arr([3, 4, 5]), start_idx=5) == -1
-    assert GritLMPooler._find_array(arr, _arr([3, 5]), start_idx=0) == -1
+    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=0) == 3
+    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=1) == 3
+    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=5) == -1
+    assert pooler._find_array(arr, _arr([3, 5]), start_idx=0) == -1
 
     with pytest.raises(ValueError):
-        GritLMPooler._find_array(arr, _arr([3, 4, 5]), start_idx=-1)
+        pooler._find_array(arr, _arr([3, 4, 5]), start_idx=-1)
 
 
 @pytest.fixture(scope="module")
