@@ -1,18 +1,18 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import Dict, List, Set, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
-import torch
 import numpy as np
+import torch
 
 from vllm.multimodal import MultiModalKwargs
-from vllm.sampling_params import SamplingParams 
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.sampling_params import SamplingType
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
+
 
 @dataclass
 class CachedRequestState:
