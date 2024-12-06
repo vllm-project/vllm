@@ -25,7 +25,7 @@ def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config,
                   compilation_config: CompilationConfig,
-                  do_logging=False,
+                  do_logging: bool =False,
                   runtime_shape: Optional[int] = None,
                   use_inductor: bool = True):
     if not use_inductor:
