@@ -37,7 +37,7 @@ def wrap_inductor(graph,
             logger.info("Compiling a graph for shape %s", runtime_shape)
 
     from torch._inductor import config
-    current_config = config.shallow_copy_dict()
+    current_config = config.get_config_copy()
     from torch._inductor.compile_fx import compile_fx
 
     if additional_inductor_config is not None:
