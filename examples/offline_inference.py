@@ -11,7 +11,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
-llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite-Chat", trust_remote_code=True, max_model_len=16384, dtype="float16", enforce_eager=True)
+llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite-Chat", trust_remote_code=True, max_model_len=16384, dtype="float16", enforce_eager=True, max_num_seqs=1, block_size=128)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)

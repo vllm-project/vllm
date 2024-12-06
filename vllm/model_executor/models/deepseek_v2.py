@@ -319,6 +319,9 @@ class DeepseekV2Attention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+from vllm.attention.backends.flash_attn import flash_attn_varlen_func, _get_query_key_seq_metadata, AttentionType
+from vllm import _custom_ops as ops
+
 class DeepseekV2MLAAttention(nn.Module):
     """
     Main reference: DeepseekV2 paper, and FlashInfer Implementation https://github.com/flashinfer-ai/flashinfer/pull/551.
@@ -473,13 +476,13 @@ class DeepseekV2MLAAttention(nn.Module):
 
         # The prefill attention will compute a multi-headed attention by up-projecting the latents.
         # TODO(simon): enable this for prefill, and save only the latents.
-        self.prefill_attn = Attention(num_heads=self.num_local_heads,
-                              head_size=256,
-                              scale=self.scaling,
-                              num_kv_heads=self.num_local_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.prefill_attn")
+        # self.prefill_attn = Attention(num_heads=self.num_local_heads,
+        #                       head_size=256,
+        #                       scale=self.scaling,
+        #                       num_kv_heads=self.num_local_heads,
+        #                       cache_config=cache_config,
+        #                       quant_config=quant_config,
+        #                       prefix=f"{prefix}.prefill_attn")
         # The decode attention will compute a multi-query attention by directly operating on the latent.
         self.decode_attn = Attention(num_heads=self.num_local_heads,
                               head_size=self.kv_lora_rank, # + self.qk_rope_head_dim, # TODO(simon): pass in qk_rope_head_dim? but i don't think
@@ -513,9 +516,12 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # TODO(simon): add prefill attn
-        # return self.forward_prefill(positions, hidden_states, kv_cache, attn_metadata)
-        return self.forward_decode(positions, hidden_states, kv_cache, attn_metadata)
+        # TODO(simon): support append/chunked prefill by two kernels, or using the decode kernel somehow.
+
+        if attn_metadata.prefill_metadata:
+            return self.forward_prefill(positions, hidden_states, kv_cache, attn_metadata)
+        if attn_metadata.decode_metadata:
+            return self.forward_decode(positions, hidden_states, kv_cache, attn_metadata)
 
     def forward_prefill(
         self,
@@ -559,12 +565,38 @@ class DeepseekV2MLAAttention(nn.Module):
         k[..., :self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim:] = k_pe
 
-        q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0).view(-1, self.num_local_heads * 256)
-        k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0).view(-1, self.num_local_heads * 256)
-        v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0).view(-1, self.num_local_heads * 256)
+        # write the latent and rope to kv cache
+        to_cache_key = kv_a.unsqueeze(1)
+        to_cache_key_rope = torch.nn.functional.pad(k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim], value=0)
+        if kv_cache.numel() > 0:
+            ops.reshape_and_cache_flash(
+                    to_cache_key,
+                    to_cache_key_rope,
+                    kv_cache[:, 0],
+                    kv_cache[:, 1],
+                    attn_metadata.slot_mapping.flatten(),
+                    kv_cache_dtype="auto", # TODO: remove hard code
+                    k_scale=1.0,
+                    v_scale=1.0,
+            )
 
-        # B(N'V)
-        attn_output = self.prefill_attn(q, k, v, kv_cache, attn_metadata)
+        # run the prefill kernels
+        q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0)
+        k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0)
+        v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0)
+
+        prefill_meta = attn_metadata.prefill_metadata
+        q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = _get_query_key_seq_metadata(prefill_meta, True, AttentionType.DECODER)
+        attn_output = flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=q_seq_start_loc,
+            cu_seqlens_k=k_seq_start_loc,
+            max_seqlen_q=q_seq_len,
+            max_seqlen_k=k_seq_len,
+            causal=True,
+            )
         attn_output = attn_output.view(-1, self.num_local_heads, 256)[..., :self.v_head_dim].reshape(-1, self.num_local_heads * self.v_head_dim)
 
         # B(N'V) -> BH
@@ -590,7 +622,6 @@ class DeepseekV2MLAAttention(nn.Module):
         else:
             q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads, self.qk_head_dim)
 
-
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
         kv_a, k_pe = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -612,9 +643,37 @@ class DeepseekV2MLAAttention(nn.Module):
         v = torch.nn.functional.pad(k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim], value=0).squeeze(1)
         assert k.numel() == v.numel(), f"{k.numel()=} != {v.numel()=}"
 
-        attn_output = self.decode_attn(q, k, v, kv_cache, attn_metadata)
+        # attn_output = self.decode_attn(q, k, v, kv_cache, attn_metadata)
 
-        assert attn_output.shape == (B, self.num_local_heads, self.kv_lora_rank), f"{attn_output.shape=}!={B=}, {self.num_local_heads=}, {self.v_head_dim=}"
+        # i just want to manually verify MLA is doing the right thing
+        # let's get all the previous kv cache and copy them here, run the MLA manually
+        paged_kv_indptr = attn_metadata.decode_metadata.paged_kv_indptr
+        paged_kv_indices = attn_metadata.decode_metadata.paged_kv_indices
+        paged_kv_last_page_len = attn_metadata.decode_metadata.paged_kv_last_page_len
+
+        # debug: we always have batch size 1 and one page
+        assert paged_kv_indptr.cpu().tolist() == [0, 1], f"{paged_kv_indptr.cpu().tolist()=}"
+        paged_idx = paged_kv_indices[0]
+        full_latent_cache = kv_cache[paged_idx, 0]
+        full_rope_cache = kv_cache[paged_idx, 1]
+        # let's write k and v into the full cache at paged_kv_last_page_len-1
+        full_latent_cache[paged_kv_last_page_len-1, :, :] = k
+        full_rope_cache[paged_kv_last_page_len-1, :, :] = v
+        full_latent_cache = full_latent_cache[:paged_kv_last_page_len, :, :]
+        full_rope_cache = full_rope_cache[:paged_kv_last_page_len, :, :self.qk_rope_head_dim]
+        full_kv_cache = torch.cat([full_latent_cache, full_rope_cache], dim=-1)
+
+        # now let's run the MLA manually
+        q_B_N_LR = q
+        k_S_1_LR = full_kv_cache
+        v_S_1_L = full_latent_cache
+        import math
+        scale = 1.0/math.sqrt(self.kv_lora_rank + self.qk_rope_head_dim)
+        attn_scores = torch.einsum("bnl,snl->nbs", q_B_N_LR, k_S_1_LR) * scale
+        attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
+        attn_output = torch.einsum("nbs,snl->bnl", attn_probs, v_S_1_L)
+
+        assert attn_output.shape == (B, self.num_local_heads, self.kv_lora_rank), f"{attn_output.shape=}!={B=}, {self.num_local_heads=}, {self.kv_lora_rank=}"
         # idk why but the attn_output is fp32
         attn_output = attn_output.to(q.dtype)
         # Apply UV, (B, N, L) @ W_UV (L, N, V) -> (B, N, V)

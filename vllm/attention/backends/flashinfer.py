@@ -838,6 +838,8 @@ class FlashInferImpl(AttentionImpl):
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
+        assert num_prefill_tokens == 0 and num_decode_tokens > 0, "only mla decode"
+
         assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
                     f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
         assert key_rope.shape[0] == num_prefill_tokens + num_decode_tokens, \
@@ -900,7 +902,8 @@ class FlashInferImpl(AttentionImpl):
                     q_nope=query_nope,
                     q_pe=query_pe,
                     paged_ckv_cache=kv_cache[:, 0],
-                    paged_kpe_cache=paged_kpe_cache,
+                    paged_kpe_cache=kv_cache[:, 1],
+                    # paged_kpe_cache=paged_kpe_cache,
                     # sm_scale=softmax_scale,
                     # logits_soft_cap=logits_soft_cap,
                     k_scale=k_scale,
@@ -916,7 +919,7 @@ class FlashInferImpl(AttentionImpl):
                     q_nope=decode_query_nope,
                     q_pe=decode_query_pe,
                     paged_ckv_cache=kv_cache[:, 0],
-                    paged_kpe_cache=paged_kpe_cache,
+                    paged_kpe_cache=kv_cache[:, 1],
                     # sm_scale=softmax_scale,
                     # logits_soft_cap=logits_soft_cap,
                     k_scale=k_scale,
