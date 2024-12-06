@@ -3,7 +3,7 @@ Define LoRA adapter for model runner.
 """
 
 from contextlib import contextmanager
-from typing import List, Tuple
+from typing import List, Set, Tuple
 
 import numpy as np
 import torch.nn as nn
@@ -58,7 +58,7 @@ class LoRAModelRunnerMixin:
 
     def _set_active_loras(self, prompt_lora_mapping: Tuple[int, ...],
                           token_lora_mapping: Tuple[int, ...],
-                          lora_requests: set[LoRARequest]) -> None:
+                          lora_requests: Set[LoRARequest]) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
 
@@ -76,7 +76,7 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping: Tuple[int, ...]  # of size input_batch.num_reqs
         token_lora_mapping: Tuple[int,
                                   ...]  # of size np.sum(num_scheduled_tokens)
-        lora_requests: set[LoRARequest]
+        lora_requests: Set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = \
                             input_batch.make_lora_inputs(num_scheduled_tokens)
         return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
