@@ -100,6 +100,13 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
+
+        from vllm.envs import VLLM_USE_V1
+        if VLLM_USE_V1:
+            assert parallel_config.worker_cls == "auto"
+            parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+            return
+
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
                 parallel_config.worker_cls = \

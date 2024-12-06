@@ -32,6 +32,7 @@ from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import make_zmq_socket
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -68,9 +69,6 @@ class Worker:
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
-
-        # see https://github.com/NVIDIA/nccl/issues/1234
-        os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -317,8 +315,10 @@ class WorkerProc:
         initialization_output_path: str,
     ):
         self.rank = rank
-        self.worker = Worker(vllm_config, local_rank, rank,
-                             distributed_init_method)
+        wrapper = WorkerWrapperBase(vllm_config=vllm_config)
+        wrapper.init_worker(vllm_config, local_rank, rank,
+                            distributed_init_method)
+        self.worker = wrapper.worker
 
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
