@@ -155,7 +155,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
-        self.compilation_configs = vllm_config.compilation_config
+        self.compilation_config = vllm_config.compilation_config
         self.graph_pool = graph_pool
         self.vllm_config = vllm_config
 
@@ -183,12 +183,12 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             compiled_graph_for_general_shape = wrap_inductor(
                 submod,
                 args,
-                self.compilation_configs.inductor_compile_config,
-                self.compilation_configs,
+                self.compilation_config.inductor_compile_config,
+                self.compilation_config,
                 graph_index=index,
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
-                use_inductor=self.compilation_configs.use_inductor)
+                use_inductor=self.compilation_config.use_inductor)
 
             self.module.__dict__[target] = PiecewiseBackend(
                 submod, self.vllm_config, self.graph_pool, index,
@@ -213,7 +213,7 @@ class VllmBackend:
     """
 
     vllm_config: VllmConfig
-    compilation_configs: CompilationConfig
+    compilation_config: CompilationConfig
     graph_pool: Any
     _called: bool = False
     # the graph we compiled
@@ -247,13 +247,13 @@ class VllmBackend:
         self.input_buffers = []
 
         self.vllm_config = vllm_config
-        self.compilation_configs = vllm_config.compilation_config
+        self.compilation_config = vllm_config.compilation_config
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
     def configure_post_pass(self):
-        config = self.compilation_configs
+        config = self.compilation_config
         self.post_grad_pass_manager.configure(config.pass_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
@@ -278,7 +278,7 @@ class VllmBackend:
         self.configure_post_pass()
 
         self.split_gm, self.piecewise_graphs = split_graph(
-            graph, self.compilation_configs.splitting_ops)
+            graph, self.compilation_config.splitting_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
         logger.debug("%s", lazy_format_graph_code("before split", self.graph))
@@ -300,8 +300,8 @@ class VllmBackend:
 
         self._called = True
 
-        if not self.compilation_configs.use_cudagraph or \
-            not self.compilation_configs.cudagraph_copy_inputs:
+        if not self.compilation_config.use_cudagraph or \
+            not self.compilation_config.cudagraph_copy_inputs:
             return self.split_gm
 
         # if we need to copy input buffers for cudagraph
@@ -371,7 +371,7 @@ class PiecewiseBackend:
 
         We will compile `self.graph` once for the general shape,
         and then compile for different shapes specified in
-        `compilation_configs.compile_sizes`.
+        `compilation_config.compile_sizes`.
 
         Independently, we will capture cudagraph for different shapes.
 
@@ -380,7 +380,7 @@ class PiecewiseBackend:
         """
         self.graph = graph
         self.vllm_config = vllm_config
-        self.compilation_configs = vllm_config.compilation_configs
+        self.compilation_config = vllm_config.compilation_config
         self.graph_pool = graph_pool
         self.piecewise_compile_index = piecewise_compile_index
         self.total_piecewise_compiles = total_piecewise_compiles
@@ -390,10 +390,10 @@ class PiecewiseBackend:
             piecewise_compile_index == total_piecewise_compiles - 1)
 
         self.compile_sizes: Set[int] = set(
-            self.compilation_configs.compile_sizes)
+            self.compilation_config.compile_sizes)
         self.capture_sizes: Set[int] = set(
-            self.compilation_configs.capture_sizes
-        ) if self.compilation_configs.use_cudagraph else set()
+            self.compilation_config.capture_sizes
+        ) if self.compilation_config.use_cudagraph else set()
 
         self.first_run_finished = False
 
@@ -440,12 +440,12 @@ class PiecewiseBackend:
             entry.runnable = wrap_inductor(
                 self.graph,
                 args,
-                self.compilation_configs.inductor_compile_config,
-                self.compilation_configs,
+                self.compilation_config.inductor_compile_config,
+                self.compilation_config,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
                 runtime_shape=runtime_shape,
-                use_inductor=self.compilation_configs.use_inductor)
+                use_inductor=self.compilation_config.use_inductor)
 
             # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:
@@ -455,13 +455,13 @@ class PiecewiseBackend:
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
-            if entry.num_finished_warmup < self.compilation_configs.cudagraph_num_of_warmups:  # noqa
+            if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
                 entry.num_finished_warmup += 1
                 if self.is_first_graph:
                     logger.debug(
                         "Warming up %s/%s for shape %s",
                         entry.num_finished_warmup,
-                        self.compilation_configs.cudagraph_num_of_warmups,
+                        self.compilation_config.cudagraph_num_of_warmups,
                         runtime_shape)
                 return entry.runnable(*args)
 
