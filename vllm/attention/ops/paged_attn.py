@@ -3,11 +3,14 @@ from typing import List, Optional, Tuple
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.attention.ops.prefix_prefill import context_attention_fwd
+    from vllm.attention.ops.triton_paged_attn_decode import (
+        paged_attn_decode_v1, paged_attn_decode_v2)
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -125,68 +128,85 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_seq_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
-
+        use_triton_pa_decode = envs.VLLM_USE_TRITON_PAGED_ATTN_DECODE
         if use_v1:
-            # Run PagedAttention V1.
-            ops.paged_attention_v1(
-                output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-                tp_rank,
-                blocksparse_local_blocks,
-                blocksparse_vert_stride,
-                blocksparse_block_size,
-                blocksparse_head_sliding_step,
-            )
+            if use_triton_pa_decode == 1:
+                paged_attn_decode_v1(
+                    output, query, key_cache, value_cache, block_tables,
+                    seq_lens, max_seq_len, kv_cache_dtype, num_kv_heads, scale,
+                    alibi_slopes, k_scale, v_scale, tp_rank,
+                    blocksparse_local_blocks, blocksparse_vert_stride,
+                    blocksparse_block_size, blocksparse_head_sliding_step)
+            else:
+                # Run PagedAttention V1.
+                ops.paged_attention_v1(
+                    output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    num_kv_heads,
+                    scale,
+                    block_tables,
+                    seq_lens,
+                    block_size,
+                    max_seq_len,
+                    alibi_slopes,
+                    kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                    tp_rank,
+                    blocksparse_local_blocks,
+                    blocksparse_vert_stride,
+                    blocksparse_block_size,
+                    blocksparse_head_sliding_step,
+                )
         else:
             # Run PagedAttention V2.
             assert _PARTITION_SIZE % block_size == 0
-            tmp_output = torch.empty(
-                size=(num_seqs, num_heads, max_num_partitions, head_size),
-                dtype=output.dtype,
-                device=output.device,
-            )
-            exp_sums = torch.empty(
-                size=(num_seqs, num_heads, max_num_partitions),
-                dtype=torch.float32,
-                device=output.device,
-            )
-            max_logits = torch.empty_like(exp_sums)
-            ops.paged_attention_v2(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-                tp_rank,
-                blocksparse_local_blocks,
-                blocksparse_vert_stride,
-                blocksparse_block_size,
-                blocksparse_head_sliding_step,
-            )
+
+            if use_triton_pa_decode == 1:
+                paged_attn_decode_v2(
+                    output, query, key_cache, value_cache, block_tables,
+                    seq_lens, max_seq_len, kv_cache_dtype, num_kv_heads, scale,
+                    alibi_slopes, k_scale, v_scale, max_num_partitions,
+                    tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
+                    blocksparse_block_size, blocksparse_head_sliding_step)
+            else:
+                tmp_output = torch.empty(
+                    size=(num_seqs, num_heads, max_num_partitions, head_size),
+                    dtype=output.dtype,
+                    device=output.device,
+                )
+                exp_sums = torch.empty(
+                    size=(num_seqs, num_heads, max_num_partitions),
+                    dtype=torch.float32,
+                    device=output.device,
+                )
+                max_logits = torch.empty_like(exp_sums)
+                ops.paged_attention_v2(
+                    output,
+                    exp_sums,
+                    max_logits,
+                    tmp_output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    num_kv_heads,
+                    scale,
+                    block_tables,
+                    seq_lens,
+                    block_size,
+                    max_seq_len,
+                    alibi_slopes,
+                    kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                    tp_rank,
+                    blocksparse_local_blocks,
+                    blocksparse_vert_stride,
+                    blocksparse_block_size,
+                    blocksparse_head_sliding_step,
+                )
         return output
 
     @staticmethod
