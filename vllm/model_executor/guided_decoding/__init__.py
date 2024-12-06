@@ -73,14 +73,6 @@ def maybe_backend_fallback(
                 "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
 
-        # xgrammar only supports EBNF grammars and uses the GBNF format
-        # https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md
-        elif (guided_params.grammar is not None
-              and "::=" not in guided_params.grammar):
-            logger.warning("xgrammar only supports EBNF grammars. "
-                           "Falling back to use outlines instead.")
-            guided_params.backend = "outlines"
-
         # xgrammar doesn't support some JSON schema features
         elif (guided_params.json is not None
               and has_xgrammar_unsupported_json_features(guided_params.json)):
