@@ -40,8 +40,9 @@ steps:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.1.0 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT --target vllm-openai --progress plain ."
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
-  - label: "Build TPU release image"
-    depends_on: block-release-image-build
+  - label: "Build and publish TPU release image"
+    depends_on: ~
+    if: build.env("NIGHTLY") == "1"
     agents:
       queue: tpu_queue_postmerge
     commands:
