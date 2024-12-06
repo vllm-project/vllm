@@ -351,7 +351,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             scale (float): Scaling factor for the operation
 
         """
-
+        # TODO: implement it based on torch ops
         raise NotImplementedError
 
     @abstractmethod
