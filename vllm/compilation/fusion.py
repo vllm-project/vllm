@@ -231,7 +231,7 @@ class FusionPass(VllmInductorPass):
 
                 fused_node = graph.call_function(
                     auto_functionalized,
-                    (torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, 
+                    (torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,
                      ),
                     kwargs=kwargs)
 
