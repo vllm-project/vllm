@@ -41,7 +41,9 @@ def wrap_inductor(graph,
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
-    output = compile_fx(graph, example_inputs, config_patches=current_config)
+    compiled_graph = compile_fx(graph,
+                                example_inputs,
+                                config_patches=current_config)
 
     if do_logging:
         now = time.time()
@@ -53,7 +55,7 @@ def wrap_inductor(graph,
             logger.info("Compiling a graph for shape %s takes %.2f s",
                         runtime_shape, elapsed)
 
-    return output
+    return compiled_graph
 
 
 @dataclasses.dataclass
