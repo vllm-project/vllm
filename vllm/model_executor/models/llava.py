@@ -129,7 +129,9 @@ def dummy_mm_kwargs_for_llava(ctx: InputProcessingContext,
         raise NotImplementedError(msg)
 
     image_processor = ctx.get_hf_processor().image_processor  # type: ignore
-    hf_inputs = image_processor(images=data["image"])
+    hf_inputs = image_processor \
+                    .preprocess(data['image'], return_tensors="pt") \
+                    .data
     return MultiModalKwargs(hf_inputs)
 
 
