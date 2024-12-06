@@ -1,11 +1,11 @@
 import itertools
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
                     Protocol, Set, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
-from torch.func import functional_call
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -17,7 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
+from vllm.utils import is_pin_memory_available, weak_ref_tensor
 
 logger = init_logger(__name__)
 
@@ -238,6 +238,88 @@ class AutoWeightsLoader:
         return autoloaded_weights
 
 
+class OffloadedTensor(torch.Tensor):
+
+    @staticmethod
+    def __new__(cls, elem, *, requires_grad=None):
+        # the wrapped tensor will have the same
+        # metadata as the original tensor
+        if elem.device != torch.device("cpu"):
+            # do not hold a strong reference to the tensor
+            elem = weak_ref_tensor(elem)
+        if requires_grad is None:
+            return super().__new__(cls, elem)
+        else:
+            return cls._make_subclass(cls, elem, requires_grad)
+
+    def __init__(self, elem):
+        super().__init__()
+
+        if elem.device == torch.device("cpu"):
+            # no need to offload the tensor
+            self.offloaded_tensor = elem
+            return
+
+        # use pin_memory if possible, which helps cudagraph capture speed
+        pin_memory = is_pin_memory_available()
+        # `torch.empty_like` does not support `pin_memory` argument
+        cpu_data = torch.empty_strided(size=elem.size(),
+                                       stride=elem.stride(),
+                                       dtype=elem.dtype,
+                                       layout=elem.layout,
+                                       device='cpu',
+                                       pin_memory=pin_memory)
+        cpu_data.copy_(elem)
+        self.offloaded_tensor = cpu_data
+
+    def load(self):
+        return self.offloaded_tensor.to(self.device, non_blocking=True)
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        if str(func) == "aten.detach.default":
+            # `nn.Parameter(data)` will call `data.detach()`
+            # and assert the returned data type is the same
+            # as the original data
+            return args[0]
+        if str(func) in ["aten.copy_.default", "aten.slice.Tensor"]:
+            # inplace or view operation on the offloaded tensor
+            # TODO: support more inplace operations if needed
+            new_args = (x.offloaded_tensor if isinstance(x, cls) else x
+                        for x in args)
+            new_kwargs = {
+                k: v.offloaded_tensor if isinstance(v, cls) else v
+                for k, v in kwargs.items()
+            }
+            return OffloadedTensor(func(*new_args, **new_kwargs))
+
+        if str(func) == "aten.uniform_.default":
+            # the generator will be on the device
+            # and the offloaded tensor will be on the CPU,
+            # so we cannot support this operation.
+            # we need to call `to()` and then `copy_()`
+            raise ValueError("Cannot perform uniform_ on an offloaded tensor")
+
+        if func._schema.is_mutable:
+            # the behavior of mutable ops for offloaded tensor
+            # is not well-defined and needs case-by-case discussion
+            raise ValueError(
+                f"Unrecognized mutable operation {func}"
+                " on an offloaded tensor. Please open an issue to discuss"
+                " the support for this operation.")
+
+        # for the rest of the operations, we will load the offloaded tensor
+        # on the fly and perform the operation on the device
+        new_args = (x.load() if isinstance(x, cls) else x for x in args)
+        new_kwargs = {
+            k: v.load() if isinstance(v, cls) else v
+            for k, v in kwargs.items()
+        }
+        return func(*new_args, **new_kwargs)
+
+
 def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
@@ -448,60 +530,25 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
 
 
-def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
-    device = next(module.parameters()).device
+@contextmanager
+def maybe_offload_to_cpu():
+    old_empty = torch.empty
 
-    if device == torch.device("cpu"):
-        return module
+    def fake_empty(*args, **kwargs):
+        global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
+        tensor = old_empty(*args, **kwargs)
+        if tensor.device != torch.device("cpu") and \
+            _CPU_OFFLOAD_BYTES < _CPU_OFFLOAD_MAX_BYTES:
+            _CPU_OFFLOAD_BYTES += tensor.numel() * tensor.element_size()
+            offloaded_tensor = OffloadedTensor(tensor)
+            return offloaded_tensor
+        return tensor
 
-    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-        return module
-
-    pin_memory = is_pin_memory_available()
-
-    # offload parameters to CPU
-    # use pin_memory if possible, which helps cudagraph capture speed
-    offloaded_parameters = False
-    for p in module.parameters():
-        if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-            # we use per-parameter offloading
-            # one module might have some parameters offloaded and some not
-            break
-
-        # `torch.empty_like` does not support `pin_memory` argument
-        cpu_data = torch.empty_strided(size=p.data.size(),
-                                       stride=p.data.stride(),
-                                       dtype=p.data.dtype,
-                                       layout=p.data.layout,
-                                       device='cpu',
-                                       pin_memory=pin_memory)
-        cpu_data.copy_(p.data)
-        p.data = cpu_data
-        _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
-        offloaded_parameters = True
-
-    if offloaded_parameters:
-        original_forward = module.forward
-
-        def forward(*args, **kwargs):
-            module.forward = original_forward
-            device_state = {
-                # here we blindly call `to(device)`
-                # if the parameter is already on the device, it will be a no-op
-                k: v.to(device, non_blocking=True)
-                for k, v in module.state_dict().items()
-            }
-            output = functional_call(module,
-                                     device_state,
-                                     args=args,
-                                     kwargs=kwargs)
-            module.forward = forward
-            return output
-
-        module.forward = forward
-
-    return module
+    torch.empty = fake_empty
+    try:
+        yield
+    finally:
+        torch.empty = old_empty
 
 
 def make_layers(
@@ -517,11 +564,13 @@ def make_layers(
     start_layer, end_layer = get_pp_indices(num_hidden_layers,
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
-    modules = torch.nn.ModuleList(
-        [PPMissingLayer() for _ in range(start_layer)] + [
-            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
-            for idx in range(start_layer, end_layer)
-        ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
+    with maybe_offload_to_cpu():
+        modules = torch.nn.ModuleList(
+            [PPMissingLayer() for _ in range(start_layer)] + [
+                layer_fn(prefix=f"{prefix}.{idx}")
+                for idx in range(start_layer, end_layer)
+            ] +
+            [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
 
 
