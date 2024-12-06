@@ -13,8 +13,9 @@ from .vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
-def silu_mul_pattern_static(result: torch.Tensor, result_silu_mul: torch.Tensor,
-                            input: torch.Tensor, scale: torch.Tensor):
+def silu_mul_pattern_static(result: torch.Tensor,
+                            result_silu_mul: torch.Tensor, input: torch.Tensor,
+                            scale: torch.Tensor):
     at1 = auto_functionalized(torch.ops._C.silu_and_mul.default,
                               result=result_silu_mul,
                               input=input)
