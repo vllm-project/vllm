@@ -71,7 +71,7 @@ class UniprocExecutor:
         output = self.worker.execute_model(scheduler_output)
         return output
 
-    def profile(self, is_start=True):
+    def profile(self, is_start: bool = True):
         self.worker.profile(is_start)
 
     def shutdown(self):

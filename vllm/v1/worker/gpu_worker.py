@@ -5,6 +5,7 @@ import pickle
 import signal
 import sys
 from dataclasses import dataclass
+from enum import Enum, auto
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -230,6 +231,10 @@ class Worker:
         else:
             self.profiler.stop()
 
+    def check_health(self) -> None:
+        # worker will always be healthy as long as it's running.
+        return
+
 
 @dataclass
 class WorkerInitRequestType:
@@ -257,7 +262,7 @@ class WorkerProcHandle:
     proc: BaseProcess
     initialization_input_path: str
     initialization_output_path: str
-    model_output_mq_handle: Optional[Handle]
+    worker_response_mq: MessageQueue  # The worker process writes to this MQ
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         with make_zmq_socket(self.initialization_output_path,
@@ -323,18 +328,14 @@ class WorkerProc:
         self.worker_request_mq = MessageQueue.create_from_handle(
             input_shm_handle, self.worker.rank)
 
-        # Worker 0 initializes a message queue for sending the model output
-        if self.rank == 0:
-            self.model_output_mq = MessageQueue(1, 1)
-            output_mq_handle = self.model_output_mq.export_handle()
-        else:
-            self.model_output_mq = None
-            output_mq_handle = None
+        # Initializes a message queue for sending the model output
+        self.worker_response_mq = MessageQueue(1, 1)
+        worker_response_mq_handle = self.worker_response_mq.export_handle()
 
         # Send Readiness signal to EngineCore process.
         with make_zmq_socket(initialization_output_path,
                              zmq.constants.PUSH) as ready_socket:
-            payload = pickle.dumps(output_mq_handle,
+            payload = pickle.dumps(worker_response_mq_handle,
                                    protocol=pickle.HIGHEST_PROTOCOL)
             ready_socket.send_multipart(
                 (WorkerInitResponseType.READY, payload))
@@ -369,27 +370,29 @@ class WorkerProc:
             "initialization_output_path": initialization_input_path,
         }
         # Run EngineCore busy loop in background process.
-        proc = context.Process(target=WorkerProc.run_worker,
+        proc = context.Process(target=WorkerProc.worker_main,
                                kwargs=process_kwargs,
                                daemon=True)
         proc.start()
 
         # Wait for startup
-        model_output_mq_handle = WorkerProc.wait_for_startup(
+        worker_response_mq_handle = WorkerProc.wait_for_startup(
             proc, initialization_input_path)
 
+        worker_response_mq = MessageQueue.create_from_handle(
+            worker_response_mq_handle, 0)
+
         return WorkerProcHandle(proc, initialization_input_path,
-                                initialization_output_path,
-                                model_output_mq_handle)
+                                initialization_output_path, worker_response_mq)
 
     def shutdown(self):
         self.worker_request_mq = None
-        self.model_output_mq = None
+        self.worker_response_mq = None
         destroy_model_parallel()
         destroy_distributed_environment()
 
     @staticmethod
-    def run_worker(*args, **kwargs):
+    def worker_main(*args, **kwargs):
         """ Worker initialization and execution loops.
         This runs a background process """
 
@@ -415,7 +418,7 @@ class WorkerProc:
                 kwargs["initialization_input_path"],
                 kwargs["initialization_output_path"])
 
-            worker.execute_model_busy_loop()
+            worker.worker_busy_loop()
 
         except SystemExit:
             logger.debug("Worker interrupted.")
@@ -497,22 +500,35 @@ class WorkerProc:
                     # Ensure message queues are ready.
                     # Must happen after sending the INITIALIZE_SUCESS message.
                     self.worker_request_mq.wait_until_ready()
-                    if self.model_output_mq is not None:
-                        self.model_output_mq.wait_until_ready()
+                    self.worker_response_mq.wait_until_ready()
 
                     # Exit initialization loop to begin model execution loop
                     return
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
 
-    def execute_model_busy_loop(self):
+    class ResponseStatus(Enum):
+        SUCCESS = auto()
+        FAILURE = auto()
+
+    def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         while True:
-            msg = self.worker_request_mq.dequeue()
+            fn, args, kwargs = self.worker_request_mq.dequeue()
 
-            output = self.worker.execute_model(msg)
+            try:
+                output = getattr(self.worker, fn)(*args, **kwargs)
+            except BaseException as e:
+                self.worker_response_mq.enqueue(
+                    (WorkerProc.ResponseStatus.FAILURE, e))
+                continue
+
             if self.worker.rank == 0:
-                self.model_output_mq.enqueue(output)
+                self.worker_response_mq.enqueue(
+                    (WorkerProc.ResponseStatus.SUCCESS, output))
+            else:
+                self.worker_response_mq.enqueue(
+                    (WorkerProc.ResponseStatus.SUCCESS, None))
 
 
 def init_worker_distributed_environment(
