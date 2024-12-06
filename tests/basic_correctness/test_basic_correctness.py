@@ -152,7 +152,6 @@ def test_models_distributed(
     )
 
 
-@pytest.mark.skip_v1
 def test_model_with_failure(vllm_runner) -> None:
     try:
         with patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
