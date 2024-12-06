@@ -2281,6 +2281,7 @@ class CompilationConfig(BaseModel):
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
+    compilation_time: float = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
@@ -2319,6 +2320,7 @@ class CompilationConfig(BaseModel):
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
         self.static_forward_context = {}
+        self.compilation_time = 0.0
 
     def init_backend(self) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:

@@ -11,6 +11,8 @@ from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import supports_dynamo
 
+from .monitor import start_monitoring_torch_compile
+
 logger = init_logger(__name__)
 
 _T = TypeVar("_T", bound=type[nn.Module])
@@ -154,6 +156,9 @@ def _support_torch_compile(
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)
+
+        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
+            start_monitoring_torch_compile(vllm_config.compilation_config)
 
     cls.__init__ = __init__
 
