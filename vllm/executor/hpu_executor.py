@@ -201,7 +201,8 @@ class HPUExecutor(ExecutorBase):
         self.driver_worker.stop_profile()
 
     def shutdown(self) -> None:
-        if hasattr(self.driver_worker, 'shutdown_inc'):
+        if hasattr(self, "driver_worker") and hasattr(self.driver_worker,
+                                                      'shutdown_inc'):
             self.driver_worker.shutdown_inc()
 
 
