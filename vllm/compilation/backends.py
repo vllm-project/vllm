@@ -191,7 +191,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 use_inductor=self.compilation_configs.use_inductor)
 
             self.module.__dict__[target] = PiecewiseBackend(
-                submod, self.compilation_configs, self.graph_pool, index,
+                submod, self.vllm_config, self.graph_pool, index,
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_general_shape)
 
@@ -361,10 +361,9 @@ class ConcreteSizeEntry:
 
 class PiecewiseBackend:
 
-    def __init__(self, graph: fx.GraphModule,
-                 compilation_configs: CompilationConfig, graph_pool: Any,
-                 piecewise_compile_index: int, total_piecewise_compiles: int,
-                 sym_shape_indices: List[int],
+    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
+                 graph_pool: Any, piecewise_compile_index: int,
+                 total_piecewise_compiles: int, sym_shape_indices: List[int],
                  compiled_graph_for_general_shape: Callable):
         """
         The backend for piecewise compilation.
@@ -380,7 +379,8 @@ class PiecewiseBackend:
         compile it first, and then capture cudagraph.
         """
         self.graph = graph
-        self.compilation_configs = compilation_configs
+        self.vllm_config = vllm_config
+        self.compilation_configs = vllm_config.compilation_configs
         self.graph_pool = graph_pool
         self.piecewise_compile_index = piecewise_compile_index
         self.total_piecewise_compiles = total_piecewise_compiles
