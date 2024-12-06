@@ -1132,7 +1132,7 @@ class SchedulerConfig:
     # Maximum number of prefill sequences to be
     # processed in a single iteration. Used only with padding-aware 
     # scheduling.
-    max_num_prefill_seqs: Optional[int] = None,
+    max_num_prefill_seqs: Optional[int] = None
 
     # If True, scheduler will consider padded
     # tokens in prefill.

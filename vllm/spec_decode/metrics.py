@@ -78,14 +78,6 @@ class AsyncMetricsCollector:
         self._rejsample_metrics_collect_interval_s = collect_interval_s
         self._last_metrics_collect_time = self._timer()
 
-    def init_tensors(self, rank: int, device: torch.device) -> None:
-        self._rank = rank
-        if device.type == 'hpu':
-            import habana_frameworks.torch as htorch
-            self._copy_stream = htorch.hpu.Stream()
-        else:
-            self._copy_stream = torch.cuda.Stream()
-
     def init_tensors(self,
                      rank: int,
                      device_type: Union[torch.device, str] = 'cuda') -> None:
@@ -94,6 +86,9 @@ class AsyncMetricsCollector:
             device_type = device_type.type
         if device_type == 'cuda':
             self._copy_stream = torch.cuda.Stream()
+        elif device_type == 'hpu':
+            import habana_frameworks.torch as htorch
+            self._copy_stream = htorch.hpu.Stream()
 
     def maybe_collect_rejsample_metrics(
             self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
