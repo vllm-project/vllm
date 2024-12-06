@@ -158,7 +158,7 @@ def _support_torch_compile(
             self, compilation_level=vllm_config.compilation_config.level)
 
         if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
-            start_monitoring_torch_compile(vllm_config.compilation_config)
+            start_monitoring_torch_compile(vllm_config)
 
     cls.__init__ = __init__
 

@@ -1,10 +1,10 @@
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-def start_monitoring_torch_compile(compilation_config: CompilationConfig):
+def start_monitoring_torch_compile(vllm_config: VllmConfig):
     pass
 
 
