@@ -11,7 +11,7 @@ from compressed_tensors.quantization import QuantizationType
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16, CompressedTensors24)
 
 
 @pytest.mark.parametrize(
@@ -177,4 +177,29 @@ def test_compressed_tensors_kv_cache(vllm_runner):
     model_path = "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
     with vllm_runner(model_path, kv_cache_dtype="fp8") as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=20)
+        assert output
+
+@pytest.mark.parametrize(
+    "args_2of4",
+    [("nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-2of4-testing", "channel", "token")])
+def test_compressed_tensors_2of4(vllm_runner, args_2of4):
+    model, weight_strategy, input_strategy = args_2of4
+    with vllm_runner(model) as llm:
+        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        layer = model.model.layers[0]
+
+        qkv_proj = layer.self_attn.qkv_proj
+        assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+        assert isinstance(qkv_proj.scheme, CompressedTensors24)
+
+        assert qkv_proj.scheme.weight_quant.strategy == weight_strategy
+        assert qkv_proj.scheme.input_quant.strategy == input_strategy
+        assert qkv_proj.scheme.quantized == True
+        assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
+        sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map
+        assert sparsity_map.get("Linear").format == "dense"
+        assert sparsity_map.get("Linear").sparsity_structure == "2:4"
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        print(output)
         assert output

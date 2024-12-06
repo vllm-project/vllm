@@ -101,7 +101,6 @@ class CompressedTensors24(CompressedTensorsScheme):
         :param bias: The bias to be added to the output tensor
         :return: The output tensor of the layer 
         """
-        print("running")
         if hasattr(layer, "input_scale"):
             q_input, input_scale = ops.scaled_fp8_quant(
                 x, scale=layer.input_scale)
