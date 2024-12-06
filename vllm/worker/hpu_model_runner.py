@@ -34,7 +34,10 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
@@ -165,21 +168,89 @@ def modify_decoder_layer(module: torch.nn.Module,
             modify_decoder_layer(child_module, suffix, n, counter)
 
 
+def get_names_for_rope(model: torch.nn.Module):
+    """Dynamically get layer names needed for cos and sin preparation for rope.
+
+    Every model can have a different naming convention for it's layers.
+    This function dynamically retrieves layer names to access rope layer.
+    If there's no rope layer, the function returns None.
+
+    This function assumes the following layer type layout:
+    Model -> ModuleList -> Attention -> RotaryEmbedding
+    """
+
+    def get_child(parent, suffix, is_list=False):
+        if parent is None:
+            return None, None
+        parent = parent[0] if is_list else parent
+        for child_name, child_module in parent.named_children():
+            if child_module.__class__.__name__.endswith(suffix):
+                return child_name, child_module
+        return None, None
+
+    model_name, model_module = get_child(model, "Model")
+    layers_name, layers_module = get_child(model_module, "ModuleList")
+    attn_name, attn_module = get_child(layers_module,
+                                       "Attention",
+                                       is_list=True)
+    rope_name, _ = get_child(attn_module, "RotaryEmbedding")
+
+    if rope_name is not None:
+        return {
+            'model_name': model_name,
+            'layers_name': layers_name,
+            'attn_name': attn_name,
+            'rope_name': rope_name
+        }
+
+
 class HpuModelAdapter:
 
-    def __init__(self, model, block_size, dtype, enforce_eager):
+    def __init__(self, model, block_size, dtype, enforce_eager, layer_names):
         self.model = model
+        self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
+                                               '1').lower() in ['1', 'true'] \
+                                                and not is_fake_hpu()
         self.block_size = block_size
         self.dtype = dtype
+        self.layer_names = layer_names
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
-            self.model = torch.compile(self.model,
-                                       backend='hpu_backend',
-                                       dynamic=False)
+            if os.getenv('VLLM_REGIONAL_COMPILATION',
+                         'true').lower() == 'true':
+                self.regional_compilation_layers_list = [
+                    RMSNorm, VocabParallelEmbedding
+                ]
+                self._regional_compilation(self.model)
+            else:
+                self.model = torch.compile(self.model,
+                                           backend='hpu_backend',
+                                           dynamic=False)
+
+    def _regional_compilation(self,
+                              module,
+                              parent_module=None,
+                              module_name=None):
+        if isinstance(module, torch.nn.ModuleList):
+            for children_name, children_module in module.named_children():
+                self._compile_region(module, children_name, children_module)
+        elif any(
+                isinstance(module, layer)
+                for layer in self.regional_compilation_layers_list):
+            self._compile_region(parent_module, module_name, module)
+        else:
+            for children_name, children_module in module.named_children():
+                self._regional_compilation(children_module, module,
+                                           children_name)
+
+    def _compile_region(self, model, name, module):
+        module = torch.compile(module, backend='hpu_backend', dynamic=False)
+        setattr(model, name, module)
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
-        if (attn_metadata is None or not attn_metadata.is_prompt):
+        if (attn_metadata is None or self.prefill_use_fusedsdpa
+                or not attn_metadata.is_prompt):
             return attn_metadata
 
         prefill_metadata = attn_metadata
@@ -280,6 +351,19 @@ class HpuModelAdapter:
                                                       attn_metadata.is_prompt)
         return attn_metadata
 
+    def _prepare_cos_sin(self, positions):
+        model_name = self.layer_names['model_name']
+        layers_name = self.layer_names['layers_name']
+        attn_name = self.layer_names['attn_name']
+        rope_name = self.layer_names['rope_name']
+
+        base_model = getattr(self.model, model_name)
+        first_model_layer = getattr(base_model, layers_name)[0]
+        attention_layer = getattr(first_model_layer, attn_name)
+        rope = getattr(attention_layer, rope_name)
+
+        rope.prepare_cos_sin(positions)
+
     def forward(self, *args, **kwargs):
         kwargs = kwargs.copy()
         selected_token_indices = kwargs.pop('selected_token_indices')
@@ -290,6 +374,8 @@ class HpuModelAdapter:
             kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
             input_ids.device, self.dtype)
         LoraMask.setLoraMask(kwargs.pop('lora_mask'))
+        if self.layer_names is not None:
+            self._prepare_cos_sin(kwargs['positions'])
         hidden_states = self.model(*args, **kwargs)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = hidden_states.index_select(0, selected_token_indices)
@@ -642,6 +728,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 self.model,
                 get_decoder_layer_suffix(self.model.config.model_type),
                 hidden_layer_markstep_interval)
+            names_for_rope = get_names_for_rope(self.model)
             torch.hpu.synchronize()
 
             with HabanaMemoryProfiler() as m_wrap:
@@ -649,7 +736,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     self.model,
                     self.block_size,
                     dtype=self.model_config.dtype,
-                    enforce_eager=self.enforce_eager)
+                    enforce_eager=self.enforce_eager,
+                    layer_names=names_for_rope)
             msg = f"Wrapping in HPU Graph took {m_wrap.get_summary_string()}"
             logger.info(msg)
 
@@ -1534,8 +1622,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.bucketing_ctx.generate_decode_buckets(max_blocks)
 
         if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
-            cache_size_limit = len(self.bucketing_ctx.prompt_buckets) + len(
-                self.bucketing_ctx.decode_buckets) + 1
+            cache_size_limit = 1 + 3 * (
+                len(self.bucketing_ctx.prompt_buckets) +
+                len(self.bucketing_ctx.decode_buckets))
             torch._dynamo.config.cache_size_limit = max(
                 cache_size_limit, torch._dynamo.config.cache_size_limit)
             # Multiply by 8 to follow the original default ratio between
