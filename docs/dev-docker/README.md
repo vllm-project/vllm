@@ -22,7 +22,7 @@ The performance data below was measured on a server with MI300X accelerators wit
 
 | System  | MI300X with 8 GPUs  |
 |---|---|
-| BKC | 24.11 |
+| BKC | 24.13 |
 | ROCm | version ROCm 6.2.2 |
 | amdgpu | build 2009461 |
 | OS | Ubuntu 22.04 |
@@ -41,12 +41,13 @@ The performance data below was measured on a server with MI300X accelerators wit
 
 ## Pull latest 
 
-You can pull the image with `docker pull rocm/vllm-dev:20241114-tuned`
+You can pull the image with `docker pull rocm/vllm-dev:main`
 
 ### What is New
 
    - MoE optimizations for Mixtral 8x22B, FP16
    - Llama 3.2 stability improvements
+   - Llama 3.3 support
       
      
 Gemms are tuned using PyTorch's Tunable Ops  feature (https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/cuda/tunable/README.md)
@@ -58,9 +59,9 @@ The  gemms are automatically enabled in the docker image, and all stored gemm co
 
 To make it easier to run fp8 Llama 3.1 models on MI300X, the quantized checkpoints are available on AMD Huggingface space as follows 
 
-- https://huggingface.co/amd/Meta-Llama-3.1-8B-Instruct-FP8-KV 
-- https://huggingface.co/amd/Meta-Llama-3.1-70B-Instruct-FP8-KV 
-- https://huggingface.co/amd/Meta-Llama-3.1-405B-Instruct-FP8-KV
+- https://huggingface.co/amd/Llama-3.1-8B-Instruct-FP8-KV 
+- https://huggingface.co/amd/Llama-3.1-70B-Instruct-FP8-KV 
+- https://huggingface.co/amd/Llama-3.1-405B-Instruct-FP8-KV
 - https://huggingface.co/amd/grok-1-FP8-KV
 
 Currently these models are private. Please join https://huggingface.co/amd to access. 
@@ -72,7 +73,7 @@ These FP8 quantized checkpoints were generated with AMD’s Quark Quantizer. For
 ### Quantize your own models
 This step is optional for you to use quantized models on your own. Take Llama 3.1 405B as an example. 
 
-Download the Model View the Meta-Llama-3.1-405B model at https://huggingface.co/meta-llama/Meta-Llama-3.1-405B. Ensure that you have been granted access, and apply for it if you do not have access.
+Download the Model View the Llama-3.1-405B model at https://huggingface.co/meta-llama/Llama-3.1-405B. Ensure that you have been granted access, and apply for it if you do not have access.
 
 If you do not already have a HuggingFace token, open your user profile (https://huggingface.co/settings/profile), select "Access Tokens", press "+ Create New Token", and create a new Read token.
 
@@ -92,18 +93,18 @@ Create the directory for Llama 3.1 models (if it doesn't already exist)
 
 Download the model
 
-    huggingface-cli download meta-llama/Meta-Llama-3.1-405B-Instruct --exclude "original/*" --local-dir /data/llama-3.1/Meta-Llama-3.1-405B-Instruct
+    huggingface-cli download meta-llama/Llama-3.1-405B-Instruct --exclude "original/*" --local-dir /data/llama-3.1/Llama-3.1-405B-Instruct
 
-Similarly, you can download Meta-Llama-3.1-70B and Meta-Llama-3.1-8B.
+Similarly, you can download Llama-3.1-70B and Llama-3.1-8B.
 
 [Download and install Quark](https://quark.docs.amd.com/latest/install.html)
 
 Run the quantization script in the example folder using the following command line:
-export MODEL_DIR = [local model checkpoint folder] or meta-llama/Meta-Llama-3.1-405B-Instruct
+export MODEL_DIR = [local model checkpoint folder] or meta-llama/Llama-3.1-405B-Instruct
 #### single GPU
         python3 quantize_quark.py \ 
         --model_dir $MODEL_DIR \
-        --output_dir Meta-Llama-3.1-405B-Instruct-FP8-KV \                           
+        --output_dir Llama-3.1-405B-Instruct-FP8-KV \                           
         --quant_scheme w_fp8_a_fp8 \
         --kv_cache_dtype fp8 \
         --num_calib_data 128 \
@@ -113,7 +114,7 @@ export MODEL_DIR = [local model checkpoint folder] or meta-llama/Meta-Llama-3.1-
 #### If model size is too large for single GPU, please use multi GPU instead.
         python3 quantize_quark.py \ 
         --model_dir $MODEL_DIR \
-        --output_dir Meta-Llama-3.1-405B-Instruct-FP8-KV \                           
+        --output_dir Llama-3.1-405B-Instruct-FP8-KV \                           
         --quant_scheme w_fp8_a_fp8 \
         --kv_cache_dtype fp8 \
         --num_calib_data 128 \
@@ -131,7 +132,7 @@ Download and launch the docker,
     --cap-add=CAP_SYS_ADMIN --cap-add=SYS_PTRACE \
     --device=/dev/kfd --device=/dev/dri --device=/dev/mem \
     -v /data/llama-3.1:/data/llm \
-    docker pull rocm/vllm-dev:20241114-tuned
+    rocm/vllm-dev:main
 
 ### Benchmark with AMD vLLM Docker
 
@@ -176,7 +177,7 @@ Below is a list of options which are useful:
 - **--max-seq-len-to-capture** : Maximum sequence length for which Hip-graphs are captured and utilized. It's recommended to use Hip-graphs for the best decode performance. The default value of this parameter is 8K, which is lower than the large context lengths supported by recent models such as LLama. Set this parameter to max-model-len or maximum context length supported by the model for best performance.
 - **--gpu-memory-utilization** : The ratio of GPU memory reserved by a vLLM instance. Default value is 0.9. It's recommended to set this to 0.99 to increase KV cache space.
 
-Note: vLLM's server creation command line (vllm serve) supports the above parameters as command line arguments. However, vLLM's benchmark_latency and benchmark_throughput command lines may not include all of these flags as command line arguments. In that case, it might be necessary to add these parameters to the LLMEngine instance constructor inside the benchmark script. 
+Note: vLLM's server creation command line (vllm serve) supports the above parameters as command line arguments.
   
 ##### Online Gemm Tuning
 Online Gemm tuning for small decode batch sizes can improve performance in some cases. e.g. Llama 70B upto Batch size 8
@@ -268,16 +269,18 @@ If you want to run Meta-Llama-3.1-405B FP16, please run
     python /app/vllm/benchmarks/benchmark_throughput.py \
     --model /data/llm/Meta-Llama-3.1-405B-Instruct \
     --dtype float16 \
-    --gpu-memory-utilization 0.99 \
+    --gpu-memory-utilization 0.9 \
     --num-prompts 2000 \
     --distributed-executor-backend mp \
     --num-scheduler-steps 10 \
     --tensor-parallel-size 8 \
     --input-len 128 \
     --output-len 128 \
-    --swapspace 16 \
-    --max-model-length 8192 \
+    --swap-space 16 \
+    --max-model-len 8192 \
     --max-num-batched-tokens 65536 \
+    --swap-space
+    --max-model-len
     --gpu-memory-utilization 0.99
 
 For fp8 quantized Llama3.18B/70B models:
@@ -410,7 +413,7 @@ Please refer to the MLPerf instructions for recreating the MLPerf numbers.
 
 Updated:
 
-vLLM: https://github.com/ROCm/vllm/commit/5362727ec366c1542b2be7a520e7c44e5cc3ce30
+vLLM: https://github.com/ROCm/vllm/commit/2c60adc83981ada77a77b2adda78ef109d2e2e2b
 ### Docker Manifest
 
 To reproduce the release docker:
@@ -418,11 +421,6 @@ To reproduce the release docker:
 ```
 git clone https://github.com/ROCm/vllm.git
 cd vllm
-git checkout 5362727ec366c1542b2be7a520e7c44e5cc3ce30
+git checkout 2c60adc83981ada77a77b2adda78ef109d2e2e2b
 docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .
 ```
-
-For details on all the dependencies, please refer to: https://github.com/ROCm/vllm/blob/5362727ec366c1542b2be7a520e7c44e5cc3ce30/Dockerfile.rocm
-
-
-
