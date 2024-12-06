@@ -170,8 +170,8 @@ class Scheduler:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
-        #  Record the LoRAs in scheduled_running_reqs
-        requested_loras: set[int] = set()
+        # Record the LoRAs in scheduled_running_reqs
+        requested_loras: Set[int] = set()
         if self.lora_config:
             requested_loras =  \
                 set(req.lora_request.lora_int_id \

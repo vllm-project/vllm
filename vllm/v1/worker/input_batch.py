@@ -275,7 +275,7 @@ class InputBatch:
         )
 
     def make_lora_inputs(self, num_scheduled_tokens: np.array) \
-                -> Tuple[Tuple[int, ...], Tuple[int, ...], set[LoRARequest]]:
+                -> Tuple[Tuple[int, ...], Tuple[int, ...], Set[LoRARequest]]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
         datastructures used to activate the current LoRAs.
@@ -292,8 +292,8 @@ class InputBatch:
         token_lora_mapping = tuple(
             req_lora_mapping.repeat(num_scheduled_tokens))
 
-        active_lora_ids: set[int] = set(np.unique(req_lora_mapping))
-        active_lora_requests: set[LoRARequest] = \
+        active_lora_ids: Set[int] = set(np.unique(req_lora_mapping))
+        active_lora_requests: Set[LoRARequest] = \
             set({lr for lr in self.lora_requests \
                     if lr.lora_int_id in active_lora_ids})
         # Update lora requests
