@@ -27,6 +27,15 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
                             c10::optional<torch::Tensor> const& bias);
+
+void cutlass_grouped_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
+                            torch::Tensor const& b, torch::Tensor const& a_scales,
+                            torch::Tensor const& b_scales,
+                            torch::Tensor const& problem_sizes,
+                            torch::Tensor const& out_offsets,
+                            torch::Tensor const& a_offsets,
+                            torch::Tensor const& b_offsets);
+
 #endif
 
 void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
@@ -149,6 +158,17 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
       "No compiled cutlass_scaled_mm for a compute capability less than "
       "CUDA device capability: ",
       version_num);
+}
+
+void cutlass_grouped_mm(torch::Tensor& out, torch::Tensor const& a,
+                        torch::Tensor const& b, torch::Tensor const& a_scales,
+                        torch::Tensor const& b_scales,
+                        torch::Tensor const& problem_sizes,
+                        torch::Tensor const& out_offsets,
+                        torch::Tensor const& a_offsets,
+                        torch::Tensor const& b_offsets) {
+  cutlass_grouped_mm_sm90(out, a, b, a_scales, b_scales, problem_sizes,
+                          out_offsets, a_offsets, b_offsets);
 }
 
 void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,

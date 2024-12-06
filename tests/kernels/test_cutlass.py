@@ -6,6 +6,7 @@ from typing import Optional, Type
 
 import pytest
 import torch
+import random
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
@@ -453,3 +454,70 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
 
 def test_cutlass_support_opcheck():
     opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability, ))
+
+# TODO fix scales
+@pytest.mark.parametrize("m,n,k", [(2048, 2048, 2048)])
+@pytest.mark.parametrize("num_groups", [10])
+@pytest.mark.parametrize("per_act_token", [False])# [True, False])
+@pytest.mark.parametrize("per_out_ch", [True])# [True, False])
+@pytest.mark.parametrize("use_bias", [False])# [True, False])
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
+                    reason="FP8 is not supported on this GPU type.")
+def test_cutlass_fp8_group_gemm(m: int, n: int, k: int, num_groups: int,
+                                per_act_token: bool,
+                                per_out_ch: bool, use_bias: bool):
+
+    # Test for a cutlass kernel with per-token activation quantization
+    # and per-output channel weight quantization.
+    device = "cuda"
+    out_dtype = torch.half
+
+    alignment = 16 # 128 // 8
+    problem_sizes = torch.empty((num_groups, 3), device="cpu")
+    offsets_a = torch.empty((num_groups), device="cpu")
+    offsets_b = torch.empty((num_groups), device="cpu")
+    offsets_c = torch.empty((num_groups), device="cpu")
+    tot_a = 0
+    tot_b = 0
+    tot_c = 0
+    for g in range(num_groups):
+        m = alignment * random.randint(1, 64)
+        n = alignment * random.randint(1, 64)
+        k = alignment * random.randint(1, 64)
+        tot_a += m * k
+        tot_b += k * n
+        tot_c += m * n
+        offsets_a[g] = m * k
+        offsets_b[g] = k * n
+        offsets_c[g] = m * n
+        problem_sizes[g][0] = m
+        problem_sizes[g][1] = n
+        problem_sizes[g][2] = k
+
+    a = to_fp8(torch.randn((tot_a), device=device))
+    b = to_fp8(torch.randn((tot_b), device=device).t())
+    c = torch.zeros((tot_c), device=device).to(out_dtype)
+
+    m_a_scales = m if per_act_token else 1
+    n_b_scales = n if per_out_ch else 1
+
+    scale_a = (torch.randn((m_a_scales, 1), device=device,
+                           dtype=torch.float32))
+    scale_b = (torch.randn((1, n_b_scales), device=device,
+                           dtype=torch.float32))
+    if use_bias:
+        bias = torch.rand((n, 1), device=device, dtype=out_dtype) * 10
+    else:
+        bias = None
+
+    # TODO strides we can get later the same way as in scaled_mm_c3x.cu
+    torch.ops._C.cutlass_grouped_mm(c, a, b, scale_a, scale_b, problem_sizes,
+                                    offsets_c, offsets_a, offsets_b)
+    # baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+
+    print(c)
+
+    # torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-2)
+
+    # opcheck(torch.ops._C.cutlass_scaled_mm,
+    #         (out, a, b, scale_a, scale_b, bias))

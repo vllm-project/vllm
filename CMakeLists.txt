@@ -209,13 +209,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        GIT_TAG v3.5.1
+        # GIT_TAG v3.5.1
+        GIT_TAG dbdae514e03f83968f8b7dd4fb064071b9bfbdd1
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
+        GIT_SHALLOW FALSE
   )
   FetchContent_MakeAvailable(cutlass)
 
@@ -261,7 +262,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # CUDA 12.0 or later (and only work on Hopper, 9.0/9.0a for now).
   cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0;9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
+    set(SRCS
+        "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
+        "csrc/quantization/cutlass_w8a8/grouped_gemm_test.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
