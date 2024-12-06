@@ -20,6 +20,7 @@ class Request:
         eos_token_id: Optional[int],
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
+        mm_hash: Optional[List[str]] = None,
     ) -> None:
         self.request_id = request_id
         self.inputs = SingletonInputsAdapter(inputs)
@@ -56,6 +57,7 @@ class Request:
             self.mm_inputs = self.inputs.multi_modal_inputs
         else:
             self.mm_inputs: List[MultiModalKwargs] = []
+        self.mm_hash = mm_hash
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -73,6 +75,7 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
+            mm_hash=request.mm_hash,
         )
 
     @property
