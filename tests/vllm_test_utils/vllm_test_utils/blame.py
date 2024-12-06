@@ -46,8 +46,8 @@ def blame(func: Callable) -> Generator[BlameResult, None, None]:
                 pass
         return _trace_calls
 
-    sys.settrace(_trace_calls)
-
-    yield result
-
-    sys.settrace(None)
+    try:
+        sys.settrace(_trace_calls)
+        yield result
+    finally:
+        sys.settrace(None)

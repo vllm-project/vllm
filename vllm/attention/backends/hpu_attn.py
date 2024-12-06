@@ -23,6 +23,10 @@ logger = init_logger(__name__)
 class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "HPU_ATTN"
+
+    @staticmethod
     def get_impl_cls() -> Type["HPUAttentionImpl"]:
         return HPUAttentionImpl
 
@@ -141,6 +145,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 

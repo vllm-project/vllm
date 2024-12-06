@@ -1,3 +1,4 @@
+import copy
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -10,7 +11,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
 import torch
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
@@ -40,7 +41,7 @@ from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
+from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -80,7 +81,7 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
 
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
-_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
+_O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 
 
 @dataclass
@@ -112,7 +113,7 @@ class SchedulerContext:
     def __init__(self, multi_step_stream_outputs: bool = False):
         self.output_queue: Deque[OutputData] = deque()
         self.request_outputs: List[Union[RequestOutput,
-                                         EmbeddingRequestOutput]] = []
+                                         PoolingRequestOutput]] = []
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
@@ -472,6 +473,7 @@ class LLMEngine:
         The workers will determine the number of blocks in both the GPU cache
         and the swap CPU cache.
         """
+        start = time.time()
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
 
@@ -487,6 +489,9 @@ class LLMEngine:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        elapsed = time.time() - start
+        logger.info(("init engine (profile, create kv cache, "
+                     "warmup model) took %.2f seconds"), elapsed)
 
     @classmethod
     def _get_executor_cls(cls,
@@ -619,7 +624,7 @@ class LLMEngine:
             model_config=self.model_config,
             scheduler_config=self.scheduler_config,
             parallel_config=self.parallel_config,
-            enable_lora=bool(self.lora_config))
+            lora_config=self.lora_config)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -719,7 +724,8 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
@@ -1023,9 +1029,9 @@ class LLMEngine:
         This function updates num_computed_tokens for prompt sequences
         when Multi-Step is enabled.
 
-        seq_group: SequenceGroup to update the num_computed_tokens for. 
+        seq_group: SequenceGroup to update the num_computed_tokens for.
         seq_group_meta: Metadata of the given SequenceGroup.
-        is_first_step_output: Optional[bool] - 
+        is_first_step_output: Optional[bool] -
             When available, is_first_step_output indicates if the appended
             output token is the output of the first-step in multi-step.
             A value of None indicates that outputs from all steps in
@@ -1314,7 +1320,7 @@ class LLMEngine:
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs)
 
-    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -1398,6 +1404,9 @@ class LLMEngine:
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
 
+            finished_requests_ids = self.scheduler[
+                virtual_engine].get_and_reset_finished_requests_ids()
+
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
@@ -1409,13 +1418,13 @@ class LLMEngine:
                 self._cache_scheduler_outputs_for_multi_step(
                     virtual_engine, seq_group_metadata_list, scheduler_outputs,
                     allow_async_output_proc)
+        else:
+            finished_requests_ids = list()
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
         if not scheduler_outputs.is_empty():
-            finished_requests_ids = self.scheduler[
-                virtual_engine].get_and_reset_finished_requests_ids()
 
             # Check if we have a cached last_output from the previous iteration.
             # For supporting PP this is probably the best way to pass the
@@ -2032,7 +2041,11 @@ class LLMEngine:
 
         logits_processors = []
 
-        if (guided_decoding := sampling_params.guided_decoding) is not None:
+        if sampling_params.guided_decoding is not None:
+            # Defensively copy sampling params since guided decoding logits
+            # processors can have different state for each request
+            sampling_params = copy.copy(sampling_params)
+            guided_decoding = sampling_params.guided_decoding
 
             logger.debug(
                 "Building guided decoding logits processor in "
@@ -2043,7 +2056,9 @@ class LLMEngine:
                 self.decoding_config.guided_decoding_backend
 
             processor = get_local_guided_decoding_logits_processor(
-                guided_params=guided_decoding, tokenizer=tokenizer)
+                guided_params=guided_decoding,
+                tokenizer=tokenizer,
+                model_config=self.model_config)
             if processor:
                 logits_processors.append(processor)
 

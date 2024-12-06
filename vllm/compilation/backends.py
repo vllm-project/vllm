@@ -1,5 +1,6 @@
 import copy
 import dataclasses
+import time
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from vllm.utils import weak_ref_tensors
 
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
+from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
@@ -22,31 +24,54 @@ logger = init_logger(__name__)
 def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config,
-                  do_logging=False,
+                  compilation_config: CompilationConfig,
+                  graph_index: int = 0,
+                  num_graphs: int = 1,
                   runtime_shape: Optional[int] = None,
                   use_inductor: bool = True):
+    if graph_index == 0:
+        # before compiling the first graph, record the start time
+        global compilation_start_time
+        compilation_start_time = time.time()
+
     if not use_inductor:
         return graph
 
     compilation_counter.num_inductor_compilations += 1
 
-    if do_logging:
-        if runtime_shape is None:
-            logger.info("Compiling a graph for general shape")
-        else:
-            logger.info("Compiling a graph for shape %s", runtime_shape)
-
     from torch._inductor import config
-    current_config = config.shallow_copy_dict()
+    current_config = config.get_config_copy()
     from torch._inductor.compile_fx import compile_fx
 
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
 
+    if isinstance(runtime_shape, int):
+        # for a specific batchsize, tuning triton kernel parameters
+        # can be beneficial
+        current_config["max_autotune"] = True
+        current_config["coordinate_descent_tuning"] = True
+
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
-    return compile_fx(graph, example_inputs, config_patches=current_config)
+    compiled_graph = compile_fx(graph,
+                                example_inputs,
+                                config_patches=current_config)
+
+    # after compiling the last graph, record the end time
+    if graph_index == num_graphs - 1:
+        now = time.time()
+        elapsed = now - compilation_start_time
+        compilation_config.compilation_time += elapsed
+        if runtime_shape is None:
+            logger.info("Compiling a graph for general shape takes %.2f s",
+                        elapsed)
+        else:
+            logger.info("Compiling a graph for shape %s takes %.2f s",
+                        runtime_shape, elapsed)
+
+    return compiled_graph
 
 
 @dataclasses.dataclass
@@ -108,6 +133,8 @@ def split_graph(graph: fx.GraphModule,
 # we share the global graph pool among all the backends
 global_graph_pool = None
 
+compilation_start_time = 0.0
+
 
 class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
@@ -151,12 +178,15 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
+            global compilation_start_time
             compiled_graph_for_general_shape = wrap_inductor(
                 submod,
                 args,
                 self.compilation_configs.inductor_compile_config,
+                self.compilation_configs,
+                graph_index=index,
+                num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
-                do_logging=index == 0,
                 use_inductor=self.compilation_configs.use_inductor)
 
             self.module.__dict__[target] = PiecewiseBackend(
@@ -242,10 +272,6 @@ class VllmBackend:
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
-        # config is updated now, because only here can
-        # we get the sizes to capture for cudagraph
-        # from compilation context
-        self.compilation_configs.init_during_runtime()
         self.configure_post_pass()
 
         self.split_gm, self.piecewise_graphs = split_graph(
@@ -377,6 +403,8 @@ class PiecewiseBackend:
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
         self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
+        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.union(
+            self.capture_sizes)
         for shape in self.compile_sizes.union(self.capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
@@ -387,6 +415,9 @@ class PiecewiseBackend:
     def __call__(self, *args) -> Any:
         if not self.first_run_finished:
             self.first_run_finished = True
+            # no specific sizes to compile
+            if self.is_last_graph and not self.to_be_compiled_sizes:
+                end_monitoring_torch_compile(self.compilation_configs)
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
@@ -401,14 +432,21 @@ class PiecewiseBackend:
 
         if entry.need_to_compile and not entry.compiled:
             entry.compiled = True
+            self.to_be_compiled_sizes.remove(runtime_shape)
             # args are real arguments
             entry.runnable = wrap_inductor(
                 self.graph,
                 args,
                 self.compilation_configs.inductor_compile_config,
+                self.compilation_configs,
+                graph_index=self.piecewise_compile_index,
+                num_graphs=self.total_piecewise_compiles,
                 runtime_shape=runtime_shape,
-                do_logging=self.is_first_graph,
                 use_inductor=self.compilation_configs.use_inductor)
+
+            # finished compilations for all required shapes
+            if self.is_last_graph and not self.to_be_compiled_sizes:
+                end_monitoring_torch_compile(self.compilation_configs)
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
