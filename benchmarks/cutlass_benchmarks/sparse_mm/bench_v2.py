@@ -242,9 +242,8 @@ def run_single_benchmark_process(kernel_config: Dict, gpu_id: int, queue: Queue)
             dtype, m, n, k
         )
         AsT = [x.t() for x in As]
-        BsT = [x.t() for x in Bs]
         bf16_As = [x.to(dtype=torch.bfloat16) for x in As]
-        bf16_BsT = [x.to(dtype=torch.bfloat16) for x in BsT]
+        bf16_Bs = [x.to(dtype=torch.bfloat16) for x in Bs]
         scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
         scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
         # Because the transposed output will be computed
@@ -266,13 +265,13 @@ def run_single_benchmark_process(kernel_config: Dict, gpu_id: int, queue: Queue)
             bench = BenchMM(cuda_graph_params, label, sub_label,
                             "pytorch_bf16_bf16_bf16_matmul-no-scales", 
                             torch.mm,
-                            ArgPool(bf16_As), ArgPool(bf16_BsT))
+                            ArgPool(bf16_As), ArgPool(bf16_Bs))
 
         elif kernel_type == 'pytorch_scaled_mm':
             bench = BenchMM(cuda_graph_params, label, sub_label,
                             "pytorch_fp8_fp8_bf16_scaled_mm",
                             torch._scaled_mm,
-                            ArgPool(As), ArgPool(BsT),
+                            ArgPool(As), ArgPool(Bs),
                             scale_a=scale_a, scale_b=scale_b,
                             out_dtype=torch.bfloat16)
 
@@ -280,21 +279,21 @@ def run_single_benchmark_process(kernel_config: Dict, gpu_id: int, queue: Queue)
             bench = BenchMM(cuda_graph_params, label, sub_label,
                             "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum",
                             torch._scaled_mm,
-                            ArgPool(As), ArgPool(BsT),
+                            ArgPool(As), ArgPool(Bs),
                             scale_a=scale_a, scale_b=scale_b,
                             out_dtype=torch.bfloat16,
                             use_fast_accum=True)
 
         elif kernel_type == 'cutlass_scaled_mm':
             bench = BenchMM(cuda_graph_params, label, sub_label,
-                            "cutlass_fp8_fp8_bf16_scaled_mm_default", 
+                            "cutlass_fp8_fp8_bf16_scaled_mm", 
                             ops.cutlass_scaled_mm,
-                            ArgPool(As), ArgPool(BsT), scale_a, scale_b,
+                            ArgPool(As), ArgPool(Bs), scale_a, scale_b,
                             torch.bfloat16)
 
-        elif kernel_type == 'cutlass_sparse_mm':
+        elif kernel_type == 'cutlass_scaled_sparse_mm':
             bench = BenchMM(cuda_graph_params, label, sub_label,
-                            "cutlass_fp8_fp8_bf16_scaled_sparse_mm_default", 
+                            "cutlass_fp8_fp8_bf16_scaled_sparse_mm", 
                             ops.cutlass_scaled_sparse_mm,
                             ArgPool(BComps), ArgPool(Es), ArgPool(AsT), 
                             scale_b, scale_a, torch.bfloat16)
@@ -417,9 +416,8 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
                     dtype, m, n, k
                 )
                 AsT = [x.t() for x in As]
-                BsT = [x.t() for x in Bs]
                 bf16_As = [x.to(dtype=torch.bfloat16) for x in As]
-                bf16_BsT = [x.to(dtype=torch.bfloat16) for x in BsT]
+                bf16_Bs = [x.to(dtype=torch.bfloat16) for x in Bs]
                 scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
                 scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
                 out = torch.zeros((n, m), dtype=torch.bfloat16, device="cuda")
@@ -440,13 +438,13 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
                     bench = BenchMM(cuda_graph_params, label, sub_label,
                                     "pytorch_bf16_bf16_bf16_matmul-no-scales", 
                                     torch.mm,
-                                    ArgPool(bf16_As), ArgPool(bf16_BsT))
+                                    ArgPool(bf16_As), ArgPool(bf16_Bs))
 
                 elif kernel_type == 'pytorch_scaled_mm':
                     bench = BenchMM(cuda_graph_params, label, sub_label,
                                     "pytorch_fp8_fp8_bf16_scaled_mm",
                                     torch._scaled_mm,
-                                    ArgPool(As), ArgPool(BsT),
+                                    ArgPool(As), ArgPool(Bs),
                                     scale_a=scale_a, scale_b=scale_b,
                                     out_dtype=torch.bfloat16)
 
@@ -454,21 +452,21 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
                     bench = BenchMM(cuda_graph_params, label, sub_label,
                                     "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum",
                                     torch._scaled_mm,
-                                    ArgPool(As), ArgPool(BsT),
+                                    ArgPool(As), ArgPool(Bs),
                                     scale_a=scale_a, scale_b=scale_b,
                                     out_dtype=torch.bfloat16,
                                     use_fast_accum=True)
 
                 elif kernel_type == 'cutlass_scaled_mm':
                     bench = BenchMM(cuda_graph_params, label, sub_label,
-                                    "cutlass_fp8_fp8_bf16_scaled_mm_default", 
+                                    "cutlass_fp8_fp8_bf16_scaled_mm", 
                                     ops.cutlass_scaled_mm,
-                                    ArgPool(As), ArgPool(BsT), scale_a, scale_b,
+                                    ArgPool(As), ArgPool(Bs), scale_a, scale_b,
                                     torch.bfloat16)
 
-                elif kernel_type == 'cutlass_sparse_mm':
+                elif kernel_type == 'cutlass_scaled_sparse_mm':
                     bench = BenchMM(cuda_graph_params, label, sub_label,
-                                    "cutlass_fp8_fp8_bf16_scaled_sparse_mm_default", 
+                                    "cutlass_fp8_fp8_bf16_scaled_sparse_mm", 
                                     ops.cutlass_scaled_sparse_mm,
                                     ArgPool(BComps), ArgPool(Es), ArgPool(AsT), 
                                     scale_b, scale_a, torch.bfloat16)
@@ -525,11 +523,11 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
     
     # Prepare configs for all kernels
     standard_kernels = [
-        {'kernel_type': 'pytorch_mm'},
-        {'kernel_type': 'pytorch_scaled_mm'},
-        {'kernel_type': 'pytorch_scaled_mm_fast'},
+        # {'kernel_type': 'pytorch_mm'},
+        # {'kernel_type': 'pytorch_scaled_mm'},
+        # {'kernel_type': 'pytorch_scaled_mm_fast'},
         {'kernel_type': 'cutlass_scaled_mm'},
-        {'kernel_type': 'cutlass_sparse_mm'}
+        {'kernel_type': 'cutlass_scaled_sparse_mm'}
     ]
     
     # Create configs for standard kernels

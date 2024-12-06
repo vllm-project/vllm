@@ -49,14 +49,14 @@ def prune_to_2_4(tensor):
 def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
                              k: int) -> Tuple[torch.Tensor, torch.Tensor]:
     a = torch.randn((m, k), device='cuda') * 5
-    b = torch.randn((n, k), device='cuda') * 5
+    b = torch.randn((n, k), device='cuda').t() * 5
 
     # # Initialize a to all ones
     # a = torch.ones((m, k), device='cuda')
     # # Initialize b to all ones
     # b = torch.ones((n, k), device='cuda')
 
-    b = prune_to_2_4(b)
+    b = prune_to_2_4(b.t()).t()
 
     if dtype == torch.int8:
         a, b = to_int8(a), to_int8(b)
@@ -69,7 +69,7 @@ def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
     else:
         raise ValueError("unsupported dtype")
 
-    b_compressed, e = ops.cutlass_compress_entry(b)
+    b_compressed, e = ops.cutlass_compress_entry(b.t())
 
     # Compressed B, Metadata, Original A, B
     return b_compressed, e, a, b

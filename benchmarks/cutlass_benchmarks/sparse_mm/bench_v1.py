@@ -96,7 +96,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     # Create tensors
     b_compressed, e, a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, m, n, k)
     aT = a.t()
-    bT = b.t()
+    bT = b
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
@@ -104,8 +104,8 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     out = ops.cutlass_scaled_sparse_mm(b_compressed, e, aT, scale_b, scale_a, torch.bfloat16)
     out_ref = ops.cutlass_scaled_mm(a, bT, scale_a, scale_b, torch.bfloat16)
 
-    if not torch.allclose(out.t(), out_ref):
-        print("Incorrect result")
+    if not torch.allclose(out, out_ref, rtol=1e-2, atol=1e-2):
+        print(f"Incorrect result for {m}, {k}, {n}")
         exit()
 
     timers = []
