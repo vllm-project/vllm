@@ -8,6 +8,8 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
+from vllm.compilation.monitor import (end_monitoring_torch_compile,
+                                      start_monitoring_torch_compile)
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
@@ -186,6 +188,9 @@ class Worker(LocalOrDistributedWorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+
+        start_monitoring_torch_compile(self.vllm_config)
+
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -285,6 +290,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
         self._init_cache_engine()
         self._warm_up_model()
+
+        end_monitoring_torch_compile(self.vllm_config)
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
