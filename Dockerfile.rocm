@@ -3,7 +3,7 @@ ARG REMOTE_VLLM="0"
 ARG USE_CYTHON="0"
 ARG BUILD_RPD="1"
 ARG COMMON_WORKDIR=/app
-ARG BASE_IMAGE=rocm/vllm-dev:base_ubuntu22.04_py3.12_ROCm6.2.4_hipblaslt0.11_torch2.6
+ARG BASE_IMAGE=rocm/vllm-dev:base_ubuntu22.04_py3.12_ROCm6.3_hipblaslt0.11_torch2.6
 
 FROM ${BASE_IMAGE} AS base
 

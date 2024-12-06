@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.2.4-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.3-complete
 FROM ${BASE_IMAGE} AS base
 
 ENV PATH=/opt/rocm/llvm/bin:$PATH
@@ -30,8 +30,8 @@ RUN pip install -U packaging cmake ninja wheel setuptools Cython
 
 FROM base AS build_hipblaslt
 ARG HIPBLASLT_BRANCH="507a649"
-# Unset the following on ROCm6.3+
-ARG LEGACY_HIPBLASLT_OPTION="--legacy_hipblas_direct"
+# Set to "--legacy_hipblas_direct" for ROCm<=6.2
+ARG LEGACY_HIPBLASLT_OPTION=
 RUN git clone https://github.com/ROCm/hipBLASLt
 RUN cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
