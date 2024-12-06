@@ -43,6 +43,12 @@ def wrap_inductor(graph,
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
 
+    if isinstance(runtime_shape, int):
+        # for a specific batchsize, tuning triton kernel parameters
+        # can be beneficial
+        current_config["max_autotune"] = True
+        current_config["coordinate_descent_tuning"] = True
+
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
