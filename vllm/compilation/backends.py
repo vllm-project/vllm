@@ -9,7 +9,7 @@ import torch
 import torch.fx as fx
 
 import vllm.envs as envs
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
@@ -211,6 +211,7 @@ class VllmBackend:
     which handles the post-grad passes.
     """
 
+    vllm_config: VllmConfig
     compilation_configs: CompilationConfig
     graph_pool: Any
     _called: bool = False
@@ -227,7 +228,7 @@ class VllmBackend:
 
     def __init__(
         self,
-        compilation_configs: CompilationConfig,
+        vllm_config: VllmConfig,
     ):
         global global_graph_pool
         if global_graph_pool is None:
@@ -244,7 +245,8 @@ class VllmBackend:
         self.sym_tensor_indices = []
         self.input_buffers = []
 
-        self.compilation_configs = compilation_configs
+        self.vllm_config = vllm_config
+        self.compilation_configs = vllm_config.compilation_config
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here

@@ -2343,7 +2343,7 @@ class CompilationConfig(BaseModel):
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
         from vllm.compilation.backends import VllmBackend
-        return VllmBackend(self, vllm_config)
+        return VllmBackend(vllm_config)
 
     def init_with_cudagraph_sizes(self, sizes_to_specialize: List[int]):
         """To complete the initialization of config,
