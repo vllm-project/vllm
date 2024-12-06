@@ -787,12 +787,6 @@ class MergedQKVParallelLinearWithLora(MergedColumnParallelLinearWithLoRA):
         """
         super().create_lora_weights(max_loras, lora_config, model_config)
 
-        self.packed_indices: Optional[torch.Tensor] = None
-        self.standard_indices: Optional[torch.Tensor] = None
-        # lazily initialized.
-        self.indices: torch.Tensor
-        self.indices_len: List[int]
-
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
