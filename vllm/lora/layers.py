@@ -549,7 +549,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         # There are two LoRA layers
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.output_slices = (self.base_layer.output_sizes)
+        self.output_slices = self.base_layer.output_sizes
         self.n_slices = len(self.output_slices)
         self.output_ids = (self.tp_rank, ) * self.n_slices
 
