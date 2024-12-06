@@ -598,7 +598,9 @@ class ModelConfig:
 
     @property
     def _is_deepseek_v2(self) -> bool:
-        return hasattr(self.hf_text_config, "model_type") and self.hf_text_config.model_type == 'deepseek_v2'
+        return hasattr(
+            self.hf_text_config,
+            "model_type") and self.hf_text_config.model_type == 'deepseek_v2'
 
     def get_head_size(self) -> int:
         # TODO remove hard code
@@ -607,7 +609,7 @@ class ModelConfig:
             # we need to pad head_size 192 to 256
             # return 256
             # TODO(simon): feature flag MLA
-            return self.hf_text_config.kv_lora_rank # + self.hf_text_config.qk_rope_head_dim
+            return self.hf_text_config.kv_lora_rank  # + self.hf_text_config.qk_rope_head_dim
 
         if self.is_attention_free:
             return 0

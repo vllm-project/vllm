@@ -89,7 +89,7 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
-        return [256, 512] # [64, 128, 256, 512]
+        return [256, 512]  # [64, 128, 256, 512]
 
     @staticmethod
     def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
@@ -122,7 +122,7 @@ class FlashInferState(AttentionState):
         if self._prefill_wrapper is None:
             # self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self._prefill_wrapper = BatchDecodeMlaWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(),)
+                self._get_workspace_buffer(), )
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
@@ -136,8 +136,8 @@ class FlashInferState(AttentionState):
             # self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
             self._decode_wrapper = BatchDecodeMlaWithPagedKVCacheWrapper(
                 self._get_workspace_buffer())
-                # "NHD",
-                # use_tensor_cores=use_tensor_cores)
+            # "NHD",
+            # use_tensor_cores=use_tensor_cores)
         return self._decode_wrapper
 
     @contextmanager
@@ -197,10 +197,14 @@ class FlashInferState(AttentionState):
         self._graph_decode_wrapper = (
             # CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
             BatchDecodeMlaWithPagedKVCacheWrapper(
-                self._graph_decode_workspace_buffer, True, _indptr_buffer,
-                self._graph_indices_buffer, _last_page_len_buffer, ))
-            # "NHD",
-            # use_tensor_cores)
+                self._graph_decode_workspace_buffer,
+                True,
+                _indptr_buffer,
+                self._graph_indices_buffer,
+                _last_page_len_buffer,
+            ))
+        # "NHD",
+        # use_tensor_cores)
         if self.runner.kv_cache_dtype.startswith("fp8"):
             kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 self.runner.kv_cache_dtype)
@@ -371,7 +375,8 @@ class FlashInferMetadata(AttentionMetadata):
                     self.num_qo_heads,
                     self.head_dim,
                     self.page_size,
-                    sm_scale=self.head_dim**-0.5, # TODO(simon): should we explicitly pass this in?
+                    sm_scale=self.head_dim**
+                    -0.5,  # TODO(simon): should we explicitly pass this in?
                     data_type=self.data_type,
                     q_data_type=self.q_data_type)
         if self.num_decode_tokens > 0:
@@ -398,7 +403,8 @@ class FlashInferMetadata(AttentionMetadata):
                 # self.num_kv_heads,
                 self.head_dim,
                 self.page_size,
-                sm_scale=self.head_dim**-0.5, # TODO(simon): should we explicitly pass this in?
+                sm_scale=self.head_dim**
+                -0.5,  # TODO(simon): should we explicitly pass this in?
                 # Disable flashinfer's pos encoding and use vllm's rope.
                 # pos_encoding_mode="NONE",
                 # kv-cache data type.
@@ -815,7 +821,8 @@ class FlashInferImpl(AttentionImpl):
         # num_tokens, hidden_size = query.shape
         query = query.view(-1, num_heads, L_R)
         key = key.view(-1, num_kv_heads, head_size)
-        key_rope = key_rope.view(-1, num_kv_heads, head_size) # this is padded!
+        key_rope = key_rope.view(-1, num_kv_heads,
+                                 head_size)  # this is padded!
 
         if kv_cache.numel() > 0:
             # Use the same reshape and cache kernel as flash attention.
@@ -869,7 +876,10 @@ class FlashInferImpl(AttentionImpl):
             # This happens when vllm runs the profiling to
             # determine the number of blocks.
             if kv_cache.numel() == 0:
-                prefill_output = torch.empty(num_prefill_tokens, N, head_size, device="cuda")
+                prefill_output = torch.empty(num_prefill_tokens,
+                                             N,
+                                             head_size,
+                                             device="cuda")
                 # key = key[:num_prefill_tokens]
                 # key_rope = key_rope[:num_prefill_tokens, :, :qk_rope_head_dim]
                 # prefill_output = flash_attn_varlen_func(
@@ -896,7 +906,8 @@ class FlashInferImpl(AttentionImpl):
                 #     k_scale=k_scale,
                 #     v_scale=v_scale,
                 #     window_left=window_left)
-                paged_kpe_cache, _ = kv_cache[:, 1].split([qk_rope_head_dim, head_size - qk_rope_head_dim], dim=-1)
+                paged_kpe_cache, _ = kv_cache[:, 1].split(
+                    [qk_rope_head_dim, head_size - qk_rope_head_dim], dim=-1)
 
                 prefill_output = prefill_meta.prefill_wrapper.run(
                     q_nope=query_nope,
@@ -907,24 +918,26 @@ class FlashInferImpl(AttentionImpl):
                     # sm_scale=softmax_scale,
                     # logits_soft_cap=logits_soft_cap,
                     k_scale=k_scale,
-                    v_scale=None, # v_scale,
+                    v_scale=None,  # v_scale,
                     # window_left=window_left
                 )
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
             assert decode_meta.decode_wrapper is not None
-            paged_kpe_cache, _ = kv_cache[:, 1].split([qk_rope_head_dim, head_size - qk_rope_head_dim], dim=-1)
+            paged_kpe_cache, _ = kv_cache[:, 1].split(
+                [qk_rope_head_dim, head_size - qk_rope_head_dim], dim=-1)
 
             decode_output = decode_meta.decode_wrapper.run(
-                    q_nope=decode_query_nope,
-                    q_pe=decode_query_pe,
-                    paged_ckv_cache=kv_cache[:, 0],
-                    paged_kpe_cache=kv_cache[:, 1],
-                    # sm_scale=softmax_scale,
-                    # logits_soft_cap=logits_soft_cap,
-                    k_scale=k_scale,
-                    v_scale=None, # v_scale, # NOTE(simon): there's a bug in FI now. https://github.com/flashinfer-ai/flashinfer/pull/650
-                    # window_left=window_left
+                q_nope=decode_query_nope,
+                q_pe=decode_query_pe,
+                paged_ckv_cache=kv_cache[:, 0],
+                paged_kpe_cache=kv_cache[:, 1],
+                # sm_scale=softmax_scale,
+                # logits_soft_cap=logits_soft_cap,
+                k_scale=k_scale,
+                v_scale=
+                None,  # v_scale, # NOTE(simon): there's a bug in FI now. https://github.com/flashinfer-ai/flashinfer/pull/650
+                # window_left=window_left
             )
 
         if prefill_output is None and decode_output is not None:
@@ -942,5 +955,7 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_query_len == 1
             decode_output = decode_output.squeeze(1)
             output = torch.cat([prefill_output, decode_output], dim=0)
-        assert output.shape == (num_tokens, N, head_size), f"{output.shape=}!={num_tokens=}, {N=}, {head_size=}"
+        assert output.shape == (
+            num_tokens, N,
+            head_size), f"{output.shape=}!={num_tokens=}, {N=}, {head_size=}"
         return output

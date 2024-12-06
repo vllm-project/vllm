@@ -319,8 +319,10 @@ class DeepseekV2Attention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+
 from vllm.attention.backends.flash_attn import flash_attn_varlen_func, _get_query_key_seq_metadata, AttentionType
 from vllm import _custom_ops as ops
+
 
 class DeepseekV2MLAAttention(nn.Module):
     """
@@ -345,9 +347,9 @@ class DeepseekV2MLAAttention(nn.Module):
         2. The kv_latent is split into kv_a (B, Lkv) and k_pe (B, R). q_latent and kv_a are normalized.
         3. The q_latent and kv_a are then projected up into the multi-head version.
            q_latent goes from (B, Lq) to (B, N(P+R)) included the rope dimension,
-           which is splited into q_nope (B, N, P) and q_pe (B, N, R).
+           which is split into q_nope (B, N, P) and q_pe (B, N, R).
            kv_a goes from (B, Lkv) to (B, N(P+V)) which has the nope dimensions for K and V,
-           which is splited into k_nope (B, N, P) and v (B, N, V).
+           which is split into k_nope (B, N, P) and v (B, N, V).
         3. q_pe, k_pe are then passed through rotary embeddings.
         4. q (B, N, (P+R)) and k (B, N, (P+R)) matrices are assembled from q_nope, q_pe, k_nope, k_pe.
         5. Attention is computued with q, k, v.
@@ -375,6 +377,7 @@ class DeepseekV2MLAAttention(nn.Module):
 
     From @tsu-bin's calculation, we only want to use the absorption technique for decode.
     """
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -394,19 +397,19 @@ class DeepseekV2MLAAttention(nn.Module):
     ) -> None:
         super().__init__()
         # Note(simon): Added some symbols for shapes, hoping to help clarity.
-        self.hidden_size = hidden_size # H
-        self.qk_nope_head_dim = qk_nope_head_dim # P
-        self.qk_rope_head_dim = qk_rope_head_dim # R
-        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim # P + R
-        self.v_head_dim = v_head_dim # V
+        self.hidden_size = hidden_size  # H
+        self.qk_nope_head_dim = qk_nope_head_dim  # P
+        self.qk_rope_head_dim = qk_rope_head_dim  # R
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim  # P + R
+        self.v_head_dim = v_head_dim  # V
 
         self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank # L
+        self.kv_lora_rank = kv_lora_rank  # L
 
-        self.num_heads = num_heads # N
+        self.num_heads = num_heads  # N
         tp_size = get_tensor_model_parallel_world_size()
         assert num_heads % tp_size == 0
-        self.num_local_heads = num_heads // tp_size # N'
+        self.num_local_heads = num_heads // tp_size  # N'
 
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
@@ -484,13 +487,15 @@ class DeepseekV2MLAAttention(nn.Module):
         #                       quant_config=quant_config,
         #                       prefix=f"{prefix}.prefill_attn")
         # The decode attention will compute a multi-query attention by directly operating on the latent.
-        self.decode_attn = Attention(num_heads=self.num_local_heads,
-                              head_size=self.kv_lora_rank, # + self.qk_rope_head_dim, # TODO(simon): pass in qk_rope_head_dim? but i don't think
-                              scale=self.scaling,
-                              num_kv_heads=1,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.decode_attn")
+        self.decode_attn = Attention(
+            num_heads=self.num_local_heads,
+            head_size=self.
+            kv_lora_rank,  # + self.qk_rope_head_dim, # TODO(simon): pass in qk_rope_head_dim? but i don't think
+            scale=self.scaling,
+            num_kv_heads=1,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.decode_attn")
 
         # To be computed during weight loading
         # self.W_QR = None
@@ -498,14 +503,17 @@ class DeepseekV2MLAAttention(nn.Module):
         # self.W_UV_O = None
 
         kv_b_proj_weight = self.kv_b_proj.weight.T
-        assert kv_b_proj_weight.shape == (self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), f"{kv_b_proj_weight.shape} != {(self.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim))}"
+        assert kv_b_proj_weight.shape == (
+            self.kv_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)
+        ), f"{kv_b_proj_weight.shape} != {(self.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim))}"
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
             self.num_local_heads,
             self.qk_nope_head_dim + self.v_head_dim,
         )
-        self.W_UK, self.W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        self.W_UK, self.W_UV = kv_b_proj_weight.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         # self.W_UK = self.W_UK.view(self.kv_lora_rank, self.num_local_heads * self.qk_nope_head_dim)
         # self.W_UV = self.W_UV.view(self.kv_lora_rank, self.num_local_heads * self.v_head_dim)
 
@@ -519,9 +527,11 @@ class DeepseekV2MLAAttention(nn.Module):
         # TODO(simon): support append/chunked prefill by two kernels, or using the decode kernel somehow.
 
         if attn_metadata.prefill_metadata:
-            return self.forward_prefill(positions, hidden_states, kv_cache, attn_metadata)
+            return self.forward_prefill(positions, hidden_states, kv_cache,
+                                        attn_metadata)
         if attn_metadata.decode_metadata:
-            return self.forward_decode(positions, hidden_states, kv_cache, attn_metadata)
+            return self.forward_decode(positions, hidden_states, kv_cache,
+                                       attn_metadata)
 
     def forward_prefill(
         self,
@@ -534,16 +544,20 @@ class DeepseekV2MLAAttention(nn.Module):
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
+                                         self.qk_head_dim)
         else:
-            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
+                                                   self.qk_head_dim)
 
         # BN(P+R) -> BNP, BNR
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
+                               dim=-1)
         # BH -> B(L+R)
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
         # B(L+R) -> BL, BR
-        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_a, _ = latent_cache.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         # B(L+R) -> B1(L+R)
         latent_cache = latent_cache.unsqueeze(1)
         # BL -> BL
@@ -551,7 +565,8 @@ class DeepseekV2MLAAttention(nn.Module):
         # BL -> B(N'(P+V))
         kv = self.kv_b_proj(kv_a)[0]
         # B(N'(P+V)) -> BN'(P+V)
-        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+        kv = kv.view(-1, self.num_local_heads,
+                     self.qk_nope_head_dim + self.v_head_dim)
         # BN'(P+V) -> BN'P, BN'V
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         # B1(L+R) -> B1R
@@ -567,17 +582,18 @@ class DeepseekV2MLAAttention(nn.Module):
 
         # write the latent and rope to kv cache
         to_cache_key = kv_a.unsqueeze(1)
-        to_cache_key_rope = torch.nn.functional.pad(k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim], value=0)
+        to_cache_key_rope = torch.nn.functional.pad(
+            k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim], value=0)
         if kv_cache.numel() > 0:
             ops.reshape_and_cache_flash(
-                    to_cache_key,
-                    to_cache_key_rope,
-                    kv_cache[:, 0],
-                    kv_cache[:, 1],
-                    attn_metadata.slot_mapping.flatten(),
-                    kv_cache_dtype="auto", # TODO: remove hard code
-                    k_scale=1.0,
-                    v_scale=1.0,
+                to_cache_key,
+                to_cache_key_rope,
+                kv_cache[:, 0],
+                kv_cache[:, 1],
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype="auto",  # TODO: remove hard code
+                k_scale=1.0,
+                v_scale=1.0,
             )
 
         # run the prefill kernels
@@ -586,7 +602,8 @@ class DeepseekV2MLAAttention(nn.Module):
         v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0)
 
         prefill_meta = attn_metadata.prefill_metadata
-        q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = _get_query_key_seq_metadata(prefill_meta, True, AttentionType.DECODER)
+        q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = _get_query_key_seq_metadata(
+            prefill_meta, True, AttentionType.DECODER)
         attn_output = flash_attn_varlen_func(
             q=q,
             k=k,
@@ -596,8 +613,10 @@ class DeepseekV2MLAAttention(nn.Module):
             max_seqlen_q=q_seq_len,
             max_seqlen_k=k_seq_len,
             causal=True,
-            )
-        attn_output = attn_output.view(-1, self.num_local_heads, 256)[..., :self.v_head_dim].reshape(-1, self.num_local_heads * self.v_head_dim)
+        )
+        attn_output = attn_output.view(
+            -1, self.num_local_heads, 256)[..., :self.v_head_dim].reshape(
+                -1, self.num_local_heads * self.v_head_dim)
 
         # B(N'V) -> BH
         output, _ = self.o_proj(attn_output)
@@ -618,13 +637,17 @@ class DeepseekV2MLAAttention(nn.Module):
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
+                                         self.qk_head_dim)
         else:
-            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
+                                                   self.qk_head_dim)
 
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
+                               dim=-1)
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_a, k_pe = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_a, k_pe = latent_cache.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
         # print(f"{q.shape=}, {q_nope.shape=}, {q_pe.shape=}, {k_pe.shape=}, {kv_a.shape=}, {latent_cache.shape=}")
         k_pe = k_pe.unsqueeze(1)
@@ -633,14 +656,19 @@ class DeepseekV2MLAAttention(nn.Module):
         q_nope = torch.einsum("bnp,lnp->bnl", q_nope, self.W_UK)
         # essemble q, k, and v; here v is repurposed to represent k_pe
 
-        q = torch.empty((B, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim), dtype=q.dtype, device=q.device)
+        q = torch.empty((B, self.num_local_heads,
+                         self.kv_lora_rank + self.qk_rope_head_dim),
+                        dtype=q.dtype,
+                        device=q.device)
         q[..., :self.kv_lora_rank] = q_nope
         q[..., self.kv_lora_rank:] = q_pe
         # q = q.view(B, self.num_local_heads * (self.kv_lora_rank + self.qk_rope_head_dim))
 
         k = kv_a
         # The padding is only used for kv storage.
-        v = torch.nn.functional.pad(k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim], value=0).squeeze(1)
+        v = torch.nn.functional.pad(
+            k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim],
+            value=0).squeeze(1)
         assert k.numel() == v.numel(), f"{k.numel()=} != {v.numel()=}"
 
         # attn_output = self.decode_attn(q, k, v, kv_cache, attn_metadata)
@@ -652,15 +680,18 @@ class DeepseekV2MLAAttention(nn.Module):
         paged_kv_last_page_len = attn_metadata.decode_metadata.paged_kv_last_page_len
 
         # debug: we always have batch size 1 and one page
-        assert paged_kv_indptr.cpu().tolist() == [0, 1], f"{paged_kv_indptr.cpu().tolist()=}"
+        assert paged_kv_indptr.cpu().tolist() == [
+            0, 1
+        ], f"{paged_kv_indptr.cpu().tolist()=}"
         paged_idx = paged_kv_indices[0]
         full_latent_cache = kv_cache[paged_idx, 0]
         full_rope_cache = kv_cache[paged_idx, 1]
         # let's write k and v into the full cache at paged_kv_last_page_len-1
-        full_latent_cache[paged_kv_last_page_len-1, :, :] = k
-        full_rope_cache[paged_kv_last_page_len-1, :, :] = v
+        full_latent_cache[paged_kv_last_page_len - 1, :, :] = k
+        full_rope_cache[paged_kv_last_page_len - 1, :, :] = v
         full_latent_cache = full_latent_cache[:paged_kv_last_page_len, :, :]
-        full_rope_cache = full_rope_cache[:paged_kv_last_page_len, :, :self.qk_rope_head_dim]
+        full_rope_cache = full_rope_cache[:paged_kv_last_page_len, :, :self.
+                                          qk_rope_head_dim]
         full_kv_cache = torch.cat([full_latent_cache, full_rope_cache], dim=-1)
 
         # now let's run the MLA manually
@@ -668,22 +699,23 @@ class DeepseekV2MLAAttention(nn.Module):
         k_S_1_LR = full_kv_cache
         v_S_1_L = full_latent_cache
         import math
-        scale = 1.0/math.sqrt(self.kv_lora_rank + self.qk_rope_head_dim)
+        scale = 1.0 / math.sqrt(self.kv_lora_rank + self.qk_rope_head_dim)
         attn_scores = torch.einsum("bnl,snl->nbs", q_B_N_LR, k_S_1_LR) * scale
         attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
         attn_output = torch.einsum("nbs,snl->bnl", attn_probs, v_S_1_L)
 
-        assert attn_output.shape == (B, self.num_local_heads, self.kv_lora_rank), f"{attn_output.shape=}!={B=}, {self.num_local_heads=}, {self.kv_lora_rank=}"
+        assert attn_output.shape == (
+            B, self.num_local_heads, self.kv_lora_rank
+        ), f"{attn_output.shape=}!={B=}, {self.num_local_heads=}, {self.kv_lora_rank=}"
         # idk why but the attn_output is fp32
         attn_output = attn_output.to(q.dtype)
         # Apply UV, (B, N, L) @ W_UV (L, N, V) -> (B, N, V)
         attn_output = torch.einsum("bnl,lnv->bnv", attn_output, self.W_UV)
-        attn_output = attn_output.reshape(B, self.num_local_heads * self.v_head_dim)
+        attn_output = attn_output.reshape(
+            B, self.num_local_heads * self.v_head_dim)
 
         output, _ = self.o_proj(attn_output)
         return output
-
-
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -995,3 +1027,4 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+    
