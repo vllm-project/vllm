@@ -5,7 +5,7 @@ import json
 import time
 from pathlib import Path
 from typing import List, Optional
-from vllm.config import CompilationConfig
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -21,11 +21,6 @@ def main(args: argparse.Namespace):
 
     engine_args = EngineArgs.from_cli_args(args)
 
-    config = CompilationConfig(
-        level=3,
-        custom_ops=["+silu_and_mul"],
-    )
-    engine_args.compilation_config = config
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(**dataclasses.asdict(engine_args))
