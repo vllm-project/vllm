@@ -2,12 +2,12 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.fusion import (find_auto_fn, find_auto_fn_maybe)
+from vllm._custom_ops import scaled_fp8_quant
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
+from vllm.compilation.fusion import find_auto_fn, find_auto_fn_maybe
 from vllm.compilation.reshapes import RedundantReshapesPass
 from vllm.config import CompilationConfig
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm._custom_ops import scaled_fp8_quant
 
 from .backend import TestBackend
 

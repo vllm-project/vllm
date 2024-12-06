@@ -113,6 +113,7 @@ void silu_and_mul_quant(torch::Tensor& out,  // [..., d]
                         torch::Tensor& scale)  // [..., 2 * d]
 {
   TORCH_CHECK(out.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(input.dtype() == torch::kFloat16 || input.dtype() == torch::kBFloat16);
+  TORCH_CHECK(input.dtype() == torch::kFloat16 ||
+              input.dtype() == torch::kBFloat16);
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
 }

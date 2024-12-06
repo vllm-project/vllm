@@ -1,5 +1,4 @@
-import operator
-from typing import Iterable, Optional
+from typing import Optional
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -9,7 +8,7 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass, fwd_only,
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
-from .vllm_inductor_pass import VllmInductorPass, is_func
+from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 

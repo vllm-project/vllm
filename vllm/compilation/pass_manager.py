@@ -5,9 +5,9 @@ from torch import fx as fx
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
+from .activation_quant_fusion import ActivationQuantFusionPass
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
-from .activation_quant_fusion import ActivationQuantFusionPass
 from .inductor_pass import InductorPass
 from .reshapes import RedundantReshapesPass
 
