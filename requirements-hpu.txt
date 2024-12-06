@@ -9,4 +9,3 @@ tabulate
 setuptools>=61
 setuptools-scm>=8
 vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@41ff369
-neural-compressor @ git+https://github.com/intel/neural-compressor.git@b196432
