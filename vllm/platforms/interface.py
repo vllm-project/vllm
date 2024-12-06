@@ -1,4 +1,5 @@
 import enum
+import platform
 import random
 from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 
@@ -37,6 +38,14 @@ class PlatformEnum(enum.Enum):
     UNSPECIFIED = enum.auto()
 
 
+class CpuArchEnum(enum.Enum):
+    X86 = enum.auto()
+    ARM = enum.auto()
+    POWERPC = enum.auto()
+    OTHER = enum.auto()
+    UNKNOWN = enum.auto()
+
+
 class DeviceCapability(NamedTuple):
     major: int
     minor: int
@@ -56,11 +65,13 @@ class DeviceCapability(NamedTuple):
 
 class Platform:
     _enum: PlatformEnum
+    device_name: str
     device_type: str
     # available dispatch keys:
     # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
+    supported_quantization: list[str] = []
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
@@ -170,6 +181,34 @@ class Platform:
         The config is passed by reference, so it can be modified in place.
         """
         pass
+
+    @classmethod
+    def verify_quantization(cls, quant: str) -> None:
+        """
+        Verify whether the quantization is supported by the current platform.
+        """
+        if cls.supported_quantization and \
+            quant not in cls.supported_quantization:
+            raise ValueError(
+                f"{quant} quantization is currently not supported in "
+                f"{cls.device_name}.")
+
+    @classmethod
+    def get_cpu_architecture(cls) -> CpuArchEnum:
+        """
+        Determine the CPU architecture of the current system.
+        Returns CpuArchEnum indicating the architecture type.
+        """
+        machine = platform.machine().lower()
+
+        if machine in ("x86_64", "amd64", "i386", "i686"):
+            return CpuArchEnum.X86
+        elif machine.startswith("arm") or machine.startswith("aarch"):
+            return CpuArchEnum.ARM
+        elif machine.startswith("ppc"):
+            return CpuArchEnum.POWERPC
+
+        return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
 
 
 class UnspecifiedPlatform(Platform):

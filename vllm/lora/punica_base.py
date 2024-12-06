@@ -204,84 +204,149 @@ class PunicaWrapperBase(ABC):
         long_lora_len = self.indices_len[4]
         return self._long_lora_indices[:long_lora_len]
 
-    # TODO: we also need to consider lora bias
-    # @abstractmethod
-    # def add_bias(self):
-    #     raise NotImplementedError
-
-    # @abstractmethod
-    # def add_bias_slice(self):
-    #     raise NotImplementedError
-
     @abstractmethod
-    def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
-                   w_t_all: torch.Tensor, scale: float, **kwarg):
+    def add_shrink(
+        self,
+        y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+        x: torch.Tensor,
+        lora_a_stacked: Tuple[torch.Tensor, ...],
+        scale: float,
+    ):
+        """
+        Performs GEMM  for multiple slices of lora_a.
+        When `is_prefill is` true, it indicates that it is currently the
+        prefill stage, and the `_shrink_prefill` function should be called.
+        Otherwise, it is the decode stage, and the _shrink_decode function
+        should be called.
+            
+        Semantics:
+        for i in range(len(lora_a_stacked)):
+            y[i] += (x @ lora_a_stacked[i]) * scale
+        
+        Args:
+            y (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Output tensors
+            x (torch.Tensor): Input tensor
+            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
+            scale (float): Scaling factor for the operation
+
+        """
+
         raise NotImplementedError
 
     @abstractmethod
-    def add_expand(self,
-                   y: torch.Tensor,
-                   x: torch.Tensor,
-                   w_t_all: torch.Tensor,
-                   add_input: bool = True,
-                   **kwarg):
+    def add_expand(
+        self,
+        y: torch.Tensor,
+        x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+        lora_b_stacked: Tuple[torch.Tensor, ...],
+        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+        output_slices: Tuple[int, ...],
+        offset_start: int = 0,
+        add_input=True,
+    ) -> None:
+        """
+        Performs GEMM and bias addition for multiple slices of lora_b.
+      
+        Semantics:
+            for i in range(len(lora_b_stacked)):
+                slice = output_slices[i]
+                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] + 
+                    lora_bias_stacked[i] 
+                offset += slice
+            
+        Args:
+            y (torch.Tensor): Output tensor.
+            x (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
+            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight
+            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): 
+                bias's weight
+            output_slices (Tuple[int, ...]): Every slice's size
+            add_input (bool):  Defaults to True.
+
+        """
         raise NotImplementedError
 
     @abstractmethod
-    def add_expand_slice(self,
-                         y: torch.Tensor,
-                         x: torch.Tensor,
-                         w_t_all: torch.Tensor,
-                         y_offset: Optional[int],
-                         y_slice_size: Optional[int],
-                         add_input: bool = True,
-                         **kwarg):
+    def add_lora_embedding(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        add_input: bool = True,
+    ):
+        """
+        Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
+
+        Semantics:
+            y += x @ lora_b_stacked
+
+        Args:
+            y (torch.Tensor): Output tensor.
+            x (torch.Tensor): Input tensor.
+            lora_b_stacked (torch.Tensor): lora_b's weights.
+            add_input (bool): Default to True.
+        """
         raise NotImplementedError
 
     @abstractmethod
-    def add_lora(self,
-                 y: torch.Tensor,
-                 x: torch.Tensor,
-                 wa_t_all: torch.Tensor,
-                 wb_t_all: torch.Tensor,
-                 scale: float,
-                 y_offset: Optional[int] = None,
-                 y_slice_size: Optional[int] = None,
-                 *,
-                 buffer: Optional[torch.Tensor] = None,
-                 **kwargs) -> None:
-        raise NotImplementedError
+    def add_lora_linear(
+            self,
+            y: torch.Tensor,
+            x: torch.Tensor,
+            lora_a_stacked: Tuple[torch.Tensor, ...],
+            lora_b_stacked: Tuple[torch.Tensor, ...],
+            lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+            scale: float,
+            output_slices: Tuple[int, ...],
+            *,
+            buffer: Optional[Tuple[torch.Tensor, ...]] = None) -> None:
+        """
+        Applicable to linear-related lora. 
 
-    @abstractmethod
-    def add_lora_packed_nslice(self, y: torch.Tensor, x: torch.Tensor,
-                               lora_a_stacked: Tuple[torch.Tensor,
-                                                     torch.Tensor,
-                                                     torch.Tensor],
-                               lora_b_stacked: Tuple[torch.Tensor,
-                                                     torch.Tensor,
-                                                     torch.Tensor],
-                               scale: float, output_slices: Tuple[int, ...],
-                               **kwarg) -> None:
-        raise NotImplementedError
+        Semantics:
+            for i in range(len(lora_a_stacked)):
+                y[i] += (
+                    x[i].unsqueeze(0)
+                    @ lora_a_stacked[indices[i], layer_idx, :, :]
+                    @ lora_b_stacked[indices[i], layer_idx, :, :]
+                    * scale
+                    ).squeeze(0)+lora_bias_stacked[i]
 
-    @abstractmethod
-    def add_lora_embedding(self,
-                           y: torch.Tensor,
-                           x: torch.Tensor,
-                           w_t_all: torch.Tensor,
-                           add_input: bool = True,
-                           **kwarg):
+        Args:
+            y (torch.Tensor): Output tensor. Will be changed in-place.
+            x (torch.Tensor): Input tensor
+            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weight.
+            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight.
+            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): lora's bias.
+            scale (float): Scaling factor.
+            output_slices (Tuple[int, ...]): Every slice's size.
+            buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
+        """
+
         raise NotImplementedError
 
     @abstractmethod
     def add_lora_logits(self,
                         y: torch.Tensor,
                         x: torch.Tensor,
-                        wa_t_all: torch.Tensor,
-                        wb_t_all: torch.Tensor,
+                        lora_a_stacked: torch.Tensor,
+                        lora_b_stacked: torch.Tensor,
                         scale,
                         *,
-                        buffer: Optional[torch.Tensor] = None,
-                        **kwarg) -> None:
+                        buffer: Optional[torch.Tensor] = None) -> None:
+        """
+        Applies lora  specifically for LogitsProcessorWithLoRA.
+        
+        Semantics:
+            buffer = (x @ lora_a_stacked) * scale
+            y += buffer @ lora_b_stacked
 
+        Args:
+            y (torch.Tensor): Output tensor.
+            x (torch.Tensor): Input tensor.
+            lora_a_stacked (torch.Tensor): lora_a's weights.
+            lora_b_stacked (torch.Tensor):lora_b's weights.
+            scale (float): Scaling factor.
+            buffer (Optional[torch.Tensor]):Default to None.
+        """
         raise NotImplementedError

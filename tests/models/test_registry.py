@@ -3,14 +3,11 @@ import warnings
 import pytest
 import torch.cuda
 
-from vllm.model_executor.models import (is_embedding_model,
+from vllm.model_executor.models import (is_pooling_model,
                                         is_text_generation_model,
                                         supports_multimodal)
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.model_executor.models.registry import (_CROSS_ENCODER_MODELS,
-                                                 _EMBEDDING_MODELS,
-                                                 _MULTIMODAL_MODELS,
+from vllm.model_executor.models.adapters import as_embedding_model
+from vllm.model_executor.models.registry import (_MULTIMODAL_MODELS,
                                                  _SPECULATIVE_DECODING_MODELS,
                                                  _TEXT_GENERATION_MODELS,
                                                  ModelRegistry)
@@ -26,18 +23,18 @@ def test_registry_imports(model_arch):
     model_cls, _ = ModelRegistry.resolve_model_cls(model_arch)
 
     if model_arch in _SPECULATIVE_DECODING_MODELS:
-        pass  # Ignore these models which do not have a unified format
-    else:
-        assert is_text_generation_model(model_cls) is (
-            model_arch in _TEXT_GENERATION_MODELS
-            or model_arch in _MULTIMODAL_MODELS)
+        return  # Ignore these models which do not have a unified format
 
-        embedding_models = {**_EMBEDDING_MODELS, **_CROSS_ENCODER_MODELS}
-        assert is_embedding_model(model_cls) is (model_arch
-                                                 in embedding_models)
+    if (model_arch in _TEXT_GENERATION_MODELS
+            or model_arch in _MULTIMODAL_MODELS):
+        assert is_text_generation_model(model_cls)
 
-        assert supports_multimodal(model_cls) is (model_arch
-                                                  in _MULTIMODAL_MODELS)
+    # All vLLM models should be convertible to an embedding model
+    embed_model = as_embedding_model(model_cls)
+    assert is_pooling_model(embed_model)
+
+    if model_arch in _MULTIMODAL_MODELS:
+        assert supports_multimodal(model_cls)
 
 
 @fork_new_process_for_each_test

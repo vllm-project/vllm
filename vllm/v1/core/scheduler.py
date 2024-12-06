@@ -33,21 +33,22 @@ class Scheduler:
         # TODO: Support LoRA.
         assert lora_config is None, "V1 does not support LoRA yet."
 
-        num_gpu_blocks = cache_config.num_gpu_blocks
-        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
-        # Create the block space manager.
-        self.kv_cache_manager = KVCacheManager(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
-        self.block_size = self.cache_config.block_size
-
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
+
+        num_gpu_blocks = cache_config.num_gpu_blocks
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        # Create the KV cache manager.
+        self.kv_cache_manager = KVCacheManager(
+            block_size=self.cache_config.block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            max_model_len=self.max_model_len,
+            sliding_window=self.cache_config.sliding_window,
+            enable_caching=self.cache_config.enable_prefix_caching)
+        self.block_size = self.cache_config.block_size
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
