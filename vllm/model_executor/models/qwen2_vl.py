@@ -1302,7 +1302,10 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            if len(multimodal_embeddings[0]) == 2:
+
+            # Workaround for checking if this is a list
+            # of (embeddings, "video") tuple.
+            if isinstance(multimodal_embeddings[0], tuple):
                 for embeddings, modality in multimodal_embeddings:
                     if modality == "video":
                         inputs_embeds = merge_multimodal_embeddings(
