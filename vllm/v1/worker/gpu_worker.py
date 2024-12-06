@@ -1,24 +1,40 @@
 """A GPU worker class."""
 import gc
 import os
+import pickle
+from dataclasses import dataclass
+from enum import Enum, auto
+from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.distributed
+import zmq
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
+from vllm.distributed import (destroy_tp_mq_broadcaster,
+                              ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.distributed.device_communicators.shm_broadcast import (Handle,
+                                                                 MessageQueue)
+from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
+                        get_open_zmq_ipc_path)
+from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.utils import make_zmq_socket
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
+
+POLLING_TIMEOUT_MS = 5000
+POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
+LOGGING_TIME_S = 5000
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -56,7 +72,6 @@ class Worker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = GPUModelRunner(vllm_config)
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -102,6 +117,9 @@ class Worker:
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
+
+        # Construct the model runner
+        self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
     def load_model(self) -> None:
         self.model_runner.load_model()
@@ -198,7 +216,6 @@ class Worker:
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         output = self.model_runner.execute_model(scheduler_output)
-        # TODO(woosuk): Send the output to the engine process.
         return output
 
     def profile(self, is_start=True):
@@ -208,6 +225,279 @@ class Worker:
             self.profiler.start()
         else:
             self.profiler.stop()
+
+
+@dataclass
+class WorkerInitRequestType:
+    """
+    Request types defined as hex byte strings, so it can be sent over sockets
+    without separate encoding step.
+    """
+    DETERMINE_NUM_BLOCKS = b'\x00'
+    INITIALIZE = b'\x01'  # Initialize cache and begin worker execution
+
+
+@dataclass
+class WorkerInitResponseType:
+    """
+    Request types defined as hex byte strings, so it can be sent over sockets
+    without separate encoding step.
+    """
+    READY = b'\x00'
+    NUM_BLOCKS = b'\x01'
+    INITIALIZE_SUCCESS = b'\x02'
+
+
+@dataclass
+class WorkerExecRequest:
+    """A directive from the core process to its worker processes.
+    
+	Wraps SchedulerOutput with a message type to distinguish between
+	regular work assignments and termination orders."""
+
+    class Type(Enum):
+        WORK = auto()
+        TERMINATE = auto()
+
+    message_type: Type
+    payload: Optional[SchedulerOutput]
+
+
+@dataclass
+class WorkerProcHandle:
+    proc: BaseProcess
+    initialization_input_path: str
+    initialization_output_path: str
+    model_output_mq_handle: Optional[Handle]
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        with make_zmq_socket(self.initialization_output_path,
+                             zmq.constants.PUSH) as send_socket, \
+             make_zmq_socket(self.initialization_input_path,
+                             zmq.constants.PULL) as recv_socket:
+
+            # Send message to determine the number of blocks
+            send_socket.send_multipart(
+                (WorkerInitRequestType.DETERMINE_NUM_BLOCKS, ))
+
+            # Receive response
+            type_frame, data_frame = recv_socket.recv_multipart(copy=False)
+            response_type = type_frame.buffer
+            response_data = data_frame.buffer
+            if response_type != WorkerInitResponseType.NUM_BLOCKS:
+                raise ValueError(f"Unknown RequestType: {response_type}")
+            return pickle.loads(response_data)
+
+    def initialize(self, num_gpu_blocks: int) -> bool:
+        """ Initialize the KV cache and begin worker execution loop """
+        with make_zmq_socket(self.initialization_output_path,
+                             zmq.constants.PUSH) as send_socket, \
+             make_zmq_socket(self.initialization_input_path,
+                             zmq.constants.PULL) as recv_socket:
+
+            # Send initialization message
+            msg = pickle.dumps(num_gpu_blocks,
+                               protocol=pickle.HIGHEST_PROTOCOL)
+            send_socket.send_multipart((WorkerInitRequestType.INITIALIZE, msg))
+
+            # Receive success or failure response
+            type_frame, data_frame = recv_socket.recv_multipart(copy=False)
+            response_type = type_frame.buffer
+            response_data = data_frame.buffer
+            if response_type != WorkerInitResponseType.INITIALIZE_SUCCESS:
+                raise ValueError(f"Unknown RequestType: {response_type}")
+            return pickle.loads(response_data)
+
+
+class WorkerProc:
+    """Wrapper that runs one Worker in a separate process."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        input_shm_handle: Handle,
+        initialization_input_path: str,
+        initialization_output_path: str,
+    ):
+        self.rank = rank
+        self.worker = Worker(vllm_config, local_rank, rank,
+                             distributed_init_method)
+
+        # Initialize MessageQueue for receiving SchedulerOutput
+        self.scheduler_output_receiver = MessageQueue.create_from_handle(
+            input_shm_handle, self.worker.rank)
+
+        # Worker 0 initializes a message queue for sending the model output
+        if self.rank == 0:
+            self.model_output_mq = MessageQueue(1, 1)
+            output_mq_handle = self.model_output_mq.export_handle()
+        else:
+            self.model_output_mq = None
+            output_mq_handle = None
+
+        # Send Readiness signal to EngineCore process.
+        with make_zmq_socket(initialization_output_path,
+                             zmq.constants.PUSH) as ready_socket:
+            payload = pickle.dumps(output_mq_handle,
+                                   protocol=pickle.HIGHEST_PROTOCOL)
+            ready_socket.send_multipart(
+                (WorkerInitResponseType.READY, payload))
+
+        self.worker.initialize()
+        self.worker.load_model()
+
+    @staticmethod
+    def make_worker_process(
+            vllm_config: VllmConfig,
+            local_rank: int,
+            rank: int,
+            distributed_init_method: str,
+            input_shm_handle,  # Receive SchedulerOutput
+    ) -> WorkerProcHandle:
+        context = get_mp_context()
+
+        # ZMQ paths to send back and forth to worker process
+        # Used for initialization.
+        initialization_input_path = get_open_zmq_ipc_path()
+        initialization_output_path = get_open_zmq_ipc_path()
+
+        process_kwargs = {
+            "vllm_config": vllm_config,
+            "local_rank": local_rank,
+            "rank": rank,
+            "distributed_init_method": distributed_init_method,
+            "input_shm_handle": input_shm_handle,
+            "initialization_input_path": initialization_output_path,
+            "initialization_output_path": initialization_input_path,
+        }
+        # Run EngineCore busy loop in background process.
+        proc = context.Process(target=WorkerProc.run_worker,
+                               kwargs=process_kwargs,
+                               daemon=True)
+        proc.start()
+
+        # Wait for startup
+        model_output_mq_handle = WorkerProc.wait_for_startup(
+            proc, initialization_input_path)
+
+        return WorkerProcHandle(proc, initialization_input_path,
+                                initialization_output_path,
+                                model_output_mq_handle)
+
+    @staticmethod
+    def run_worker(*args, **kwargs):
+        """Launch Worker busy loop in background process."""
+
+        try:
+            worker = WorkerProc(*args, **kwargs)
+            worker.model_initialization_loop(
+                kwargs["initialization_input_path"],
+                kwargs["initialization_output_path"])
+
+            worker.execute_model_busy_loop()
+
+            # Clean up once worker exits busy loop
+            worker = None
+            destroy_tp_mq_broadcaster()
+
+        except KeyboardInterrupt:
+            logger.debug("Worker interrupted.")
+
+        except BaseException as e:
+            logger.exception(e)
+            raise e
+
+    @staticmethod
+    def wait_for_startup(
+        proc: BaseProcess,
+        path: str,
+    ) -> Optional[Handle]:
+        """Wait until the Worker is ready."""
+        with make_zmq_socket(path, zmq.constants.PULL) as socket:
+
+            # Wait for Worker to send READY.
+            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                logger.debug("Waiting for WorkerProc to startup.")
+
+                if not proc.is_alive():
+                    raise RuntimeError("WorkerProc failed to start.")
+
+            type_frame, data_frame = socket.recv_multipart(copy=False)
+            assert type_frame.buffer == WorkerInitResponseType.READY
+            handle = pickle.loads(data_frame.buffer)
+            return handle
+
+    # Busy loop used for initializing Multiprocessing Workers
+    def model_initialization_loop(self, init_input_path, init_output_path):
+        with make_zmq_socket(init_output_path,
+                             zmq.constants.PUSH) as send_socket, \
+             make_zmq_socket(init_input_path,
+                             zmq.constants.PULL) as recv_socket:
+            while True:
+                # (RequestType, RequestData)
+                request = recv_socket.recv_multipart(copy=False)
+                request_type = request[0].buffer
+
+                # Deserialize the request data.
+                if request_type == WorkerInitRequestType.DETERMINE_NUM_BLOCKS:
+                    num_blocks = self.worker.determine_num_available_blocks()
+                    send_socket.send_multipart(
+                        (WorkerInitResponseType.NUM_BLOCKS,
+                         pickle.dumps(num_blocks)),
+                        copy=False)
+                elif request_type == WorkerInitRequestType.INITIALIZE:
+                    # Initialize cache with the number of requested gpu blocks
+                    try:
+                        request_data = request[1].buffer
+                        num_gpu_blocks = pickle.loads(request_data)
+                        self.worker.initialize_cache(num_gpu_blocks)
+                        self.worker.compile_or_warm_up_model()
+                    except BaseException as e:
+                        logger.exception(e)
+
+                        # Send a failure response
+                        send_socket.send_multipart(
+                            (WorkerInitResponseType.INITIALIZE_SUCCESS,
+                             pickle.dumps(False)),
+                            copy=False)
+
+                        raise e
+
+                    # Send a success response. Order is important:
+                    # The executor will call wait_until_ready() on its
+                    # message queues after receiving this message.
+                    send_socket.send_multipart(
+                        (WorkerInitResponseType.INITIALIZE_SUCCESS,
+                         pickle.dumps(True)),
+                        copy=False)
+
+                    # Ensure message queues are ready.
+                    # Must happen after sending the INITIALIZE_SUCESS message.
+                    self.scheduler_output_receiver.wait_until_ready()
+                    if self.model_output_mq is not None:
+                        self.model_output_mq.wait_until_ready()
+
+                    # Exit initialization loop to begin model execution loop
+                    return
+                else:
+                    raise ValueError(f"Unknown RequestType: {request_type}")
+
+    def execute_model_busy_loop(self):
+        """Main busy loop for Multiprocessing Workers"""
+        while True:
+            msg = self.scheduler_output_receiver.dequeue()
+
+            if msg.message_type == WorkerExecRequest.Type.TERMINATE:
+                return
+            if msg.message_type == WorkerExecRequest.Type.WORK:
+                output = self.worker.execute_model(msg.payload)
+                if self.worker.rank == 0:
+                    self.model_output_mq.enqueue(output)
+            else:
+                raise ValueError(f"Unknown RequestType: {msg.message_type}")
 
 
 def init_worker_distributed_environment(

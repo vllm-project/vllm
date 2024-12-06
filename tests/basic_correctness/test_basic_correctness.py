@@ -26,6 +26,14 @@ MODELS = [
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
     llm = LLM("facebook/opt-125m")
@@ -118,6 +126,11 @@ def test_models_distributed(
     if attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
 
+    # Import VLLM_USE_V1 dynamically to handle patching
+    from vllm.envs import VLLM_USE_V1
+    if VLLM_USE_V1 and distributed_executor_backend != "mp":
+        pytest.skip(f"Skip {distributed_executor_backend} for V1")
+
     dtype = "half"
     max_tokens = 5
 
@@ -143,6 +156,7 @@ def test_models_distributed(
     )
 
 
+@pytest.mark.skip_v1
 def test_model_with_failure(vllm_runner) -> None:
     try:
         with patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
@@ -169,6 +183,7 @@ def test_model_with_failure(vllm_runner) -> None:
         os.remove(filename)
 
 
+@pytest.mark.skip_v1
 def test_failure_with_async_out_proc(vllm_runner) -> None:
 
     filename = None

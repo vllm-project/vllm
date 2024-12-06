@@ -1,10 +1,11 @@
 import os
 import pickle
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from unittest.mock import patch
 
 import torch
@@ -20,6 +21,20 @@ from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 logger = init_logger(__name__)
+
+# We prefer to use os.sched_yield as it results in tighter polling loops,
+# measured to be around 3e-7 seconds. However on earlier versions of Python
+# os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
+USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
+                   or (sys.version_info[:2] == (3, 10)
+                       and sys.version_info[2] >= 8))
+
+
+def sched_yield():
+    if USE_SCHED_YIELD:
+        os.sched_yield()
+    else:
+        time.sleep(0)
 
 
 class ShmRingBuffer:
@@ -114,11 +129,14 @@ class ShmRingBuffer:
                     # and we should suppress the error
                     pass
 
+    def handle(self):
+        return (self.n_reader, self.max_chunk_bytes, self.max_chunks,
+                self.shared_memory.name)
+
     def __reduce__(self):
         return (
             self.__class__,
-            (self.n_reader, self.max_chunk_bytes, self.max_chunks,
-             self.shared_memory.name),
+            self.handle(),
         )
 
     def __del__(self):
@@ -147,7 +165,7 @@ class Handle:
     connect_ip: str
     local_reader_ranks: List[int] = field(default_factory=list)
 
-    buffer: Optional[ShmRingBuffer] = None
+    buffer_handle: Optional[Tuple[int, int, int, str]] = None
     local_subscribe_port: Optional[int] = None
     remote_subscribe_port: Optional[int] = None
 
@@ -228,7 +246,7 @@ class MessageQueue:
         self.handle = Handle(
             connect_ip=connect_ip,
             local_reader_ranks=local_reader_ranks,
-            buffer=self.buffer,
+            buffer_handle=self.buffer.handle(),
             local_subscribe_port=local_subscribe_port,
             remote_subscribe_port=remote_subscribe_port,
         )
@@ -247,8 +265,8 @@ class MessageQueue:
         context = Context()
 
         if rank in handle.local_reader_ranks:
-            assert handle.buffer is not None
-            self.buffer = handle.buffer
+            assert handle.buffer_handle is not None
+            self.buffer = ShmRingBuffer(*handle.buffer_handle)
             self.current_idx = 0
             self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
@@ -329,7 +347,7 @@ class MessageQueue:
                     # we need to wait until it is read by all readers
 
                     # Release the processor to other threads
-                    os.sched_yield()
+                    sched_yield()
 
                     # if we wait for a long time, we should warn the user
                     if (time.monotonic() - start_time >
@@ -383,7 +401,7 @@ class MessageQueue:
                     # we need to wait until it is written
 
                     # Release the processor to other threads
-                    os.sched_yield()
+                    sched_yield()
 
                     # if we wait for a long time, we should warn the user
                     if (time.monotonic() - start_time >
