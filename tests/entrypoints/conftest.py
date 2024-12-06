@@ -70,6 +70,37 @@ def sample_json_schema():
 
 
 @pytest.fixture
+def sample_complex_json_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "score": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100  # Numeric range
+            },
+            "grade": {
+                "type": "string",
+                "pattern": "^[A-D]$"  # Regex pattern
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+            },
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "pattern":
+                    "^[a-z]{1,10}$"  # Combining length and pattern restrictions
+                }
+            }
+        },
+        "required": ["score", "grade", "email", "tags"]
+    }
+
+
+@pytest.fixture
 def sample_guided_choice():
     return [
         "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",

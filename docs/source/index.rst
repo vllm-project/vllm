@@ -67,6 +67,7 @@ Documentation
    getting_started/openvino-installation
    getting_started/cpu-installation
    getting_started/gaudi-installation
+   getting_started/arm-installation
    getting_started/neuron-installation
    getting_started/tpu-installation
    getting_started/xpu-installation
@@ -84,12 +85,8 @@ Documentation
    serving/deploying_with_nginx
    serving/distributed_serving
    serving/metrics
-   serving/env_vars
-   serving/usage_stats
    serving/integrations
    serving/tensorizer
-   serving/compatibility_matrix
-   serving/faq
 
 .. toctree::
    :maxdepth: 1
@@ -98,11 +95,21 @@ Documentation
    models/supported_models
    models/adding_model
    models/enabling_multimodal_inputs
-   models/engine_args
-   models/lora
-   models/vlm
-   models/spec_decode
-   models/performance
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Usage
+
+   usage/lora
+   usage/multimodal_inputs
+   usage/structured_outputs
+   usage/spec_decode
+   usage/compatibility_matrix
+   usage/performance
+   usage/faq
+   usage/engine_args
+   usage/env_vars
+   usage/usage_stats
 
 .. toctree::
    :maxdepth: 1
@@ -126,23 +133,11 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
-   :caption: Performance benchmarks
+   :caption: Performance
 
-   performance_benchmark/benchmarks
+   performance/benchmarks
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Developer Documentation
-
-   dev/sampling_params
-   dev/pooling_params
-   dev/offline_inference/offline_index
-   dev/engine/engine_index
-   dev/kernel/paged_attention
-   dev/input_processing/model_inputs_index
-   dev/multimodal/multimodal_index
-   dev/dockerfile/dockerfile
-   dev/profiling/profiling_index
+.. Community: User community resources
 
 .. toctree::
    :maxdepth: 1
@@ -150,6 +145,40 @@ Documentation
 
    community/meetups
    community/sponsors
+
+.. API Documentation: API reference aimed at vllm library usage
+
+.. toctree::
+   :maxdepth: 2
+   :caption: API Documentation
+
+   dev/sampling_params
+   dev/pooling_params
+   dev/offline_inference/offline_index
+   dev/engine/engine_index
+
+.. Design: docs about vLLM internals
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Design
+
+   design/arch_overview
+   design/huggingface_integration
+   design/plugin_system
+   design/input_processing/model_inputs_index
+   design/kernel/paged_attention
+   design/multimodal/multimodal_index
+
+.. For Developers: contributing to the vLLM project
+
+.. toctree::
+   :maxdepth: 2
+   :caption: For Developers
+
+   contributing/overview
+   contributing/profiling/profiling_index
+   contributing/dockerfile/dockerfile
 
 Indices and tables
 ==================

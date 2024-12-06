@@ -119,8 +119,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         if blocksparse_params is not None:
             raise ValueError(
                 "IPEX backend does not support block-sparse attention.")
-        if logits_soft_cap is not None:
-            raise ValueError("IPEX backend does not support logits_soft_cap.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -135,6 +133,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.need_mask = (self.alibi_slopes is not None
                           or self.sliding_window is not None)
+        if logits_soft_cap is None:
+            logits_soft_cap = 0
+        self.logits_soft_cap = logits_soft_cap
 
         supported_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in supported_head_sizes:
@@ -171,7 +172,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         attn_metadata: IpexAttnMetadata,  # type: ignore
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
 
@@ -239,20 +241,23 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     (num_tokens, self.num_heads, self.head_size),
                     dtype=query.dtype,
                     device=query.device)
-                ipex_ops.varlen_attention(query,
-                                          key,
-                                          value,
-                                          output,
-                                          attn_metadata.seqlen_q,
-                                          attn_metadata.seqlen_q,
-                                          attn_metadata.max_seqlen,
-                                          attn_metadata.max_seqlen,
-                                          pdropout=0.0,
-                                          softmax_scale=self.scale,
-                                          zero_tensors=False,
-                                          is_causal=True,
-                                          return_softmax=False,
-                                          gen_=None)
+                ipex_ops.varlen_attention(
+                    query,
+                    key,
+                    value,
+                    output,
+                    attn_metadata.seqlen_q,
+                    attn_metadata.seqlen_q,
+                    attn_metadata.max_seqlen,
+                    attn_metadata.max_seqlen,
+                    pdropout=0.0,
+                    softmax_scale=self.scale,
+                    zero_tensors=False,
+                    is_causal=True,
+                    return_softmax=False,
+                    gen_=None,
+                    logits_soft_cap=self.logits_soft_cap,
+                )
             else:
                 # prefix-enabled attention
                 raise RuntimeError(

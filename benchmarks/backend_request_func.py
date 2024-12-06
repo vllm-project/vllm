@@ -24,6 +24,7 @@ class RequestFuncInput:
     model: str
     best_of: int = 1
     logprobs: Optional[int] = None
+    extra_body: Optional[dict] = None
     multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
 
@@ -36,6 +37,7 @@ class RequestFuncOutput:
     ttft: float = 0.0  # Time to first token
     itl: List[float] = field(
         default_factory=list)  # List of inter-token latencies
+    tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
 
@@ -54,6 +56,7 @@ async def async_request_tgi(
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
             "top_p": 0.99,  # TGI does not accept 1.0 top_p.
+            "truncate": request_func_input.prompt_len,
             # TGI does not accept ignore_eos flag.
         }
         payload = {
@@ -241,6 +244,8 @@ async def async_request_openai_completions(
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
         }
+        if request_func_input.extra_body:
+            payload.update(request_func_input.extra_body)
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
@@ -256,6 +261,7 @@ async def async_request_openai_completions(
             async with session.post(url=api_url, json=payload,
                                     headers=headers) as response:
                 if response.status == 200:
+                    first_chunk_received = False
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
@@ -274,7 +280,8 @@ async def async_request_openai_completions(
                             if data["choices"][0]["text"]:
                                 timestamp = time.perf_counter()
                                 # First token
-                                if ttft == 0.0:
+                                if not first_chunk_received:
+                                    first_chunk_received = True
                                     ttft = time.perf_counter() - st
                                     output.ttft = ttft
 
@@ -285,9 +292,14 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += data["choices"][0]["text"]
-
+                    if first_chunk_received:
+                        output.success = True
+                    else:
+                        output.success = False
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT."
+                            "This response will be marked as failed!")
                     output.generated_text = generated_text
-                    output.success = True
                     output.latency = latency
                 else:
                     output.error = response.reason or ""
@@ -328,6 +340,8 @@ async def async_request_openai_chat_completions(
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
         }
+        if request_func_input.extra_body:
+            payload.update(request_func_input.extra_body)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",

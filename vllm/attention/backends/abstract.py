@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from enum import Enum, auto
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
                     Tuple, Type, TypeVar)
 
@@ -15,13 +14,19 @@ if TYPE_CHECKING:
                                                ModelRunnerInputBuilderBase)
 
 
-class AttentionType(Enum):
-    DECODER = auto()  # Decoder attention between previous layer Q/K/V
-    ENCODER = auto(
-    )  # Encoder attention between previous layer Q/K/V for encoder-decoder
-    ENCODER_ONLY = auto()  # Encoder attention between previous layer Q/K/V
-    ENCODER_DECODER = auto(
-    )  # Attention between dec. Q and enc. K/V for encoder-decoder
+class AttentionType:
+    """
+    Attention type.
+    Use string to be compatible with `torch.compile`.
+    """
+    # Decoder attention between previous layer Q/K/V
+    DECODER = "decoder"
+    # Encoder attention between previous layer Q/K/V for encoder-decoder
+    ENCODER = "encoder"
+    # Encoder attention between previous layer Q/K/V
+    ENCODER_ONLY = "encoder_only"
+    # Attention between dec. Q and enc. K/V for encoder-decoder
+    ENCODER_DECODER = "encoder_decoder"
 
 
 class AttentionBackend(ABC):
@@ -241,6 +246,7 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
