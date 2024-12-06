@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from typing import TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.model_executor.model_loader import get_model
@@ -36,6 +36,7 @@ class CPUModelRunner(GPUModelRunner):
     @torch.inference_mode()
     def execute_model(
             self,
+            kv_caches: List[torch.Tensor],
             scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
@@ -68,7 +69,7 @@ class CPUModelRunner(GPUModelRunner):
             hidden_states = self.model(
                 input_ids=None,
                 positions=self.positions[:num_input_tokens],
-                kv_caches=self.kv_caches,
+                kv_caches=kv_caches,
                 attn_metadata=None,
                 inputs_embeds=self.inputs_embeds[:num_input_tokens],
             )
@@ -185,7 +186,7 @@ class CPUModelRunner(GPUModelRunner):
 
         # calculate block tables info for cpu
         block_tables = self.input_batch.block_table_cpu_tensor[:num_reqs]
-        decode_block_tables = block_tables[num_decode_tokens:]
+        decode_block_tables = block_tables[num_prefills:]
         prefill_block_tables = block_tables[:num_prefills]
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]

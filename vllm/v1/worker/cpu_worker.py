@@ -8,7 +8,7 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.attention import get_attn_backend
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -33,7 +33,9 @@ class CPUCacheEngine:
     """
 
     def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
-                 parallel_config: ParallelConfig) -> None:
+                 parallel_config: ParallelConfig,
+                 device_config: DeviceConfig) -> None:
+        assert device_config.device_type == "cpu"
         self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -217,12 +219,50 @@ class CPUWorkerV1:
         # Initialize the cache.
         self._init_cache_engine()
 
+    def _validate_num_cpu_blocks(self, num_cpu_blocks: int) -> None:
+        """Raise errors if the num_cpu_blocks is invalid.
+        """
+        if num_cpu_blocks <= 0:
+            raise ValueError("No available memory for the cache blocks. "
+                             "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
+                             "initializing the engine.")
+
+        max_seq_len = self.cache_config.block_size * num_cpu_blocks
+        if self.model_config.max_model_len > max_seq_len:
+            raise ValueError(
+                f"The model's max seq len ({self.model_config.max_model_len}) "
+                "is larger than the maximum number of tokens that can be "
+                f"stored in KV cache ({max_seq_len}). Try increasing "
+                "`VLLM_CPU_KVCACHE_SPACE` or decreasing `max_model_len` when "
+                "initializing the engine.")
+
+    def _init_cache_engine(self) -> None:
+        self.cache_engine = [
+            CPUCacheEngine(self.cache_config, self.model_config,
+                           self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.cpu_cache = [
+            self.cache_engine[ve].cpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.model_runner.block_size = self.cache_engine[0].block_size
+
+        assert all(
+            self.cpu_cache[ve] is not None
+            for ve in range(self.parallel_config.pipeline_parallel_size))
+
+        # Populate the cache to warmup the memory
+        for ve in range(self.parallel_config.pipeline_parallel_size):
+            for layer_cache in self.cpu_cache[ve]:
+                layer_cache.fill_(0)
+
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        output = self.model_runner.execute_model(scheduler_output)
+        output = self.model_runner.execute_model(self.cpu_cache[0], scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
         return output
 
