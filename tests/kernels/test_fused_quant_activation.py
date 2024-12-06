@@ -1,5 +1,3 @@
-from typing import Optional, Tuple, Union
-
 import pytest
 import torch
 
@@ -8,7 +6,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 
 DTYPES = [torch.bfloat16, torch.float16]
 QUANT_DTYPES = [torch.float8_e4m3fn]
-NUM_TOKENS = [32, 64, 128, 2048, 4096]  # Arbitrary values for testing
+NUM_TOKENS = [1, 17, 86, 1234, 3045]  # Arbitrary values for testing
 HIDDEN_SIZES = [32, 64, 128, 2048, 4096]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
@@ -63,9 +61,6 @@ def test_silu_and_mul(
     ref_out = ref_impl(layer, x, scale)
     ops_out = ops_impl(x, scale)
 
-    # print(ref_out)
-    # print("@@@@@@@@@@@@@@@@@@@@@@@@")
-    # print(ops_out)
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
     assert ref_out.shape == ops_out.shape
