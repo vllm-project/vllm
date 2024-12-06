@@ -1,5 +1,6 @@
 import copy
 import dataclasses
+import time
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
@@ -31,10 +32,14 @@ def wrap_inductor(graph,
     compilation_counter.num_inductor_compilations += 1
 
     if do_logging:
+        now = time.time()
+        elapsed = now - compilation_start_time
         if runtime_shape is None:
-            logger.info("Compiling a graph for general shape")
+            logger.info("Compiling a graph for general shape takes %.2f s",
+                        elapsed)
         else:
-            logger.info("Compiling a graph for shape %s", runtime_shape)
+            logger.info("Compiling a graph for shape %s takes %.2f s",
+                        runtime_shape, elapsed)
 
     from torch._inductor import config
     current_config = config.shallow_copy_dict()
@@ -108,6 +113,8 @@ def split_graph(graph: fx.GraphModule,
 # we share the global graph pool among all the backends
 global_graph_pool = None
 
+compilation_start_time = 0.0
+
 
 class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
@@ -151,12 +158,15 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
+            global compilation_start_time
+            if index == 0:
+                compilation_start_time = time.time()
             compiled_graph_for_general_shape = wrap_inductor(
                 submod,
                 args,
                 self.compilation_configs.inductor_compile_config,
                 runtime_shape=None,
-                do_logging=index == 0,
+                do_logging=index == len(self.compile_submod_names) - 1,
                 use_inductor=self.compilation_configs.use_inductor)
 
             self.module.__dict__[target] = PiecewiseBackend(
@@ -398,12 +408,15 @@ class PiecewiseBackend:
         if entry.need_to_compile and not entry.compiled:
             entry.compiled = True
             # args are real arguments
+            if self.is_first_graph:
+                global compilation_start_time
+                compilation_start_time = time.time()
             entry.runnable = wrap_inductor(
                 self.graph,
                 args,
                 self.compilation_configs.inductor_compile_config,
                 runtime_shape=runtime_shape,
-                do_logging=self.is_first_graph,
+                do_logging=self.is_last_graph,
                 use_inductor=self.compilation_configs.use_inductor)
 
         if not entry.use_cudagraph:
