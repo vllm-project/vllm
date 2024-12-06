@@ -1,0 +1,31 @@
+{
+    "name": "vllm-dev-cuda",
+    "build": { 
+        "dockerfile": "../../Dockerfile",
+        "context": "../..",
+        "target": "dev"
+    },
+    "runArgs": ["--gpus", "all"],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "charliermarsh.ruff",
+                "ms-toolsai.jupyter-keymap",
+                "ms-vscode.cpptools",
+                "NVIDIA.nsight-vscode-edition"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/bin/python3",
+                "ruff.lint.args": [
+                    "\"--config=pyproject.toml\""
+                ]
+            }
+
+        }
+    },
+    "containerEnv": {
+        "HF_TOKEN": "${localEnv:HF_TOKEN}"
+    }
+}
