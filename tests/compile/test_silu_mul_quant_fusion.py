@@ -2,8 +2,8 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.fusion import (FusionPass, find_auto_fn,
-                                     find_auto_fn_maybe)
+from vllm.compilation.fusion import (find_auto_fn, find_auto_fn_maybe)
+from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.reshapes import RedundantReshapesPass
 from vllm.config import CompilationConfig
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -37,7 +37,7 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size):
     config = CompilationConfig.PassConfig(enable_fusion=True,
                                           enable_reshape=True)
     reshape_pass = RedundantReshapesPass(config)
-    fusion_pass = FusionPass.instance(config)
+    fusion_pass = ActivationQuantFusionPass.instance(config)
 
     backend = TestBackend(reshape_pass, fusion_pass)
     model = TestModel()
