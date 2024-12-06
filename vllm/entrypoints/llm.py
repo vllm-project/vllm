@@ -6,6 +6,7 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
 from tqdm import tqdm
+from typing_extensions import deprecated
 
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -260,6 +261,7 @@ class LLM:
         self.llm_engine.finish_measurements()  # type: ignore[attr-defined]
 
     @overload  # LEGACY: single (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: str,
@@ -272,6 +274,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: List[str],
@@ -284,6 +287,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: Optional[str] = None,
@@ -297,6 +301,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: Optional[List[str]] = None,
@@ -310,6 +315,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: None,
@@ -675,6 +681,7 @@ class LLM:
         )
 
     @overload  # LEGACY: single (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: str,
@@ -687,6 +694,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: List[str],
@@ -699,6 +707,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: Optional[str] = None,
@@ -712,6 +721,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: Optional[List[str]] = None,
@@ -725,6 +735,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: None,

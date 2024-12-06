@@ -171,7 +171,7 @@ class EngineArgs:
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
 
-    guided_decoding_backend: str = 'outlines'
+    guided_decoding_backend: str = 'xgrammar'
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     speculative_model_quantization: Optional[str] = None
@@ -374,11 +374,12 @@ class EngineArgs:
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
-            default='outlines',
-            choices=['outlines', 'lm-format-enforcer'],
+            default='xgrammar',
+            choices=['outlines', 'lm-format-enforcer', 'xgrammar'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
-            'https://github.com/outlines-dev/outlines and '
+            'https://github.com/outlines-dev/outlines,'
+            'https://github.com/mlc-ai/xgrammar, and '
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.')
@@ -1137,7 +1138,7 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:

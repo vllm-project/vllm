@@ -9,6 +9,7 @@ import cloudpickle
 import psutil
 import zmq
 import zmq.asyncio
+from typing_extensions import deprecated
 from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
@@ -93,8 +94,7 @@ class MQLLMEngineClient(EngineClient):
             model_config=self.model_config,
             scheduler_config=engine_config.scheduler_config,
             parallel_config=engine_config.parallel_config,
-            enable_lora=bool(engine_config.lora_config),
-        )
+            lora_config=engine_config.lora_config)
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
 
@@ -414,7 +414,8 @@ class MQLLMEngineClient(EngineClient):
     def dead_error(self) -> BaseException:
         return ENGINE_DEAD_ERROR(self._errored_with)
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def generate(
         self,
         *,
@@ -472,8 +473,8 @@ class MQLLMEngineClient(EngineClient):
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
-            priority: Priority of the request (lower means earlier handling). 
-                Any priority other than 0 will lead to an error if the 
+            priority: Priority of the request (lower means earlier handling).
+                Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
         if inputs is not None:
@@ -485,7 +486,8 @@ class MQLLMEngineClient(EngineClient):
                                      lora_request, trace_headers,
                                      prompt_adapter_request, priority)
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def encode(
         self,
         *,
@@ -586,6 +588,7 @@ class MQLLMEngineClient(EngineClient):
                     default_guided_backend=(self.decoding_config.guided_decoding_backend
                         if self.decoding_config
                         else DecodingConfig.guided_decoding_backend),
+                    model_config=self.model_config
                 )
 
         # 1) Create output queue for this requests.

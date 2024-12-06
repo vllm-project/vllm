@@ -489,7 +489,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
                 block_size = cache_config.block_size
                 seq_num_blocks = (seq_len + block_size - 1) // block_size
 
-                seq_data, dummy_multi_modal_data = input_registry \
+                dummy_data = input_registry \
                     .dummy_data_for_profiling(model_config,
                                               seq_len,
                                               mm_registry)
@@ -498,11 +498,11 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
                 seq = SequenceGroupMetadata(
                     request_id=str(group_id),
                     is_prompt=True,
-                    seq_data={group_id: seq_data},
+                    seq_data={group_id: dummy_data.seq_data},
                     sampling_params=sampling_params,
                     block_tables=block_tables,
                     lora_request=None,
-                    multi_modal_data=dummy_multi_modal_data)
+                    multi_modal_data=dummy_data.multi_modal_data)
                 seqs.append(seq)
 
             self.model_runner.block_size = tmp_cache_config.block_size
