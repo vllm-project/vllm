@@ -175,8 +175,8 @@ async def build_async_engine_client_from_engine_args(
 
         # Select random path for IPC.
         ipc_path = get_open_zmq_ipc_path()
-        logger.info("Multiprocessing frontend to use %s for IPC Path.",
-                    ipc_path)
+        logger.debug("Multiprocessing frontend to use %s for IPC Path.",
+                     ipc_path)
 
         # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
