@@ -8,7 +8,7 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig):
 
 
 def end_monitoring_torch_compile(vllm_config: VllmConfig):
-    if vllm_config.level != CompilationLevel.PIECEWISE:
+    if vllm_config.compilation_config.level != CompilationLevel.PIECEWISE:
         print(f"{compile_times()=}")
         return
 
