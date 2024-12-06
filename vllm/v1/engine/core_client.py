@@ -6,7 +6,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.logger import init_logger
-from vllm.utils import get_open_zmq_ipc_path
+from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
@@ -171,7 +171,7 @@ class MPClient(EngineCoreClient):
             self.proc.join(5)
 
             if self.proc.is_alive():
-                self.proc.kill()
+                kill_process_tree(self.proc.pid)
 
     def __del__(self):
         self.shutdown()
