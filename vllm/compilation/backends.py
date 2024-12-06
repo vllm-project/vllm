@@ -155,7 +155,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
-        self.compilation_configs = vllm_config.compilation_configs
+        self.compilation_configs = vllm_config.compilation_config
         self.graph_pool = graph_pool
         self.vllm_config = vllm_config
 
