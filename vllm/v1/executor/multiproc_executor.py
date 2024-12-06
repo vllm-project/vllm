@@ -1,17 +1,14 @@
 import atexit
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Optional, Tuple
 
-import torch
-
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+from vllm.executor.multiproc_worker_utils import (
+    set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.triton_utils import maybe_set_triton_cache_manager
-from vllm.utils import (cuda_is_initialized, get_distributed_init_method,
-                        get_open_port, get_vllm_instance_id)
+from vllm.utils import get_distributed_init_method, get_open_port
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import WorkerProc, WorkerProcHandle
 
@@ -26,16 +23,7 @@ class MultiprocExecutor:
         atexit.register(self.shutdown)
 
         self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
-        self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
-        self.observability_config = vllm_config.observability_config
 
         world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -44,40 +32,8 @@ class MultiprocExecutor:
             f"tensor_parallel_size ({tensor_parallel_size}). "
             f"Pipeline parallelism is not yet implemented in v1")
 
-        if (cuda_is_initialized()
-                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-            logger.warning("CUDA was previously initialized. We must use "
-                           "the `spawn` multiprocessing start method. Setting "
-                           "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.")
-            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-        # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
-        os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
-
-        # Disable torch async compiling which won't work with daemonic processes
-        os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-
-        # Configure thread parallelism if OMP_NUM_THREADS isn't set
-        #
-        # Helps to avoid CPU contention. The default of spawning a thread per
-        # core combined with multiprocessing for each GPU can have a negative
-        # impact on performance. The contention is amplified when running in a
-        # container where CPU limits can cause throttling.
-        default_omp_num_threads = 1
-        if "OMP_NUM_THREADS" not in os.environ and (
-                current_parallelism :=
-                torch.get_num_threads()) > default_omp_num_threads:
-            logger.warning(
-                "Reducing Torch parallelism from %d threads to %d to avoid "
-                "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
-                "external environment to tune this value as needed.",
-                current_parallelism, default_omp_num_threads)
-            os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
-            torch.set_num_threads(default_omp_num_threads)
-
-        # workaround for https://github.com/vllm-project/vllm/issues/6103
-        if world_size > 1:
-            maybe_set_triton_cache_manager()
+        # Set multiprocessing envs that are common to V0 and V1
+        set_multiprocessing_worker_envs(self.parallel_config)
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
