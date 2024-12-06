@@ -671,38 +671,40 @@ class DeepseekV2MLAAttention(nn.Module):
             value=0).squeeze(1)
         assert k.numel() == v.numel(), f"{k.numel()=} != {v.numel()=}"
 
-        # attn_output = self.decode_attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.decode_attn(q, k, v, kv_cache, attn_metadata)
 
-        # i just want to manually verify MLA is doing the right thing
-        # let's get all the previous kv cache and copy them here, run the MLA manually
-        paged_kv_indptr = attn_metadata.decode_metadata.paged_kv_indptr
-        paged_kv_indices = attn_metadata.decode_metadata.paged_kv_indices
-        paged_kv_last_page_len = attn_metadata.decode_metadata.paged_kv_last_page_len
+        # # debug: i just want to manually verify MLA is doing the right thing
+        # # let's get all the previous kv cache and copy them here, run the MLA manually
+        # paged_kv_indptr = attn_metadata.decode_metadata.paged_kv_indptr
+        # paged_kv_indices = attn_metadata.decode_metadata.paged_kv_indices
+        # paged_kv_last_page_len = attn_metadata.decode_metadata.paged_kv_last_page_len
 
-        # debug: we always have batch size 1 and one page
-        assert paged_kv_indptr.cpu().tolist() == [
-            0, 1
-        ], f"{paged_kv_indptr.cpu().tolist()=}"
-        paged_idx = paged_kv_indices[0]
-        full_latent_cache = kv_cache[paged_idx, 0]
-        full_rope_cache = kv_cache[paged_idx, 1]
-        # let's write k and v into the full cache at paged_kv_last_page_len-1
-        full_latent_cache[paged_kv_last_page_len - 1, :, :] = k
-        full_rope_cache[paged_kv_last_page_len - 1, :, :] = v
-        full_latent_cache = full_latent_cache[:paged_kv_last_page_len, :, :]
-        full_rope_cache = full_rope_cache[:paged_kv_last_page_len, :, :self.
-                                          qk_rope_head_dim]
-        full_kv_cache = torch.cat([full_latent_cache, full_rope_cache], dim=-1)
+        # # debug: we always have batch size 1 and one page
+        # assert paged_kv_indptr.cpu().tolist() == [
+        #     0, 1
+        # ], f"{paged_kv_indptr.cpu().tolist()=}"
+        # paged_idx = paged_kv_indices[0]
+        # full_latent_cache = kv_cache[paged_idx, 0]
+        # full_rope_cache = kv_cache[paged_idx, 1]
+        # # let's write k and v into the full cache at paged_kv_last_page_len-1
+        # full_latent_cache[paged_kv_last_page_len - 1, :, :] = k
+        # full_rope_cache[paged_kv_last_page_len - 1, :, :] = v
+        # full_latent_cache = full_latent_cache[:paged_kv_last_page_len, :, :]
+        # full_rope_cache = full_rope_cache[:paged_kv_last_page_len, :, :self.
+        #                                   qk_rope_head_dim]
+        # full_kv_cache = torch.cat([full_latent_cache, full_rope_cache], dim=-1)
 
-        # now let's run the MLA manually
-        q_B_N_LR = q
-        k_S_1_LR = full_kv_cache
-        v_S_1_L = full_latent_cache
-        import math
-        scale = 1.0 / math.sqrt(self.kv_lora_rank + self.qk_rope_head_dim)
-        attn_scores = torch.einsum("bnl,snl->nbs", q_B_N_LR, k_S_1_LR) * scale
-        attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
-        attn_output = torch.einsum("nbs,snl->bnl", attn_probs, v_S_1_L)
+        # # now let's run the MLA manually
+        # q_B_N_LR = q
+        # k_S_1_LR = full_kv_cache
+        # v_S_1_L = full_latent_cache
+        # import math
+        # scale = 1.0 / math.sqrt(self.kv_lora_rank + self.qk_rope_head_dim)
+        # attn_scores = torch.einsum("bnl,snl->nbs", q_B_N_LR, k_S_1_LR) * scale
+        # attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
+        # attn_output_ref = torch.einsum("nbs,snl->bnl", attn_probs, v_S_1_L)
+
+        # # assert torch.allclose(attn_output.sum(), attn_output_ref.sum()), f"{attn_output.sum()=}\n{attn_output_ref.sum()=}"
 
         assert attn_output.shape == (
             B, self.num_local_heads, self.kv_lora_rank
@@ -1027,4 +1029,3 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
-    

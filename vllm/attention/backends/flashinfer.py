@@ -194,6 +194,7 @@ class FlashInferState(AttentionState):
             self.runner.parallel_config)
         use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (
             num_qo_heads // num_kv_heads > 4)
+        assert torch.is_tensor(_indptr_buffer), f"{_indptr_buffer=}"
         self._graph_decode_wrapper = (
             # CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
             BatchDecodeMlaWithPagedKVCacheWrapper(
@@ -276,6 +277,7 @@ class FlashInferState(AttentionState):
         model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()
         model_input.attn_metadata.begin_forward()
 
+import math
 
 @dataclass
 class FlashInferMetadata(AttentionMetadata):
@@ -375,8 +377,7 @@ class FlashInferMetadata(AttentionMetadata):
                     self.num_qo_heads,
                     self.head_dim,
                     self.page_size,
-                    sm_scale=self.head_dim**
-                    -0.5,  # TODO(simon): should we explicitly pass this in?
+                    sm_scale=1.0 / math.sqrt(self.head_dim + self.head_dim//8),  # TODO(simon): should we explicitly pass this in?
                     data_type=self.data_type,
                     q_data_type=self.q_data_type)
         if self.num_decode_tokens > 0:
@@ -395,6 +396,7 @@ class FlashInferMetadata(AttentionMetadata):
 
             assert self.decode_wrapper is not None
             # self.decode_wrapper.end_forward()
+
             self.decode_wrapper.plan(
                 self.paged_kv_indptr[self.num_prefills:],
                 self.paged_kv_indices,
@@ -403,8 +405,7 @@ class FlashInferMetadata(AttentionMetadata):
                 # self.num_kv_heads,
                 self.head_dim,
                 self.page_size,
-                sm_scale=self.head_dim**
-                -0.5,  # TODO(simon): should we explicitly pass this in?
+                sm_scale=1.0 / math.sqrt(self.head_dim + self.head_dim//8),  # TODO(simon): should we explicitly pass this in?
                 # Disable flashinfer's pos encoding and use vllm's rope.
                 # pos_encoding_mode="NONE",
                 # kv-cache data type.
@@ -803,23 +804,25 @@ class FlashInferImpl(AttentionImpl):
         key_rope = value
         del value
 
-        num_tokens, N, L_R = query.shape
-        qk_rope_head_dim = L_R - self.head_size
-        hidden_size = N * self.head_size
+        num_tokens, N, LR = query.shape
         assert N == self.num_heads
+        assert LR == self.head_size + self.head_size//8
+        qk_rope_head_dim = LR - self.head_size
         assert qk_rope_head_dim == 64
+        # hidden_size = N * self.head_size
 
         num_heads: int = self.num_heads
         head_size: int = self.head_size
         num_kv_heads: int = self.num_kv_heads
+        assert self.num_kv_heads == 1
         kv_cache_dtype: str = self.kv_cache_dtype
-        softmax_scale: float = self.scale
-        window_size = self.sliding_window
-        alibi_slopes = self.alibi_slopes
-        logits_soft_cap = self.logits_soft_cap
+        # softmax_scale: float = self.scale
+        # window_size = self.sliding_window
+        # alibi_slopes = self.alibi_slopes
+        # logits_soft_cap = self.logits_soft_cap
 
         # num_tokens, hidden_size = query.shape
-        query = query.view(-1, num_heads, L_R)
+        query = query.view(-1, num_heads, LR)
         key = key.view(-1, num_kv_heads, head_size)
         key_rope = key_rope.view(-1, num_kv_heads,
                                  head_size)  # this is padded!
@@ -851,26 +854,26 @@ class FlashInferImpl(AttentionImpl):
                     f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
         assert key_rope.shape[0] == num_prefill_tokens + num_decode_tokens, \
                     f"value : {key_rope.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
-        query = query.contiguous(
-        )  # Flashinfer requires query to be contiguous
+
+        query = query.contiguous()  # Flashinfer requires query to be contiguous
         # Query for decode. KV is not needed because it is already cached.
         # QKV for prefill.
-        decode_query = query[num_prefill_tokens:]
-        query = query[:num_prefill_tokens]
-        assert query.shape[0] == num_prefill_tokens
-        assert decode_query.shape[0] == num_decode_tokens
+        # query = query[:num_prefill_tokens]
+        decode_query = query#[num_prefill_tokens:]
+        # assert query.shape[0] == num_prefill_tokens
+        assert decode_query.shape[0] == num_decode_tokens, f"{decode_query.shape=}, {num_decode_tokens=}"
 
-        query_nope = query[:, :, :head_size]
-        query_pe = query[:, :, head_size:]
+        # query_nope = query[:, :, :head_size].contiguous()
+        # query_pe = query[:, :, head_size:].contiguous()
+        decode_query_nope = decode_query[:, :, :head_size].contiguous()
+        decode_query_pe = decode_query[:, :, head_size:].contiguous()
 
-        decode_query_nope = decode_query[:, :, :head_size]
-        decode_query_pe = decode_query[:, :, head_size:]
-
-        window_left = window_size[0] if window_size is not None else -1
+        # window_left = window_size[0] if window_size is not None else -1
 
         prefill_output: Optional[torch.Tensor] = None
         decode_output: Optional[torch.Tensor] = None
         if prefill_meta := attn_metadata.prefill_metadata:
+            assert False
             # We will use flash attention for prefill
             # when kv_cache is not provided.
             # This happens when vllm runs the profiling to
@@ -924,19 +927,21 @@ class FlashInferImpl(AttentionImpl):
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
             assert decode_meta.decode_wrapper is not None
-            paged_kpe_cache, _ = kv_cache[:, 1].split(
-                [qk_rope_head_dim, head_size - qk_rope_head_dim], dim=-1)
+            # paged_kpe_cache, _ = kv_cache[:, 1].split(
+            #     [qk_rope_head_dim, head_size - qk_rope_head_dim], dim=-1)
+            # paged_kpe_cache = paged_kpe_cache.contiguous() # this is making of entire KV cache noooo
+            # # note: this shouldn't matter b/c FI assumes head_dim_kpe == head_dim_ckv//8
 
             decode_output = decode_meta.decode_wrapper.run(
                 q_nope=decode_query_nope,
                 q_pe=decode_query_pe,
                 paged_ckv_cache=kv_cache[:, 0],
                 paged_kpe_cache=kv_cache[:, 1],
+                # paged_kpe_cache=paged_kpe_cache,
                 # sm_scale=softmax_scale,
                 # logits_soft_cap=logits_soft_cap,
-                k_scale=k_scale,
-                v_scale=
-                None,  # v_scale, # NOTE(simon): there's a bug in FI now. https://github.com/flashinfer-ai/flashinfer/pull/650
+                # k_scale=k_scale,
+                # v_scale=v_scale,
                 # window_left=window_left
             )
 
