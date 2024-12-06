@@ -173,11 +173,9 @@ class Scheduler:
         # Record the LoRAs in scheduled_running_reqs
         requested_loras: Set[int] = set()
         if self.lora_config:
-            requested_loras =  \
-                set(req.lora_request.lora_int_id \
-                        for req in scheduled_running_reqs \
-                            if req.lora_request and \
-                                req.lora_request.lora_int_id > 0)
+            requested_loras = set(
+                req.lora_request.lora_int_id for req in scheduled_running_reqs
+                if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(requested_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.

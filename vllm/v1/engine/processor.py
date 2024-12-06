@@ -108,11 +108,15 @@ class Processor:
 
         # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
-            request_id, decoder_inputs.prompt, decoder_inputs.prompt_token_ids,
+            request_id,
+            decoder_inputs.prompt,
+            decoder_inputs.prompt_token_ids,
             sampling_params.skip_special_tokens,
             sampling_params.spaces_between_special_tokens,
-            sampling_params.output_kind, sampling_params.stop,
-            sampling_params.include_stop_str_in_output, lora_request,
+            sampling_params.output_kind,
+            sampling_params.stop,
+            sampling_params.include_stop_str_in_output,
+            lora_request,
         )
 
         # Make Request for EngineCore.

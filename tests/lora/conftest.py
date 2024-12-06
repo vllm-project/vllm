@@ -281,8 +281,8 @@ def run_with_both_engines_lora(request):
     if use_v1:
         if skip_v1:
             pytest.skip("Skipping test on vllm V1")
-        with patch('vllm.envs.VLLM_USE_V1', True), \
-                patch('vllm.envs.VLLM_V1_FORCE_DISABLE_PREFIX_CACHING', True):
+        with patch('vllm.envs.VLLM_USE_V1', True), patch(
+                'vllm.envs.VLLM_V1_FORCE_DISABLE_PREFIX_CACHING', True):
             yield
     else:
         with patch('vllm.envs.VLLM_USE_V1', False):
