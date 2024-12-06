@@ -21,6 +21,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLora,
                               LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica import PunicaWrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              is_regex_target_modules,
@@ -102,19 +103,19 @@ class LoRAModel(AdapterModel):
     # (yard1): TODO see if we can derive target_embedding_padding automatically
     @classmethod
     def from_lora_tensors(
-        cls,
-        lora_model_id: int,
-        rank: int,
-        lora_alpha: int,
-        tensors: Dict[str, torch.Tensor],
-        device: str = "cuda",
-        dtype: Optional[torch.dtype] = None,
-        embeddings: Optional[Dict[str, torch.Tensor]] = None,
-        target_embedding_padding: Optional[int] = None,
-        scaling_factor: Optional[float] = None,
-        embedding_modules: Optional[Dict[str, str]] = None,
-        embedding_padding_modules: Optional[List[str]] = None,
-    ) -> "LoRAModel":
+            cls,
+            lora_model_id: int,
+            rank: int,
+            lora_alpha: int,
+            tensors: Dict[str, torch.Tensor],
+            device: str = "cuda",
+            dtype: Optional[torch.dtype] = None,
+            embeddings: Optional[Dict[str, torch.Tensor]] = None,
+            target_embedding_padding: Optional[int] = None,
+            scaling_factor: Optional[float] = None,
+            embedding_modules: Optional[Dict[str, str]] = None,
+            embedding_padding_modules: Optional[List[str]] = None,
+            lora_helper: Optional[PEFTHelper] = None) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
@@ -135,10 +136,9 @@ class LoRAModel(AdapterModel):
                         if pin_memory:
                             lora_embeddings_tensor = (
                                 lora_embeddings_tensor.pin_memory())
-                loras[module_name] = LoRALayerWeights(module_name, rank,
-                                                      lora_alpha, None, None,
-                                                      None,
-                                                      lora_embeddings_tensor)
+                loras[module_name] = LoRALayerWeights.from_config(
+                    module_name, lora_helper, lora_embeddings_tensor)
+
             if is_bias:
                 loras[module_name].bias = tensor.to(device=device,
                                                     dtype=dtype).t()
@@ -170,7 +170,10 @@ class LoRAModel(AdapterModel):
 
         for lora in loras.values():
             lora.optimize()
-        return cls(lora_model_id, rank, loras, scaling_factor=scaling_factor)
+        return cls(lora_model_id,
+                   lora_helper.r,
+                   loras,
+                   scaling_factor=scaling_factor)
 
     @classmethod
     def from_local_checkpoint(
@@ -283,7 +286,7 @@ class LoRAModel(AdapterModel):
                 max_position_embeddings = context_length
             scaling_factor = float(
                 math.ceil(context_length / max_position_embeddings))
-
+        peft_helper = PEFTHelper.from_dict(config)
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
             if lora_model_id is None else lora_model_id,
@@ -297,7 +300,7 @@ class LoRAModel(AdapterModel):
             scaling_factor=scaling_factor,
             embedding_modules=embedding_modules,
             embedding_padding_modules=embedding_padding_modules,
-        )
+            lora_helper=peft_helper)
 
 
 class LoRAModelManager(AdapterModelManager):
