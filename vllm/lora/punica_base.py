@@ -18,11 +18,108 @@ if TYPE_CHECKING:
     from vllm.lora.models import LongContextLoRAContext
 
 
-class PunicaWrapperBase(ABC):
+class PunicaWrapperABC(ABC):
     """
-    PunicaWrapper is designed to manage and provide metadata for the punica 
+    PunicaWrapper ABC.
+    """
+
+    @abstractmethod
+    def update_metadata(
+        self,
+        mapping: "LoRAMapping",
+        lora_index_to_id: List[Optional[int]],
+        max_loras: int,
+        vocab_size: int,
+        extra_vocab_size: int,
+        long_lora_context: Optional["LongContextLoRAContext"] = None,
+    ):
+        """
+        Update the lora-related metadata
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_shrink(
+        self,
+        y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+        x: torch.Tensor,
+        lora_a_stacked: Tuple[torch.Tensor, ...],
+        scale: float,
+    ):
+        """
+        Performs GEMM  for multiple slices of lora_a.
+        """
+
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_expand(
+        self,
+        y: torch.Tensor,
+        x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+        lora_b_stacked: Tuple[torch.Tensor, ...],
+        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+        output_slices: Tuple[int, ...],
+        offset_start: int = 0,
+        add_input=True,
+    ) -> None:
+        """
+        Performs GEMM and bias addition for multiple slices of lora_b.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_lora_embedding(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        add_input: bool = True,
+    ):
+        """
+        Applies lora  specifically for VocabParallelEmbeddingWithLoRA, 
+        and this layer only requires the expand operation.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_lora_linear(
+            self,
+            y: torch.Tensor,
+            x: torch.Tensor,
+            lora_a_stacked: Tuple[torch.Tensor, ...],
+            lora_b_stacked: Tuple[torch.Tensor, ...],
+            lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+            scale: float,
+            output_slices: Tuple[int, ...],
+            *,
+            buffer: Optional[Tuple[torch.Tensor, ...]] = None) -> None:
+        """
+        Applicable to linear-related lora. 
+        """
+
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_lora_logits(self,
+                        y: torch.Tensor,
+                        x: torch.Tensor,
+                        lora_a_stacked: torch.Tensor,
+                        lora_b_stacked: torch.Tensor,
+                        scale,
+                        *,
+                        buffer: Optional[torch.Tensor] = None) -> None:
+        """
+        Applies lora  specifically for LogitsProcessorWithLoRA.
+        """
+        raise NotImplementedError
+
+
+class PunicaWrapperBase(PunicaWrapperABC):
+    """
+    PunicaWrapperBase is designed to manage and provide metadata for the punica 
     kernel. The main function is to maintain the state information for 
-    Multi-LoRA, and to provide the interface for the punica kernel.
+    Multi-LoRA, and to provide the interface for the punica.
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
@@ -64,26 +161,6 @@ class PunicaWrapperBase(ABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
-
-    def update_metadata(
-        self,
-        mapping: "LoRAMapping",
-        lora_index_to_id: List[Optional[int]],
-        max_loras: int,
-        vocab_size: int,
-        extra_vocab_size: int,
-        long_lora_context: Optional["LongContextLoRAContext"] = None,
-    ):
-
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras,
-                                   vocab_size, extra_vocab_size,
-                                   long_lora_context)
-        if mapping.is_prefill:
-            # Update metadata required for prefill-related operators.
-            self._update_prefill_metada(self.token_lora_indices)
-            self.is_prefill = True
-        else:
-            self.is_prefill = False
 
     def _update_base_metadata(
         self,
@@ -139,6 +216,38 @@ class PunicaWrapperBase(ABC):
         self.max_length = max_length
         self.token_nums = token_nums
         self.no_lora = no_lora
+
+    def _apply_bias(
+        self,
+        indices: torch.Tensor,
+        output: torch.Tensor,
+        output_slices: Tuple[int, ...],
+        lora_bias_stacked: Tuple[Optional[torch.Tensor], ...],
+    ):
+        """Applies bias to output
+
+        Input shapes:
+            lora_bias_stacked:      3 element tuple of (num_loras, output_dim)
+            indices:           (batch_size)
+            output:            (batch_size, q_slice_size + 2*kv_slice_size)
+            output_slices:     n-1 element tuple of (slice_size...),
+                            where n is number of slices
+        """
+        org_output = output
+        output = output.view(-1, output.shape[-1])
+        indices = indices.view(-1)
+
+        offset_left = 0
+        for slice_idx, slice in enumerate(output_slices):
+            bias = lora_bias_stacked[slice_idx]
+            if bias is not None:
+                bias = bias.view(-1, bias.shape[-1])
+                bias = bias[indices]
+                bias[indices == -1] = 0
+                output[:, offset_left:offset_left + slice] += bias
+            offset_left += slice
+
+        return output.view_as(org_output)
 
     @property
     def prefill_metadata(
@@ -204,21 +313,33 @@ class PunicaWrapperBase(ABC):
         long_lora_len = self.indices_len[4]
         return self._long_lora_indices[:long_lora_len]
 
+    def update_metadata(
+            self,
+            mapping: "LoRAMapping",
+            lora_index_to_id: List[Optional[int]],
+            max_loras: int,
+            vocab_size: int,
+            extra_vocab_size: int,
+            long_lora_context: Optional["LongContextLoRAContext"] = None,
+            **kwargs):
+
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras,
+                                   vocab_size, extra_vocab_size,
+                                   long_lora_context)
+        if mapping.is_prefill:
+            # Update metadata required for prefill-related operators.
+            self._update_prefill_metada(self.token_lora_indices)
+            self.is_prefill = True
+        else:
+            self.is_prefill = False
+
     @abstractmethod
-    def add_shrink(
-        self,
-        y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
-        x: torch.Tensor,
-        lora_a_stacked: Tuple[torch.Tensor, ...],
-        scale: float,
-    ):
+    def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+                   x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
+                   scale: float, **kwargs):
         """
         Performs GEMM  for multiple slices of lora_a.
-        When `is_prefill is` true, it indicates that it is currently the
-        prefill stage, and the `_shrink_prefill` function should be called.
-        Otherwise, it is the decode stage, and the _shrink_decode function
-        should be called.
-            
+
         Semantics:
         for i in range(len(lora_a_stacked)):
             y[i] += (x @ lora_a_stacked[i]) * scale
@@ -234,16 +355,15 @@ class PunicaWrapperBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_expand(
-        self,
-        y: torch.Tensor,
-        x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
-        lora_b_stacked: Tuple[torch.Tensor, ...],
-        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
-        output_slices: Tuple[int, ...],
-        offset_start: int = 0,
-        add_input=True,
-    ) -> None:
+    def add_expand(self,
+                   y: torch.Tensor,
+                   x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+                   lora_b_stacked: Tuple[torch.Tensor, ...],
+                   lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+                   output_slices: Tuple[int, ...],
+                   offset_start: int = 0,
+                   add_input=True,
+                   **kwargs) -> None:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
       
@@ -264,19 +384,19 @@ class PunicaWrapperBase(ABC):
             add_input (bool):  Defaults to True.
 
         """
+        # TODO: implement it based on torch ops
         raise NotImplementedError
 
     @abstractmethod
-    def add_lora_embedding(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        lora_b_stacked: torch.Tensor,
-        add_input: bool = True,
-    ):
+    def add_lora_embedding(self,
+                           y: torch.Tensor,
+                           x: torch.Tensor,
+                           lora_b_stacked: torch.Tensor,
+                           add_input: bool = True,
+                           **kwargs):
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
-
+        and this layer only requires the expand operation.
         Semantics:
             y += x @ lora_b_stacked
 
@@ -286,20 +406,21 @@ class PunicaWrapperBase(ABC):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_input (bool): Default to True.
         """
+        # TODO: implement it based on torch ops
         raise NotImplementedError
 
     @abstractmethod
-    def add_lora_linear(
-            self,
-            y: torch.Tensor,
-            x: torch.Tensor,
-            lora_a_stacked: Tuple[torch.Tensor, ...],
-            lora_b_stacked: Tuple[torch.Tensor, ...],
-            lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
-            scale: float,
-            output_slices: Tuple[int, ...],
-            *,
-            buffer: Optional[Tuple[torch.Tensor, ...]] = None) -> None:
+    def add_lora_linear(self,
+                        y: torch.Tensor,
+                        x: torch.Tensor,
+                        lora_a_stacked: Tuple[torch.Tensor, ...],
+                        lora_b_stacked: Tuple[torch.Tensor, ...],
+                        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+                        scale: float,
+                        output_slices: Tuple[int, ...],
+                        *,
+                        buffer: Optional[Tuple[torch.Tensor, ...]] = None,
+                        **kwargs) -> None:
         """
         Applicable to linear-related lora. 
 
@@ -322,7 +443,7 @@ class PunicaWrapperBase(ABC):
             output_slices (Tuple[int, ...]): Every slice's size.
             buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
         """
-
+        # TODO: implement it based on torch ops
         raise NotImplementedError
 
     @abstractmethod
@@ -333,7 +454,8 @@ class PunicaWrapperBase(ABC):
                         lora_b_stacked: torch.Tensor,
                         scale,
                         *,
-                        buffer: Optional[torch.Tensor] = None) -> None:
+                        buffer: Optional[torch.Tensor] = None,
+                        **kwargs) -> None:
         """
         Applies lora  specifically for LogitsProcessorWithLoRA.
         
@@ -349,4 +471,5 @@ class PunicaWrapperBase(ABC):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
+        # TODO: implement it based on torch ops
         raise NotImplementedError
