@@ -249,8 +249,8 @@ def mount_metrics(app: FastAPI):
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
-        logger.info("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
-                    prometheus_multiproc_dir_path)
+        logger.debug("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
+                     prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
 
