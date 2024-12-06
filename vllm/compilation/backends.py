@@ -25,9 +25,15 @@ def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config,
                   compilation_config: CompilationConfig,
-                  do_logging: bool =False,
+                  graph_index: int = 0,
+                  num_graphs: int = 1,
                   runtime_shape: Optional[int] = None,
                   use_inductor: bool = True):
+    if graph_index == 0:
+        # before compiling the first graph, record the start time
+        global compilation_start_time
+        compilation_start_time = time.time()
+
     if not use_inductor:
         return graph
 
@@ -47,7 +53,8 @@ def wrap_inductor(graph,
                                 example_inputs,
                                 config_patches=current_config)
 
-    if do_logging:
+    # after compiling the last graph, record the end time
+    if graph_index == num_graphs - 1:
         now = time.time()
         elapsed = now - compilation_start_time
         compilation_config.compilation_time += elapsed
@@ -166,15 +173,14 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
-            if index == 0:
-                compilation_start_time = time.time()
             compiled_graph_for_general_shape = wrap_inductor(
                 submod,
                 args,
                 self.compilation_configs.inductor_compile_config,
                 self.compilation_configs,
+                graph_index=index,
+                num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
-                do_logging=index == len(self.compile_submod_names) - 1,
                 use_inductor=self.compilation_configs.use_inductor)
 
             self.module.__dict__[target] = PiecewiseBackend(
@@ -422,16 +428,14 @@ class PiecewiseBackend:
             entry.compiled = True
             self.to_be_compiled_sizes.remove(runtime_shape)
             # args are real arguments
-            if self.is_first_graph:
-                global compilation_start_time
-                compilation_start_time = time.time()
             entry.runnable = wrap_inductor(
                 self.graph,
                 args,
                 self.compilation_configs.inductor_compile_config,
                 self.compilation_configs,
+                graph_index=self.piecewise_compile_index,
+                num_graphs=self.total_piecewise_compiles,
                 runtime_shape=runtime_shape,
-                do_logging=self.is_last_graph,
                 use_inductor=self.compilation_configs.use_inductor)
 
             # finished compilations for all required shapes
