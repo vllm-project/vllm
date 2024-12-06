@@ -28,7 +28,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
 # yapf: enable
 from vllm.lora.models import (LongContextLoRAContext, LoRALayerWeights,
                               PackedLoRALayerWeights)
-from vllm.lora.punica_gpu import PunicaWrapperGPU
+from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,

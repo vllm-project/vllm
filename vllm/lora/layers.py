@@ -32,7 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
 if TYPE_CHECKING:
-    from vllm.lora.punica_base import PunicaWrapperBase
+    from vllm.lora.punica_wrapper import PunicaWrapperBase
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
-from vllm.lora.utils import compute_meta, convert_mapping
+from .utils import compute_meta, convert_mapping
 
 if TYPE_CHECKING:
     # avoid circuit import

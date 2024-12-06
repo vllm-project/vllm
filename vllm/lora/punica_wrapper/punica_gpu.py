@@ -9,7 +9,7 @@ from typing import Callable, Optional, Tuple, Union, final
 
 import torch
 
-from vllm.lora.punica_base import PunicaWrapperBase
+
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -19,6 +19,8 @@ if HAS_TRITON:
     from vllm.lora.ops.sgmv_expand import sgmv_expand
     from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
     from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+
+from .punica_base import PunicaWrapperBase
 
 
 @final
