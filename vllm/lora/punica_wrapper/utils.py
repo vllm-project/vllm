@@ -1,12 +1,11 @@
-import torch
-from typing import List,Optional,Tuple,TYPE_CHECKING,Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
+import torch
 
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
     from vllm.lora.models import LongContextLoRAContext
-
 
 
 def compute_meta(
@@ -37,7 +36,6 @@ def compute_meta(
         no_lora = True
     return (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
             batch_size, max_length, token_nums, no_lora)
-
 
 
 # TODO see if this can be vectorized

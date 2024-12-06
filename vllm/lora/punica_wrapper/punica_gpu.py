@@ -9,7 +9,6 @@ from typing import Callable, Optional, Tuple, Union, final
 
 import torch
 
-
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:

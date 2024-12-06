@@ -1,7 +1,8 @@
+from functools import lru_cache
 
 from vllm.platforms import current_platform
+
 from .punica_base import PunicaWrapperBase
-from functools import lru_cache
 
 
 @lru_cache(maxsize=None)
