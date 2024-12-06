@@ -1,15 +1,15 @@
 from torch._dynamo.utils import compile_times
 
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationConfig, CompilationLevel
 
 
-def start_monitoring_torch_compile(vllm_config: VllmConfig):
+def start_monitoring_torch_compile(compilation_config: CompilationConfig):
     pass
 
 
-def end_monitoring_torch_compile(vllm_config: VllmConfig):
-    if vllm_config.compilation_config.level != CompilationLevel.PIECEWISE:
+def end_monitoring_torch_compile(compilation_config: CompilationConfig):
+    if compilation_config.level != CompilationLevel.PIECEWISE:
         print(f"{compile_times()=}")
         return
 
-    print(f"{vllm_config.compilation_config.compilation_time=}")
+    print(f"{compilation_config.compilation_time=}")

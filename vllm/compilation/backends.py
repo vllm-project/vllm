@@ -15,6 +15,7 @@ from vllm.utils import weak_ref_tensors
 
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
+from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
@@ -390,6 +391,8 @@ class PiecewiseBackend:
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
         self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
+        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.union(
+            self.capture_sizes)
         for shape in self.compile_sizes.union(self.capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
@@ -414,6 +417,7 @@ class PiecewiseBackend:
 
         if entry.need_to_compile and not entry.compiled:
             entry.compiled = True
+            self.to_be_compiled_sizes.remove(runtime_shape)
             # args are real arguments
             if self.is_first_graph:
                 global compilation_start_time
@@ -426,6 +430,9 @@ class PiecewiseBackend:
                 runtime_shape=runtime_shape,
                 do_logging=self.is_last_graph,
                 use_inductor=self.compilation_configs.use_inductor)
+
+            if self.is_last_graph and not self.to_be_compiled_sizes:
+                end_monitoring_torch_compile(self.compilation_configs)
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
