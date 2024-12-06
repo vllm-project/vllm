@@ -11,9 +11,11 @@ from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams, LoraPolic
 from vllm.lora.request import LoRARequest
 from faker import Faker
 import pandas as pd
+import torch
 
 OUT_DIR = "out"
 TOTAL_LORAS = 8
+NUM_REQUESTS = 96
 
 def create_test_prompts(
     distribution: str
@@ -47,9 +49,10 @@ def create_test_prompts(
 
     return prompts
     '''
-    num_requests=100
+    num_requests=NUM_REQUESTS
     if distribution == "uniform":
-        lora_ids_list = np.random.randint(0, TOTAL_LORAS, size=num_requests)
+        # lora_ids_list = np.random.randint(0, TOTAL_LORAS, size=num_requests)
+        lora_ids_list = np.array(list(range(TOTAL_LORAS)) * (num_requests // TOTAL_LORAS))
     elif distribution == "normal":
         # Center the normal distribution around the middle of the LoRA range
         mean = (TOTAL_LORAS - 1)/2
@@ -138,33 +141,43 @@ def initialize_engine(max_loras: int, lora_policy: LoraPolicy, num_iters_before_
                              enforce_eager=True,
                              disable_async_output_proc=True,
                              lora_policy=lora_policy,
-                             num_iters_before_lora_reschedule=num_iters_before_lora_reschedule
+                             num_iters_before_lora_reschedule=num_iters_before_lora_reschedule,
+                             max_model_len=256,
                              )
     return LLMEngine.from_engine_args(engine_args)
 
+import time
 
 def main():
     """Main function that sets up and runs the prompt processing."""
     metrics_list = []
-    for distribution in ["uniform"]: #, "normal"]:
+    for distribution in ["uniform"]: # , "normal"]:
         test_prompts = create_test_prompts(distribution)
-        for lora_policy in [LoraPolicy.NAIVE, LoraPolicy.ROUND_ROBIN]:
-            for num_iters_before_lora_reschedule in [1, 4, 16, 64]:
+        for lora_policy in [LoraPolicy.NAIVE]:
+            for num_iters_before_lora_reschedule in [1, 2, 4, 8, 16, 32, 64]:
                 for max_loras in [1, 2, 4, 8]:
-                    engine = initialize_engine(max_loras, lora_policy, num_iters_before_lora_reschedule)
-                    prompts = [(
-                        sentence,
-                        SamplingParams(temperature=0.0,
-                            logprobs=1,
-                            prompt_logprobs=1,
-                            max_tokens=64,
-                            stop_token_ids=[128001]),
-                        LoRARequest(f"lora{lora_id}", lora_id, f"{OUT_DIR}/lora{lora_id}")
-                    ) for sentence, lora_id in test_prompts]
-                    metrics_list.extend(process_requests(engine, prompts, distribution))
-                    del engine
-    metrics_df = pd.DataFrame(metrics_list)
-    metrics_df.to_csv(f"{OUT_DIR}/metrics.csv", index=False)
+                    try:
+                        engine = initialize_engine(max_loras, lora_policy, num_iters_before_lora_reschedule)
+                        prompts = [(
+                            sentence,
+                            SamplingParams(temperature=0.0,
+                                logprobs=1,
+                                prompt_logprobs=1,
+                                max_tokens=16,
+                                stop_token_ids=[128001]),
+                            LoRARequest(f"lora{lora_id}", lora_id + 1, f"{OUT_DIR}/lora{lora_id}")
+                        ) for sentence, lora_id in test_prompts]
+                        metrics_list.extend(process_requests(engine, prompts, distribution))
+                        del engine
+                        torch.cuda.empty_cache()
+                    except Exception as e:
+                        print(f"Error: {e}")
+                        time.sleep(10)
+                        continue
+                    metrics_df = pd.DataFrame(metrics_list)
+                    metrics_df.to_csv(f"{OUT_DIR}/metrics_tmp.csv", index=False)
+                    with open(f"{OUT_DIR}/status.csv", "a") as f:
+                        f.write(f"{distribution},{lora_policy},{num_iters_before_lora_reschedule},{max_loras}\n")
 
 
 if __name__ == '__main__':
