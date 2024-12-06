@@ -253,7 +253,8 @@ class VllmBackend:
 
         from torch._dynamo.utils import lazy_format_graph_code
         logger.debug("%s", lazy_format_graph_code("before split", self.graph))
-        logger.debug("%s", lazy_format_graph_code("after split", self.split_gm))
+        logger.debug("%s", lazy_format_graph_code("after split",
+                                                  self.split_gm))
 
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)
@@ -479,7 +480,8 @@ class PiecewiseBackend:
             ]
             assert new_input_addresses == entry.input_addresses, (
                 "Input addresses for cudagraphs are different during replay."
-                f" Expected {entry.input_addresses}, got {new_input_addresses}")
+                f" Expected {entry.input_addresses}, got {new_input_addresses}"
+            )
 
         entry.cudagraph.replay()
         return entry.output
