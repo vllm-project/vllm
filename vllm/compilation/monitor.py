@@ -1,6 +1,7 @@
-from torch._dynamo.utils import compile_times
-
 from vllm.config import CompilationConfig, CompilationLevel
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def start_monitoring_torch_compile(compilation_config: CompilationConfig):
@@ -8,8 +9,6 @@ def start_monitoring_torch_compile(compilation_config: CompilationConfig):
 
 
 def end_monitoring_torch_compile(compilation_config: CompilationConfig):
-    if compilation_config.level != CompilationLevel.PIECEWISE:
-        print(f"{compile_times()=}")
-        return
-
-    print(f"{compilation_config.compilation_time=}")
+    if compilation_config.level == CompilationLevel.PIECEWISE:
+        logger.info("graph compilation takes %s s in total",
+                    compilation_config.compilation_time)
