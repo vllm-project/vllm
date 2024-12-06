@@ -533,74 +533,6 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             and len(packed_modules_list) == 1)
 
 
-class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
-    """
-    ColumnParallelLinear layer that is specifically designed for
-    qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
-    only contains a single LoRA within their qkv_proj layer.
-
-    During inference with Tensor Parallel, the weights of lora_b
-    must be accurately partitioned according to the respective ranks.
-
-    Q slice may have different shape than K and V slices (which both have
-    the same shape).
-    """
-
-    def __init__(self, base_layer: QKVParallelLinear) -> None:
-        super().__init__(base_layer)
-        self.q_proj_total_size = (self.base_layer.total_num_heads *
-                                  self.base_layer.head_size)
-        self.q_proj_shard_size = (self.base_layer.num_heads *
-                                  self.base_layer.head_size)
-        self.kv_proj_shard_size = (self.base_layer.num_kv_heads *
-                                   self.base_layer.head_size)
-        self.kv_proj_total_size = (self.base_layer.total_num_kv_heads *
-                                   self.base_layer.head_size)
-        # There is only one LoRA layer
-        self.n_slices = 1
-
-    def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
-        tp_rank = get_tensor_model_parallel_rank()
-        self.q_shard_id = tp_rank
-        self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
-        lora_b_q = lora_b[:, self.q_proj_shard_size *
-                          self.q_shard_id:self.q_proj_shard_size *
-                          (self.q_shard_id + 1)]
-        k_offset = self.q_proj_total_size
-        lora_b_k = lora_b[:, k_offset +
-                          self.kv_proj_shard_size * self.kv_shard_id:k_offset +
-                          self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-        v_offset = k_offset + self.kv_proj_total_size
-        lora_b_v = lora_b[:, v_offset +
-                          self.kv_proj_shard_size * self.kv_shard_id:v_offset +
-                          self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-        lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=1)
-        return lora_b
-
-    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
-        bias_q = bias[self.q_proj_shard_size *
-                      self.q_shard_id:self.q_proj_shard_size *
-                      (self.q_shard_id + 1)]
-        k_offset = self.q_proj_total_size
-        bias_k = bias[k_offset +
-                      self.kv_proj_shard_size * self.kv_shard_id:k_offset +
-                      self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-        v_offset = k_offset + self.kv_proj_total_size
-        bias_v = bias[v_offset +
-                      self.kv_proj_shard_size * self.kv_shard_id:v_offset +
-                      self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-        bias = torch.cat([bias_q, bias_k, bias_v], dim=1)
-        return bias
-
-    @classmethod
-    @_not_fully_sharded_can_replace
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(
-            packed_modules_list) == 1
-
-
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
     packed together (eg. gate_proj + up_proj -> gate_up_proj).
@@ -737,6 +669,74 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     ) -> bool:
         return (type(source_layer) is MergedColumnParallelLinear
                 and len(packed_modules_list) == 2)
+
+
+class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
+    """
+    ColumnParallelLinear layer that is specifically designed for
+    qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
+    only contains a single LoRA within their qkv_proj layer.
+
+    During inference with Tensor Parallel, the weights of lora_b
+    must be accurately partitioned according to the respective ranks.
+
+    Q slice may have different shape than K and V slices (which both have
+    the same shape).
+    """
+
+    def __init__(self, base_layer: QKVParallelLinear) -> None:
+        super().__init__(base_layer)
+        self.q_proj_total_size = (self.base_layer.total_num_heads *
+                                  self.base_layer.head_size)
+        self.q_proj_shard_size = (self.base_layer.num_heads *
+                                  self.base_layer.head_size)
+        self.kv_proj_shard_size = (self.base_layer.num_kv_heads *
+                                   self.base_layer.head_size)
+        self.kv_proj_total_size = (self.base_layer.total_num_kv_heads *
+                                   self.base_layer.head_size)
+        # There is only one LoRA layer
+        self.n_slices = 1
+
+    def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
+        tp_rank = get_tensor_model_parallel_rank()
+        self.q_shard_id = tp_rank
+        self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
+        lora_b_q = lora_b[:, self.q_proj_shard_size *
+                          self.q_shard_id:self.q_proj_shard_size *
+                          (self.q_shard_id + 1)]
+        k_offset = self.q_proj_total_size
+        lora_b_k = lora_b[:, k_offset +
+                          self.kv_proj_shard_size * self.kv_shard_id:k_offset +
+                          self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+        v_offset = k_offset + self.kv_proj_total_size
+        lora_b_v = lora_b[:, v_offset +
+                          self.kv_proj_shard_size * self.kv_shard_id:v_offset +
+                          self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+        lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=1)
+        return lora_b
+
+    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        bias_q = bias[self.q_proj_shard_size *
+                      self.q_shard_id:self.q_proj_shard_size *
+                      (self.q_shard_id + 1)]
+        k_offset = self.q_proj_total_size
+        bias_k = bias[k_offset +
+                      self.kv_proj_shard_size * self.kv_shard_id:k_offset +
+                      self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+        v_offset = k_offset + self.kv_proj_total_size
+        bias_v = bias[v_offset +
+                      self.kv_proj_shard_size * self.kv_shard_id:v_offset +
+                      self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+        bias = torch.cat([bias_q, bias_k, bias_v], dim=1)
+        return bias
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        return type(source_layer) is QKVParallelLinear and len(
+            packed_modules_list) == 1
 
 
 class MergedQKVParallelLinearWithLora(MergedColumnParallelLinearWithLoRA):
