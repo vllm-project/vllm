@@ -5,8 +5,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import IntermediateTensors
-from vllm.worker.hpu_model_runner import HPUModelRunner as ModelRunnerBaseCls
-from vllm.worker.hpu_model_runner import ModelInputForHPUWithSamplingMetadata
+from vllm.worker.model_runner_base import (ModelRunnerInputBase,
+                                           ModelRunnerWrapperBase)
 
 logger = init_logger(__name__)
 
@@ -18,7 +18,7 @@ debug_advance_input = False
 allow_gpu_advance_step = True
 
 
-class HPUTP1DraftModelRunner(ModelRunnerBaseCls):
+class HPUTP1DraftModelRunner(ModelRunnerWrapperBase):
     """Specialized model runner for speculative decoding draft model.
     Since the draft model always execute k forward passes consecutively to
     generate k speculative tokens in a single speculative decoding step,
@@ -43,7 +43,7 @@ class HPUTP1DraftModelRunner(ModelRunnerBaseCls):
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: ModelInputForHPUWithSamplingMetadata,
+        model_input: ModelRunnerInputBase,
         kv_caches: List[torch.Tensor],
         previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
@@ -63,7 +63,7 @@ class HPUTP1DraftModelRunner(ModelRunnerBaseCls):
                 previous_hidden_states = torch.cat(
                     [previous_hidden_states, dummy_previous_hidden_states],
                     dim=0)
-        return super().execute_model(
+        return self.model_runner.execute_model(
             model_input=model_input,
             kv_caches=kv_caches,
             previous_hidden_states=previous_hidden_states,

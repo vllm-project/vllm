@@ -72,16 +72,14 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[HPUModelRunner] = HPUModelRunner
-        if model_runner_cls is not None:
-            ModelRunnerClass = model_runner_cls
-        else:
-            ModelRunnerClass = HPUModelRunner
         self.model_runner: HPUModelRunner = ModelRunnerClass(
             vllm_config=vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             **speculative_args,
         )
+        if model_runner_cls is not None:
+            self.model_runner = model_runner_cls(self.model_runner)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[HPUCacheEngine]
