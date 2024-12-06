@@ -149,14 +149,15 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """
 
     def __init__(self, module: torch.fx.GraphModule,
-                 compile_submod_names: List[str],
-                 compilation_configs: CompilationConfig, graph_pool):
+                 compile_submod_names: List[str], vllm_config: VllmConfig,
+                 graph_pool):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
-        self.compilation_configs = compilation_configs
+        self.compilation_configs = vllm_config.compilation_configs
         self.graph_pool = graph_pool
+        self.vllm_config = vllm_config
 
     def run(self, *args):
         fake_args = [
@@ -294,7 +295,7 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-                                    self.compilation_configs,
+                                    self.vllm_config,
                                     self.graph_pool).run(*example_inputs)
 
         self._called = True
