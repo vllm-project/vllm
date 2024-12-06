@@ -115,7 +115,7 @@ class LoRAModel(AdapterModel):
             scaling_factor: Optional[float] = None,
             embedding_modules: Optional[Dict[str, str]] = None,
             embedding_padding_modules: Optional[List[str]] = None,
-            lora_helper: Optional[PEFTHelper] = None) -> "LoRAModel":
+            peft_helper: Optional[PEFTHelper] = None) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
@@ -137,7 +137,7 @@ class LoRAModel(AdapterModel):
                             lora_embeddings_tensor = (
                                 lora_embeddings_tensor.pin_memory())
                 loras[module_name] = LoRALayerWeights.from_config(
-                    module_name, lora_helper, lora_embeddings_tensor)
+                    module_name, peft_helper, lora_embeddings_tensor)
 
             if is_bias:
                 loras[module_name].bias = tensor.to(device=device,
@@ -171,7 +171,7 @@ class LoRAModel(AdapterModel):
         for lora in loras.values():
             lora.optimize()
         return cls(lora_model_id,
-                   lora_helper.r,
+                   peft_helper.r,
                    loras,
                    scaling_factor=scaling_factor)
 
@@ -300,7 +300,7 @@ class LoRAModel(AdapterModel):
             scaling_factor=scaling_factor,
             embedding_modules=embedding_modules,
             embedding_padding_modules=embedding_padding_modules,
-            lora_helper=peft_helper)
+            peft_helper=peft_helper)
 
 
 class LoRAModelManager(AdapterModelManager):
