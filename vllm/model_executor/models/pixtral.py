@@ -159,18 +159,18 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     # Get precise tracking of placeholder positions
     placeholder_ranges = []
+    curr_offset = -1
     curr_length = 0
-    curr_offset = 0
     for i in range(len(prompt_token_ids)):
         if prompt_token_ids[i] in (image_token_id, image_break_id):
-            if curr_offset == 0:
+            if curr_offset < 0:
                 curr_offset = i
             curr_length += 1
         elif prompt_token_ids[i] == image_end_id:
             curr_length += 1
             placeholder_ranges.append(
                 PlaceholderRange(offset=curr_offset, length=curr_length))
-            curr_offset = 0
+            curr_offset = -1
             curr_length = 0
         else:
             pass
