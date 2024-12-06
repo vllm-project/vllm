@@ -273,7 +273,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.quant_config = quant_config
 
         self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
+            vllm_config=vllm_config,
+            hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Qwen2ForCausalLM"],
         )

@@ -251,12 +251,15 @@ def init_vllm_registered_model(
     """
     from vllm.model_executor.model_loader.loader import _initialize_model
 
-    if hf_config is not None:
-        vllm_config = vllm_config.with_hf_config(hf_config)
+    if hf_config is None and architectures is not None:
+        # So that the architectures field is overridden
+        hf_config = vllm_config.model_config.hf_config
 
-    return _initialize_model(vllm_config=vllm_config,
-                             prefix=prefix,
-                             architectures=architectures)
+    if hf_config is not None:
+        vllm_config = vllm_config.with_hf_config(hf_config,
+                                                 architectures=architectures)
+
+    return _initialize_model(vllm_config=vllm_config, prefix=prefix)
 
 
 @overload
