@@ -403,6 +403,9 @@ class PiecewiseBackend:
     def __call__(self, *args) -> Any:
         if not self.first_run_finished:
             self.first_run_finished = True
+            # no specific sizes to compile
+            if self.is_last_graph and not self.to_be_compiled_sizes:
+                end_monitoring_torch_compile(self.compilation_configs)
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
@@ -431,6 +434,7 @@ class PiecewiseBackend:
                 do_logging=self.is_last_graph,
                 use_inductor=self.compilation_configs.use_inductor)
 
+            # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:
                 end_monitoring_torch_compile(self.compilation_configs)
 
