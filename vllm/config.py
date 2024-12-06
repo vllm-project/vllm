@@ -509,7 +509,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
         if device_config.device_type not in ("cuda", "tpu", "xpu", "hpu"):
             logger.warning(
@@ -525,7 +525,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
         if device_config.device_type == "cuda" and self.enforce_eager:
             logger.warning(
@@ -540,7 +540,7 @@ class ModelConfig:
         if self.task == "embedding":
             self.use_async_output_proc = False
 
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
         if speculative_config:
             logger.warning("Async output processing is not supported with"
@@ -1704,7 +1704,7 @@ class LoRAConfig:
                            model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
         if scheduler_config.chunked_prefill_enabled:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
@@ -2082,7 +2082,7 @@ class KVTransferConfig(BaseModel):
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
-        """Parse the CLI value for the compilation config."""
+        """Parse the CLI value for the kv cache transfer config."""
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
@@ -2281,6 +2281,7 @@ class CompilationConfig(BaseModel):
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
+    compilation_time: float = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
@@ -2319,6 +2320,7 @@ class CompilationConfig(BaseModel):
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
         self.static_forward_context = {}
+        self.compilation_time = 0.0
 
     def init_backend(self) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:

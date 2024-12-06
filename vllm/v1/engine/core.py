@@ -68,6 +68,7 @@ class EngineCore:
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
+        start = time.time()
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
         )
 
@@ -81,6 +82,9 @@ class EngineCore:
 
         num_cpu_blocks = 0
         self.model_executor.initialize(num_gpu_blocks)
+        elapsed = time.time() - start
+        logger.info(("init engine (profile, create kv cache, "
+                     "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks
 
     def add_request(self, request: EngineCoreRequest):
