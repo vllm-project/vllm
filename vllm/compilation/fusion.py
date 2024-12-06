@@ -230,9 +230,9 @@ class FusionPass(VllmInductorPass):
                 kwargs["epsilon"] = 1e-5  # Currently hard-coded in RMSNorm
 
                 fused_node = graph.call_function(
-                    auto_functionalized, (
-                    torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, 
-                    ),
+                    auto_functionalized,
+                    (torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, 
+                     ),
                     kwargs=kwargs)
 
                 graph.inserting_after(fused_node)
