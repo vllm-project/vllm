@@ -79,7 +79,7 @@ class MolmoImageInputs(TypedDict):
     `(batch_size, num_crops, num_patch)`
     """
 
-    image_start_end: Tuple[int]
+    image_start_end: Tuple[int, int]
     """Starting and ending index of placeholder 
     tokens
     """
