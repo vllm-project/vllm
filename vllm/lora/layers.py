@@ -33,9 +33,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
 
-if current_platform.is_hpu():
-    from vllm_hpu_extension.punica_hpu import GaudiPunicaWrapper
-
 if TYPE_CHECKING:
     pass
 

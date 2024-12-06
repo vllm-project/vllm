@@ -1130,7 +1130,7 @@ class SchedulerConfig:
     chunked_prefill_enabled: bool = field(init=False)
 
     # Maximum number of prefill sequences to be
-    # processed in a single iteration. Used only with padding-aware 
+    # processed in a single iteration. Used only with padding-aware
     # scheduling.
     max_num_prefill_seqs: Optional[int] = None
 

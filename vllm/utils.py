@@ -773,8 +773,6 @@ def is_pin_memory_available() -> bool:
         return False
     elif current_platform.is_cpu() or current_platform.is_openvino():
         return False
-    elif (current_platform.is_hpu()):
-        return False
     return True
 
 
