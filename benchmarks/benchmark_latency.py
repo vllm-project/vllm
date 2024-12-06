@@ -5,7 +5,7 @@ import json
 import time
 from pathlib import Path
 from typing import List, Optional
-
+from vllm.config import CompilationConfig
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -21,6 +21,11 @@ def main(args: argparse.Namespace):
 
     engine_args = EngineArgs.from_cli_args(args)
 
+    config = CompilationConfig(
+        level=3,
+        custom_ops=["+silu_and_mul"],
+    )
+    engine_args.compilation_config = config
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -70,8 +75,7 @@ def main(args: argparse.Namespace):
         profile_dir = args.profile_result_dir
         if not profile_dir:
             profile_dir = Path(
-                "."
-            ) / "vllm_benchmark_result" / f"latency_result_{time.time()}"
+                ".") / "vllm_benchmark_result" / f"latency_result_{time.time()}"
         print(f"Profiling (results will be saved to '{profile_dir}')...")
         run_to_completion(profile_dir=profile_dir)
         return
@@ -118,21 +122,19 @@ if __name__ == '__main__':
                         type=int,
                         default=30,
                         help='Number of iterations to run.')
-    parser.add_argument(
-        '--profile',
-        action='store_true',
-        help='profile the generation process of a single batch')
+    parser.add_argument('--profile',
+                        action='store_true',
+                        help='profile the generation process of a single batch')
     parser.add_argument(
         '--profile-result-dir',
         type=str,
         default=None,
         help=('path to save the pytorch profiler output. Can be visualized '
               'with ui.perfetto.dev or Tensorboard.'))
-    parser.add_argument(
-        '--output-json',
-        type=str,
-        default=None,
-        help='Path to save the latency results in JSON format.')
+    parser.add_argument('--output-json',
+                        type=str,
+                        default=None,
+                        help='Path to save the latency results in JSON format.')
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()

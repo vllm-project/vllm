@@ -171,8 +171,8 @@ class FusionPass(VllmInductorPass):
             empty_bf16(1, 5),
             empty_fp32(1, 1)
         ]
-        register_replacement(rms_pattern_static, rms_replacement_static, inputs,
-                             fwd_only, self.patterns)
+        register_replacement(rms_pattern_static, rms_replacement_static,
+                             inputs, fwd_only, self.patterns)
 
         # Fuse fused_add_rms_norm + static_scaled_fp8_quant into
         # fused_add_rms_norm_static_fp8_quant
@@ -229,15 +229,17 @@ class FusionPass(VllmInductorPass):
                 kwargs = match.kwargs
                 kwargs["epsilon"] = 1e-5  # Currently hard-coded in RMSNorm
 
-                fused_node = graph.call_function(auto_functionalized, (
-                    torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, ),
-                                                 kwargs=kwargs)
+                fused_node = graph.call_function(
+                    auto_functionalized, (
+                    torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, 
+                    ),
+                    kwargs=kwargs)
 
                 graph.inserting_after(fused_node)
                 result_node_new = graph.call_function(operator.getitem,
                                                       (fused_node, 1))
-                residual_node_new = graph.call_function(operator.getitem,
-                                                        (fused_node, 2))
+                residual_node_new = graph.call_function(
+                    operator.getitem, (fused_node, 2))
 
             # Last part of replacement is rebinding the users of nodes in the
             # match to use the new nodes.
