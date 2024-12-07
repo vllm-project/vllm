@@ -7,7 +7,7 @@ from torch import nn
 
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import (get_allowed_kwarg_only_overrides,
+from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
 if TYPE_CHECKING:
@@ -54,8 +54,8 @@ class MultiModalPlugin(ABC):
     """
 
     def __init__(self) -> None:
-        self._input_mappers: Dict[Type[nn.Module], MultiModalInputMapper] = {}
-        self._max_mm_tokens: Dict[Type[nn.Module], MultiModalTokensCalc] = {}
+        self._input_mappers = ClassRegistry[nn.Module, MultiModalInputMapper]()
+        self._max_mm_tokens = ClassRegistry[nn.Module, MultiModalTokensCalc]()
 
     @abstractmethod
     def get_data_key(self) -> str:
@@ -226,16 +226,16 @@ class MultiModalPlugin(ABC):
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
+        from vllm.model_executor.models import supports_multimodal
 
         model_cls, _ = get_model_architecture(model_config)
 
-        if model_cls not in self._input_mappers:
+        if not supports_multimodal(model_cls):
             return 0
 
         max_mm_tokens = self._max_mm_tokens.get(model_cls)
         if max_mm_tokens is None:
-            raise KeyError(f"No maximum number of multi-modal tokens is given "
-                           f"for model class {model_cls.__name__} in {self}.")
+            return 0
 
         if callable(max_mm_tokens):
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
@@ -454,18 +454,3 @@ class MultiModalPlaceholderMap:
 
         return MultiModalPlaceholderMap.IndexMap(src=src_indices,
                                                  dest=dest_indices)
-
-
-def __getattr__(name: str):
-    import warnings
-
-    if name == "MultiModalInputs":
-        msg = ("MultiModalInputs has been renamed to MultiModalKwargs. "
-               "The original name will take another meaning in an upcoming "
-               "version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return MultiModalKwargs
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -6,6 +6,8 @@ from PIL.Image import Image
 from transformers import AutoTokenizer, BatchEncoding, PreTrainedTokenizerBase
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
+from vllm.config import TaskOption
+
 from .....conftest import HfRunner, VllmRunner
 from .types import RunnerOutput
 
@@ -30,11 +32,13 @@ def run_test(
     comparator: Callable[..., None],
     get_stop_token_ids: Optional[Callable[[PreTrainedTokenizerBase],
                                           List[int]]],
+    stop_str: Optional[List[str]],
+    tokenizer_mode: str,
     limit_mm_per_prompt: Dict[str, int],
     vllm_runner_kwargs: Optional[Dict[str, Any]],
     hf_model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
-    task: str = "auto",
+    task: TaskOption = "auto",
     runner_mm_key: str = "images",
     distributed_executor_backend: Optional[str] = None,
     tensor_parallel_size: int = 1,
@@ -52,14 +56,17 @@ def run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    vllm_kwargs = {}
+    vllm_kwargs: Dict[str, Any] = {}
     if get_stop_token_ids is not None:
         vllm_kwargs["stop_token_ids"] = get_stop_token_ids(tokenizer)
+    if stop_str:
+        vllm_kwargs["stop"] = stop_str
 
     if vllm_runner_kwargs is None:
         vllm_runner_kwargs = {}
 
     with vllm_runner(model,
+                     tokenizer_mode=tokenizer_mode,
                      max_model_len=max_model_len,
                      max_num_seqs=max_num_seqs,
                      dtype=dtype,
@@ -91,6 +98,8 @@ def run_test(
     hf_kwargs = {}
     if use_tokenizer_eos:
         hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
+    if stop_str:
+        hf_kwargs["stop_strings"] = stop_str
 
     with hf_model, torch.no_grad():
         for prompts, media in inputs:

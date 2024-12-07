@@ -6,9 +6,9 @@ import fnmatch
 import glob
 import inspect
 import itertools
-import json
 import math
 import os
+import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
@@ -17,7 +17,7 @@ import gguf
 import huggingface_hub
 import numpy as np
 import torch
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi
 from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -97,22 +97,31 @@ def device_loading_context(module: torch.nn.Module,
 logger = init_logger(__name__)
 
 
-def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
+def _initialize_model(
+    vllm_config: VllmConfig,
+    *,
+    prefix: str = "",
+    architectures: Optional[list[str]] = None,
+) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
-    model_class, _ = get_model_architecture(model_config)
+    model_class, _ = get_model_architecture(model_config,
+                                            architectures=architectures)
+
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
         with set_current_vllm_config(vllm_config):
             return model_class(vllm_config=vllm_config, prefix=prefix)
+
     msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
            "input arguments. Possibly you have an old-style model class"
            " registered from out of tree and it is used for new vLLM version. "
            "Check https://docs.vllm.ai/en/latest/design/arch_overview.html "
            "for the design and update the model class accordingly.")
-    logger.warning(msg)
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
     logger.warning(
         "Trying to guess the arguments for old-style model class %s",
         model_class,
@@ -356,7 +365,7 @@ class DefaultModelLoader(BaseModelLoader):
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
-            # We only enable strict check for non-quantiized models
+            # We only enable strict check for non-quantized models
             # that have loaded weights tracking currently.
             if model_config.quantization is None and loaded_weights is not None:
                 weights_not_loaded = weights_to_load - loaded_weights
@@ -694,51 +703,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.unsharded_weights_modules: List[str] = []
         # Save the module names that are sharded by column.
         self.column_sharded_weights_modules: List[str] = []
-        # we don't need to quantize the whole model, only the target modules
-        # that are specified in the adapter config file. If the adapter config
-        # file is not provided, we will quantize the default modules.
-        if (not load_config.model_loader_extra_config
-                or "qlora_adapter_name_or_path"
-                not in load_config.model_loader_extra_config):
-            self.target_modules = []
-            return
-
-        qlora_adapter = load_config.model_loader_extra_config[
-            "qlora_adapter_name_or_path"]
-
-        config_file_path = self._get_config_file(qlora_adapter)
-
-        with open(config_file_path) as f:
-            config = json.load(f)
-            self.target_modules = config["target_modules"]
-            # TODO: target_modules could be either a list or a regex string.
-            # We need to handle both cases.
-            assert isinstance(self.target_modules,
-                              list), "Unsupported target_modules: "
-            f"{self.target_modules}"
-
-    def _get_config_file(self, qlora_adapter: str) -> str:
-        is_local = os.path.isdir(qlora_adapter)
-        config_file_path = None
-        if is_local:
-            for file in self.possible_config_file_names:
-                config_file_path = os.path.join(qlora_adapter, file)
-                if os.path.exists(config_file_path):
-                    break
-        else:
-            hf_api = HfApi()
-            repo_files = hf_api.list_repo_files(repo_id=qlora_adapter)
-            for file in self.possible_config_file_names:
-                if file in repo_files:
-                    config_file_path = hf_hub_download(repo_id=qlora_adapter,
-                                                       filename=file)
-                    break
-
-        if not config_file_path:
-            raise ValueError(
-                f"Cannot find adapter config file in {qlora_adapter}")
-
-        return config_file_path
+        # Store all module names (from transformers) that support
+        # BNB quantization.
+        self.target_modules: List[str] = []
 
     def _get_weight_files(
         self,
@@ -1020,25 +987,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 inverse_stacked_mapping[packed] = []
             inverse_stacked_mapping[packed].insert(idx, orig)
 
-        linear_module_lst = []
         for name, module in model.named_modules():
             if isinstance(module, (LinearBase, )):
                 last_name = name.split(".")[-1]
                 if sub_modules := inverse_stacked_mapping.get(last_name, []):
                     # Map vllm's names to transformers' names.
                     for sub_name in sub_modules:
-                        linear_module_lst.append(
+                        self.target_modules.append(
                             name.replace(last_name, sub_name))
                 else:
-                    linear_module_lst.append(name)
-        if self.target_modules:
-            # Update self.target_modules
-            self.target_modules = [
-                qual_name for qual_name in linear_module_lst
-                if any(t in qual_name for t in self.target_modules)
-            ]
-        else:
-            self.target_modules = linear_module_lst
+                    self.target_modules.append(name)
         assert (self.target_modules
                 ), "vllm currently does not support BNB quantization for"
         f" {type(model).__name__}"
@@ -1110,7 +1068,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                  model_config.revision,
                                                  pre_quant, load_8bit))
 
-        model.load_weights(qweight_iterator)
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        loaded_weights = model.load_weights(qweight_iterator)
+        # Some models may have weights loading tracker unimplemented.
+        if loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError("Following weights were not initialized from "
+                                 f"checkpoint: {weights_not_loaded}")
 
         torch.cuda.empty_cache()
 
@@ -1142,9 +1107,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         shard_name, weight_name)
                     break
 
+            # Models like Clip/Siglip may skip some layers in initialization,
+            # causing unused quant_param_name in state_dict.
             if quant_param_name not in param_dict:
-                raise ValueError(
-                    f"Parameter {quant_param_name} not found in the model.")
+                continue
 
             if quant_param_name not in stacked_quant_state_dict:
                 stacked_quant_state_dict[quant_param_name] = {}

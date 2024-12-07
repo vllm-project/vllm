@@ -9,6 +9,7 @@ from typing_extensions import TypeAlias
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import ClassRegistry
 
 from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
@@ -62,8 +63,8 @@ class MultiModalRegistry:
             plugins: Sequence[MultiModalPlugin] = DEFAULT_PLUGINS) -> None:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
-        self._processor_factories: Dict[Type[nn.Module],
-                                        MultiModalProcessorFactory] = {}
+        self._processor_factories = ClassRegistry[nn.Module,
+                                                  MultiModalProcessorFactory]()
 
         # This is used for non-multimodal models
         self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
@@ -314,6 +315,8 @@ class MultiModalRegistry:
         self,
         metadata_factory: Callable[[InputProcessingContext],
                                    MultiModalProcessingMetadata],
+        get_dummy_mm_kwargs: Callable[
+            [InputProcessingContext, Mapping[str, int]], MultiModalKwargs],
     ):
         """
         Convenience method to register a multi-modal processor to a model class
@@ -327,8 +330,16 @@ class MultiModalRegistry:
             - :ref:`enabling_multimodal_inputs`
         """
 
+        class ConcreteMultiModalProcessor(MultiModalProcessor):
+
+            def _get_dummy_mm_kwargs(
+                self,
+                mm_counts: Mapping[str, int],
+            ) -> MultiModalKwargs:
+                return get_dummy_mm_kwargs(self.ctx, mm_counts)
+
         def factory(ctx: InputProcessingContext):
-            return MultiModalProcessor(
+            return ConcreteMultiModalProcessor(
                 ctx=ctx,
                 metadata=metadata_factory(ctx),
             )

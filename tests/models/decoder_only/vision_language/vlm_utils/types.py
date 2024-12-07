@@ -100,6 +100,9 @@ class VLMTestInfo(NamedTuple):
     # Optional callable which gets a list of token IDs from the model tokenizer
     get_stop_token_ids: Optional[Callable[[PreTrainedTokenizerBase],
                                           List[int]]] = None
+    # Optional list of strings to stop generation, useful when stop tokens are
+    # not special tokens in the tokenizer
+    stop_str: Optional[List[str]] = None
 
     # Exposed options for HF runner
     hf_model_kwargs: Optional[Dict[str, Any]] = None
@@ -151,6 +154,8 @@ class VLMTestInfo(NamedTuple):
 
     marks: Optional[List[MarkDecorator]] = None
 
+    tokenizer_mode: str = "auto"
+
     def get_non_parametrized_runner_kwargs(self):
         """Returns a dictionary of expandable kwargs for items that are used
         in all test types, which are NOT used when creating the parametrized
@@ -171,7 +176,9 @@ class VLMTestInfo(NamedTuple):
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
             "hf_model_kwargs": self.hf_model_kwargs,
+            "stop_str": self.stop_str,
             "patch_hf_runner": self.patch_hf_runner,
+            "tokenizer_mode": self.tokenizer_mode
         }
 
 

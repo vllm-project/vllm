@@ -23,6 +23,7 @@ except ImportError as e:
 
 class OpenVinoPlatform(Platform):
     _enum = PlatformEnum.OPENVINO
+    device_name: str = "openvino"
     device_type: str = "openvino"
     dispatch_key: str = "CPU"
 
