@@ -89,3 +89,6 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return -1
+
+    def get_num_cached_tokens(self, seq: Sequence) -> int:
+        return 0

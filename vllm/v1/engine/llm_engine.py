@@ -7,6 +7,7 @@ from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -32,6 +33,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
@@ -44,16 +46,21 @@ class LLMEngine:
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            enable_lora=bool(vllm_config.lora_config))
+            lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config.model_config,
                                    vllm_config.lora_config, self.tokenizer,
-                                   input_registry)
+                                   input_registry, mm_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
+        self.detokenizer = Detokenizer(
+            tokenizer_name=vllm_config.model_config.tokenizer,
+            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
+            trust_remote_code=vllm_config.model_config.trust_remote_code,
+            revision=vllm_config.model_config.tokenizer_revision,
+        )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -75,7 +82,7 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
 
         # Create the engine configs.
-        vllm_config = engine_args.create_engine_config()
+        vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = cls._get_executor_cls(vllm_config)
 
         if VLLM_ENABLE_V1_MULTIPROCESSING:
@@ -154,16 +161,13 @@ class LLMEngine:
     # TODO(rob): Can we get rid of these?
 
     def get_model_config(self):
-        pass
-
-    def is_encoder_decoder_model(self):
-        pass
+        return self.model_config
 
     def start_profile(self):
-        pass
+        self.engine_core.profile(True)
 
     def stop_profile(self):
-        pass
+        self.engine_core.profile(False)
 
     def get_tokenizer_group(self, group_type):
         pass

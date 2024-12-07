@@ -15,7 +15,7 @@
 import itertools
 import re
 from functools import cached_property, lru_cache
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
 import numpy as np
@@ -29,23 +29,22 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.models.clip import CLIPVisionModel
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
@@ -500,15 +499,20 @@ def input_processor_for_phi3v(ctx: InputContext,
 
     # TODO: Move this to utils or integrate with clip.
     new_token_ids: List[int] = []
+    placeholder_ranges: List[PlaceholderRange] = []
     placeholder_idx = 0
     while merged_token_ids:
         token_id = merged_token_ids.pop(0)
         if token_id == _IMAGE_TOKEN_ID:
-            new_token_ids.extend(
-                repeat_and_pad_token(
-                    _IMAGE_TOKEN_ID,
-                    repeat_count=image_feature_size[placeholder_idx],
-                ))
+            replacement_ids = repeat_and_pad_token(
+                _IMAGE_TOKEN_ID,
+                repeat_count=image_feature_size[placeholder_idx],
+            )
+            placeholder_ranges.append({
+                "offset": len(new_token_ids),
+                "length": len(replacement_ids)
+            })
+            new_token_ids.extend(replacement_ids)
             placeholder_idx += 1
         else:
             new_token_ids.append(token_id)
@@ -516,7 +520,8 @@ def input_processor_for_phi3v(ctx: InputContext,
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": placeholder_ranges})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
@@ -529,7 +534,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        pooler_config = vllm_config.model_config.pooler_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
@@ -549,18 +553,17 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             quant_config,
             prefix=maybe_prefix(prefix, "model.vision_embed_tokens"))
 
-        # The prefix is empty intentionally because default prefix of
-        # LlamaForCausalLM is "model"
-        self.language_model = LlamaForCausalLM(vllm_config=vllm_config,
-                                               prefix="")
+        self.language_model = init_vllm_registered_model(
+            vllm_config=vllm_config,
+            # The prefix is empty intentionally because default prefix of
+            # LlamaForCausalLM is "model"
+            prefix="",
+            # We don't directly initialize vLLM's LlamaForCausalLM so we
+            # can automatically apply embedding wrapper if this model is
+            # initialized as an embedding model
+            architectures=["LlamaForCausalLM"],
+        )
 
-        # The same model class supports both language generation and embedding
-        # because the architecture name is the same
-        self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=True,
-            softmax=False)
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
@@ -669,32 +672,44 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return image_embeds
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.embed_tokens(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.image_token_id)
+        return inputs_embeds
+
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs: object):
+
         if intermediate_tensors is not None:
             inputs_embeds = None
-        else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
 
-            if image_input is not None:
-                vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = self.embed_tokens(input_ids)
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
-                    self.image_token_id)
-            else:
-                inputs_embeds = self.language_model.model.embed_tokens(
-                    input_ids)
-
-        # always pass the input via `inputs_embeds`
-        # to make sure the computation graph is consistent
-        # for `torch.compile` integration
-        input_ids = None
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
@@ -720,14 +735,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         hf_to_vllm_mapper = WeightsMapper(
             orig_to_new_prefix={
                 "model.vision_embed_tokens.wte": "embed_tokens",
@@ -742,5 +751,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         # The HF config doesn't specify whether these are tied,
         # so we detect it this way
-        if "embed_tokens" not in autoloaded_weights:
+        if "embed_tokens.weight" not in autoloaded_weights:
             self.embed_tokens = self.language_model.model.embed_tokens
+            autoloaded_weights.add("embed_tokens.weight")
+        return autoloaded_weights

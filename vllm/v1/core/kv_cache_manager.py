@@ -17,12 +17,15 @@ class KVCacheManager:
         self,
         block_size: int,
         num_gpu_blocks: int,
+        max_model_len: int,
         sliding_window: Optional[int] = None,
         enable_caching: bool = True,
         num_preallocate_tokens: int = 64,
     ) -> None:
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
+        self.max_model_len = max_model_len
+        self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
         self.sliding_window = sliding_window
         self.enable_caching = enable_caching
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
@@ -79,6 +82,9 @@ class KVCacheManager:
             return []
 
         computed_blocks = []
+
+        # TODO(rickyx): potentially we could cache this so we don't have to
+        # recompute it every time.
         block_hashes = hash_request_tokens(self.block_size,
                                            request.all_token_ids)
 
@@ -120,47 +126,52 @@ class KVCacheManager:
             # slots, but we cannot allocate new blocks due to the limit.
             return None
 
-        # When caching is enabled, assign token IDs to already allocated blocks.
-        new_token_ids = None
-        parent_block = None
-        if self.enable_caching:
-            # Figure out the token IDs to add to the blocks.
-            new_token_ids = request.all_token_ids[
-                request.num_computed_tokens:request.num_computed_tokens +
-                num_tokens]
+        if num_new_blocks <= 0:
+            # No new block is needed.
+            new_blocks = []
+        else:
+            # Get new blocks from the free block pool considering
+            # preallocated blocks.
+            num_new_blocks = min(
+                num_new_blocks + self.num_preallocate_blocks,
+                self.free_block_queue.num_free_blocks,
+                # Should not exceed the maximum number of blocks per request.
+                # This is especially because the block table has the shape
+                # [..., max_num_blocks_per_req].
+                # TODO(woosuk): Check and reject requests if
+                # num_prompt_tokens + max_tokens > max_model_len.
+                self.max_num_blocks_per_req - len(req_blocks),
+            )
+            assert num_new_blocks > 0
 
-            # Find the last full block index.
-            # TODO: This may be optimized by calculating the computed tokens.
-            last_full_block_idx = len(req_blocks) - 1
-            while (last_full_block_idx >= 0
-                   and req_blocks[last_full_block_idx].block_hash is None):
-                last_full_block_idx -= 1
+            new_blocks = self._get_new_blocks(num_new_blocks)
+            req_blocks.extend(new_blocks)
 
-            parent_block = (req_blocks[last_full_block_idx]
-                            if last_full_block_idx >= 0 else None)
-            token_id_idx = self._add_token_ids_to_blocks(
-                blocks=req_blocks[last_full_block_idx + 1:],
-                token_ids=new_token_ids,
-                parent_block=parent_block)
+        if not self.enable_caching:
+            return new_blocks
 
-            new_token_ids = new_token_ids[token_id_idx:]
-            parent_block = req_blocks[-1]
+        num_computed_full_blocks = (request.num_computed_tokens //
+                                    self.block_size)
 
-        # No new block is needed. When caching is enabled, we make sure
-        # token_id_idx is equal to len(new_token_ids), meaning that all tokens
-        # are added to allocated blocks.
-        if num_required_blocks <= len(req_blocks):
-            assert not self.enable_caching or token_id_idx == num_tokens, \
-                    f"{token_id_idx=} != {num_tokens=}"
-            return []
+        # NOTE(rickyx): We are assuming the `num_tokens` are actual
+        # tokens rather than lookahead slots (e.g. for speculative decoding).
+        # TODO(rickyx): When supporting speculative decoding, we will need to
+        # differentiate between them so that we can know how many blocks are
+        # full after appending the actual tokens.
+        num_full_blocks_after_append = (request.num_computed_tokens +
+                                        num_tokens) // self.block_size
+        assert num_full_blocks_after_append <= len(req_blocks)
 
-        # Allocate new blocks considering preallocated blocks, and
-        # add token IDs to them if caching is enabled.
-        num_new_blocks = min(num_new_blocks + self.num_preallocate_blocks,
-                             self.free_block_queue.num_free_blocks)
-        new_blocks = self._get_new_blocks(num_new_blocks, new_token_ids,
-                                          parent_block)
-        req_blocks.extend(new_blocks)
+        new_full_blocks = req_blocks[
+            num_computed_full_blocks:num_full_blocks_after_append]
+        self._cache_full_blocks(
+            request=request,
+            blk_start_idx=num_computed_full_blocks,
+            full_blocks=new_full_blocks,
+            prev_block=req_blocks[num_computed_full_blocks - 1]
+            if num_computed_full_blocks >= 1 else None,
+        )
+
         return new_blocks
 
     def allocate_slots(
@@ -184,11 +195,20 @@ class KVCacheManager:
             raise ValueError(
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
-        # If a computed block of a request is an eviction candidate (in the
-        # free queue and ref_cnt == 0), it cannot be counted as a free block
-        # when allocating this request.
-        num_evictable_computed_blocks = len(
-            [blk for blk in computed_blocks if blk.ref_cnt == 0])
+        # Touch the computed blocks to make sure they won't be evicted.
+        num_evictable_computed_blocks = 0
+        if self.enable_caching:
+            self._touch(computed_blocks)
+
+            # If a computed block of a request is an eviction candidate (in the
+            # free queue and ref_cnt == 0), it cannot be counted as a free block
+            # when allocating this request.
+            num_evictable_computed_blocks = len(
+                [blk for blk in computed_blocks if blk.ref_cnt == 0])
+        else:
+            assert not computed_blocks, (
+                "Computed blocks should be empty when "
+                "prefix caching is disabled")
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
         if (num_required_blocks > self.free_block_queue.num_free_blocks -
@@ -201,35 +221,35 @@ class KVCacheManager:
         num_new_blocks = min(
             num_required_blocks + self.num_preallocate_blocks,
             self.free_block_queue.num_free_blocks -
-            num_evictable_computed_blocks)
-
-        num_computed_tokens = len(computed_blocks) * self.block_size
-
-        # When caching is enabled, get the new token IDs and the parent block
-        # ID to generate cache keys.
-        new_token_ids = None
-        parent_block = None
-        if self.enable_caching:
-            # Touch the computed blocks to make sure they won't be evicted.
-            self._touch(computed_blocks)
-
-            # Get the token IDs for the blocks being allocated for hashing.
-            new_token_ids = request.all_token_ids[
-                num_computed_tokens:num_computed_tokens + num_tokens]
-            if not new_token_ids:
-                raise RuntimeError(
-                    "Failed to infer the token IDs for allocation. "
-                    f"#all_tokens={len(request.all_token_ids)} < "
-                    f"#computed_tokens={num_computed_tokens}")
-
-            # Get the parent block ID to construct the block chain.
-            parent_block = computed_blocks[-1] if computed_blocks else None
-
-        new_blocks = self._get_new_blocks(num_new_blocks, new_token_ids,
-                                          parent_block)
+            num_evictable_computed_blocks,
+            # Should not exceed the maximum number of blocks per request.
+            # This is especially because the block table has the shape
+            # [..., max_num_blocks_per_req].
+            # TODO(woosuk): Check and reject requests if
+            # num_prompt_tokens + max_tokens > max_model_len.
+            self.max_num_blocks_per_req - len(computed_blocks),
+        )
+        assert num_new_blocks > 0
 
         # Concatenate the computed block IDs and the new block IDs.
+        new_blocks = self._get_new_blocks(num_new_blocks)
         self.req_to_blocks[request.request_id] = computed_blocks + new_blocks
+
+        if not self.enable_caching:
+            return new_blocks
+
+        num_computed_tokens = len(computed_blocks) * self.block_size
+        num_full_blocks = (num_computed_tokens + num_tokens) // self.block_size
+
+        self._cache_full_blocks(
+            request=request,
+            blk_start_idx=len(computed_blocks),
+            # The new full blocks are the full blocks that are not computed.
+            full_blocks=self.req_to_blocks[request.request_id]
+            [len(computed_blocks):num_full_blocks],
+            prev_block=computed_blocks[-1] if computed_blocks else None,
+        )
+
         return new_blocks
 
     def free(self, request: Request) -> None:
@@ -248,24 +268,17 @@ class KVCacheManager:
             blocks = reversed(blocks)
 
         for block in blocks:
-            block.ref_cnt -= 1
+            block.decr_ref()
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
-    def _get_new_blocks(
-            self,
-            num_blocks: int,
-            token_ids: Optional[List[int]] = None,
-            parent_block: Optional[int] = None) -> List[KVCacheBlock]:
-        """Get new blocks from the free block pool, and add token IDs to
-        allocated blocks if caching is enabled.
+    def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
+        """Get new blocks from the free block pool.
+
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
-            token_ids: The token IDs in the blocks. None if caching is disabled.
-            parent_block: The parent block. Used to include block chain
-                in the block hash.
 
         Returns:
             A list of new block.
@@ -274,56 +287,38 @@ class KVCacheManager:
             raise ValueError(
                 f"Cannot get {num_blocks} free blocks from the pool")
 
-        # First allocate blocks.
         ret: List[KVCacheBlock] = []
         idx = 0
         while idx < num_blocks:
+            # First allocate blocks.
             curr_block = self.free_block_queue.popleft()
             assert curr_block.ref_cnt == 0
 
-            # Evict blocks from the cache.
+            # If the block is cached, evict it.
             if self.enable_caching:
-                block_hash = curr_block.block_hash
-                if (block_hash is not None
-                        and block_hash in self.cached_block_hash_to_block):
-                    if len(self.cached_block_hash_to_block[block_hash]) == 1:
-                        del self.cached_block_hash_to_block[block_hash]
-                    else:
-                        del self.cached_block_hash_to_block[block_hash][
-                            curr_block.block_id]
-                curr_block.reset()
+                self._evict_cached_block(curr_block)
 
-            curr_block.ref_cnt = 1
+            curr_block.incr_ref()
             ret.append(curr_block)
             idx += 1
 
-        # Then assign token IDs to the allocated blocks.
-        if self.enable_caching:
-            assert token_ids is not None
-            token_id_idx = self._add_token_ids_to_blocks(
-                blocks=ret, token_ids=token_ids, parent_block=parent_block)
-            assert token_id_idx == len(token_ids)
-
         return ret
 
-    def _cache_full_block(self,
-                          block: KVCacheBlock,
-                          parent_block: Optional[KVCacheBlock] = None) -> None:
-        """Cache a full block for prefix caching.
+    def _evict_cached_block(self, block: KVCacheBlock) -> None:
+        """
+        If a block is cached in `cached_block_hash_to_block`, we reset its hash
+        metadata and evict it from the cache.
 
         Args:
-            block: The block to cache.
-            parent_block: The parent block. None if this is the first block.
+            block: The block to evict.
         """
-        parent_block_hash = (parent_block.block_hash
-                             if parent_block is not None else None)
-        assert len(block.token_ids) == self.block_size
-        block.token_ids = tuple(block.token_ids)
-        block_hash = hash_block_tokens(parent_block_hash, block.token_ids)
-        block.block_hash = block_hash
-        block.num_hashed_tokens = self.block_size + (
-            parent_block.num_hashed_tokens if parent_block is not None else 0)
-        self.cached_block_hash_to_block[block_hash][block.block_id] = block
+        block_hash = block.block_hash
+        if block_hash and block_hash in self.cached_block_hash_to_block:
+            block.reset_hash()
+            del self.cached_block_hash_to_block[block_hash][block.block_id]
+
+            if len(self.cached_block_hash_to_block[block_hash]) == 0:
+                del self.cached_block_hash_to_block[block_hash]
 
     def _get_cached_block(self,
                           block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -355,43 +350,50 @@ class KVCacheManager:
             # candidate), so remove it.
             if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
-            block.ref_cnt += 1
+            block.incr_ref()
 
-    def _add_token_ids_to_blocks(
-            self,
-            blocks: List[KVCacheBlock],
-            token_ids: List[int],
-            parent_block: Optional[KVCacheBlock] = None) -> int:
-        """Add token IDs to a list of allocated blocks.
-        If a block becomes full after adding token IDs, cache it.
-        Return the token ID index that has not been added to the blocks
-        if the blocks are not enough to hold all the token IDs.
+    def _cache_full_blocks(
+        self,
+        request: Request,
+        blk_start_idx: int,
+        full_blocks: List[KVCacheBlock],
+        prev_block: Optional[KVCacheBlock],
+    ) -> None:
+        """Cache a list of full blocks for prefix caching.
+
+        This function takes a list of blocks that will have their block hash
+        metadata to be updated and cached. Given a request, it computes the
+        block hashes for the blocks starting from `blk_start_idx` to the end
+        of the request's full blocks, updating the metadata for each block
+        and caching them in the `cached_block_hash_to_block`.
 
         Args:
-            blocks: A list of blocks to add token IDs.
-            token_ids: A list of token IDs to add.
-            parent_block: The parent block. None if this is the
-                first block.
-
-        Returns:
-            The starting token ID index that has not been added to the blocks
-            due to insufficient given blocks.
+            request: The request to cache the blocks.
+            blk_start_idx: The index of the first block in the request's blocks
+                to cache.
+            full_blocks: The list of blocks to update hash metadata.
+            prev_block: The previous block in the chain.
         """
-        token_id_start = 0
-        for curr_block in blocks:
-            # If all token IDs are added, then the rest of the blocks are
-            # preallocated blocks, so we only need to update the
-            # parent_block_id. FIXME
-            if token_id_start == len(token_ids):
-                continue
+        # Update the new blocks with the block hashes through the chain.
+        prev_block_hash = (prev_block.block_hash
+                           if prev_block is not None else None)
+        for i, blk in enumerate(full_blocks):
+            blk_idx = blk_start_idx + i
 
-            # Add token IDs to the empty slots in the block.
-            empty_slots = self.block_size - len(curr_block.token_ids)
-            token_id_end = min(token_id_start + empty_slots, len(token_ids))
-            curr_block.token_ids.extend(token_ids[token_id_start:token_id_end])
-            # Cache the block if it becomes full.
-            if len(curr_block.token_ids) == self.block_size:
-                self._cache_full_block(curr_block, parent_block)
-            parent_block = curr_block
-            token_id_start = token_id_end
-        return token_id_start
+            block_tokens = request.all_token_ids[blk_idx *
+                                                 self.block_size:(blk_idx +
+                                                                  1) *
+                                                 self.block_size]
+            assert len(block_tokens) == self.block_size, (
+                f"Expected {self.block_size} tokens, got {len(block_tokens)} "
+                f"at {blk_idx}th block for request "
+                f"{request.request_id}({request})")
+
+            # Compute the hash of the current block.
+            block_hash = hash_block_tokens(prev_block_hash,
+                                           tuple(block_tokens))
+
+            # Update and added the full block to the cache.
+            blk.block_hash = block_hash
+            self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
+            prev_block_hash = block_hash

@@ -307,28 +307,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         token_ids_to_score = self._get_token_ids_to_score(
             proposal_token_ids[batch_index])
 
-        # Use simpler sampling parameters apart from for final token
-        # (in particular don't do seeded sampling) since those sampled tokens
-        # aren't used.
-        # We don't replace the sampling_params in the greedy case because
-        # this also controls whether the probs get modified in the sampler
-        # (see use of _modify_greedy_probs_inplace there).
         sampling_params = input_seq_group_metadata.sampling_params
-        non_bonus_sampling_params = DEFAULT_SIMPLE_SAMPLING_PARAMS \
-            if sampling_params.temperature else sampling_params
-
         target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        last_index = len(token_ids_to_score) - 1
         for i, token_ids in enumerate(token_ids_to_score):
-            target_sampling_params = sampling_params if i == last_index \
-                else non_bonus_sampling_params
             target_seq_group_metadata_list.append(
                 self._create_single_target_seq_group_metadata(
                     input_seq_group_metadata,
                     input_seq_id,
                     next(target_seq_ids_iter),
                     token_ids,
-                    sampling_params=target_sampling_params,
+                    sampling_params=sampling_params,
                 ))
 
         return target_seq_group_metadata_list
@@ -353,6 +341,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         seq_data = seq_group_metadata.seq_data[seq_id]
         prompt_token_ids = seq_data.prompt_token_ids_array
         new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
+        mrope_position_delta = seq_data.mrope_position_delta
 
         new_seq_data_dict = {
             target_seq_id:
@@ -368,6 +357,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # the kv cache is filled by a previous batch in the batch expansion.
         for data in new_seq_data_dict.values():
             data.update_num_computed_tokens(data.get_len() - 1)
+            data.mrope_position_delta = mrope_position_delta
 
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,

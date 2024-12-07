@@ -20,7 +20,8 @@
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 from functools import lru_cache
-from typing import Iterable, List, Mapping, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import librosa
 import numpy as np
@@ -41,10 +42,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .interfaces import SupportsMultiModal, SupportsPP
+from .utils import merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -211,7 +214,7 @@ def input_processor_for_qwen2_audio(
 
     return token_inputs(
         prompt_token_ids=new_input_ids,
-        prompt=inputs['prompt'],
+        prompt=inputs.get("prompt"),
         multi_modal_data=multi_modal_data,
     )
 
@@ -370,6 +373,25 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return masked_audio_features
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        audio_input = self._parse_and_validate_audio_input(**kwargs)
+        if audio_input is None:
+            return None
+        masked_audio_features = self._process_audio_input(audio_input)
+        return masked_audio_features
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.audio_token_index)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -377,33 +399,27 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            audio_input = self._parse_and_validate_audio_input(**kwargs)
 
-            if audio_input is None:
-                inputs_embeds = None
-            else:
-                inputs_embeds = self.language_model.embed_tokens(input_ids)
-                masked_audio_features = self._process_audio_input(audio_input)
-                # merge llm embeddings and audio features
-                mask = (input_ids == self.config.audio_token_index)
-                inputs_embeds[mask, :] = masked_audio_features
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      multimodal_embeddings)
+            input_ids = None
 
-                input_ids = None
-
-        hidden_states = self.language_model(
-            input_ids=input_ids,
-            positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.language_model(input_ids,
+                                            positions,
+                                            kv_caches,
+                                            attn_metadata,
+                                            intermediate_tensors,
+                                            inputs_embeds=inputs_embeds)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -420,7 +436,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -430,6 +447,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -463,3 +481,5 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

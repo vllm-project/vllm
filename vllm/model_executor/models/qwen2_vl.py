@@ -23,7 +23,7 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import partial
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Tuple, Type, TypedDict, Union)
+                    Optional, Set, Tuple, Type, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -39,7 +39,6 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     make_batched_images, make_batched_videos, smart_resize)
 
 from vllm.attention import AttentionMetadata
-from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
@@ -51,18 +50,20 @@ from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import (GPTQConfig,
-                                                     GPTQMarlinConfig,
-                                                     QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinConfig)
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2Model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalKwargs)
-from vllm.multimodal.base import MultiModalData
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.inputs import (MultiModalData, MultiModalDataDict,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_get_processor
@@ -79,7 +80,7 @@ logger = init_logger(__name__)
 
 class Qwen2VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: torch.Tensor
+    pixel_values: torch.Tensor
     """Shape:
     `(num_patches, num_channels * patch_size * patch_size)`
     """
@@ -92,9 +93,22 @@ class Qwen2VLImagePixelInputs(TypedDict):
 
 class Qwen2VLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-    `hidden_size` must match the hidden size of language model backbone.
+    image_embeds: torch.Tensor
+    """Supported types:
+    - List[`torch.Tensor`]: A list of tensors holding all images' features.
+        Each tensor holds an image's features.
+    - `torch.Tensor`: A tensor holding all images' features
+        (concatenation of all images' feature tensors).
+    
+    Tensor shape: `(num_image_features, hidden_size)`
+    - `num_image_features` varies based on
+        the number and resolution of the images.
+    - `hidden_size` must match the hidden size of language model backbone.
+    """
+
+    image_grid_thw: torch.Tensor
+    """Shape: `(num_images, 3)`
+    This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
 
@@ -102,7 +116,8 @@ Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
                            Qwen2VLImageEmbeddingInputs]
 
 
-class Qwen2VLVideoInputs(TypedDict):
+class Qwen2VLVideoPixelInputs(TypedDict):
+    type: Literal["pixel_values_videos"]
     pixel_values_videos: torch.Tensor
     """Shape:
     `(num_patches,
@@ -115,6 +130,30 @@ class Qwen2VLVideoInputs(TypedDict):
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
+
+class Qwen2VLVideoEmbeddingInputs(TypedDict):
+    type: Literal["video_embeds"]
+    video_embeds: torch.Tensor
+    """Supported types:
+    - List[`torch.Tensor`]: A list of tensors holding all videos' features.
+        Each tensor holds an video's features.
+    - `torch.Tensor`: A tensor holding all videos' features
+      (concatenation of all videos' feature tensors).
+    
+    Tensor shape: `(num_image_features, hidden_size)`
+    - `num_image_features` varies based on 
+        the number and resolution of the videos.
+    - `hidden_size` must match the hidden size of language model backbone.
+    """
+
+    video_grid_thw: torch.Tensor
+    """Shape: `(num_videos, 3)`
+    This should be in `(grid_t, grid_h, grid_w)` format.
+    """
+
+
+Qwen2VLVideoInputs = Union[Qwen2VLVideoPixelInputs,
+                           Qwen2VLVideoEmbeddingInputs]
 
 # === Vision Encoder === #
 
@@ -220,7 +259,7 @@ class Qwen2VisionAttention(nn.Module):
                                       prefix=f"{prefix}.proj")
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend()
+        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
         }:
@@ -585,6 +624,12 @@ def mm_input_mapper_for_qwen2_vl(
             "image_embeds": data.get("image_embeds"),
             "image_grid_thw": data.get("image_grid_thw"),
         })
+    if data_type_key == "video" and isinstance(data, dict):
+        return MultiModalKwargs({
+            "video_embeds": data.get("video_embeds"),
+            "video_grid_thw": data.get("video_grid_thw"),
+        })
+
     model_config = ctx.model_config
     # Handle mm processor kwargs; we pass these at creation time
     # because preprocess() in transformers doesn't expose them
@@ -890,16 +935,33 @@ def input_processor_for_qwen2_vl(
                 idx for idx, token in enumerate(prompt_token_ids)
                 if token == hf_config.image_token_id
             ]
-            image_cnt = len(image_indices)
-            embed_dim = image_inputs.get('image_embeds').size(0)
-            assert embed_dim % image_cnt == 0
-            num_pad_tokens = embed_dim // image_cnt
+
+            # ensure all image tokens have grid_thw
+            assert \
+                len(image_indices) == image_inputs["image_grid_thw"].size(0), \
+                "image token num does not match image_grid_thw.shape"
+
+            image_counter = 0
+            pad_token_counter = 0
             for idx, token in enumerate(prompt_token_ids):
                 if idx in image_indices:
+                    grid_thw = image_inputs["image_grid_thw"][image_counter]
+                    grid_t, grid_h, grid_w = grid_thw
+                    num_pad_tokens = (grid_t * grid_h * grid_w //
+                                      image_processor.merge_size //
+                                      image_processor.merge_size)
                     prompt_token_ids_with_image.extend([token] *
                                                        num_pad_tokens)
+                    image_counter += 1
+                    pad_token_counter += num_pad_tokens
                 else:
                     prompt_token_ids_with_image.append(token)
+
+            # ensure all embeddings are used
+            assert \
+                pad_token_counter == image_inputs["image_embeds"].size(0), \
+                "image_embeds.shape does not match image_grid_thw"
+
             prompt_token_ids = prompt_token_ids_with_image
         else:
             prompt_token_ids = _expand_pad_tokens(image_inputs,
@@ -912,14 +974,49 @@ def input_processor_for_qwen2_vl(
                                                   max_pixels=max_pixels)
 
     if video_inputs is not None:
-        prompt_token_ids = _expand_pad_tokens(video_inputs,
-                                              hf_config.video_token_id,
-                                              make_batched_videos,
-                                              "video",
-                                              image_processor,
-                                              prompt_token_ids,
-                                              min_pixels=min_pixels,
-                                              max_pixels=max_pixels)
+        if isinstance(video_inputs, dict):
+            prompt_token_ids_with_video = []
+            video_indices = [
+                idx for idx, token in enumerate(prompt_token_ids)
+                if token == hf_config.video_token_id
+            ]
+
+            # ensure all video tokens have grid_thw
+            assert \
+                len(video_indices) == video_inputs["video_grid_thw"].size(0), \
+                "video token num does not match video_grid_thw.shape"
+
+            video_counter = 0
+            pad_token_counter = 0
+            for idx, token in enumerate(prompt_token_ids):
+                if idx in video_indices:
+                    grid_thw = video_inputs["video_grid_thw"][video_counter]
+                    grid_t, grid_h, grid_w = grid_thw
+                    num_pad_tokens = (grid_t * grid_h * grid_w //
+                                      image_processor.merge_size //
+                                      image_processor.merge_size)
+                    prompt_token_ids_with_video.extend([token] *
+                                                       num_pad_tokens)
+                    video_counter += 1
+                    pad_token_counter += num_pad_tokens
+                else:
+                    prompt_token_ids_with_video.append(token)
+
+            # ensure all embeddings are used
+            assert \
+                pad_token_counter == video_inputs["video_embeds"].size(0), \
+                "video_embeds.shape does not match video_grid_thw"
+
+            prompt_token_ids = prompt_token_ids_with_video
+        else:
+            prompt_token_ids = _expand_pad_tokens(video_inputs,
+                                                  hf_config.video_token_id,
+                                                  make_batched_videos,
+                                                  "video",
+                                                  image_processor,
+                                                  prompt_token_ids,
+                                                  min_pixels=min_pixels,
+                                                  max_pixels=max_pixels)
 
     prompt = inputs.get("prompt")
     if prompt is None:
@@ -1002,6 +1099,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
+
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -1051,49 +1149,71 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                  f"Got type: {type(pixel_values)}")
 
             return Qwen2VLImagePixelInputs(type="pixel_values",
-                                           data=pixel_values,
+                                           pixel_values=pixel_values,
                                            image_grid_thw=image_grid_thw)
 
         if image_embeds is not None:
             image_embeds = self._validate_and_reshape_mm_tensor(
                 image_embeds, "image embeds")
+            image_grid_thw = self._validate_and_reshape_mm_tensor(
+                image_grid_thw, "image grid_thw")
 
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
             return Qwen2VLImageEmbeddingInputs(type="image_embeds",
-                                               data=image_embeds)
+                                               image_embeds=image_embeds,
+                                               image_grid_thw=image_grid_thw)
 
     def _parse_and_validate_video_input(
             self, **kwargs: object) -> Optional[Qwen2VLVideoInputs]:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
 
-        if pixel_values_videos is None:
+        if pixel_values_videos is None and video_embeds is None:
             return None
 
-        pixel_values_videos = self._validate_and_reshape_mm_tensor(
-            pixel_values_videos, "video pixel values")
-        video_grid_thw = self._validate_and_reshape_mm_tensor(
-            video_grid_thw, "video grid_thw")
+        if pixel_values_videos is not None:
+            pixel_values_videos = self._validate_and_reshape_mm_tensor(
+                pixel_values_videos, "video pixel values")
+            video_grid_thw = self._validate_and_reshape_mm_tensor(
+                video_grid_thw, "video grid_thw")
 
-        return Qwen2VLVideoInputs(
-            pixel_values_videos=pixel_values_videos,
-            video_grid_thw=video_grid_thw,
-        )
+            return Qwen2VLVideoPixelInputs(
+                type="pixel_values_videos",
+                pixel_values_videos=pixel_values_videos,
+                video_grid_thw=video_grid_thw,
+            )
+
+        if video_embeds is not None:
+            video_embeds = self._validate_and_reshape_mm_tensor(
+                video_embeds, "video embeds")
+            video_grid_thw = self._validate_and_reshape_mm_tensor(
+                video_grid_thw, "video grid_thw")
+
+            if not isinstance(video_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of video embeddings. "
+                                 f"Got type: {type(video_embeds)}")
+            return Qwen2VLVideoEmbeddingInputs(type="video_embeds",
+                                               video_embeds=video_embeds,
+                                               video_grid_thw=video_grid_thw)
 
     def _process_image_input(self,
                              image_input: Qwen2VLImageInputs) -> torch.Tensor:
         if image_input["type"] == "image_embeds":
-            return image_input["data"].type(self.visual.dtype)
+            return image_input["image_embeds"].type(self.visual.dtype)
 
-        pixel_values = image_input["data"].type(self.visual.dtype)
+        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
         image_embeds = self.visual(pixel_values,
                                    grid_thw=image_input["image_grid_thw"])
         return image_embeds
 
     def _process_video_input(self,
                              video_input: Qwen2VLVideoInputs) -> torch.Tensor:
+        if video_input["type"] == "video_embeds":
+            return video_input["video_embeds"].type(self.visual.dtype)
+
         pixel_values_videos = video_input["pixel_values_videos"].type(
             self.visual.dtype)
         video_embeds = self.visual(pixel_values_videos,
@@ -1111,6 +1231,55 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds[mask, :] = multimodal_embeddings
         return inputs_embeds
 
+    def get_multimodal_embeddings(
+            self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
+
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        video_input = self._parse_and_validate_video_input(**kwargs)
+        if image_input is None and video_input is None:
+            return None
+
+        # We make a tuple of each embedding with its modality string. This is a
+        # temporary workaround for models to handle mixed modalities when
+        # get_multimodal_embeddings and get_input_embeddings are called
+        # separately.
+        # TODO(ywang96): Add support for mixed-modality inference for v1.
+        multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
+
+        if image_input is not None:
+            image_embeds = self._process_image_input(image_input)
+            multimodal_embeddings.append((image_embeds, "image"))
+        if video_input is not None:
+            video_embeds = self._process_video_input(video_input)
+            multimodal_embeddings.append((video_embeds, "video"))
+
+        return multimodal_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[List[Tuple[NestedTensors,
+                                                   str]]] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            for embeddings, modality in multimodal_embeddings:
+                if modality == "image":
+                    inputs_embeds = self._merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        embeddings,
+                        placeholder_token_id=self.config.image_token_id,
+                    )
+                if modality == "video":
+                    inputs_embeds = self._merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        embeddings,
+                        placeholder_token_id=self.config.video_token_id,
+                    )
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1118,6 +1287,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for Qwen2-VL.
@@ -1139,42 +1309,26 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
                 `None` if no videos are passed.
         """
+
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            video_input = self._parse_and_validate_video_input(**kwargs)
 
-            if image_input is None and video_input is None:
-                inputs_embeds = None
-            else:
-                if uses_mrope(self.config):
-                    assert positions.ndim == 2 and positions.size(0) == 3, (
-                        "multimodal section rotary embedding requires "
-                        f"(3, seq_len) positions, but got {positions.size()}")
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-                inputs_embeds = self.model.embed_tokens(input_ids)
+            # We need to check for usage of mrope here in case there is
+            # multimodal data.
+            # TODO (ywang96): move this to model runner in V1.
+            if multimodal_embeddings is not None and uses_mrope(self.config):
+                assert positions.ndim == 2 and positions.size(0) == 3, (
+                    "multimodal section rotary embedding requires "
+                    f"(3, seq_len) positions, but got {positions.size()}")
 
-                if image_input is not None:
-                    image_embeds = self._process_image_input(image_input)
-                    inputs_embeds = self._merge_multimodal_embeddings(
-                        input_ids,
-                        inputs_embeds,
-                        image_embeds,
-                        placeholder_token_id=self.config.image_token_id,
-                    )
-
-                if video_input is not None:
-                    video_embeds = self._process_video_input(video_input)
-                    inputs_embeds = self._merge_multimodal_embeddings(
-                        input_ids,
-                        inputs_embeds,
-                        video_embeds,
-                        placeholder_token_id=self.config.video_token_id,
-                    )
-
-                input_ids = None
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      multimodal_embeddings)
+            input_ids = None
 
         hidden_states = self.model(
             input_ids=input_ids,
@@ -1200,7 +1354,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -1210,6 +1365,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             ("gate_up_proj", "gate_proj", 0),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1259,3 +1415,5 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

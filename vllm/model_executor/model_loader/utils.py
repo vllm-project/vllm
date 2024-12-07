@@ -1,12 +1,13 @@
 """Utilities for selecting and loading models."""
 import contextlib
-from typing import Tuple, Type
+from typing import Optional, Tuple, Type
 
 import torch
 from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.adapters import as_embedding_model
 
 
 @contextlib.contextmanager
@@ -19,8 +20,13 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 def get_model_architecture(
-        model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
-    architectures = getattr(model_config.hf_config, "architectures", [])
+    model_config: ModelConfig,
+    *,
+    architectures: Optional[list[str]] = None,
+) -> Tuple[Type[nn.Module], str]:
+    if architectures is None:
+        architectures = getattr(model_config.hf_config, "architectures", [])
+
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     mixtral_supported = [
@@ -32,7 +38,11 @@ def get_model_architecture(
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
 
-    return ModelRegistry.resolve_model_cls(architectures)
+    model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
+    if model_config.task == "embedding":
+        model_cls = as_embedding_model(model_cls)
+
+    return model_cls, arch
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:

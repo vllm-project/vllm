@@ -32,6 +32,9 @@ async def generate(engine: AsyncLLM, request_id: str,
 
 @pytest.mark.asyncio
 async def test_load(monkeypatch):
+    # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
+    # so that in the future when we switch, we don't have to change all the
+    # tests.
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 

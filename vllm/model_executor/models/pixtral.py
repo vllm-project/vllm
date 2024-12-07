@@ -1,7 +1,7 @@
 from dataclasses import dataclass, fields
 from functools import cached_property
 from itertools import tee
-from typing import Iterable, List, Mapping, Optional, Tuple, Union
+from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
 
 import numpy
 import torch
@@ -17,6 +17,7 @@ from transformers.models.pixtral.modeling_pixtral import (
 
 from vllm.attention import AttentionMetadata
 from vllm.config import ModelConfig, VllmConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -29,10 +30,11 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges)
+                                   consecutive_placeholder_ranges,
+                                   resolve_visual_encoder_outputs)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
@@ -170,9 +172,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # init MistralForCausalLM
         self.language_model = init_vllm_registered_model(
-            config.text_config,
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"))
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
 
         self.vision_encoder = VisionTransformer(self.vision_args)
         self.vision_language_adapter = VisionLanguageAdapter(
@@ -188,6 +191,25 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return get_sampler()
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.vision_args.image_token_id)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -195,31 +217,21 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for pixtral.
-
-        TODO
-
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
 
-            if image_input is not None:
-                vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
-
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
-                    self.vision_args.image_token_id)
-
-                input_ids = None
-            else:
-                inputs_embeds = None
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
@@ -330,6 +342,7 @@ class VisionEncoderArgs:
     num_attention_heads: int
     rope_theta: float  # for rope-2D
     image_token_id: int
+    adapter_bias: bool = True
 
 
 def _reshape_for_broadcast(freqs_cis: torch.Tensor,
@@ -594,10 +607,10 @@ class VisionLanguageAdapter(nn.Module):
         self.w_in = nn.Linear(
             args.hidden_size,
             dim,
-            bias=True,
+            bias=args.adapter_bias,
         )
         self.gelu = nn.GELU()
-        self.w_out = nn.Linear(dim, dim, bias=True)
+        self.w_out = nn.Linear(dim, dim, bias=args.adapter_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w_out(self.gelu(self.w_in(x)))
@@ -774,15 +787,28 @@ def input_processor_for_pixtral_hf(
         replace_tokens[-1] = image_end_id
         replace_tokens_list.append(replace_tokens)
 
+    reverse_offsets: List[int] = []
     # Backward iteration for replacement without affecting known indices
     for placeholder_idx, replace_tokens in zip(reversed(placeholder_indices),
                                                reversed(replace_tokens_list)):
+        reverse_offsets.append(
+            len(new_token_ids) - placeholder_idx + len(replace_tokens))
         new_token_ids[placeholder_idx:placeholder_idx + 1] = replace_tokens
+
+    placeholder_ranges: List[PlaceholderRange] = []
+    for reverse_offset, replace_tokens in zip(reversed(reverse_offsets),
+                                              replace_tokens_list):
+        placeholder_ranges.append(
+            PlaceholderRange(
+                offset=len(new_token_ids) - reverse_offset,
+                length=len(replace_tokens),
+            ))
 
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": placeholder_ranges})
 
 
 class PixtralHFMLP(nn.Module):
@@ -830,17 +856,20 @@ class PixtralHFAttention(nn.Module):
 
         self.config = config
         assert not config.hidden_size % config.num_attention_heads
-        self.n_heads = config.num_attention_heads
+        self.total_num_heads = config.num_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        self.n_heads = divide(config.num_attention_heads, tp_size)
         self.head_dim = config.hidden_size // config.num_attention_heads
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=config.hidden_size,
             head_size=self.head_dim,
-            total_num_heads=self.n_heads,
+            total_num_heads=self.total_num_heads,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        assert self.total_num_heads * self.head_dim == config.hidden_size
         self.o_proj = RowParallelLinear(
             input_size=config.hidden_size,
             output_size=config.hidden_size,
@@ -952,9 +981,18 @@ class PixtralHFTransformer(nn.Module):
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         position_embeddings: torch.Tensor,
+        return_all_hidden_states: bool,
     ) -> torch.Tensor:
+        hidden_states_pool = []
+
         for layer in self.layers:
             x = layer(x, attention_mask, position_embeddings)
+            if return_all_hidden_states:
+                hidden_states_pool.append(x)
+        # If we have multiple feature sample layers, we return all hidden
+        # states in order and grab the ones we need by index.
+        if return_all_hidden_states:
+            return hidden_states_pool
         return x
 
 
@@ -972,6 +1010,7 @@ class PixtralHFVisionModel(nn.Module):
         super().__init__()
 
         self.config = config
+
         self.patch_conv = nn.Conv2d(
             in_channels=config.num_channels,
             out_channels=config.hidden_size,
@@ -1006,6 +1045,7 @@ class PixtralHFVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: List[torch.Tensor],
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -1013,6 +1053,9 @@ class PixtralHFVisionModel(nn.Module):
                 in pixel_values. This means it will be a list of tensors
                 because multiple requests batched can have multiple images,
                 each with their own shape potentially
+            feature_sample_layers: Layer indices whose features should be
+                concatenated and used as the visual encoder output. If none
+                are provided, the last layer is used.
 
         Returns:
             image_features: tensor of token features for
@@ -1047,14 +1090,22 @@ class PixtralHFVisionModel(nn.Module):
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
                 patch_embeds)
 
-        out = self.transformer(patch_embeds, attention_mask,
-                               position_embedding)
+        return_all_hidden_states = feature_sample_layers is not None
+        out = self.transformer(
+            patch_embeds,
+            attention_mask,
+            position_embedding,
+            return_all_hidden_states=return_all_hidden_states)
+
+        out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
+                                             self.config.num_hidden_layers)
 
         return out
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1064,6 +1115,7 @@ class PixtralHFVisionModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         layer_count = len(self.transformer.layers)
 
         for name, loaded_weight in weights:
@@ -1076,8 +1128,8 @@ class PixtralHFVisionModel(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -1086,3 +1138,5 @@ class PixtralHFVisionModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

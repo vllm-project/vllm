@@ -15,8 +15,7 @@ from transformers import PretrainedConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.utils import is_list_of
 

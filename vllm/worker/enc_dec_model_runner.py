@@ -8,37 +8,30 @@ import torch.distributed
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
-                                     get_global_forced_attn_backend,
-                                     global_force_attn_backend)
-from vllm.config import ModelConfig, VllmConfig
+from vllm.attention.selector import (get_env_variable_attn_backend,
+                                     get_global_forced_attn_backend)
+from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.model_loader.utils import get_architecture_class_name
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
+from vllm.platforms import _Backend
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
-                                      ModelInputForGPUWithSamplingMetadata,
-                                      _get_graph_batch_size)
+                                      ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 logger = init_logger(__name__)
-
-# The Mllama model has PagedAttention specific logic because of which it
-# can only be run with the XFORMERS backend
-# TODO Make Mllama model work with Flash Attention backend.
-_XFORMERS_ONLY_ENCODER_DECODER_ARCHS = ["MllamaForConditionalGeneration"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,7 +90,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         models) but these arguments are present here for compatibility with 
         the base-class constructor.
         '''
-        self._maybe_force_supported_attention_backend(vllm_config.model_config)
+        self._maybe_force_supported_attention_backend()
 
         super().__init__(
             vllm_config=vllm_config,
@@ -108,12 +101,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # Crash for unsupported encoder/scenarios
         assert_enc_dec_mr_supported_scenario(self)
 
-    def _is_xformers_only_encoder_decoder_model(self,
-                                                model: ModelConfig) -> bool:
-        return get_architecture_class_name(
-            model) in _XFORMERS_ONLY_ENCODER_DECODER_ARCHS
-
-    def _maybe_force_supported_attention_backend(self, model: ModelConfig):
+    def _maybe_force_supported_attention_backend(self):
         '''
         Force vLLM to use the XFormers attention backend,
         which is currently the only supported option.
@@ -128,23 +116,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         maybe_global_forced_backend = get_global_forced_attn_backend()
         is_forced_by_global = maybe_global_forced_backend is not None
         is_forced_by_env_var = maybe_env_var_forced_backend is not None
-
-        if not (is_forced_by_global or is_forced_by_env_var) \
-            and self._is_xformers_only_encoder_decoder_model(model):
-            # The user has not already specified an attention backend
-            # override
-            logger.info(
-                "Encoder-Decoder Model Architecture %s requires XFormers "
-                "backend; overriding backend auto-selection and "
-                "forcing XFormers.", get_architecture_class_name(model))
-            global_force_attn_backend(_Backend.XFORMERS)
-        elif is_forced_by_global:
+        if is_forced_by_global:  # noqa: SIM102
             # Backend override enforced by global variable takes
             # precedence over vLLM backend environment variable.
             if maybe_global_forced_backend not in\
                  [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
                 raise_backend_err()
-        elif is_forced_by_env_var:
+        elif is_forced_by_env_var:  # noqa: SIM102
             # Backend override enforced by vLLM backend
             # environment variable
             if maybe_env_var_forced_backend not in\
@@ -197,7 +175,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        with set_forward_context(model_input.attn_metadata):
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -486,7 +464,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # We will be using CUDA graph replay for this decode.
                 max_len_of_block_table = self.get_max_block_per_batch()
                 batch_size = len(encoder_seq_lens)
-                graph_batch_size = _get_graph_batch_size(batch_size)
+                graph_batch_size = self.vllm_config.get_graph_batch_size(
+                    batch_size)
                 assert graph_batch_size >= batch_size
                 cuda_graph_pad_size = graph_batch_size - batch_size
                 # extend the cross_block_tables and encoder_seq_lens to match

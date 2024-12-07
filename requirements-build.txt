@@ -1,5 +1,5 @@
 # Should be mirrored in pyproject.toml
-cmake>=3.26,<=3.30
+cmake>=3.26
 ninja
 packaging
 setuptools>=61
