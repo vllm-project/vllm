@@ -123,8 +123,8 @@ class IncrementalDetokenizer:
         self,
         token_id_list: int,
     ) -> List[str]:
-        return self.tokenizer.convert_ids_to_tokens(
-            token_id_list, skip_special_tokens=False)
+        return self.tokenizer.convert_ids_to_tokens(token_id_list,
+                                                    skip_special_tokens=False)
 
     def _pythonize_sequence_position(
         self,
