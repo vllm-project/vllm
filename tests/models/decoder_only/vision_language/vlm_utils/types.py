@@ -11,6 +11,7 @@ from transformers import (AutoModelForCausalLM, BatchEncoding,
                           PreTrainedTokenizerBase)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
+from vllm.config import TaskOption
 from vllm.sequence import SampleLogprobs
 from vllm.utils import identity
 
@@ -93,7 +94,7 @@ class VLMTestInfo(NamedTuple):
     enforce_eager: bool = True
     max_model_len: int = 1024
     max_num_seqs: int = 256
-    task: str = "auto"
+    task: TaskOption = "auto"
     tensor_parallel_size: int = 1
     vllm_runner_kwargs: Optional[Dict[str, Any]] = None
 
