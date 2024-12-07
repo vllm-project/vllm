@@ -223,7 +223,7 @@ def run_internvl(question: str, modality: str):
     # Stop tokens for InternVL
     # models variants may have different stop tokens
     # please refer to the model card for the correct "stop words":
-    # https://huggingface.co/OpenGVLab/InternVL2-2B#service
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
     stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
     return llm, prompt, stop_token_ids
@@ -419,6 +419,22 @@ def run_aria(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# Mantis
+def run_mantis(question: str, modality: str):
+    assert modality == "image"
+
+    llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'  # noqa: E501
+    prompt = llama3_template.format(f"{question}\n<image>")
+
+    llm = LLM(
+        model="TIGER-Lab/Mantis-8B-siglip-llama3",
+        max_model_len=4096,
+        hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
+    )
+    stop_token_ids = [128009]
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -441,6 +457,7 @@ model_example_map = {
     "glm4v": run_glm4v,
     "idefics3": run_idefics3,
     "aria": run_aria,
+    "mantis": run_mantis,
 }
 
 

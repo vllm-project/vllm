@@ -3,8 +3,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from PIL.Image import Image
-from transformers import AutoTokenizer, BatchEncoding
+from transformers import AutoTokenizer, BatchEncoding, PreTrainedTokenizerBase
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
+
+from vllm.config import TaskOption
 
 from .....conftest import HfRunner, VllmRunner
 from .types import RunnerOutput
@@ -28,13 +30,15 @@ def run_test(
     use_tokenizer_eos: bool,
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
     comparator: Callable[..., None],
-    get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]],
+    get_stop_token_ids: Optional[Callable[[PreTrainedTokenizerBase],
+                                          List[int]]],
     stop_str: Optional[List[str]],
     tokenizer_mode: str,
     limit_mm_per_prompt: Dict[str, int],
-    model_kwargs: Optional[Dict[str, Any]],
+    vllm_runner_kwargs: Optional[Dict[str, Any]],
+    hf_model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
-    task: str = "auto",
+    task: TaskOption = "auto",
     runner_mm_key: str = "images",
     distributed_executor_backend: Optional[str] = None,
     tensor_parallel_size: int = 1,
@@ -58,6 +62,9 @@ def run_test(
     if stop_str:
         vllm_kwargs["stop"] = stop_str
 
+    if vllm_runner_kwargs is None:
+        vllm_runner_kwargs = {}
+
     with vllm_runner(model,
                      tokenizer_mode=tokenizer_mode,
                      max_model_len=max_model_len,
@@ -67,7 +74,8 @@ def run_test(
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=enforce_eager,
-                     task=task) as vllm_model:
+                     task=task,
+                     **vllm_runner_kwargs) as vllm_model:
         for prompts, media in vllm_inputs:
             vllm_kwargs[runner_mm_key] = media
             vllm_output = vllm_model.generate_greedy_logprobs(
@@ -78,7 +86,7 @@ def run_test(
                          dtype=dtype,
                          auto_cls=auto_cls,
                          postprocess_inputs=postprocess_inputs,
-                         model_kwargs=model_kwargs)
+                         model_kwargs=hf_model_kwargs)
 
     # Some models need to patch things like the model processor, e.g., internvl
     if patch_hf_runner is not None:
