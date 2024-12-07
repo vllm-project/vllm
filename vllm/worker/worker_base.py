@@ -426,7 +426,8 @@ class WorkerWrapperBase:
             init_cached_hf_modules()
 
     @staticmethod
-    def update_environment_variables(envs: Dict[str, str]) -> None:
+    def update_environment_variables(all_envs: List[Dict[str, str]]) -> None:
+        envs = all_envs[self.vllm_config.parallel_config.rank]
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
