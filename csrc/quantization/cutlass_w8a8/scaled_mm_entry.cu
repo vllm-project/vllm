@@ -137,11 +137,9 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
     return;
   }
 
-  if (version_num >= 75) {
-    // Turing
-    cutlass_scaled_mm_sm75(c, a, b, a_scales, b_scales, bias);
-    return;
-  }
+  // Turing
+  TORCH_CHECK(version_num >= 75);
+  cutlass_scaled_mm_sm75(c, a, b, a_scales, b_scales, bias);
 #endif
 
   TORCH_CHECK_NOT_IMPLEMENTED(
