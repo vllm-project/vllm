@@ -2472,7 +2472,15 @@ class VllmConfig:
             return quant_config
         return None
 
-    def with_hf_config(self, hf_config: PretrainedConfig) -> "VllmConfig":
+    def with_hf_config(
+        self,
+        hf_config: PretrainedConfig,
+        architectures: Optional[list[str]] = None,
+    ) -> "VllmConfig":
+        if architectures is not None:
+            hf_config = copy.deepcopy(hf_config)
+            hf_config.architectures = architectures
+
         model_config = copy.deepcopy(self.model_config)
         model_config.hf_config = hf_config
 
