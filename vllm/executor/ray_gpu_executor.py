@@ -187,8 +187,14 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.workers = sorted(self.workers, key=sort_by_driver_then_worker_ip)
 
         # Get the set of GPU IDs used on each node.
-        worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
-                                                    use_dummy_driver=True)
+        worker_node_and_gpu_ids = []
+        for worker in [self.driver_dummy_worker] + self.workers:
+            if worker is None:
+                # driver_dummy_worker can be None when using ray spmd worker.
+                continue
+            worker_node_and_gpu_ids.append(
+                ray.get(worker.get_node_and_gpu_ids.remote()) \
+            ) # type: ignore
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
         node_gpus = defaultdict(list)  # node id -> list of gpu ids
@@ -326,7 +332,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
         method: str,
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
-        use_dummy_driver: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
@@ -368,17 +373,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # non-SPMD worker class.
         if not self.use_ray_spmd_worker:
             # Start the driver worker after all the ray workers.
-            if not use_dummy_driver:
-                driver_worker_output = [
-                    self.driver_worker.execute_method(method, *args, **kwargs)
-                ]
-            else:
-                assert self.driver_dummy_worker is not None
-                driver_worker_output = [
-                    ray.get(
-                        self.driver_dummy_worker.execute_method.remote(
-                            method, *args, **kwargs))
-                ]
+            driver_worker_output = [
+                self.driver_worker.execute_method(method, *driver_args,
+                                                  **driver_kwargs)
+            ]
 
         # Get the results of the ray workers.
         if self.workers:
