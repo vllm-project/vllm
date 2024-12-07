@@ -26,6 +26,8 @@ class ParallelSetup(NamedTuple):
     pp_size: int
     eager_mode: bool
     chunked_prefill: bool
+    speculative_model: Optional[str] = None
+    num_speculative_tokens: Optional[int] = None
 
 
 class PPTestOptions(NamedTuple):
@@ -77,6 +79,12 @@ class PPTestSettings:
                               pp_size=pp_base,
                               eager_mode=True,
                               chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
+                              eager_mode=False,
+                              chunked_prefill=False,
+                              speculative_model="ngram",
+                              num_speculative_tokens=5),
             ],
             distributed_backends=["mp", "ray"],
             task=task,
@@ -247,9 +255,21 @@ def _compare_tp(
     *,
     method: Literal["generate", "encode"],
 ):
-    tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
-    multi_node_only, trust_remote_code, tokenizer_mode, \
-        load_format, hf_overrides = test_options
+    (
+        tp_size,
+        pp_size,
+        eager_mode,
+        chunked_prefill,
+        speculative_model,
+        num_speculative_tokens,
+    ) = parallel_setup
+    (
+        multi_node_only,
+        trust_remote_code,
+        tokenizer_mode,
+        load_format,
+        hf_overrides,
+    ) = test_options
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
@@ -282,6 +302,12 @@ def _compare_tp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", hf_overrides])
+    if speculative_model:
+        common_args.extend(["--speculative-model", speculative_model])
+    if num_speculative_tokens:
+        common_args.extend(
+            ["--num-speculative-tokens",
+             str(num_speculative_tokens)])
 
     if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
             and chunked_prefill):
