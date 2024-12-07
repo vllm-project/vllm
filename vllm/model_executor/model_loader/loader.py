@@ -101,12 +101,10 @@ def _initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    architectures: Optional[list[str]] = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
-    model_class, _ = get_model_architecture(model_config,
-                                            architectures=architectures)
+    model_class, _ = get_model_architecture(model_config)
 
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
