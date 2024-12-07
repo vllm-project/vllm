@@ -161,7 +161,7 @@ class IncrementalDetokenizer:
         new_logprobs: List[Tuple[npt.NDArray, npt.NDArray]],
         new_token_ids: List[int],
         detokenize: bool,
-    ) -> Tuple[SampleLogprobs, float]:
+    ) -> SampleLogprobs:
         """Pythonize sample logprobs, maybe detokenize.
         
         Pythonization entails the conversion from a numpy (np)
@@ -181,6 +181,7 @@ class IncrementalDetokenizer:
         Returns:
           Sample logprobs, Pythonized and possibly detokenized
         """
+        new_pythonized_logprobs = []
         max_logprobs = self.max_request_sample_logprobs
         for (logprob_values,
              logprob_token_ids), token_id in zip(new_logprobs, new_token_ids):
@@ -201,12 +202,15 @@ class IncrementalDetokenizer:
                 # There will be one more logprob than the user requested
                 logprob_cnt = max_logprobs + 1
 
-            new_pythonized_logprobs = self._pythonize_sequence_position(
+            new_pythonized_logprobs_dict = self._pythonize_sequence_position(
                 logprob_values[0:logprob_cnt],
                 logprob_token_ids[0:logprob_cnt], detokenize)
-            self.request_logprobs.append(new_pythonized_logprobs)
-            self.request_cumulative_logprob += new_pythonized_logprobs[
+            self.request_logprobs.append(new_pythonized_logprobs_dict)
+            self.request_cumulative_logprob += new_pythonized_logprobs_dict[
                 token_id].logprob
+            new_pythonized_logprobs.append(new_pythonized_logprobs_dict)
+
+        return new_pythonized_logprobs
 
     def _pythonize_maybe_detokenize_prompt_logprobs_for_request(
         self,
@@ -237,6 +241,8 @@ class IncrementalDetokenizer:
 
         self.request_prompt_logprobs.extend(prompt_logprobs)
 
+        return prompt_logprobs
+
     def add_tokens(
         self,
         new_token_ids: List[int],
@@ -265,15 +271,17 @@ class IncrementalDetokenizer:
 
         # 1) If required, Pythonize & detokenize sample logprobs
         if do_request_sample_logprobs:
-            self._pythonize_maybe_detokenize_sample_logprobs_for_request(
-                new_logprobs, new_token_ids, detokenize=True)
+            new_logprobs = (
+                self._pythonize_maybe_detokenize_sample_logprobs_for_request(
+                    new_logprobs, new_token_ids, detokenize=True))
 
         # 2) If necessary, detokenize prompt logprobs incrementally
         if do_request_prompt_logprobs:
-            self._pythonize_maybe_detokenize_prompt_logprobs_for_request(
-                new_prompt_logprobs,
-                new_prompt_logprob_token_ids,
-                detokenize=True)
+            new_prompt_logprobs = (
+                self._pythonize_maybe_detokenize_prompt_logprobs_for_request(
+                    new_prompt_logprobs,
+                    new_prompt_logprob_token_ids,
+                    detokenize=True))
 
         # 3) Detokenize the new token ids incrementally. If necessary,
         #    detokenize logprobs.

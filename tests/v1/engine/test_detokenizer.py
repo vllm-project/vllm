@@ -1,5 +1,5 @@
 import random
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -7,8 +7,8 @@ import pytest
 from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
 
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
-from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.detokenizer import Detokenizer, DetokenizerRequest
 
@@ -99,66 +99,35 @@ def _generate_dummy_prompt_logprobs(
                                             False))
 
 
-def _pythonize_logprobs_at_single_seq_offset(
-    logprobs_np: npt.NDArray,
-    token_ids_np: npt.NDArray,
+def _decode_token(
+    tok_id: int,
     tokenizer: PreTrainedTokenizer,
-) -> Dict[int, Logprob]:
-    return {
-        tok_id: Logprob(
-            val, tdx + 1,
-            tokenizer.convert_ids_to_tokens([tok_id],
-                                            skip_special_tokens=False))
-        for tdx, (val, tok_id) in enumerate(zip(logprobs_np, token_ids_np))
-    }
+) -> str:
+    return tokenizer.convert_ids_to_tokens([tok_id],
+                                           skip_special_tokens=False)[0]
 
 
-def _detokenize_prompt_logprobs(
-    prompt_logprobs_np: Tuple[npt.NDArray, npt.NDArray],
-    tokenizer: PreTrainedTokenizer,
-) -> PromptLogprobs:
-    prompt_logprobs_np_vals = prompt_logprobs_np[0]
-    prompt_logprobs_np_toks = prompt_logprobs_np[1]
-    num_prompt_tokens = prompt_logprobs_np_vals.shape[0]
-    res = [
-        _pythonize_logprobs_at_single_seq_offset(
-            prompt_logprobs_np_vals[sdx, :], prompt_logprobs_np_toks[sdx, :],
-            tokenizer) for sdx in range(num_prompt_tokens)
-    ]
-    return res
+def _validate_requests_logprobs(requests: List[DetokenizerRequest],
+                                request_outputs: List[RequestOutput]):
+    # Validate logprob detokenization
+    for req, req_out in zip(requests, request_outputs):
+        if req.logprobs is not None and req.logprobs > 0:
+            for comp in req_out.outputs:
+                for lp_dict in comp.logprobs:
+                    for tok_id, lp in lp_dict.items():
+                        assert lp.decoded_token == _decode_token(
+                            tok_id,
+                            tokenizer), "sample logprob decoded token mismatch"
 
-
-def _copy_logprob_add_decode(
-    logprob: Logprob,
-    token_id: int,
-    tokenizer: PreTrainedTokenizer,
-) -> Logprob:
-    return Logprob(
-        logprob.logprob, logprob.rank,
-        tokenizer.convert_ids_to_tokens([token_id], skip_special_tokens=False))
-
-
-def _generate_dummy_logprobs_tuple(
-    num_logprobs: int,
-    is_sample_logprobs: bool,
-    tokenizer: PreTrainedTokenizer,
-) -> Dict[int, Logprob]:
-    adjusted_num_logprobs = (num_logprobs + random.choice([0, 1])
-                             if is_sample_logprobs else num_logprobs)
-    return {
-        random.randint(0,
-                       len(tokenizer.vocab) - 1):
-        Logprob(random.uniform(-100, 0), idx, None)
-        for idx in range(adjusted_num_logprobs)
-    }
-
-
-def _new_logprobs_detokenized(logprobs: Union[SampleLogprobs, PromptLogprobs],
-                              C) -> Union[SampleLogprobs, PromptLogprobs]:
-    return [{
-        tok_id: _copy_logprob_add_decode(lp, tok_id, tokenizer)
-        for tok_id, lp in lp_dict.items()
-    } for lp_dict in logprobs]
+        if req.prompt_logprobs is not None and req.prompt_logprobs > 0 and len(
+                req_out.prompt_logprobs) > 0:
+            # Validate prompt logprobs
+            assert req_out.prompt_logprobs[0] is None
+            for plp_dict in req_out.prompt_logprobs[1:]:
+                for tok_id, plp in plp_dict.items():
+                    assert plp.decoded_token == _decode_token(
+                        tok_id,
+                        tokenizer), "prompt logprob decoded token mismatch"
 
 
 FULL_STRINGS = [
@@ -232,11 +201,10 @@ class MockEngineCore:
         do_logprobs = self.do_logprobs
         do_prompt_logprobs = self.do_prompt_logprobs
         token_idx = self.current_idx
-        self.current_idx += 1
 
         outputs = []
-        for req_idx, (generated_token_ids, prompt_token_ids) in enumerate(
-                zip(self.generated_tokens_list, self.prompt_tokens_list)):
+        for req_idx, generated_token_ids in enumerate(
+                self.generated_tokens_list):
             if len(generated_token_ids) > token_idx:
                 if do_logprobs:
                     assert self.generated_logprobs_raw is not None
@@ -245,28 +213,30 @@ class MockEngineCore:
                     ]
                 else:
                     logprobs = None
-                if self.current_idx == 0 and do_prompt_logprobs:
-                    assert self.prompt_logprobs_raw is not None
-                    prompt_logprobs = self.prompt_logprobs_raw[req_idx][0]
-                    prompt_logprobs_token_ids = self.prompt_logprobs_raw[
-                        req_idx][1]
+                if do_prompt_logprobs:
+                    if self.current_idx == 0:
+                        assert self.prompt_logprobs_raw is not None
+                        prompt_logprobs = self.prompt_logprobs_raw[req_idx][0]
+                        prompt_logprobs_token_ids = self.prompt_logprobs_raw[
+                            req_idx][1]
+                    else:
+                        (prompt_logprobs, prompt_logprobs_token_ids) = ([], [])
                 else:
-                    prompt_logprobs = None
-                    prompt_logprobs_token_ids = None
+                    (prompt_logprobs, prompt_logprobs_token_ids) = (None, None)
                 output = EngineCoreOutput(
                     request_id=f"request-{req_idx}",
                     new_token_ids=[generated_token_ids[token_idx]],
                     finished=False,
                     logprobs=logprobs,
                     prompt_logprobs=prompt_logprobs,
-                    prompt_logprobs_token_ids=prompt_logprobs_token_ids
-                    if self.current_idx == 0 and do_prompt_logprobs else None,
+                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                 )
                 if token_idx == len(generated_token_ids) - 1:
                     output.finished = True
                     output.finish_reason = "stopped"
                 outputs.append(output)
 
+        self.current_idx += 1
         return outputs
 
 
@@ -378,6 +348,7 @@ def test_stop_string(
 
     gen_strings = {}
     aborted = []
+    i = 0
     while True:
         # Mock output from the EngineCore.
         outputs = engine_core.get_outputs()
@@ -391,6 +362,9 @@ def test_stop_string(
             assert request_output.request_id not in aborted
         aborted.extend(requests_to_abort)
 
+        # Validate logprob detokenization
+        _validate_requests_logprobs(requests, request_outputs)
+
         # Update tracking.
         for request_output in request_outputs:
             if request_output.finished:
@@ -402,6 +376,7 @@ def test_stop_string(
                 gen_strings[request_id] = new_text
             else:
                 gen_strings[request_id] += new_text
+        i += 1
 
     # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str,
