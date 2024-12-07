@@ -539,8 +539,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             populated.
         """
         seq_output_prompt_logprobs = [
-            seq.is_prompt and seq.sampling_params.prompt_logprobs is not None
-            and seq.sampling_params.prompt_logprobs > 0
+            seq.is_prompt
+            and seq.sampling_params.request_prompt_logprobs is not None
+            and seq.sampling_params.request_prompt_logprobs > 0
             for seq in execute_model_req.seq_group_metadata_list
         ]
         # ignore slots for prompt tokens that are filled with INVALID_TOKEN_ID

@@ -625,8 +625,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.lora_prompt_mapping.append(
             [lora_id] *
             (query_len if seq_group_metadata.sampling_params
-             and seq_group_metadata.sampling_params.prompt_logprobs is not None
-             else 1))
+             and seq_group_metadata.sampling_params.request_prompt_logprobs
+             is not None else 1))
 
     def _compute_prompt_adapter_input(
             self, inter_data: InterDataForSeqGroup,
@@ -653,8 +653,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             prompt_adapter_id
         ] * num_tokens + [0] * (query_len - num_tokens)
         inter_data.prompt_adapter_prompt_mapping = [prompt_adapter_id] * (
-            query_len if seq_group_metadata.sampling_params
-            and seq_group_metadata.sampling_params.prompt_logprobs else 1)
+            query_len if seq_group_metadata.sampling_params and
+            seq_group_metadata.sampling_params.request_prompt_logprobs else 1)
 
     def _compute_multi_modal_input(self, inter_data: InterDataForSeqGroup,
                                    seq_group_metadata: SequenceGroupMetadata):

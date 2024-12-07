@@ -1,7 +1,9 @@
 """Sampler testing utils"""
 import re
 from typing import List, Tuple
+
 from vllm import CompletionOutput
+
 
 def get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
     """Generate logprobs configs for a batch of requests
@@ -104,6 +106,14 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
 
 def compute_correct_cumulative_logprob(
         completion_output: CompletionOutput) -> float:
+    """Compute known-good value for evaluating cumulative logprob
+    
+    Args:
+      completion_output: completion output from engine
+
+    Returns:
+      Known-good cumulative logprob value
+    """
     token_ids = completion_output.token_ids
     logprobs = completion_output.logprobs
     assert logprobs is not None

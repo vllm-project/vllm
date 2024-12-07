@@ -38,7 +38,7 @@ class Sampler(nn.Module):
 
     def _top_logprobs_token_indices(
         self,
-        logprobs: torch.Tensor,
+        logprob_values: torch.Tensor,
         max_num_logprobs: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute top logprobs and associated token indices
@@ -47,13 +47,14 @@ class Sampler(nn.Module):
           logprobs: total_tokens x vocab tensor
           max_num_logprobs: Max number of top {sample,prompt} logprobs
                             requested in batch (depending on whether top sample
-                            logprobs or top prompt logprobs are being computed)
+                            logprobs or top prompt logprobs are being computed).
+                            This will be the k.
 
         Returns:
           Top logprobs, total_tokens x max_num_logprobs tensor
           Top logprob token indices, total_tokens x max_num_logprobs tensor
         """
-        topk_logprobs, topk_indices = torch.topk(logprobs,
+        topk_logprobs, topk_indices = torch.topk(logprob_values,
                                                  max_num_logprobs,
                                                  dim=-1)
         # Use int32 to reduce the tensor size.
@@ -61,8 +62,8 @@ class Sampler(nn.Module):
 
     def _compute_logprobs_from_processed_logits(
         self,
-        do_logprobs: bool,
-        do_prompt_logprobs: bool,
+        do_batch_sample_logprobs: bool,
+        do_batch_prompt_logprobs: bool,
         maybe_sampled: torch.Tensor,
         maybe_sample_logits_indices: Optional[torch.Tensor],
         prompt_logits_mask: Optional[torch.Tensor],
@@ -75,16 +76,18 @@ class Sampler(nn.Module):
         Consumes logits which have already had temperature, top-k and top-p
         applied. 
          
-        `do_logprobs` and `do_prompt_logprobs` control whether sample and
-        prompt logprobs are computed, respectively.
+        `do_batch_sample_logprobs` and `do_batch_prompt_logprobs` control
+        whether sample and prompt logprobs are computed, respectively.
 
         This function does not handle the case where no logprobs are required
         at the batch level; it is assumed this function will not be called in
         that scenario.
 
         Args:
-          do_logprobs: compute sample logprobs
-          do_prompt_logprobs: compute prompt logprobs
+          do_batch_sample_logprobs: at least one request in the batch requires
+                                    sample logprobs to be computed
+          do_batch_prompt_logprobs: at least one request in the batch requires
+                                    prompt logprobs to be computed
           maybe_sampled: list of sampled tokens; if there is a partial request,
                          includes the partial request's sampled token (which
                          will later be discarded.)
@@ -109,20 +112,21 @@ class Sampler(nn.Module):
                          top-p applied.
 
           Returns:
-            Sample logprobs (`None` if `do_logprobs == False`,
+            Sample logprobs (`None` if `do_batch_sample_logprobs == False`,
                              o/w num_samples x max_num_logprobs tensor)
-            Sample logprobs token indices (`None` if `do_logprobs == False`,
+            Sample logprobs token indices (`None` if
+                            `do_batch_sample_logprobs == False`,
                              o/w num_samples x max_num_logprobs tensor)
-            Prompt logprobs (`None` if `do_prompt_logprobs == False`,
+            Prompt logprobs (`None` if `do_batch_prompt_logprobs == False`,
                              o/w num_prompt_tokens x max_num_prompt_logprobs
                              tensor)
             Prompt logprobs token indices (`None` if
-                 `do_prompt_logprobs == False`, o/w
+                 `do_batch_prompt_logprobs == False`, o/w
                  num_prompt_tokens x max_num_prompt_logprobs tensor)
         """
 
-        assert do_logprobs or do_prompt_logprobs
-        if do_logprobs and do_prompt_logprobs:
+        assert do_batch_sample_logprobs or do_batch_prompt_logprobs
+        if do_batch_sample_logprobs and do_batch_prompt_logprobs:
             # Batch requires sample and prompt logprobs
 
             # - Compute logprobs for all sequence offsets
@@ -135,7 +139,7 @@ class Sampler(nn.Module):
                 maybe_sample_topk_indices,
             ) = self._top_logprobs_token_indices(
                 logprobs[maybe_sample_logits_indices, :],
-                sampling_metadata.max_num_logprobs)
+                sampling_metadata.max_num_batch_sample_logprobs)
 
             # - In case sampled tokens are not in the top logprobs at their
             #   respective sequence offsets, gather logprobs associated with
@@ -155,8 +159,8 @@ class Sampler(nn.Module):
                     # Prompt logprobs and token indices
                     self._top_logprobs_token_indices(
                         logprobs[prompt_logits_mask, :],
-                        sampling_metadata.max_num_prompt_logprobs))
-        elif do_logprobs:
+                        sampling_metadata.max_num_batch_prompt_logprobs))
+        elif do_batch_sample_logprobs:
             # Batch requires only sample logprobs
 
             # - Compute top logprobs only at sequence offsets where new tokens
@@ -166,7 +170,7 @@ class Sampler(nn.Module):
                 maybe_sample_topk_logprobs,
                 maybe_sample_topk_indices,
             ) = self._top_logprobs_token_indices(
-                logprobs, sampling_metadata.max_num_logprobs)
+                logprobs, sampling_metadata.max_num_batch_sample_logprobs)
 
             # - In case sampled tokens are not in the top logprobs at their
             #   respective sequence offsets, gather logprobs associated with
@@ -188,7 +192,7 @@ class Sampler(nn.Module):
             return (maybe_sample_topk_logprobs, maybe_sample_topk_indices,
                     None, None)
 
-        elif do_prompt_logprobs:
+        elif do_batch_prompt_logprobs:
             # Batch requires only prompt logprobs
 
             # - Compute top logprobs only at sequence offsets of prompt tokens
@@ -197,7 +201,7 @@ class Sampler(nn.Module):
 
             # Return prompt logprobs
             return ((None, None) + self._top_logprobs_token_indices(
-                logprobs, sampling_metadata.max_num_prompt_logprobs))
+                logprobs, sampling_metadata.max_num_batch_prompt_logprobs))
 
     def forward(
         self,
@@ -220,12 +224,18 @@ class Sampler(nn.Module):
           (if requested)
         """
 
-        # Batch-level logprobs configs. `do_logprobs` indicates whether
-        # any request requires sample logprobs. `do_prompt_logprobs`
-        # indicates whether any request requires prompt logprobs.
-        do_logprobs = sampling_metadata.max_num_logprobs > 0
-        do_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs > 0
-        do_any_logprobs = do_logprobs or do_prompt_logprobs
+        # Batch-level logprobs configs. `do_batch_sample_logprobs`
+        # indicates whether any request requires sample logprobs.
+        # `do_batch_prompt_logprobs` indicates whether any request
+        # requires prompt logprobs. `do_batch_any_logprobs` indicates
+        # whether, overall, any request in the batch requires logprobs
+        # computed
+        do_batch_sample_logprobs = (
+            sampling_metadata.max_num_batch_sample_logprobs > 0)
+        do_batch_prompt_logprobs = (
+            sampling_metadata.max_num_batch_prompt_logprobs > 0)
+        do_batch_any_logprobs = (do_batch_sample_logprobs
+                                 or do_batch_prompt_logprobs)
 
         num_query_tokens = sampling_metadata.num_query_tokens
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
@@ -244,7 +254,7 @@ class Sampler(nn.Module):
 
         # Apply temperature, top-k and top-p to logits at sequence offsets
         # where a new token is being decoded.
-        if do_prompt_logprobs:
+        if do_batch_prompt_logprobs:
             # If prompt logprobs are required, then temp/top-k/top-p
             # must also be applied to prompt logits as a prerequisite.
             # So pass *all* logits through temp/top-k/top-p, then gather
@@ -270,15 +280,15 @@ class Sampler(nn.Module):
                                            sampling_metadata)
 
         # Compute sample & prompt logprobs, as-needed
-        if do_any_logprobs:
+        if do_batch_any_logprobs:
             (
                 maybe_sample_logprobs,
                 maybe_sample_logprobs_token_indices,
                 prompt_logprobs,
                 prompt_logprobs_token_indices,
             ) = self._compute_logprobs_from_processed_logits(
-                do_logprobs=do_logprobs,
-                do_prompt_logprobs=do_prompt_logprobs,
+                do_batch_sample_logprobs=do_batch_sample_logprobs,
+                do_batch_prompt_logprobs=do_batch_prompt_logprobs,
                 maybe_sampled=maybe_sampled,
                 maybe_sample_logits_indices=maybe_sample_logits_indices,
                 prompt_logits_mask=prompt_logits_mask,
@@ -286,16 +296,17 @@ class Sampler(nn.Module):
                 maybe_sample_logits_w_tmp_tpk_tpp=
                 maybe_sample_logits_w_tmp_tpk_tpp,
                 logits_w_tmp_tpk_tpp=(logits_w_tmp_tpk_tpp
-                                      if do_prompt_logprobs else None))
+                                      if do_batch_prompt_logprobs else None))
 
             # Return decoded output tokens and sample/prompt logprobs,
             # as required
             return SamplerOutput(
                 sampled_token_ids=maybe_sampled,
-                logprobs=maybe_sample_logprobs,
-                logprob_token_ids=maybe_sample_logprobs_token_indices,
-                prompt_logprobs=prompt_logprobs,
-                prompt_logprob_token_ids=prompt_logprobs_token_indices)
+                batch_sample_logprobs=maybe_sample_logprobs,
+                batch_sample_logprob_token_ids=
+                maybe_sample_logprobs_token_indices,
+                batch_prompt_logprobs=prompt_logprobs,
+                batch_prompt_logprob_token_ids=prompt_logprobs_token_indices)
         else:
             # No logprobs; return decoded output tokens
             return SamplerOutput(sampled_token_ids=maybe_sampled)

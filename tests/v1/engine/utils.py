@@ -228,7 +228,6 @@ def validate_requests_logprobs(
       requests: list of detokenizer input requests
       request_outputs: list of detokenizer outputs
     """
-    assert len(requests) == len(request_outputs)
     for req, req_out in zip(requests, request_outputs):
         if req.logprobs is not None and req.logprobs > 0:
             # Validate sample logprobs

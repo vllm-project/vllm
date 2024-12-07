@@ -119,12 +119,13 @@ class EngineCore:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        do_logprobs = model_runner_output.logprobs_cpu is not None
-        do_prompt_logprobs = (
-            model_runner_output.prompt_logprobs_cpu is not None
-            and len(model_runner_output.prompt_logprobs_cpu) > 0)
+        do_batch_sample_logprobs = (model_runner_output.batch_logprobs_cpu
+                                    is not None)
+        do_batch_prompt_logprobs = (
+            model_runner_output.batch_prompt_logprobs_cpu is not None
+            and len(model_runner_output.batch_prompt_logprobs_cpu) > 0)
 
-        if do_prompt_logprobs:
+        if do_batch_prompt_logprobs:
             # Index into prompt tokens, for building
             # prompt logprobs output data structure
             mr_output_slice_lower_index = 0
@@ -136,12 +137,13 @@ class EngineCore:
             request.num_computed_tokens += num_scheduled_tokens[req_id]
             req_index = model_runner_output.req_id_to_index[req_id]
             num_new_tokens = 1
-            max_logprobs = request.max_logprobs
-            request_do_logprobs = (do_logprobs and max_logprobs is not None
-                                   and max_logprobs > 0)
+            request_sample_logprobs = request.request_sample_logprobs
+            request_do_logprobs = (do_batch_sample_logprobs
+                                   and request_sample_logprobs is not None
+                                   and request_sample_logprobs > 0)
 
-            if do_prompt_logprobs:
-                max_prompt_logprobs = request.max_prompt_logprobs
+            if do_batch_prompt_logprobs:
+                request_prompt_logprobs = request.request_prompt_logprobs
                 # Number of new prompt tokens is the number of scheduled
                 # tokens *if* the request is partial (because the sampled
                 # token is discarded and all sequence offsets are prompt
@@ -153,8 +155,9 @@ class EngineCore:
                     num_scheduled_tokens[request.request_id] -
                     int(req_is_not_partial))
 
-                request_do_prompt_logprobs = (max_prompt_logprobs is not None
-                                              and max_prompt_logprobs > 0
+                request_do_prompt_logprobs = (request_prompt_logprobs
+                                              is not None
+                                              and request_prompt_logprobs > 0
                                               and num_new_prompt_tokens > 0)
 
                 if request_do_prompt_logprobs:
@@ -170,15 +173,15 @@ class EngineCore:
                     #
                     # Note: new_prompt_logprobs will be used later to build the
                     # engine core output
-                    logprob_cnt = max_prompt_logprobs
+                    logprob_cnt = request_prompt_logprobs
                     mr_output_slice_upper_index = (
                         mr_output_slice_lower_index + num_new_prompt_tokens)
                     new_prompt_logprobs = (
-                        model_runner_output.prompt_logprobs_cpu[
+                        model_runner_output.batch_prompt_logprobs_cpu[
                             mr_output_slice_lower_index:
                             mr_output_slice_upper_index, 0:logprob_cnt])
                     new_prompt_logprob_token_ids = (
-                        model_runner_output.prompt_logprob_token_ids_cpu[
+                        model_runner_output.batch_prompt_logprob_token_ids_cpu[
                             mr_output_slice_lower_index:
                             mr_output_slice_upper_index, 0:logprob_cnt])
 
@@ -219,8 +222,9 @@ class EngineCore:
                     # Slice out this request's sample logprobs; defer
                     # pythonization to be carried out in the frontend.
                     request.logprobs.append(
-                        (model_runner_output.logprobs_cpu[req_index],
-                         model_runner_output.logprob_token_ids_cpu[req_index]))
+                        (model_runner_output.batch_logprobs_cpu[req_index],
+                         model_runner_output.
+                         batch_logprob_token_ids_cpu[req_index]))
                 request.append_output_token_ids(token_id)
                 # TODO: Update the KV cache manager for prefix caching.
 

@@ -460,8 +460,12 @@ class GPUModelRunner:
 
         sampling_metadata = self._prepare_sampling(
             scheduler_output, num_input_tokens, attn_metadata.query_start_loc)
-        do_logprobs = sampling_metadata.max_num_logprobs > 0
-        do_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs > 0
+        # Indicate whether one or more requests in the batch require sample
+        # logprobs or prompt logprobs to be computed, respectively
+        do_batch_sample_logprobs = (
+            sampling_metadata.max_num_batch_sample_logprobs > 0)
+        do_batch_prompt_logprobs = (
+            sampling_metadata.max_num_batch_prompt_logprobs > 0)
 
         # Get the inputs embeds.
         if encoder_outputs:
@@ -523,16 +527,18 @@ class GPUModelRunner:
             sampled_token_ids_cpu=sampled_token_ids,
             # NOTE: sample and prompt logprob CPU-GPU synchronization happens
             # here
-            logprob_token_ids_cpu=(
-                sampler_output.logprob_token_ids.cpu().numpy()
-                if do_logprobs else None),
-            logprobs_cpu=(sampler_output.logprobs.cpu().numpy()
-                          if do_logprobs else None),
-            prompt_logprob_token_ids_cpu=(
-                sampler_output.prompt_logprob_token_ids.cpu().numpy()
-                if do_prompt_logprobs else None),
-            prompt_logprobs_cpu=(sampler_output.prompt_logprobs.cpu().numpy()
-                                 if do_prompt_logprobs else None))
+            batch_logprob_token_ids_cpu=(
+                sampler_output.batch_sample_logprob_token_ids.cpu().numpy()
+                if do_batch_sample_logprobs else None),
+            batch_logprobs_cpu=(
+                sampler_output.batch_sample_logprobs.cpu().numpy()
+                if do_batch_sample_logprobs else None),
+            batch_prompt_logprob_token_ids_cpu=(
+                sampler_output.batch_prompt_logprob_token_ids.cpu().numpy()
+                if do_batch_prompt_logprobs else None),
+            batch_prompt_logprobs_cpu=(
+                sampler_output.batch_prompt_logprobs.cpu().numpy()
+                if do_batch_prompt_logprobs else None))
         return model_runner_output
 
     def load_model(self) -> None:
@@ -763,13 +769,13 @@ class InputBatch:
 
         self.generators[req_index] = request.generator
 
-        num_logprobs = sampling_params.logprobs
-        num_prompt_logprobs = sampling_params.prompt_logprobs
+        num_logprobs = sampling_params.request_sample_logprobs
+        num_prompt_logprobs = sampling_params.request_prompt_logprobs
         if num_logprobs is not None and num_logprobs > 0:
             self.num_logprobs[req_id] = num_logprobs
         if num_prompt_logprobs is not None and num_prompt_logprobs > 0:
             self.num_prompt_logprobs[req_id] = num_prompt_logprobs
-        if sampling_params.prompt_logprobs:
+        if sampling_params.request_prompt_logprobs:
             self.prompt_logprob_reqs.add(req_id)
 
     def remove_request(self, req_id: str) -> Optional[int]:
@@ -869,8 +875,8 @@ class InputBatch:
             no_top_p=self.no_top_p,
             no_top_k=self.no_top_k,
             generators=self.generators,
-            max_num_logprobs=self.max_num_logprobs,
-            max_num_prompt_logprobs=self.max_num_prompt_logprobs,
+            max_num_batch_sample_logprobs=self.max_num_logprobs,
+            max_num_batch_prompt_logprobs=self.max_num_prompt_logprobs,
             # Required for sampling indices computation
             query_start_loc=query_start_loc,
             num_input_tokens=num_input_tokens,

@@ -20,8 +20,8 @@ class SamplingMetadata:
 
     # Max number of sample or prompt logprobs
     # (respectiely) at the batch level
-    max_num_logprobs: int
-    max_num_prompt_logprobs: int
+    max_num_batch_sample_logprobs: int
+    max_num_batch_prompt_logprobs: int
 
     # Attributes which support logprob computation
     query_start_loc: Optional[torch.Tensor]

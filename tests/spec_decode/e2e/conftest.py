@@ -196,8 +196,8 @@ def run_equality_correctness_test(
                                      max_tokens=max_output_len,
                                      seed=seed,
                                      ignore_eos=ignore_eos,
-                                     logprobs=logprobs,
-                                     prompt_logprobs=prompt_logprobs)
+                                     request_sample_logprobs=logprobs,
+                                     request_prompt_logprobs=prompt_logprobs)
 
     with vllm_runner(**org_args) as vllm_model:
         org_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)

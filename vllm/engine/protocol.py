@@ -95,7 +95,7 @@ class EngineClient(ABC):
             tokenizer.eos_token_id, length_penalty)
 
         beam_search_params = SamplingParams(
-            logprobs=2 * beam_width,
+            request_sample_logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
         )

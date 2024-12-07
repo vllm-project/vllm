@@ -29,7 +29,7 @@ def test_logits_processor_force_generate(
 
         params_with_logprobs = SamplingParams(
             logits_processors=[pick_vllm],
-            prompt_logprobs=3,
+            request_prompt_logprobs=3,
             max_tokens=max_tokens,
         )
 
@@ -43,7 +43,7 @@ def test_logits_processor_force_generate(
         vllm_model.model._add_request(
             example_prompts[1],
             params=SamplingParams(
-                prompt_logprobs=3,
+                request_prompt_logprobs=3,
                 max_tokens=max_tokens,
             ),
         )

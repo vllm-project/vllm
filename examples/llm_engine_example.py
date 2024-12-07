@@ -9,7 +9,9 @@ def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
     return [
         ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1)),
+         SamplingParams(temperature=0.0,
+                        request_sample_logprobs=1,
+                        request_prompt_logprobs=1)),
         ("To be or not to be,",
          SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
         ("What is the meaning of life?",

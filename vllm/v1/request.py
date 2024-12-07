@@ -46,8 +46,10 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
-        self.max_logprobs = sampling_params.logprobs
-        self.max_prompt_logprobs = sampling_params.prompt_logprobs
+        # Number of sample logprobs and prompt logprobs requested,
+        # respectively
+        self.request_sample_logprobs = sampling_params.request_sample_logprobs
+        self.request_prompt_logprobs = sampling_params.request_prompt_logprobs
         # If sample logprobs are enabled, the number of sample logprobs cannot
         # be anticipated in advance (because the LLM is partially responsible
         # for deciding when the completion is finished.) So,
@@ -64,15 +66,15 @@ class Request:
         # this was not employed because the array could be very large for large
         # context windows, even if the completion was very short.
         self.logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]] = (
-            None if self.max_logprobs is None else [])
+            None if self.request_sample_logprobs is None else [])
         # The number of prompt logprobs is known is advance, so preallocate an
         # NDArray
         self.prompt_logprobs: Optional[npt.NDArray] = (
-            None if self.max_prompt_logprobs is None else np.empty(
-                (self.num_prompt_tokens, self.max_prompt_logprobs)))
+            None if self.request_prompt_logprobs is None else np.empty(
+                (self.num_prompt_tokens, self.request_prompt_logprobs)))
         self.prompt_logprob_token_ids: Optional[npt.NDArray] = (
-            None if self.max_prompt_logprobs is None else np.empty(
-                (self.num_prompt_tokens, self.max_prompt_logprobs),
+            None if self.request_prompt_logprobs is None else np.empty(
+                (self.num_prompt_tokens, self.request_prompt_logprobs),
                 dtype=np.int32))
         self.num_computed_tokens = 0
 

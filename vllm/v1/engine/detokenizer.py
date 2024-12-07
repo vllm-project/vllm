@@ -181,8 +181,8 @@ class IncrementalDetokenizer:
 
     def _pythonize_maybe_detokenize_sample_logprobs_for_request(
         self,
-        new_logprobs: List[Tuple[npt.NDArray, npt.NDArray]],
-        new_token_ids: List[int],
+        new_sample_logprobs: List[Tuple[npt.NDArray, npt.NDArray]],
+        new_sample_token_ids: List[int],
         detokenize: bool,
     ) -> SampleLogprobs:
         """Pythonize sample logprobs, maybe detokenize.
@@ -202,8 +202,9 @@ class IncrementalDetokenizer:
         from the associated top token id) if detokenize=True
 
         Args:
-          new_logprobs: List of (logprobs,logprob token ids) numpy array tuples
-          new_token_ids: List of sample token ids
+          new_sample_logprobs: List of (logprobs,logprob token ids) numpy array
+                               tuples
+          new_sample_token_ids: List of sample token ids
           detokenize: Logprob.decoded_token is computed if True, otherwise None
         
         Returns:
@@ -213,7 +214,8 @@ class IncrementalDetokenizer:
         new_pythonized_logprobs = []
         max_logprobs = self.max_request_sample_logprobs
         for (logprob_values,
-             logprob_token_ids), token_id in zip(new_logprobs, new_token_ids):
+             logprob_token_ids), token_id in zip(new_sample_logprobs,
+                                                 new_sample_token_ids):
             # Only keep the number of logprobs specified by the request
             # (plus possibly the sampled token id & its logprob)
             logprob_cnt = max_logprobs
@@ -292,8 +294,8 @@ class IncrementalDetokenizer:
 
     def add_tokens(
         self,
-        new_token_ids: List[int],
-        new_logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]],
+        new_sampled_token_ids: List[int],
+        new_sample_logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]],
         new_prompt_logprobs: Optional[npt.NDArray],
         new_prompt_logprob_token_ids: Optional[npt.NDArray],
         finish_reason: Optional[str],
@@ -326,10 +328,10 @@ class IncrementalDetokenizer:
         """
 
         # Only try to Pythonize sample logprobs if any were provided
-        do_request_sample_logprobs = new_logprobs is not None and len(
-            new_logprobs) > 0
-        assert not do_request_sample_logprobs or len(new_logprobs) == len(
-            new_token_ids)
+        do_request_sample_logprobs = new_sample_logprobs is not None and len(
+            new_sample_logprobs) > 0
+        assert not do_request_sample_logprobs or len(
+            new_sample_logprobs) == len(new_sampled_token_ids)
         # Only try to Pythonize prompt logprobs if any were provided
         do_request_prompt_logprobs = new_prompt_logprobs is not None and len(
             new_prompt_logprobs) > 0
@@ -338,9 +340,11 @@ class IncrementalDetokenizer:
 
         if do_request_sample_logprobs:
             # 1) Pythonize & detokenize sample logprobs
-            new_logprobs = (
+            new_sample_logprobs = (
                 self._pythonize_maybe_detokenize_sample_logprobs_for_request(
-                    new_logprobs, new_token_ids, detokenize=True))
+                    new_sample_logprobs,
+                    new_sampled_token_ids,
+                    detokenize=True))
 
         if do_request_prompt_logprobs:
             # 2) If necessary, detokenize prompt logprobs incrementally
@@ -355,7 +359,7 @@ class IncrementalDetokenizer:
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
         decoded_text = ""
-        for new_token_id in new_token_ids:
+        for new_token_id in new_sampled_token_ids:
             self.token_ids.append(new_token_id)
             (new_tokens, new_decoded_token_text, prefix_offset,
              read_offset) = detokenize_incrementally(
@@ -404,8 +408,8 @@ class IncrementalDetokenizer:
         #          logprob
         # FINAL -> all sampled tokens and logprobs + current cumulative prompt
         #          logprob
-        token_ids = new_token_ids if delta else self.output_token_ids
-        logprobs = new_logprobs if delta else self.request_logprobs
+        token_ids = new_sampled_token_ids if delta else self.output_token_ids
+        logprobs = new_sample_logprobs if delta else self.request_logprobs
         prompt_logprobs = (new_prompt_logprobs
                            if delta else self.request_prompt_logprobs)
         cumulative_logprob = self.request_cumulative_logprob
@@ -510,8 +514,8 @@ class Detokenizer:
 
             # Detokenize and update state.
             request_output = detokenizer.add_tokens(
-                new_token_ids=engine_core_output.new_token_ids,
-                new_logprobs=engine_core_output.logprobs,
+                new_sampled_token_ids=engine_core_output.new_token_ids,
+                new_sample_logprobs=engine_core_output.logprobs,
                 new_prompt_logprobs=engine_core_output.prompt_logprobs,
                 new_prompt_logprob_token_ids=engine_core_output.
                 prompt_logprobs_token_ids,

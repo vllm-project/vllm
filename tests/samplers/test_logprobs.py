@@ -49,11 +49,12 @@ def test_get_prompt_logprobs(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
-        vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
-                                              logprobs=num_top_logprobs,
-                                              prompt_logprobs=num_top_logprobs,
-                                              temperature=0.0,
-                                              detokenize=detokenize)
+        vllm_sampling_params = SamplingParams(
+            max_tokens=max_tokens,
+            request_sample_logprobs=num_top_logprobs,
+            request_prompt_logprobs=num_top_logprobs,
+            temperature=0.0,
+            detokenize=detokenize)
         vllm_results = vllm_model.model.generate(
             example_prompts, sampling_params=vllm_sampling_params)
 
@@ -131,11 +132,11 @@ def test_get_prompt_logprobs(
 
 def test_max_logprobs():
     runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
-    vllm_sampling_params = SamplingParams(logprobs=1)
+    vllm_sampling_params = SamplingParams(request_sample_logprobs=1)
     # should pass
     runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
-    bad_sampling_params = SamplingParams(logprobs=2)
+    bad_sampling_params = SamplingParams(request_sample_logprobs=2)
     with pytest.raises(ValueError):
         runner.generate(["Hello world"], sampling_params=bad_sampling_params)
 
@@ -160,10 +161,11 @@ def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
-        sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
-                                                       logprobs=None,
-                                                       temperature=0.0,
-                                                       detokenize=detokenize)
+        sampling_params_logprobs_none = SamplingParams(
+            max_tokens=max_tokens,
+            request_sample_logprobs=None,
+            temperature=0.0,
+            detokenize=detokenize)
         results_logprobs_none = vllm_model.model.generate(
             example_prompts, sampling_params=sampling_params_logprobs_none)
 

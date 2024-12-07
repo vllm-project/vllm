@@ -184,8 +184,10 @@ class SamplingParams(
     ignore_eos: bool = False
     max_tokens: Optional[int] = 16
     min_tokens: int = 0
-    logprobs: Optional[int] = None
-    prompt_logprobs: Optional[int] = None
+    # Number of sample logprobs and prompt logprobs,
+    # respectively, requested
+    request_sample_logprobs: Optional[int] = None
+    request_prompt_logprobs: Optional[int] = None
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -268,8 +270,8 @@ class SamplingParams(
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
             min_tokens=min_tokens,
-            logprobs=logprobs,
-            prompt_logprobs=prompt_logprobs,
+            request_sample_logprobs=logprobs,
+            request_prompt_logprobs=prompt_logprobs,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
@@ -326,9 +328,12 @@ class SamplingParams(
         else:
             self.bad_words = list(self.bad_words)
 
-        self.logprobs = 1 if self.logprobs is True else self.logprobs
-        self.prompt_logprobs = (1 if self.prompt_logprobs is True else
-                                self.prompt_logprobs)
+        self.request_sample_logprobs = (1
+                                        if self.request_sample_logprobs is True
+                                        else self.request_sample_logprobs)
+        self.request_prompt_logprobs = (1
+                                        if self.request_prompt_logprobs is True
+                                        else self.request_prompt_logprobs)
 
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
@@ -385,12 +390,14 @@ class SamplingParams(
             raise ValueError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
-        if self.logprobs is not None and self.logprobs < 0:
-            raise ValueError(
-                f"logprobs must be non-negative, got {self.logprobs}.")
-        if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
+        if (self.request_sample_logprobs is not None
+                and self.request_sample_logprobs < 0):
+            raise ValueError(f"logprobs must be non-negative, "
+                             f"got {self.request_sample_logprobs}.")
+        if (self.request_prompt_logprobs is not None
+                and self.request_prompt_logprobs < 0):
             raise ValueError(f"prompt_logprobs must be non-negative, got "
-                             f"{self.prompt_logprobs}.")
+                             f"{self.request_prompt_logprobs}.")
         if (self.truncate_prompt_tokens is not None
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
@@ -481,8 +488,8 @@ class SamplingParams(
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "
             f"min_tokens={self.min_tokens}, "
-            f"logprobs={self.logprobs}, "
-            f"prompt_logprobs={self.prompt_logprobs}, "
+            f"logprobs={self.request_sample_logprobs}, "
+            f"prompt_logprobs={self.request_prompt_logprobs}, "
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "

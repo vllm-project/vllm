@@ -27,8 +27,8 @@ def create_test_prompts(
     return [
         ("A robot may not injure a human being",
          SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
+                        request_sample_logprobs=1,
+                        request_prompt_logprobs=1,
                         max_tokens=128), None),
         ("To be or not to be,",
          SamplingParams(temperature=0.8,
@@ -38,16 +38,16 @@ def create_test_prompts(
         (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
             SamplingParams(temperature=0.0,
-                           logprobs=1,
-                           prompt_logprobs=1,
+                           request_sample_logprobs=1,
+                           request_prompt_logprobs=1,
                            max_tokens=128,
                            stop_token_ids=[32003]),
             LoRARequest("sql-lora", 1, lora_path)),
         (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
             SamplingParams(temperature=0.0,
-                           logprobs=1,
-                           prompt_logprobs=1,
+                           request_sample_logprobs=1,
+                           request_prompt_logprobs=1,
                            max_tokens=128,
                            stop_token_ids=[32003]),
             LoRARequest("sql-lora2", 2, lora_path)),

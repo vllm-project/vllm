@@ -895,10 +895,10 @@ class LLMEngine:
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
-        if (sampling_params.logprobs
-                and sampling_params.logprobs > max_logprobs) or (
-                    sampling_params.prompt_logprobs
-                    and sampling_params.prompt_logprobs > max_logprobs):
+        if (sampling_params.request_sample_logprobs
+                and sampling_params.request_sample_logprobs > max_logprobs
+            ) or (sampling_params.request_prompt_logprobs
+                  and sampling_params.request_prompt_logprobs > max_logprobs):
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
 

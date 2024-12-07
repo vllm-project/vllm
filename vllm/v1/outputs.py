@@ -12,14 +12,14 @@ class SamplerOutput:
     sampled_token_ids: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: Optional[torch.Tensor] = None
+    batch_sample_logprob_token_ids: Optional[torch.Tensor] = None
     # [num_reqs, max_num_logprobs + 1]
-    logprobs: Optional[torch.Tensor] = None
+    batch_sample_logprobs: Optional[torch.Tensor] = None
 
     # [num_prompt_tokens, max_num_prompt_logprobs + 1]
-    prompt_logprobs: Optional[torch.Tensor] = None
+    batch_prompt_logprobs: Optional[torch.Tensor] = None
     # [num_prompt_tokens, max_num_prompt_logprobs + 1]
-    prompt_logprob_token_ids: Optional[torch.Tensor] = None
+    batch_prompt_logprob_token_ids: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -34,11 +34,11 @@ class ModelRunnerOutput:
     sampled_token_ids_cpu: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids_cpu: Optional[npt.NDArray]
+    batch_logprob_token_ids_cpu: Optional[npt.NDArray]
     # [num_reqs, max_num_logprobs + 1]
-    logprobs_cpu: Optional[npt.NDArray]
+    batch_logprobs_cpu: Optional[npt.NDArray]
 
     # [num_reqs, max_num_prompt_logprobs]
-    prompt_logprob_token_ids_cpu: Optional[npt.NDArray]
+    batch_prompt_logprob_token_ids_cpu: Optional[npt.NDArray]
     # [num_reqs, max_num_prompt_logprobs]
-    prompt_logprobs_cpu: Optional[npt.NDArray]
+    batch_prompt_logprobs_cpu: Optional[npt.NDArray]
