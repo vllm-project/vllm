@@ -10,8 +10,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (get_distributed_init_method, get_open_port,
-                        get_vllm_instance_id, make_async)
+from vllm.utils import get_distributed_init_method, get_open_port, make_async
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -30,9 +29,6 @@ class CPUExecutor(ExecutorBase):
         #
         # Environment variables for CPU executor
         #
-
-        # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
-        os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"

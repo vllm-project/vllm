@@ -15,8 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
-                        get_ip, get_open_port, get_vllm_instance_id,
-                        make_async)
+                        get_ip, get_open_port, make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -220,14 +219,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 " environment variable, make sure it is unique for"
                 " each node.")
 
-        VLLM_INSTANCE_ID = get_vllm_instance_id()
-
         # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = [({
             "CUDA_VISIBLE_DEVICES":
             ",".join(map(str, node_gpus[node_id])),
-            "VLLM_INSTANCE_ID":
-            VLLM_INSTANCE_ID,
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
             **({
