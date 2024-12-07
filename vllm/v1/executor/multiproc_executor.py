@@ -1,7 +1,6 @@
 import atexit
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
@@ -25,10 +24,10 @@ class MultiprocExecutor:
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
 
-        world_size = self.parallel_config.world_size
+        self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
-        assert world_size == tensor_parallel_size, (
-            f"world_size ({world_size}) must be equal to the "
+        assert self.world_size == tensor_parallel_size, (
+            f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}). "
             f"Pipeline parallelism is not yet implemented in v1")
 
@@ -43,50 +42,38 @@ class MultiprocExecutor:
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        self.worker_request_mq = MessageQueue(world_size, world_size)
+        self.worker_request_mq = MessageQueue(self.world_size, self.world_size)
         scheduler_output_handle = self.worker_request_mq.export_handle()
 
         # Create workers
         self.workers: List[WorkerProcHandle] = []
-        for rank in range(world_size):
+        for rank in range(self.world_size):
             worker = WorkerProc.make_worker_process(vllm_config, rank, rank,
                                                     distributed_init_method,
                                                     scheduler_output_handle)
             self.workers.append(worker)
+
+        # Ensure message queues are ready. Will deadlock if re-ordered
+        # Must be kept consistent with the WorkerProc
+        self.worker_request_mq.wait_until_ready()
+        for w in self.workers:
+            w.worker_response_mq.wait_until_ready()
 
     def initialize(self, num_gpu_blocks: int) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        with ThreadPoolExecutor() as executor:
-            futures = [
-                executor.submit(w.initialize, num_gpu_blocks)
-                for w in self.workers
-            ]
-            success_vals = [f.result()
-                            for f in futures]  # Wait for all to complete
-
-        if not all(success_vals):
-            raise RuntimeError("Worker initialization failed.")
-
-        self.worker_request_mq.wait_until_ready()
-        for w in self.workers:
-            w.worker_response_mq.wait_until_ready()
+        self.collective_rpc("initialize_cache", {}, None, num_gpu_blocks)
+        self.collective_rpc("compile_or_warm_up_model", {}, None)
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """
         Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        with ThreadPoolExecutor() as executor:
-            futures = [
-                executor.submit(w.determine_num_available_blocks)
-                for w in self.workers
-            ]
-            num_blocks = [f.result()
-                          for f in futures]  # Wait for all to complete
+        num_blocks = self.collective_rpc("determine_num_available_blocks",
+                                         set(range(self.world_size)), None)
 
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
@@ -96,12 +83,13 @@ class MultiprocExecutor:
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def collective_rpc(self, fn: str, timeout: Optional[float], *args,
-                       **kwargs) -> Any:
-        self.worker_request_mq.enqueue((fn, args, kwargs))
+    def collective_rpc(self, method: str, output_ranks: Set[int],
+                       timeout: Optional[float], *args,
+                       **kwargs) -> [Optional]:
+        self.worker_request_mq.enqueue((method, output_ranks, args, kwargs))
 
         try:
-            responses = []
+            responses = [None] * self.world_size
             for w in self.workers:
                 status, result = w.worker_response_mq.dequeue(timeout=timeout)
 
@@ -111,11 +99,12 @@ class MultiprocExecutor:
                     else:
                         raise RuntimeError("Worker failed")
 
-                responses.append(result)
+                if w.rank in output_ranks:
+                    responses[w.rank] = result
 
-            return responses[0]
+            return responses
         except TimeoutError:
-            raise TimeoutError(f"RPC call to {fn} timed out.") from None
+            raise TimeoutError(f"RPC call to {method} timed out.") from None
         except Exception as e:
             # Re-raise any other exceptions
             raise e
@@ -124,8 +113,8 @@ class MultiprocExecutor:
         self,
         scheduler_output,
     ) -> ModelRunnerOutput:
-        model_output = self.collective_rpc("execute_model", None,
-                                           scheduler_output)
+        model_output = self.collective_rpc("execute_model", {0}, None,
+                                           scheduler_output)[0]
         return model_output
 
     def profile(self, is_start=True):
@@ -167,5 +156,5 @@ class MultiprocExecutor:
         self.worker_request_mq = None
 
     def check_health(self) -> None:
-        self.collective_rpc("check_health", 10)
+        self.collective_rpc("check_health", {}, 10)
         return
