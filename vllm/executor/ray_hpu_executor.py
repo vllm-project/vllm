@@ -1,8 +1,7 @@
 import asyncio
 import os
 from collections import defaultdict
-from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import msgspec
 
@@ -201,7 +200,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
             str(envs.VLLM_TRACE_FUNCTION),
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
         self._run_workers("update_environment_variables",
-                          all_args=all_args_to_update_environment_variables)
+                          all_args_to_update_environment_variables)
 
         if len(node_gpus) == 1:
             # in single node case, we don't need to get the IP address.
@@ -294,8 +293,6 @@ class RayHPUExecutor(DistributedGPUExecutor):
         method: str,
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
-        all_args: Optional[List[Tuple[Any, ...]]] = None,
-        all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
@@ -309,8 +306,6 @@ class RayHPUExecutor(DistributedGPUExecutor):
           It will also be run asynchronously and return a list of futures
           rather than blocking on the results.
         - args/kwargs: All workers share the same args/kwargs
-        - all_args/all_kwargs: args/kwargs for each worker are specified
-          individually
         """
         if self.use_ray_spmd_worker:
             assert not async_run_tensor_parallel_workers_only, (
@@ -321,26 +316,13 @@ class RayHPUExecutor(DistributedGPUExecutor):
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        count = len(self.workers) if not \
-            async_run_tensor_parallel_workers_only \
-            else len(self.non_driver_workers)
-        # If using SPMD worker, all workers are the same, so we should execute
-        # the args on all workers. Otherwise, we skip the first worker's args
-        # because those args will go to the driver worker.
-        first_worker_args_index: int = 0 if self.use_ray_spmd_worker else 1
-        all_worker_args = repeat(args, count) if all_args is None \
-            else islice(all_args, first_worker_args_index, None)
-        all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
-            else islice(all_kwargs, first_worker_args_index, None)
-
         # Start the ray workers first.
         ray_workers = self.workers
         if async_run_tensor_parallel_workers_only:
             ray_workers = self.non_driver_workers
         ray_worker_outputs = [
-            worker.execute_method.remote(method, *worker_args, **worker_kwargs)
-            for (worker, worker_args, worker_kwargs
-                 ) in zip(ray_workers, all_worker_args, all_worker_kwargs)
+            worker.execute_method.remote(method, *args, **kwargs)
+            for worker in ray_workers
         ]
 
         if async_run_tensor_parallel_workers_only:
@@ -352,21 +334,17 @@ class RayHPUExecutor(DistributedGPUExecutor):
         # so we only explicitly execute on the driver worker if using a
         # non-SPMD worker class.
         if not self.use_ray_spmd_worker:
-            driver_args = args if all_args is None else all_args[0]
-            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
-
             # Start the driver worker after all the ray workers.
             if not use_dummy_driver:
                 driver_worker_output = [
-                    self.driver_worker.execute_method(method, *driver_args,
-                                                      **driver_kwargs)
+                    self.driver_worker.execute_method(method, *args, **kwargs)
                 ]
             else:
                 assert self.driver_dummy_worker is not None
                 driver_worker_output = [
                     ray.get(
                         self.driver_dummy_worker.execute_method.remote(
-                            method, *driver_args, **driver_kwargs))
+                            method, *args, **kwargs))
                 ]
 
         # Get the results of the ray workers.

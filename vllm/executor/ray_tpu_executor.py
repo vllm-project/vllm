@@ -1,7 +1,6 @@
 import asyncio
 import os
 from collections import defaultdict
-from itertools import islice, repeat
 from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Tuple,
                     Union)
 
@@ -150,7 +149,7 @@ class RayTPUExecutor(TPUExecutor):
             str(envs.VLLM_TRACE_FUNCTION),
         }, ) for _ in worker_node_and_gpu_ids]
         self._run_workers("update_environment_variables",
-                          all_args=all_args_to_update_environment_variables)
+                          all_args_to_update_environment_variables)
 
         if len(node_workers) == 1:
             # in single node case, we don't need to get the IP address.
@@ -197,8 +196,6 @@ class RayTPUExecutor(TPUExecutor):
         method: str,
         *args,
         async_run_remote_workers_only: bool = False,
-        all_args: Optional[List[Tuple[Any, ...]]] = None,
-        all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
@@ -212,43 +209,31 @@ class RayTPUExecutor(TPUExecutor):
           run asynchronously and return a list of futures rather than blocking
           on the results.
         - args/kwargs: All workers share the same args/kwargs
-        - all_args/all_kwargs: args/kwargs for each worker are specified
-          individually
         """
 
         if max_concurrent_workers:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        count = len(self.workers)
-        all_worker_args = repeat(args, count) if all_args is None \
-            else islice(all_args, 1, None)
-        all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
-            else islice(all_kwargs, 1, None)
-
         # Start the ray workers first.
         ray_worker_outputs = [
-            worker.execute_method.remote(method, *worker_args, **worker_kwargs)
-            for (worker, worker_args, worker_kwargs
-                 ) in zip(self.workers, all_worker_args, all_worker_kwargs)
+            worker.execute_method.remote(method, *args, **kwargs)
+            for worker in self.workers
         ]
 
         if async_run_remote_workers_only:
             # Just return futures
             return ray_worker_outputs
 
-        driver_args = args if all_args is None else all_args[0]
-        driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
-
         # Start the driver worker after all the ray workers.
         if not use_dummy_driver:
             driver_worker_output = self.driver_worker.execute_method(
-                method, *driver_args, **driver_kwargs)
+                method, *args, **kwargs)
         else:
             assert self.driver_dummy_worker is not None
             driver_worker_output = ray.get(
                 self.driver_dummy_worker.execute_method.remote(
-                    method, *driver_args, **driver_kwargs))
+                    method, *args, **kwargs))
         # Get the results of the ray workers.
         if self.workers:
             ray_worker_outputs = ray.get(ray_worker_outputs)
