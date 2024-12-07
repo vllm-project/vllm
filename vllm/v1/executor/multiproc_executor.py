@@ -1,6 +1,6 @@
 import atexit
 import time
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
@@ -8,6 +8,7 @@ from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_open_port
+from vllm.v1.executor.abstract import RPCParams
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import WorkerProc, WorkerProcHandle
 
@@ -64,16 +65,20 @@ class MultiprocExecutor:
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_cache", {}, None, num_gpu_blocks)
-        self.collective_rpc("compile_or_warm_up_model", {}, None)
+        self.collective_rpc(
+            RPCParams(method="initialize_cache", output_ranks={}),
+            num_gpu_blocks)
+        self.collective_rpc(
+            RPCParams(method="compile_or_warm_up_model", output_ranks={}))
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """
         Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        num_blocks = self.collective_rpc("determine_num_available_blocks",
-                                         set(range(self.world_size)), None)
+        num_blocks = self.collective_rpc(
+            RPCParams(method="determine_num_available_blocks",
+                      output_ranks=set(range(self.world_size))))
 
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
@@ -83,15 +88,16 @@ class MultiprocExecutor:
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def collective_rpc(self, method: str, output_ranks: Set[int],
-                       timeout: Optional[float], *args,
-                       **kwargs) -> [Optional]:
-        self.worker_request_mq.enqueue((method, output_ranks, args, kwargs))
+    def collective_rpc(self, rpc: RPCParams, *args, **kwargs) -> [Optional]:
+        """Execute a collective remote procedure call on workers"""
+        self.worker_request_mq.enqueue(
+            (rpc.method, rpc.output_ranks, args, kwargs))
 
         try:
             responses = [None] * self.world_size
             for w in self.workers:
-                status, result = w.worker_response_mq.dequeue(timeout=timeout)
+                status, result = w.worker_response_mq.dequeue(
+                    timeout=rpc.timeout)
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     if isinstance(result, Exception):
@@ -99,12 +105,13 @@ class MultiprocExecutor:
                     else:
                         raise RuntimeError("Worker failed")
 
-                if w.rank in output_ranks:
+                if w.rank in rpc.output_ranks:
                     responses[w.rank] = result
 
             return responses
-        except TimeoutError:
-            raise TimeoutError(f"RPC call to {method} timed out.") from None
+        except TimeoutError e:
+            raise TimeoutError(
+                f"RPC call to {rpc.method} timed out.") from e 
         except Exception as e:
             # Re-raise any other exceptions
             raise e
@@ -113,8 +120,9 @@ class MultiprocExecutor:
         self,
         scheduler_output,
     ) -> ModelRunnerOutput:
-        model_output = self.collective_rpc("execute_model", {0}, None,
-                                           scheduler_output)[0]
+        model_output = self.collective_rpc(
+            RPCParams(method="execute_model", output_ranks={0}),
+            scheduler_output)[0]
         return model_output
 
     def profile(self, is_start=True):
@@ -156,5 +164,6 @@ class MultiprocExecutor:
         self.worker_request_mq = None
 
     def check_health(self) -> None:
-        self.collective_rpc("check_health", {}, 10)
+        self.collective_rpc(
+            RPCParams(method="check_health", output_ranks={}, timeout=10))
         return

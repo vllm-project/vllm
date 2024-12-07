@@ -399,10 +399,11 @@ class WorkerProc:
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         while True:
-            fn, output_ranks, args, kwargs = self.worker_request_mq.dequeue()
+            method, output_ranks, args, kwargs = self.worker_request_mq.dequeue(
+            )
 
             try:
-                output = getattr(self.worker, fn)(*args, **kwargs)
+                output = getattr(self.worker, method)(*args, **kwargs)
             except BaseException as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))

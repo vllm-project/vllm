@@ -1,8 +1,17 @@
 from abc import ABC, abstractmethod
-from typing import Tuple
+from dataclasses import dataclass
+from typing import Optional, Set, Tuple
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
+
+
+@dataclass
+class RPCParams:
+    """Arguments for a collective RPC to run on workers"""
+    method: str  # Which Worker method should be executed?
+    output_ranks: Set[int]  # Which output ranks should return to the executor?
+    timeout: Optional[float] = None
 
 
 class Executor(ABC):
@@ -37,4 +46,8 @@ class Executor(ABC):
 
     @abstractmethod
     def check_health(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def collective_rpc(self, rpc: RPCParams, *args, **kwargs) -> [Optional]:
         raise NotImplementedError
