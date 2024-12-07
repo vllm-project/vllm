@@ -273,6 +273,8 @@ def test_incremental_detokenization(
             output_kind=request_output_kind,
             stop=[],
             include_stop_str_in_output=False,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
         ) for idx, (
             prompt,
             prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
@@ -293,6 +295,9 @@ def test_incremental_detokenization(
         # Step the Detokenizer.
         request_outputs, requests_to_abort = detokenizer.step(outputs)
         assert len(requests_to_abort) == 0
+
+        # Validate logprob detokenization
+        _validate_requests_logprobs(requests, request_outputs)
 
         # Update tracking.
         for request_output in request_outputs:
