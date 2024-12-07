@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
-    VLLM_VIDEO_FETCH_TIMEOUT: int = 15
+    VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -67,9 +67,6 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_TORCH_COMPILE_LEVEL: int = 0
-    VLLM_TORCH_COMPILE_CONFIG: Optional[str] = None
-    VLLM_CUSTOM_OPS: List[str] = []
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
@@ -116,7 +113,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
-    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
+    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
+        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
@@ -156,7 +154,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If you are using multi-node inference, you should set this differently
     # on each node.
     'VLLM_HOST_IP':
-    lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
+    lambda: os.getenv('VLLM_HOST_IP', ""),
 
     # used in distributed environment to manually set the communication port
     # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
@@ -210,24 +208,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
-    "VLLM_TORCH_COMPILE_LEVEL":
-    lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
-
-    # Path to the config file for torch compile
-    "VLLM_TORCH_COMPILE_CONFIG":
-    lambda: os.environ.get("VLLM_TORCH_COMPILE_CONFIG", None),
-
-    # Fine-grained control over which custom ops to enable/disable.
-    # Use 'all' to enable all, 'none' to disable all.
-    # Also specify a list of custom op names to enable (prefixed with a '+'),
-    # or disable (prefixed with a '-').
-    # Examples:
-    # - 'all,-op1' to enable all except op1
-    # - 'none,+op1,+op2' to enable only op1 and op2
-    # By default, all custom ops are enabled when running without Inductor
-    # and disabled when running with Inductor (compile_level >= Inductor).
-    "VLLM_CUSTOM_OPS":
-    lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id

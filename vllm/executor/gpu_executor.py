@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -8,19 +8,14 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
-from vllm.worker.worker_base import WorkerBase, WorkerWrapperBase
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 
-def create_worker(worker_module_name: str, worker_class_name: str,
-                  worker_class_fn: Optional[Callable[[], Type[WorkerBase]]],
-                  **kwargs):
-    wrapper = WorkerWrapperBase(
-        worker_module_name=worker_module_name,
-        worker_class_name=worker_class_name,
-        worker_class_fn=worker_class_fn,
-    )
+def create_worker(**kwargs):
+    vllm_config = kwargs.get("vllm_config")
+    wrapper = WorkerWrapperBase(vllm_config=vllm_config)
     wrapper.init_worker(**kwargs)
     return wrapper.worker
 
@@ -57,43 +52,11 @@ class GPUExecutor(ExecutorBase):
             or (rank % self.parallel_config.tensor_parallel_size == 0),
         )
 
-    def _get_worker_module_and_class(
-            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
-        worker_class_fn = None
-        if self.scheduler_config.is_multi_step:
-            worker_module_name = "vllm.worker.multi_step_worker"
-            worker_class_name = "MultiStepWorker"
-        elif self.speculative_config:
-            worker_module_name = "vllm.spec_decode.spec_decode_worker"
-            worker_class_name = "create_spec_worker"
-        else:
-            worker_module_name = "vllm.worker.worker"
-            worker_class_name = "Worker"
-        return (worker_module_name, worker_class_name, worker_class_fn)
-
-    def _get_create_worker_kwargs(
-            self,
-            local_rank: int = 0,
-            rank: int = 0,
-            distributed_init_method: Optional[str] = None) -> Dict:
-        worker_kwargs = self._get_worker_kwargs(local_rank, rank,
-                                                distributed_init_method)
-
-        (worker_module_name, worker_class_name,
-         worker_class_fn) = self._get_worker_module_and_class()
-        worker_kwargs.update(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-            worker_class_fn=worker_class_fn,
-        )
-
-        return worker_kwargs
-
     def _create_worker(self,
                        local_rank: int = 0,
                        rank: int = 0,
                        distributed_init_method: Optional[str] = None):
-        return create_worker(**self._get_create_worker_kwargs(
+        return create_worker(**self._get_worker_kwargs(
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method))

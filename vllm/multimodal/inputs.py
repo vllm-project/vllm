@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.types
 from PIL.Image import Image
-from typing_extensions import TypeAlias
+from typing_extensions import NotRequired, TypeAlias
 
 from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
@@ -203,17 +203,13 @@ class MultiModalInputsV2(TypedDict):
     """The type of inputs."""
 
     prompt: str
-    """
-    The original, unprocessed prompt text.
-
-    Note:
-        Since prompt text is not required by vLLM internals, we leave this
-        unprocessed to save CPU computation. You can still call
-        :code:`tokenizer.decode(prompt_token_ids)` to get the processed text.
-    """
+    """The processed prompt text."""
 
     prompt_token_ids: List[int]
     """The processed token IDs which includes placeholder tokens."""
+
+    token_type_ids: NotRequired[List[int]]
+    """The token type IDs of the prompt."""
 
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""

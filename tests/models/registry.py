@@ -43,6 +43,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct",
                                          trust_remote_code=True),
+    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria",
+                                                    trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan-7B",
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
@@ -61,6 +63,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-2b"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
+    "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "GPT2LMHeadModel": _HfExamplesInfo("gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo("bigcode/starcoder"),
     "GPTJForCausalLM": _HfExamplesInfo("EleutherAI/gpt-j-6b"),
@@ -91,6 +94,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
+    "Olmo2ForCausalLM": _HfExamplesInfo("shanearora/OLMo-7B-1124-hf"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo("facebook/opt-iml-max-1.3b"),
     "OrionForCausalLM": _HfExamplesInfo("OrionStarAI/Orion-14B-Chat",
@@ -112,6 +116,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
     "SolarForCausalLM": _HfExamplesInfo("upstage/solar-pro-preview-instruct"),
+    "TeleChat2ForCausalLM": _HfExamplesInfo("Tele-AI/TeleChat2-3B",
+                                            trust_remote_code=True),
     "XverseForCausalLM": _HfExamplesInfo("xverse/XVERSE-7B-Chat",
                                          is_available_online=False,
                                          trust_remote_code=True),
@@ -135,12 +141,20 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B"),
     "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),  # noqa: E501
+    "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),  # noqa: E501
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-large"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
+}
+
+_CROSS_ENCODER_EXAMPLE_MODELS = {
+    # [Text-only]
+    "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2"),  # noqa: E501
+    "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base"),  # noqa: E501
+    "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),  # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -195,6 +209,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 _EXAMPLE_MODELS = {
     **_TEXT_GENERATION_EXAMPLE_MODELS,
     **_EMBEDDING_EXAMPLE_MODELS,
+    **_CROSS_ENCODER_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
 }

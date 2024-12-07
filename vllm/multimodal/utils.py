@@ -6,6 +6,7 @@ from typing import Any, List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
+import torch
 from PIL import Image
 
 import vllm.envs as envs
@@ -390,6 +391,49 @@ def encode_video_base64(frames: npt.NDArray):
         img_base64 = encode_image_base64(Image.fromarray(frame))
         base64_frames.append(img_base64)
     return ",".join(base64_frames)
+
+
+def resolve_visual_encoder_outputs(
+    encoder_outputs: Union[torch.Tensor, list[torch.Tensor]],
+    feature_sample_layers: Optional[list[int]],
+    post_layer_norm: Optional[torch.nn.LayerNorm],
+    max_possible_layers: int,
+) -> torch.Tensor:
+    """Given the outputs a visual encoder module that may correspond to the
+    output of the last layer, or a list of hidden states to be stacked,
+    handle post normalization and resolve it into a single output tensor.
+
+    Args:
+        encoder_outputs: Output of encoder's last layer or all hidden states.
+        feature_sample_layers: Optional layer indices to grab from the encoder
+            outputs; if provided, encoder outputs must be a list.
+        post_layer_norm: Post norm to apply to the output of the encoder.
+        max_possible_layers: Total layers in the fully loaded visual encoder.
+
+    """
+    if feature_sample_layers is None:
+        if post_layer_norm is not None:
+            return post_layer_norm(encoder_outputs)
+        return encoder_outputs
+
+    # Get the hidden states corresponding to the layer indices.
+    # Negative values are relative to the full visual encoder,
+    # so offset them depending on how many layers were loaded.
+    # NOTE: this assumes that encoder_outputs contains a list
+    # of hidden states in the same order as the encoder layers
+    # that produced them.
+    offset = max_possible_layers - len(encoder_outputs)
+    hs_pool = [
+        encoder_outputs[layer_idx]
+        if layer_idx >= 0 else encoder_outputs[layer_idx + offset]
+        for layer_idx in feature_sample_layers
+    ]
+
+    # Apply post-norm on the final hidden state if we are using it
+    uses_last_layer = feature_sample_layers[-1] in (len(hs_pool) - 1, -1)
+    if post_layer_norm is not None and uses_last_layer:
+        hs_pool[-1] = post_layer_norm(encoder_outputs)
+    return torch.cat(hs_pool, dim=-1)
 
 
 # Utilities for input processors

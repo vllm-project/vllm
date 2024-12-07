@@ -27,9 +27,8 @@ def make_request() -> EngineCoreRequest:
         request_id=uuid.uuid4(),
         prompt=PROMPT,
         prompt_token_ids=PROMPT_TOKENS,
-        mm_data=None,
+        mm_inputs=None,
         mm_placeholders=None,
-        mm_processor_kwargs=None,
         sampling_params=SamplingParams(),
         eos_token_id=None,
         arrival_time=time.time(),
@@ -43,7 +42,8 @@ def test_engine_core(monkeypatch):
         m.setenv("VLLM_USE_V1", "1")
         """Setup the EngineCore."""
         engine_args = EngineArgs(model=MODEL_NAME)
-        vllm_config = engine_args.create_engine_config()
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT)
         executor_class = AsyncLLM._get_executor_cls(vllm_config)
 
         engine_core = EngineCore(vllm_config=vllm_config,

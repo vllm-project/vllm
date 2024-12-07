@@ -32,7 +32,7 @@ We currently support the following OpenAI APIs:
 - [Completions API](https://platform.openai.com/docs/api-reference/completions)
   - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
-  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Using VLMs](../models/vlm.rst).
+  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
     - *Note: `image_url.detail` parameter is not supported.*
   - We also support `audio_url` content type for audio files.
     - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
@@ -41,8 +41,150 @@ We currently support the following OpenAI APIs:
 - [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
   - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
     which will be treated as a single prompt to the model according to its chat template.
-    - This enables multi-modal inputs to be passed to embedding models, see [Using VLMs](../models/vlm.rst).
+    - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
+
+## Score API for Cross Encoder Models
+
+vLLM supports *cross encoders models* at the **/v1/score** endpoint, which is not an OpenAI API standard endpoint. You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+
+A ***Cross Encoder*** takes exactly two sentences / texts as input and either predicts a score or label for this sentence pair. It can for example predict the similarity of the sentence pair on a scale of 0 … 1.
+
+### Example of usage for a pair of a string and a list of texts
+
+In this case, the model will compare the first given text to each of the texts containing the list.
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/v1/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "text_1": "What is the capital of France?",
+  "text_2": [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris."
+  ]
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693570,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": [
+        0.001094818115234375
+      ]
+    },
+    {
+      "index": 1,
+      "object": "score",
+      "score": [
+        1
+      ]
+    }
+  ],
+  "usage": {}
+}
+```
+
+### Example of usage for a pair of two lists of texts
+
+In this case, the model will compare the one by one, making pairs by same index correspondent in each list.
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/v1/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "encoding_format": "float",
+  "text_1": [
+    "What is the capital of Brazil?",
+    "What is the capital of France?"
+  ],
+  "text_2": [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris."
+  ]
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693447,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": [
+        1
+      ]
+    },
+    {
+      "index": 1,
+      "object": "score",
+      "score": [
+        1
+      ]
+    }
+  ],
+  "usage": {}
+}
+```
+
+### Example of usage for a pair of two strings
+
+In this case, the model will compare the strings of texts.
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/v1/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "encoding_format": "float",
+  "text_1": "What is the capital of France?",
+  "text_2": "The capital of France is Paris."
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693447,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": [
+        1
+      ]
+    }
+  ],
+  "usage": {}
+}
+```
 
 ## Extra Parameters
 
@@ -172,12 +314,20 @@ completion = client.chat.completions.create(
   ]
 )
 ```
-Most chat templates for LLMs expect the `content` to be a `string` but there are some newer models like
-`meta-llama/Llama-Guard-3-1B` that expect the content to be parsed with the new OpenAI spec. In order to choose which
-format the content needs to be parsed in by vLLM, please use the `--chat-template-text-format` argument to specify
-between `string` or `openai`. The default value is `string` and vLLM internally converts both spec formats to match
-this, unless explicitly specified.
 
+Most chat templates for LLMs expect the `content` field to be a string, but there are some newer models like 
+`meta-llama/Llama-Guard-3-1B` that expect the content to be formatted according to the OpenAI schema in the
+request. vLLM provides best-effort support to detect this automatically, which is logged as a string like
+*"Detected the chat template content format to be..."*, and internally converts incoming requests to match
+the detected format, which can be one of:
+
+- `"string"`: A string.
+  - Example: `"Hello world"`
+- `"openai"`: A list of dictionaries, similar to OpenAI schema.
+  - Example: `[{"type": "text", "text": "Hello world!"}]`
+
+If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
+to override which format to use.
 
 ## Command line arguments for the server
 
