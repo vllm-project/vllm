@@ -109,9 +109,8 @@ class MultiprocExecutor:
                     responses[w.rank] = result
 
             return responses
-        except TimeoutError e:
-            raise TimeoutError(
-                f"RPC call to {rpc.method} timed out.") from e 
+        except TimeoutError as e:
+            raise TimeoutError(f"RPC call to {rpc.method} timed out.") from e
         except Exception as e:
             # Re-raise any other exceptions
             raise e
