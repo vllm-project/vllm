@@ -27,7 +27,8 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once, resolve_obj_by_qualname)
+                        print_warning_once, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -2408,6 +2409,7 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    instance_id: str = ""
 
     @staticmethod
     def get_graph_batch_size(batch_size: int) -> int:
@@ -2572,6 +2574,9 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
+
+        if not self.instance_id:
+            self.instance_id = random_uuid()[:5]
 
     def __str__(self):
         return ("model=%r, speculative_config=%r, tokenizer=%r, "
