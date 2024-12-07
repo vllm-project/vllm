@@ -1,5 +1,17 @@
 #include <stddef.h>
+
+#include <cudaTypedefs.h>
+
+#if defined CUDA_VERSION && CUDA_VERSION >= 12000
+
 #include <torch/all.h>
+
+#include <ATen/cuda/CUDAContext.h>
+
+#include <iostream>
+#include <sstream>
+#include <vector>
+
 #include "cutlass/cutlass.h"
 #include "scaled_mm_c3x.cuh"
 
@@ -439,6 +451,7 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
   }
 }
 
+#endif
 // hyper-parameter sweep kernels
 
 void cutlass_scaled_mm_sm90_dispatch(torch::Tensor& out, torch::Tensor const& a,
