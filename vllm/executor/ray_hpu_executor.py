@@ -165,6 +165,9 @@ class RayHPUExecutor(DistributedGPUExecutor):
 
         worker_node_and_gpu_ids = []
         for worker in [self.driver_dummy_worker] + self.workers:
+            if worker is None:
+                # driver_dummy_worker can be None when using ray spmd worker.
+                continue
             worker_node_and_gpu_ids.append(
                 ray.get(worker.get_node_and_gpu_ids.remote()) \
             ) # type: ignore
