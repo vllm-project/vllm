@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 _SAMPLING_EPS = 1e-5
 
