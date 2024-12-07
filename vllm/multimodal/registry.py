@@ -15,7 +15,7 @@ from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import MultiModalProcessingMetadata, MultiModalProcessor
+from .processing import BaseMultiModalProcessor
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 N = TypeVar("N", bound=Type[nn.Module])
 
 MultiModalProcessorFactory: TypeAlias = Callable[[InputProcessingContext],
-                                                 MultiModalProcessor]
+                                                 BaseMultiModalProcessor]
 """
 Constructs a :class:`MultiModalProcessor` instance from the context.
 
@@ -311,41 +311,6 @@ class MultiModalRegistry:
 
         return wrapper
 
-    def register_processor_by_metadata(
-        self,
-        metadata_factory: Callable[[InputProcessingContext],
-                                   MultiModalProcessingMetadata],
-        get_dummy_mm_kwargs: Callable[
-            [InputProcessingContext, Mapping[str, int]], MultiModalKwargs],
-    ):
-        """
-        Convenience method to register a multi-modal processor to a model class
-        according to a function that constructs its metadata.
-
-        When the model receives multi-modal data, the provided function is
-        invoked to transform the data into a dictionary of model inputs.
-
-        See also:
-            - :ref:`input_processing_pipeline`
-            - :ref:`enabling_multimodal_inputs`
-        """
-
-        class ConcreteMultiModalProcessor(MultiModalProcessor):
-
-            def _get_dummy_mm_kwargs(
-                self,
-                mm_counts: Mapping[str, int],
-            ) -> MultiModalKwargs:
-                return get_dummy_mm_kwargs(self.ctx, mm_counts)
-
-        def factory(ctx: InputProcessingContext):
-            return ConcreteMultiModalProcessor(
-                ctx=ctx,
-                metadata=metadata_factory(ctx),
-            )
-
-        return self.register_processor(factory)
-
     def has_processor(self, model_config: "ModelConfig") -> bool:
         """
         Test whether a multi-modal processor is defined for a specific model.
@@ -360,7 +325,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         tokenizer: AnyTokenizer,
-    ) -> MultiModalProcessor:
+    ) -> BaseMultiModalProcessor:
         """
         Create a multi-modal processor for a specific model and tokenizer.
         """
