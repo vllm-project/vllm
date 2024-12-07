@@ -83,7 +83,7 @@ class PPTestSettings:
                               pp_size=pp_base,
                               eager_mode=False,
                               chunked_prefill=False,
-                              speculative_model="ngram",
+                              speculative_model="[ngram]",
                               num_speculative_tokens=5),
             ],
             distributed_backends=["mp", "ray"],
