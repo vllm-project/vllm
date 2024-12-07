@@ -399,16 +399,16 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
 
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            if hasattr(config, "logits_scaling"):
+                logit_scale /= config.logits_scaling
+
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size,
+                                                    scale=logit_scale)
         else:
             self.lm_head = PPMissingLayer()
 
-            logit_scale = getattr(config, "logit_scale", 1.0)
-
-        if hasattr(config, "logits_scaling"):
-            logit_scale /= config.logits_scaling
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size,
-                                                scale=logit_scale)
         self.sampler = get_sampler()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
