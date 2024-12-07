@@ -33,7 +33,7 @@ PROMPT_TOKENS = [
     tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS
 ]
 PROMPT_LOGPROBS_RAW: List[Tuple[npt.NDArray, npt.NDArray]] = [
-    _generate_dummy_prompt_logprobs(tokens_list=tokens_list,
+    _generate_dummy_prompt_logprobs(prompt_tokens_list=tokens_list,
                                     num_logprobs=NUM_PROMPT_LOGPROBS,
                                     tokenizer=tokenizer)
     for tokens_list in PROMPT_TOKENS
