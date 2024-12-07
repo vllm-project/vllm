@@ -40,6 +40,7 @@ class MambaMixer(CustomOp):
                  use_conv_bias: bool,
                  use_bias: bool,
                  use_rms_norm: bool,
+                 rms_norm_has_weight: bool = True,
                  rms_norm_eps: float = 1e-5,
                  activation="silu"):
         super().__init__()
@@ -105,14 +106,23 @@ class MambaMixer(CustomOp):
             input_is_parallel=True,
         )
 
-        self.dt_layernorm = RMSNorm(time_step_rank,
-                                    eps=rms_norm_eps) if use_rms_norm else None
+        self.dt_layernorm = RMSNorm(
+            time_step_rank,
+            eps=rms_norm_eps,
+            has_weight=rms_norm_has_weight,
+        ) if use_rms_norm else None
 
-        self.b_layernorm = RMSNorm(ssm_state_size,
-                                   eps=rms_norm_eps) if use_rms_norm else None
+        self.b_layernorm = RMSNorm(
+            ssm_state_size,
+            eps=rms_norm_eps,
+            has_weight=rms_norm_has_weight,
+        ) if use_rms_norm else None
 
-        self.c_layernorm = RMSNorm(ssm_state_size,
-                                   eps=rms_norm_eps) if use_rms_norm else None
+        self.c_layernorm = RMSNorm(
+            ssm_state_size,
+            eps=rms_norm_eps,
+            has_weight=rms_norm_has_weight,
+        ) if use_rms_norm else None
 
     def forward_native(self, hidden_states: torch.Tensor,
                        attn_metadata: AttentionMetadata,
