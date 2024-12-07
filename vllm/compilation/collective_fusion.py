@@ -17,9 +17,13 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.utils import direct_register_custom_op
 
+from .inductor_pass import get_pass_context
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
+
+
+# TODO: add static version of replacement
 
 use_flux = False
 if envs.VLLM_USE_FLUX:
@@ -36,14 +40,14 @@ if envs.VLLM_USE_FLUX:
 FLUX_TILE_SIZE: int = 128
 
 
+def get_world_name() -> str:
+    return torch.distributed.group.WORLD.group_name
+
+
 def use_cc_kernels(m_shape: int) -> bool:
     n_slices = get_tensor_model_parallel_world_size()
     return (m_shape % (FLUX_TILE_SIZE * n_slices) == 0
             and m_shape >= FLUX_TILE_SIZE * n_slices)
-
-
-def get_world_name() -> str:
-    return torch.distributed.group.WORLD.group_name
 
 
 def residual_slice_shape(residual: torch.Tensor, rank: int) -> int:
@@ -338,13 +342,24 @@ class CollectiveFusionPass(VllmInductorPass):
                                  fwd_only, [self.gemm_rs_ag_gemm_pattern],
                                  extra_check=lambda m: self.record_match(m))
 
-            register_replacement(match_final, torch.ops.vllm.gemm_ag_final,
+            register_replacement(match_final,
+                                 #gemm_ag_final,
+                                 torch.ops.vllm.gemm_ag_final,
                                  final_inputs, fwd_only, [self.final_pattern])
+
+    # TODO: put logic here to disable for bad sizes
+    def should_rewrite(self, match: Match) -> bool:
+        pass_context = get_pass_context()
+        if pass_context.runtime_shape is None:
+            # extract shape from match
+            return True
+        return use_cc_kernels(pass_context.runtime_shape)
 
     def record_match(self, match: Match) -> bool:
         # Hijack the extra_check to record the match and
         # save it for post-processing.
-        self.matches.append(match)
+        if self.should_rewrite(match):
+            self.matches.append(match)
 
         # Return False to prevent automatic replacement.
         return False
@@ -433,6 +448,11 @@ class CollectiveFusionPass(VllmInductorPass):
                    for node in match.nodes)
 
     def __call__(self, graph: fx.Graph):
+        return
+        pass_context = get_pass_context()
+
+        logger.info("CollectiveFusionPass %s", pass_context.runtime_shape)
+
         # TODO: disable if chunk prefill size is too small
         # or when doing decode.
         self.dump_graph(graph, "before_collective_fusion")

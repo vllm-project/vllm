@@ -18,12 +18,42 @@ from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
 from .counter import compilation_counter
-from .inductor_pass import InductorPass
+from .inductor_pass import InductorPass, pass_context
 from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 from .utils import dump_graph
+from .shape_prop import ShapeProp
 
 logger = init_logger(__name__)
+
+
+ID = 0
+PASSES = {}
+def get_dummy_pass(id: int):
+    def dummy_pass(g: fx.Graph):
+        print(f"DUMMY PASS {id}")
+
+    pass_fn = PASSES.get(id)
+    if pass_fn is None:
+        pass_fn = dummy_pass
+        PASSES[id] = pass_fn
+
+    return pass_fn
+
+
+def add_dummy_pass(fn):
+    # Disable for now
+    if True or fn is None:
+        return fn
+    else:
+        global ID
+        dummy = get_dummy_pass(ID)
+        ID = ID + 1
+        def compose(graph: fx.GraphModule):
+            dummy(graph)
+            fn(graph)
+
+    return compose
 
 
 def wrap_inductor(graph: fx.GraphModule,
@@ -44,16 +74,21 @@ def wrap_inductor(graph: fx.GraphModule,
 
     compilation_counter.num_inductor_compilations += 1
 
-    from torch._inductor import config
+    logger.info("Inputs: %s", ", ".join([str((inp.shape, inp.dtype) if isinstance(inp, torch.Tensor) else inp) for inp in example_inputs][0:3]))
 
-    # Enable support for symmetric memory ops in the inductor.
-    torch._inductor.config._micro_pipeline_tp = True
+    from torch._inductor import config
+    from torch._inductor.compile_fx import compile_fx
 
     current_config = config.get_config_copy()
-    from torch._inductor.compile_fx import compile_fx
+
+    # Enable support for symmetric memory ops in the inductor.
+    current_config._micro_pipeline_tp = True
 
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
+
+    current_config["post_grad_custom_post_pass"] = \
+        add_dummy_pass(current_config["post_grad_custom_post_pass"])
 
     if isinstance(runtime_shape, int):
         # for a specific batchsize, tuning triton kernel parameters
@@ -164,7 +199,8 @@ def wrap_inductor(graph: fx.GraphModule,
             logger.info("Compiling a graph for shape %s takes %.2f s",
                         runtime_shape, elapsed)
 
-    return compiled_graph
+    with pass_context(runtime_shape):
+        return compiled_graph
 
 
 @dataclasses.dataclass
@@ -173,6 +209,70 @@ class SplitItem:
     graph_id: int
     is_splitting_graph: bool
     graph: fx.GraphModule
+
+
+def find_last(nodes, op):
+    last = None
+    found = False
+    for n in nodes:
+        if n.op == op:
+            found = True
+        if found and n.op != op:
+            break
+        last = n
+    return last
+
+
+def add_input_output_to_graph(gm: fx.GraphModule, arg_name, add_output: bool = False):
+    last_input = find_last(gm.graph.nodes, 'placeholder')
+    assert last_input is not None
+    with gm.graph.inserting_after(last_input):
+        input_node = gm.graph.placeholder(arg_name, "f16[s0, 4096]", None) # type_expr?
+
+    if add_output:
+        last_output = find_last(gm.graph.nodes, 'output')
+        assert last_output is not None
+        if isinstance(last_output.args[0], tuple):
+            last_output.args = (last_output.args[0] + (input_node, ), )
+        else:
+            last_output.args = (last_output.args + (input_node, ), )
+
+    return input_node
+
+
+def add_residual_args(split_gm: fx.GraphModule):
+    names = [name for (name, module) in split_gm.named_modules()]
+    count = 0
+    new_arg = f"my_residual_{count}"
+    new_input = add_input_output_to_graph(split_gm, new_arg, False)
+
+    for n in split_gm.graph.nodes:
+        if n.op == 'call_module' and n.target in names:
+            count += 1
+            n.args = n.args + (new_input,)
+            submod = getattr(split_gm, n.target)
+            new_arg = f"my_residual_{count}"
+            add_input_output_to_graph(submod, new_arg, True)
+
+            output_node = find_last(submod.graph.nodes, 'output')
+            assert output_node is not None
+            outputs = output_node.args[0]
+
+            if isinstance(outputs, tuple) and len(outputs) > 2:
+                with split_gm.graph.inserting_after(n):
+                    new_input = split_gm.graph.call_function(operator.getitem, (n, len(outputs) - 1))
+            else:
+                with split_gm.graph.inserting_after(n):
+                    new_input = split_gm.graph.call_function(operator.getitem, (n, 1))
+                    old_output = split_gm.graph.call_function(operator.getitem, (n, 0))
+                del n.users[new_input]
+                del n.users[old_output]
+                n.replace_all_uses_with(old_output)
+                n.users[old_output] = None
+                n.users[new_input] = None
+            submod.recompile()
+
+    split_gm.recompile()
 
 
 def split_graph(graph: fx.GraphModule,
@@ -220,6 +320,8 @@ def split_graph(graph: fx.GraphModule,
     # sort by intetger graph_id, rather than string name
     outputs.sort(key=lambda x: x.graph_id)
 
+    add_residual_args(split_gm)
+
     return split_gm, outputs
 
 
@@ -253,17 +355,21 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.vllm_config = vllm_config
 
     def run(self, *args):
-        fake_args = [
+        self.fake_args = [
             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in args
         ]
         with self.fake_mode:
-            return super().run(*fake_args)
+            return super().run(*self.fake_args)
 
     def call_module(self, target: torch.fx.node.Target,
                     args: Tuple[torch.fx.node.Argument,
                                 ...], kwargs: Dict[str, Any]) -> Any:
         assert isinstance(target, str)
+
+        #print(f"ARGS = {'\n'.join([str(x) for x in args])}")
+        #print(f"ARGS = {len(args)} {len(kwargs)}")
+
         output = super().call_module(target, args, kwargs)
 
         if target in self.compile_submod_names:
@@ -282,6 +388,10 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
                 use_inductor=self.compilation_config.use_inductor)
+
+            #self.module.recompile()
+            #with self.fake_mode:
+            #    ShapeProp(self.module).propagate(*self.fake_args)
 
             self.module.__dict__[target] = PiecewiseBackend(
                 submod, self.vllm_config, self.graph_pool, index,

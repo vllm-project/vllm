@@ -1,11 +1,37 @@
+
 import hashlib
 import inspect
 import types
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Any, Callable, Optional, Union
 
 import torch
 from torch import fx
+
+_pass_context: "PassContext" = None
+
+class PassContext:
+    def __init__(self, runtime_shape: Optional[int]):
+        self.runtime_shape = runtime_shape
+
+def get_pass_context() -> PassContext:
+    """Get the current pass context."""
+    return _pass_context
+
+
+@contextmanager
+def pass_context(runtime_shape: Optional[int]):
+    """A context manager that stores the current pass context,
+    usually it is a list of sizes to specialize.
+    """
+    global _pass_context
+    prev_context = _pass_context
+    _pass_context = PassContext(runtime_shape)
+    try:
+        yield
+    finally:
+        _pass_context = prev_context
 
 
 class InductorPass(ABC):
