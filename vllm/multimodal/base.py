@@ -226,16 +226,16 @@ class MultiModalPlugin(ABC):
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
+        from vllm.model_executor.models import supports_multimodal
 
         model_cls, _ = get_model_architecture(model_config)
 
-        if model_cls not in self._input_mappers:
+        if not supports_multimodal(model_cls):
             return 0
 
         max_mm_tokens = self._max_mm_tokens.get(model_cls)
         if max_mm_tokens is None:
-            raise KeyError(f"No maximum number of multi-modal tokens is given "
-                           f"for model class {model_cls.__name__} in {self}.")
+            return 0
 
         if callable(max_mm_tokens):
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
@@ -326,26 +326,47 @@ class MultiModalPlaceholderMap:
             src_ranges  = []
             dest_ranges = []
         """
-        if (not seq_group.multi_modal_data
-                or not seq_group.multi_modal_placeholders):
-            return seq_group.multi_modal_data, {}
+        seq_mm_data = seq_group.multi_modal_data
+        seq_mm_placeholders = seq_group.multi_modal_placeholders
 
-        mm_data = {**seq_group.multi_modal_data}
-        placeholder_maps: Dict[str, MultiModalPlaceholderMap] = defaultdict(
+        if not seq_mm_data or not seq_mm_placeholders:
+            return seq_mm_data, {}
+
+        # For merged processor, we directly use mm_kwargs as mm_data
+        if isinstance(seq_mm_data, MultiModalKwargs):
+            placeholder_maps = dict[str, MultiModalPlaceholderMap]()
+
+            for modality, placeholders in seq_mm_placeholders.items():
+                placeholder_map = MultiModalPlaceholderMap()
+
+                if positions:
+                    placeholder_map.append_items_from_seq_group(
+                        positions,
+                        # Dummy, since we don't care about intersecting items
+                        [None] * len(placeholders),
+                        placeholders,
+                    )
+
+                placeholder_maps[modality] = placeholder_map
+
+            return seq_mm_data, placeholder_maps
+
+        mm_data = {**seq_mm_data}
+        placeholder_maps = defaultdict[str, MultiModalPlaceholderMap](
             MultiModalPlaceholderMap)
 
-        for (
-                modality,
-                placeholders,
-        ) in seq_group.multi_modal_placeholders.items():
+        for modality, placeholders in seq_mm_placeholders.items():
             mm_items = mm_data.pop(modality)
             if not isinstance(mm_items, list):
                 mm_items = [mm_items]
 
             if positions:
-                intersecting_items = placeholder_maps[
-                    modality].append_items_from_seq_group(
-                        positions, mm_items, placeholders)
+                intersecting_items = placeholder_maps[modality] \
+                    .append_items_from_seq_group(
+                        positions,
+                        mm_items,
+                        placeholders,
+                    )
 
                 if intersecting_items:
                     mm_data[modality] = intersecting_items
