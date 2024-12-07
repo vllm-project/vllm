@@ -84,6 +84,19 @@ class CacheEngine:
                             device=device))
         return kv_cache
 
+    def destroy(self) -> None:
+        # Iterate over all the caches and destroy them.
+        while self.gpu_cache:
+            tensor = self.gpu_cache.pop()
+            del tensor
+
+        while self.cpu_cache:
+            tensor = self.cpu_cache.pop()
+            del tensor
+
+        import gc
+        gc.collect()
+
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         for i in range(self.num_attention_layers):
             self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
