@@ -4,9 +4,9 @@ import numpy.typing as npt
 import pytest
 from transformers import AutoTokenizer
 
-from tests.v1.engine.utils import (_generate_dummy_prompt_logprobs,
-                                   _generate_dummy_sample_logprobs,
-                                   _validate_requests_logprobs)
+from tests.v1.engine.utils import (generate_dummy_prompt_logprobs,
+                                   generate_dummy_sample_logprobs,
+                                   validate_requests_logprobs)
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.detokenizer import Detokenizer, DetokenizerRequest
@@ -33,9 +33,9 @@ PROMPT_TOKENS = [
     tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS
 ]
 PROMPT_LOGPROBS_RAW: List[Tuple[npt.NDArray, npt.NDArray]] = [
-    _generate_dummy_prompt_logprobs(prompt_tokens_list=tokens_list,
-                                    num_logprobs=NUM_PROMPT_LOGPROBS,
-                                    tokenizer=tokenizer)
+    generate_dummy_prompt_logprobs(prompt_tokens_list=tokens_list,
+                                   num_logprobs=NUM_PROMPT_LOGPROBS,
+                                   tokenizer=tokenizer)
     for tokens_list in PROMPT_TOKENS
 ]
 # PROMPT_LOGPROBS = [
@@ -46,9 +46,9 @@ GENERATION_TOKENS = [
     tokenizer(text).input_ids[PROMPT_LEN:] for text in FULL_STRINGS
 ]
 GENERATION_LOGPROBS_RAW = [
-    _generate_dummy_sample_logprobs(sampled_tokens_list=tokens_list,
-                                    num_logprobs=NUM_SAMPLE_LOGPROBS,
-                                    tokenizer=tokenizer)
+    generate_dummy_sample_logprobs(sampled_tokens_list=tokens_list,
+                                   num_logprobs=NUM_SAMPLE_LOGPROBS,
+                                   tokenizer=tokenizer)
     for tokens_list in GENERATION_TOKENS
 ]
 # GENERATION_LOGPROBS = [
@@ -186,7 +186,7 @@ def test_incremental_detokenization(
         assert len(requests_to_abort) == 0
 
         # Validate logprob detokenization
-        _validate_requests_logprobs(requests, request_outputs, tokenizer)
+        validate_requests_logprobs(requests, request_outputs, tokenizer)
 
         # Update tracking.
         for request_output in request_outputs:
@@ -272,7 +272,7 @@ def test_stop_string(
         aborted.extend(requests_to_abort)
 
         # Validate logprob detokenization
-        _validate_requests_logprobs(requests, request_outputs, tokenizer)
+        validate_requests_logprobs(requests, request_outputs, tokenizer)
 
         # Update tracking.
         for request_output in request_outputs:

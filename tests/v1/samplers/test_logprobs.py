@@ -1,123 +1,19 @@
 import os
-import re
-from typing import List, Tuple
+from typing import List
 
 import pytest
 import torch
 
 from tests.kernels.utils import override_backend_env_variable
-from vllm import CompletionOutput, SamplingParams
+from tests.v1.samplers.utils import (
+    assert_incr_detok_str_matches_non_incr_detok_str,
+    compute_correct_cumulative_logprob, get_test_batch)
+from tests.v1.utils import assert_vllm_use_v1
+from vllm import SamplingParams
 
 from ...conftest import VllmRunner
 
 MODELS = ["facebook/opt-125m"]
-
-
-def _get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
-    """Generate logprobs configs for a batch of requests
-    
-    A given request's logprobs configuration is (1) num_sample_logprobs and (2)
-    num_prompt_logprobs. The batch logprobs configuration is the list of request
-    logprobs configs.
-
-    batch_logprobs_composition == "NONE" yields a batch with no sample or prompt
-    logprobs
-
-    batch_logprobs_composition == "SAMPLE" yields a batch with some requests
-    configured for sample logprobs only, and others configured for no logprobs
-
-    batch_logprobs_composition == "PROMPT" yields a batch with some requests
-    configured for prompt logprobs only, and others configured for no logprobs
-
-    batch_logprobs_composition == "SAMPLE_PROMPT" yields a batch with some
-    requests configured for sample logprobs and prompt logprobs, some configured
-    for only sample logprobs or only prompt logprobs, and some configured for
-    no logprobs
-
-    Args:
-      batch_logprobs_composition: types of logprobs configs to include in batch
-
-    Returns:
-
-      List of (Optional[num_sample_logprobs], Optional[num_prompt_logprobs])
-      tuples
-    """
-    if batch_logprobs_composition == "NONE":
-        # No requests with sample or prompt logprobs
-        return [(None, None), (0, None), (None, 0), (0, 0)]
-    elif batch_logprobs_composition == "SAMPLE":
-        return [
-            (None, None),
-            (None, 0),
-            (0, None),
-            (0, 0),
-            (5, None),
-            (3, 0),
-        ]
-    elif batch_logprobs_composition == "PROMPT":
-        return [
-            (None, 0),
-            (0, None),
-            (0, 0),
-            (None, 6),
-            (0, 5),
-        ]
-    elif batch_logprobs_composition == "SAMPLE_PROMPT":
-        return [
-            (None, 0),
-            (0, None),
-            (0, 0),
-            (5, None),
-            (3, 0),
-            (6, 3),
-            (None, 6),
-            (0, 5),
-        ]
-    else:
-        raise ValueError("Invalid logprobs batch configuration for test.")
-
-
-def _assert_incr_detok_str_matches_non_incr_detok_str(
-    incremental_detokenization_str: str,
-    non_incremental_detokenization_str: str,
-    msg: str,
-) -> None:
-    """Compare incrementally detok. text to non-incrementally detok. text
-    
-    Fail if the strings mismatch after non-alphanumeric characters are stripped
-    out.
-
-    Rationale: incremental detokenization in the text generation process allows
-    the tokenizer to adjust the next token text output based on the token's
-    context in the string. However, logprobs detokenization detokenizes each
-    token individually, and the resultant strings may include some
-    non-alphanumeric placeholder characters where there could be i.e.
-    whitespace. So, this function compares only the alphanumeric text
-    between two strings and fails if there is a mismatch, which helps
-    with validating logprobs detokenization.
-
-    Args:
-      incremental_detokenization_str: incrementally-detokenized generated text
-      non_incremental_detokenization_str: non-incrementally-detokenized logprob
-                                          tokens
-      msg: error message if `assert` fails
-    """
-    rgx = r'[^a-zA-Z0-9]+'
-    assert (re.sub(rgx, '', incremental_detokenization_str) == re.sub(
-        rgx, '', non_incremental_detokenization_str)), (msg)
-
-
-def _compute_correct_cumulative_logprob(
-        completion_output: CompletionOutput) -> float:
-    token_ids = completion_output.token_ids
-    logprobs = completion_output.logprobs
-    assert logprobs is not None
-    return sum([lp[tok_id].logprob for tok_id, lp in zip(token_ids, logprobs)])
-
-
-def _assert_vllm_use_v1():
-    if os.getenv("VLLM_USE_V1") != "1":
-        raise OSError("Test requires VLLM_USE_V1=\"1\"")
 
 
 def _test_case_get_logprobs_and_prompt_logprobs(
@@ -131,7 +27,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     example_prompts,
     monkeypatch,
 ) -> None:
-    _assert_vllm_use_v1()
+    assert_vllm_use_v1()
     test_prompts = example_prompts
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
@@ -152,7 +48,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
 
     # Batch has mixed sample params
     # (different logprobs/prompt logprobs combos)
-    logprob_prompt_logprob_list = _get_test_batch(batch_logprobs_composition)
+    logprob_prompt_logprob_list = get_test_batch(batch_logprobs_composition)
 
     # We rely on there being more prompts than combinations of
     # logprobs & prompt logprobs which we want to test
@@ -223,7 +119,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             if detokenize:
                 output_string_from_most_likely_tokens = "".join(
                     output_string_from_most_likely_tokens_lst)
-                _assert_incr_detok_str_matches_non_incr_detok_str(
+                assert_incr_detok_str_matches_non_incr_detok_str(
                     output_text, output_string_from_most_likely_tokens,
                     "The output text from the top logprob for each token "
                     "position should be the same as the output text in the "
@@ -254,7 +150,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             # matches the correct value, which is computed below.
             torch.testing.assert_close(
                 vllm_result.outputs[0].cumulative_logprob,
-                _compute_correct_cumulative_logprob(vllm_result.outputs[0]),
+                compute_correct_cumulative_logprob(vllm_result.outputs[0]),
                 atol=1e-6,
                 rtol=1e-6)
         else:
@@ -391,7 +287,7 @@ def test_max_logprobs(monkeypatch):
     Args:
       monkeypatch
     """
-    _assert_vllm_use_v1()
+    assert_vllm_use_v1()
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
@@ -414,7 +310,7 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
       example_prompts
       monkeypatch
     """
-    _assert_vllm_use_v1()
+    assert_vllm_use_v1()
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     max_num_seqs = 256

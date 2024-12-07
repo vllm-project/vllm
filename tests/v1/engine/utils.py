@@ -127,7 +127,7 @@ def _create_random_top_token_test_matrix(
     return res
 
 
-def _generate_dummy_sample_logprobs(
+def generate_dummy_sample_logprobs(
     sampled_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
@@ -159,7 +159,7 @@ def _generate_dummy_sample_logprobs(
     return res
 
 
-def _generate_dummy_prompt_logprobs(
+def generate_dummy_prompt_logprobs(
     prompt_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
@@ -205,7 +205,7 @@ def _decode_token(
                                            skip_special_tokens=False)[0]
 
 
-def _validate_requests_logprobs(
+def validate_requests_logprobs(
     requests: List[DetokenizerRequest],
     request_outputs: List[RequestOutput],
     tokenizer: PreTrainedTokenizer,
