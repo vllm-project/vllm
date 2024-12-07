@@ -1,3 +1,4 @@
+import os
 import re
 from typing import List, Tuple
 
@@ -114,6 +115,11 @@ def _compute_correct_cumulative_logprob(
     return sum([lp[tok_id].logprob for tok_id, lp in zip(token_ids, logprobs)])
 
 
+def _assert_vllm_use_v1():
+    if os.getenv("VLLM_USE_V1") != "1":
+        raise OSError("Test requires VLLM_USE_V1=\"1\"")
+
+
 def _test_case_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,
@@ -125,10 +131,8 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     example_prompts,
     monkeypatch,
 ) -> None:
+    _assert_vllm_use_v1()
     test_prompts = example_prompts
-
-    # LLM engine v1
-    monkeypatch.setenv("VLLM_USE_V1", "1")
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     max_num_seqs = 128
@@ -342,6 +346,10 @@ def test_get_logprobs_and_prompt_logprobs(
         monkeypatch=monkeypatch)
 
 
+# LLM engine v1
+@pytest.mark.skipif(os.getenv("VLLM_V1_FAST_TESTS") != "1",
+                    reason="vLLM v1 fast tests not enabled by "
+                    "VLLM_V1_FAST_TESTS=\"1\" in the environment.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype",
                          ["half"])  # needed for comparing logprobs with HF
@@ -363,7 +371,6 @@ def test_fast_get_logprobs_and_prompt_logprobs(
     Faster version of `test_get_logprobs_and_prompt_logprobs` with
     fewer test cases.
     """
-
     _test_case_get_logprobs_and_prompt_logprobs(
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
@@ -384,8 +391,7 @@ def test_max_logprobs(monkeypatch):
     Args:
       monkeypatch
     """
-    # LLM engine v1
-    monkeypatch.setenv("VLLM_USE_V1", "1")
+    _assert_vllm_use_v1()
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
@@ -408,9 +414,7 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
       example_prompts
       monkeypatch
     """
-
-    # LLM engine v1
-    monkeypatch.setenv("VLLM_USE_V1", "1")
+    _assert_vllm_use_v1()
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     max_num_seqs = 256
