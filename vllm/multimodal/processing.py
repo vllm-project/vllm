@@ -529,9 +529,9 @@ def iter_placeholders(
             yield placeholder
 
 
-class MultiModalProcessor(ABC):
+class BaseMultiModalProcessor(ABC):
     """
-    Helper class to process multi-modal inputs to be used in vLLM.
+    Abstract base class to process multi-modal inputs to be used in vLLM.
     """
 
     def __init__(
