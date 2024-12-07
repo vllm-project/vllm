@@ -27,7 +27,8 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once, resolve_obj_by_qualname)
+                        print_warning_once, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -2082,7 +2083,7 @@ class KVTransferConfig(BaseModel):
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
-        """Parse the CLI value for the compilation config."""
+        """Parse the CLI value for the kv cache transfer config."""
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
@@ -2281,6 +2282,7 @@ class CompilationConfig(BaseModel):
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
+    compilation_time: float = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
@@ -2319,6 +2321,7 @@ class CompilationConfig(BaseModel):
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
         self.static_forward_context = {}
+        self.compilation_time = 0.0
 
     def init_backend(self) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
@@ -2406,6 +2409,7 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    instance_id: str = ""
 
     @staticmethod
     def get_graph_batch_size(batch_size: int) -> int:
@@ -2470,7 +2474,15 @@ class VllmConfig:
             return quant_config
         return None
 
-    def with_hf_config(self, hf_config: PretrainedConfig) -> "VllmConfig":
+    def with_hf_config(
+        self,
+        hf_config: PretrainedConfig,
+        architectures: Optional[list[str]] = None,
+    ) -> "VllmConfig":
+        if architectures is not None:
+            hf_config = copy.deepcopy(hf_config)
+            hf_config.architectures = architectures
+
         model_config = copy.deepcopy(self.model_config)
         model_config.hf_config = hf_config
 
@@ -2562,6 +2574,9 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
+
+        if not self.instance_id:
+            self.instance_id = random_uuid()[:5]
 
     def __str__(self):
         return ("model=%r, speculative_config=%r, tokenizer=%r, "
