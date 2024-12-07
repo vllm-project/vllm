@@ -243,9 +243,24 @@ class MockEngineCore:
 @pytest.mark.parametrize(
     "request_output_kind",
     [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-def test_incremental_detokenization(request_output_kind: RequestOutputKind):
+@pytest.mark.parametrize("logprobs,prompt_logprobs",
+                         [(None, None), (NUM_SAMPLE_LOGPROBS, None),
+                          (None, NUM_PROMPT_LOGPROBS),
+                          (NUM_SAMPLE_LOGPROBS, NUM_PROMPT_LOGPROBS)])
+def test_incremental_detokenization(
+    request_output_kind: RequestOutputKind,
+    logprobs: Optional[int],
+    prompt_logprobs: Optional[int],
+) -> None:
+    do_generated_logprobs = logprobs is not None
+    do_prompt_logprobs = prompt_logprobs is not None
     detokenizer = Detokenizer(TOKENIZER_NAME)
-    engine_core = MockEngineCore(GENERATION_TOKENS)
+    engine_core = MockEngineCore(generated_tokens_list=GENERATION_TOKENS,
+                                 prompt_tokens_list=PROMPT_TOKENS,
+                                 generated_logprobs_raw=GENERATION_LOGPROBS_RAW
+                                 if do_generated_logprobs else None,
+                                 prompt_logprobs_raw=PROMPT_LOGPROBS_RAW
+                                 if do_prompt_logprobs else None)
 
     # Make N requests.
     requests = [
