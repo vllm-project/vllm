@@ -547,9 +547,9 @@ Text Generation
     - ✅︎
     - 
   * - :code:`InternVLChatModel`
-    - InternVL2
+    - InternVL 2.5, Mono-InternVL, InternVL 2.0
     - T + I\ :sup:`E+`
-    - :code:`OpenGVLab/Mono-InternVL-2B`, :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
+    - :code:`OpenGVLab/InternVL2_5-4B`, :code:`OpenGVLab/Mono-InternVL-2B`, :code:`OpenGVLab/InternVL2-4B`, etc.
     - 
     - ✅︎
   * - :code:`LlavaForConditionalGeneration`
