@@ -26,9 +26,6 @@ class ParallelSetup(NamedTuple):
     pp_size: int
     eager_mode: bool
     chunked_prefill: bool
-    speculative_model: Optional[str] = None
-    num_speculative_tokens: Optional[int] = None
-    ngram_prompt_lookup_max: Optional[int] = None
 
 
 class PPTestOptions(NamedTuple):
@@ -80,13 +77,6 @@ class PPTestSettings:
                               pp_size=pp_base,
                               eager_mode=True,
                               chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=pp_base,
-                              eager_mode=False,
-                              chunked_prefill=False,
-                              speculative_model="[ngram]",
-                              num_speculative_tokens=5,
-                              ngram_prompt_lookup_max=3),
             ],
             distributed_backends=["mp", "ray"],
             task=task,
@@ -262,9 +252,6 @@ def _compare_tp(
         pp_size,
         eager_mode,
         chunked_prefill,
-        speculative_model,
-        num_speculative_tokens,
-        ngram_prompt_lookup_max,
     ) = parallel_setup
     (
         multi_node_only,
@@ -305,16 +292,6 @@ def _compare_tp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", hf_overrides])
-    if speculative_model:
-        common_args.extend(["--speculative-model", speculative_model])
-    if num_speculative_tokens:
-        common_args.extend(
-            ["--num-speculative-tokens",
-             str(num_speculative_tokens)])
-    if ngram_prompt_lookup_max:
-        common_args.extend(
-            ["--ngram-prompt-lookup-max",
-             str(ngram_prompt_lookup_max)])
 
     if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
             and chunked_prefill):
