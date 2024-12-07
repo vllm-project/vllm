@@ -413,12 +413,10 @@ class _CorrectnessTestHelper:
     def generate_probs_for_test(
         self, draft_and_target_probs_equal: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        draft_probs, target_probs = [
-            F.softmax(
-                torch.rand(self.vocab_size, dtype=torch.float32),
-                dim=-1,
-            ) for _ in range(2)
-        ]
+        draft_probs, target_probs = (F.softmax(
+            torch.rand(self.vocab_size, dtype=torch.float32),
+            dim=-1,
+        ) for _ in range(2))
 
         num_reference_probs = 100
         reference_probs = F.softmax(

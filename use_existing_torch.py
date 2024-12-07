@@ -4,7 +4,7 @@ requires_files = glob.glob('requirements*.txt')
 requires_files += ["pyproject.toml"]
 for file in requires_files:
     print(f">>> cleaning {file}")
-    with open(file, 'r') as f:
+    with open(file) as f:
         lines = f.readlines()
     if "torch" in "".join(lines).lower():
         print("removed:")

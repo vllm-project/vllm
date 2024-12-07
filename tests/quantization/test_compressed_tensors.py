@@ -8,6 +8,7 @@ import pytest
 import torch
 from compressed_tensors.quantization import QuantizationType
 
+from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
@@ -72,6 +73,35 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
 
         output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
         assert output
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "neuralmagic/Llama-3.2-1B-quantized.w8a8"
+        # TODO static & asymmetric
+    ])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [10])
+def test_compressed_tensors_w8a8_logprobs(hf_runner, vllm_runner,
+                                          example_prompts, model_path,
+                                          max_tokens, num_logprobs):
+    dtype = "bfloat16"
+
+    with hf_runner(model_path, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs)
+
+    with vllm_runner(model_path, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
 def test_compressed_tensors_no_enforce_eager(vllm_runner):

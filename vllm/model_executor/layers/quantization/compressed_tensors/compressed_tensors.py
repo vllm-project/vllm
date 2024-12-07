@@ -57,10 +57,6 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
-    @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]
 

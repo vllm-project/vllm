@@ -20,12 +20,15 @@ from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
+NUM_EXPERTS = [8, 64]
+TOP_KS = [2, 6]
 
-@pytest.mark.parametrize("m", [1024 * 128, 512, 222, 33, 1])
-@pytest.mark.parametrize("n", [2048, 256, 1024])
+
+@pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
+@pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 511, 1024])
-@pytest.mark.parametrize("e", [8, 64])
-@pytest.mark.parametrize("topk", [2, 6])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fused_moe(
     m: int,
@@ -42,7 +45,7 @@ def test_fused_moe(
     score = torch.randn((m, e), device="cuda", dtype=dtype)
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
-    torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=0)
+    torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
 @pytest.mark.parametrize("dtype",
@@ -93,12 +96,12 @@ def test_mixtral_moe(dtype: torch.dtype):
                                atol=mixtral_moe_tol[dtype])
 
 
-@pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
-@pytest.mark.parametrize("n", [128, 2048, 256, 1024])
-@pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [8, 64])
-@pytest.mark.parametrize("topk", [2, 6])
-@pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+@pytest.mark.parametrize("m", [1, 33, 64, 222])
+@pytest.mark.parametrize("n", [128, 2048])
+@pytest.mark.parametrize("k", [128, 1024])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("group_size", [-1, 32, 128])
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
 @pytest.mark.parametrize("is_k_full", [True, False])

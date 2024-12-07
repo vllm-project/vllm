@@ -3,6 +3,7 @@ import pytest_asyncio
 from huggingface_hub import snapshot_download
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 
 from .utils import ARGS, CONFIGS, ServerConfig
 
@@ -11,6 +12,11 @@ from .utils import ARGS, CONFIGS, ServerConfig
 @pytest.fixture(scope="session", params=CONFIGS.keys())
 def server_config(request):
     config = CONFIGS[request.param]
+
+    if current_platform.is_rocm() and not config.get("supports_rocm", True):
+        pytest.skip("The {} model can't be tested on the ROCm platform".format(
+            config["model"]))
+
     # download model and tokenizer using transformers
     snapshot_download(config["model"])
     yield CONFIGS[request.param]

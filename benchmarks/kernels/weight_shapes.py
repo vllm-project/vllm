@@ -72,4 +72,10 @@ WEIGHT_SHAPES = {
         ([14336, 4096], None),  # large K, small N
         ([8192, 14336], None),  # medium K, large N (from llama-2-70b-tp4-hf
     ],
+    "meta-llama/Llama-3.1-405b-hf": [
+        ([16384, 18432], 1),
+        ([16384, 16384], 0),
+        ([16384, 106496], 1),
+        ([53248, 16384], 0),
+    ],
 }
