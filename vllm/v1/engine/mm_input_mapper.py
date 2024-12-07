@@ -12,6 +12,7 @@ class MMInputMapper:
         model_config: ModelConfig,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
+        self.model_config = model_config
         self.mm_registry = mm_registry
         self.multi_modal_input_mapper = mm_registry.create_input_mapper(
             model_config)
