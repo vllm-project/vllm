@@ -340,8 +340,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
         if not self.use_ray_spmd_worker:
             # Start the driver worker after all the ray workers.
             driver_worker_output = [
-                self.driver_worker.execute_method(method, *driver_args,
-                                                  **driver_kwargs)
+                self.driver_worker.execute_method(method, *args, **kwargs)
             ]
 
         # Get the results of the ray workers.

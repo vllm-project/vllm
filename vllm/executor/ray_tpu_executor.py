@@ -232,7 +232,7 @@ class RayTPUExecutor(TPUExecutor):
 
         # Start the driver worker after all the ray workers.
         driver_worker_output = self.driver_worker.execute_method(
-            method, *driver_args, **driver_kwargs)
+            method, *args, **kwargs)
         # Get the results of the ray workers.
         if self.workers:
             ray_worker_outputs = ray.get(ray_worker_outputs)
