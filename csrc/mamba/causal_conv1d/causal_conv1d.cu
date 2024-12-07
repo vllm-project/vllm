@@ -424,7 +424,7 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         // and the one before it (chunk = n_chunks - 1 and chunk = n_chunks - 2), 
         // (which occurs when `final_state_position` is a non-positivie index)
         // we load the correct data from smem_exchange from both chunks, the last chunk iteration and the one before it
-        if (final_state_position < 0 && seqlen > kWidth){
+        if (conv_states != nullptr && final_state_position < 0 && seqlen > kWidth){
             input_t vals_load[kNElts] = {0};
             if ((chunk == n_chunks - 2) && (tidx == kNThreads - 1)){
                 // chunk = n_chunks - 2, a segment of the final state sits in the last index
