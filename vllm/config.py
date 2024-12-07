@@ -1707,8 +1707,8 @@ class LoRAConfig:
         # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
         if scheduler_config.chunked_prefill_enabled:
-            logger.warning("LoRA with chunked prefill is experimental and "
-                           "may be unstable.")
+            logger.warning("LoRA with chunked prefill is still experimental "
+                           "and may be unstable.")
 
 
 @dataclass
