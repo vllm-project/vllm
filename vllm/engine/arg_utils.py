@@ -433,6 +433,7 @@ class EngineArgs:
                             'capping to sliding window size')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
+                            default=True,
                             help='[DEPRECATED] block manager v1 has been '
                             'removed and SelfAttnBlockSpaceManager (i.e. '
                             'block manager v2) is now the default. '

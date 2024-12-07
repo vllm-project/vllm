@@ -57,7 +57,7 @@ def load_general_plugins():
 
     discovered_plugins = entry_points(group='vllm.general_plugins')
     if len(discovered_plugins) == 0:
-        logger.info("No plugins found.")
+        logger.debug("No plugins found.")
         return
     logger.info("Available plugins:")
     for plugin in discovered_plugins:
