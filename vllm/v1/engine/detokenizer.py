@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -16,11 +16,14 @@ from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
 
 logger = init_logger(__name__)
 
-AnyLogprobs = Union[Optional[SampleLogprobs], Optional[PromptLogprobs]]
-
 
 @dataclass
 class IncrementalDetokenizer:
+    """Track and implement detokenization for a single request.
+    
+    Also handles Pythonization (conversion to OpenAI-API-compatible Python
+    data structures) of logprobs Numpy arrays computed for the request.
+    """
 
     # Generation data
     output_text: str
@@ -63,6 +66,7 @@ class IncrementalDetokenizer:
 
     @property
     def output_token_ids(self) -> List[int]:
+        """Return generated tokens"""
         assert len(self.token_ids) >= len(self.prompt_token_ids)
         return self.token_ids[len(self.prompt_token_ids):]
 
@@ -72,6 +76,15 @@ class IncrementalDetokenizer:
         tokenizer: AnyTokenizer,
         request: DetokenizerRequest,
     ) -> "IncrementalDetokenizer":
+        """Construct incremental detokenizer for a request.
+        
+        Args:
+          tokenizer: tokenizer provides detokenization methods
+          request: track detokenization progress of this request
+
+        Returns:
+          Incremental detokenizer for the request
+        """
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,
@@ -87,10 +100,10 @@ class IncrementalDetokenizer:
         else:
             stop_buffer_length = 0
 
-        # Logprobs & prompt logprobs settings
+        # Flags for whether to detokenize sample logprobs and prompt logprobs,
+        # respectively.
         do_request_logprobs = (request.logprobs is not None
                                and request.logprobs > 0)
-
         do_request_prompt_logprobs = (request.prompt_logprobs is not None
                                       and request.prompt_logprobs > 0)
 
@@ -123,6 +136,14 @@ class IncrementalDetokenizer:
         self,
         token_id_list: int,
     ) -> List[str]:
+        """Helper method to detokenize one or more token ids.
+        
+        Args:
+          token_id_list: list of tokens to detokenize
+
+        Returns:
+          List of token string representations of tokens
+        """
         return self.tokenizer.convert_ids_to_tokens(token_id_list,
                                                     skip_special_tokens=False)
 
@@ -134,13 +155,15 @@ class IncrementalDetokenizer:
     ) -> Dict[int, Logprob]:
         """Pythonize the numpy (np) logprobs & token ids for a sequence position
         
-        Optionally detokenize (compute logprob decoded token str)
+        Outputs the OpenAI-API-compatible representation of the top tokens and
+        their logprobs at a single position in a sequence.
+
+        Optionally detokenize (compute logprob `decoded_token`)
 
         Args:
           logprob_values: np logprob values
           logprob_token_ids: np logprob token ids
-          detokenize: if True, compute logprob decoded token str,
-                      (o/w decoded_token=None)
+          detokenize: if True, detokenize logprob top token ids
 
         Return:
           mapping from top token id to Logprob data structure
@@ -164,6 +187,12 @@ class IncrementalDetokenizer:
     ) -> SampleLogprobs:
         """Pythonize sample logprobs, maybe detokenize.
         
+        Only Pythonizes sample logprobs computed in the current
+        step. Has the side effect of updating the incremental detokenizer
+        state by (1) appending the new sample logprobs to the list of what
+        was computed for previously-sampled tokens, and (2) accumulating
+        into the request's cumulative logprob value.ß
+
         Pythonization entails the conversion from a numpy (np)
         values/token ids representation to the more idiomatically
         Pythonic representation required by the OpenAI API,
@@ -172,14 +201,14 @@ class IncrementalDetokenizer:
         The Logprob.decoded_token field is only computed (detokenized
         from the associated top token id) if detokenize=True
 
-        Also computes cumulative logprob.
-
         Args:
           new_logprobs: List of (logprobs,logprob token ids) numpy array tuples
+          new_token_ids: List of sample token ids
           detokenize: Logprob.decoded_token is computed if True, otherwise None
         
         Returns:
-          Sample logprobs, Pythonized and possibly detokenized
+          Sample logprobs compute in this step, Pythonized and possibly
+          detokenized
         """
         new_pythonized_logprobs = []
         max_logprobs = self.max_request_sample_logprobs
@@ -190,7 +219,7 @@ class IncrementalDetokenizer:
             logprob_cnt = max_logprobs
             if token_id not in logprob_token_ids[0:logprob_cnt]:
                 # Sampled token is not in the in the top logprobs;
-                # inject it & resort, ensuring that excess logprobs
+                # inject it & re-sort, ensuring that excess logprobs
                 # not requested by the user have -inf probability
                 logprob_values[max_logprobs:-1] = float('-inf')
                 # Get indices that would sort logprob_values in descending order
@@ -202,6 +231,7 @@ class IncrementalDetokenizer:
                 # There will be one more logprob than the user requested
                 logprob_cnt = max_logprobs + 1
 
+            # Pythonize top logprobs
             new_pythonized_logprobs_dict = self._pythonize_sequence_position(
                 logprob_values[0:logprob_cnt],
                 logprob_token_ids[0:logprob_cnt], detokenize)
@@ -218,13 +248,33 @@ class IncrementalDetokenizer:
         prompt_logprob_token_ids: Optional[npt.NDArray],
         detokenize: bool,
     ) -> PromptLogprobs:
-        # Construct prompt logprobs, under the condition that
-        # prompt logprobs were requested & a nonzero number of
-        # prompt tokens were computed in this step for this request.
-        #
-        # Note that this scenario returns an EngineCoreOutput which
-        # is empty except for the prompt logprobs which were
-        # computed for these prompt tokens.
+        """Pythonize prompt logprobs, maybe detokenize.
+        
+        Only Pythonizes prompt logprobs computed in the current
+        step. Has the side effect of updating the incremental detokenizer
+        state by appending the new prompt logprobs to the list of what
+        was computed for previous prompt chunks. Forces the first prompt
+        logprob associated with the request to be `None`.
+
+        Pythonization entails the conversion from a numpy (np)
+        values/token ids representation to the more idiomatically
+        Pythonic representation required by the OpenAI API,
+        List[Dict[int,Logprob]]
+
+        The Logprob.decoded_token field is only computed (detokenized
+        from the associated top token id) if detokenize=True
+
+        Args:
+          prompt_logprob_values: num_chunk_tokens x num_prompt_logprobs np array
+                                 of top token log probabilities
+          prompt_logprob_token_ids: num_chunk_tokens x num_prompt_logprobs np
+                                    array of top token ids
+          detokenize: Logprob.decoded_token is computed if True, otherwise None
+        
+        Returns:
+          Prompt logprobs compute in this step, Pythonized and possibly
+          detokenized
+        """
         logprob_cnt = self.max_request_prompt_logprobs
         prompt_logprobs = [
             self._pythonize_sequence_position(plp_tok_values,
@@ -234,13 +284,10 @@ class IncrementalDetokenizer:
                 prompt_logprob_values[:, 0:logprob_cnt],
                 prompt_logprob_token_ids[:, 0:logprob_cnt])
         ]
-
         if not self.request_prompt_logprobs:
             # Ensure that None is the first prompt logprob
             prompt_logprobs = [None] + prompt_logprobs
-
         self.request_prompt_logprobs.extend(prompt_logprobs)
-
         return prompt_logprobs
 
     def add_tokens(
@@ -252,31 +299,51 @@ class IncrementalDetokenizer:
         finish_reason: Optional[str],
         stop_reason: Optional[str],
     ) -> Optional[RequestOutput]:
-        """
-        Update RequestState for the request_id by:
-            1) If necessary, detokenize logprobs *non*-incrementally
-            2) If necessary, detokenize prompt logprobs *non*-incrementally
-            3) Detokenize the new token ids incrementally.
-            4) Update the RequestOutput with the new text.
+        """Update RequestState for the request_id.
+
+        1) If necessary, detokenize sample logprobs *non*-incrementally
+        2) If necessary, detokenize prompt logprobs *non*-incrementally
+        3) Detokenize the new token ids incrementally.
+        4) Evaluate stop criteria
+        5) Update the `RequestOutput` object with new text
+
+        Args:
+          new_token_ids: list of newly-sampled token ids
+          new_logprobs: list of (logprobs,token ids) top logprobs
+                        tuples for sampled tokens
+          new_prompt_logprobs: num_chunk_tokens x num_prompt_logprobs np array
+                               of prompt logprobs values
+          new_prompt_logprob_token_ids: num_chunk_tokens x num_prompt_logprobs
+                                        np array of top token ids
+          finish_reason: string representation of the reason request
+                         detokenization completed
+          stop_reason: reason that detokenization stopped
+
+        Returns:
+          Returns request output instance, except i.e. when the request
+          is configured to only return a result on the final decode step
+          which has not occurred yet.
         """
 
+        # Only try to Pythonize sample logprobs if any were provided
         do_request_sample_logprobs = new_logprobs is not None and len(
             new_logprobs) > 0
         assert not do_request_sample_logprobs or len(new_logprobs) == len(
             new_token_ids)
+        # Only try to Pythonize prompt logprobs if any were provided
         do_request_prompt_logprobs = new_prompt_logprobs is not None and len(
             new_prompt_logprobs) > 0
         assert (not do_request_prompt_logprobs
                 or new_prompt_logprob_token_ids is not None)
 
-        # 1) If required, Pythonize & detokenize sample logprobs
         if do_request_sample_logprobs:
+            # 1) Pythonize & detokenize sample logprobs
             new_logprobs = (
                 self._pythonize_maybe_detokenize_sample_logprobs_for_request(
                     new_logprobs, new_token_ids, detokenize=True))
 
-        # 2) If necessary, detokenize prompt logprobs incrementally
         if do_request_prompt_logprobs:
+            # 2) If necessary, detokenize prompt logprobs incrementally
             new_prompt_logprobs = (
                 self._pythonize_maybe_detokenize_prompt_logprobs_for_request(
                     new_prompt_logprobs,
@@ -309,8 +376,8 @@ class IncrementalDetokenizer:
 
             decoded_text += new_decoded_token_text
 
-        # 2) Evaluate stop criteria.
         if self.stop:
+            # 4) Evaluate stop criteria.
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(decoded_text),
@@ -325,7 +392,7 @@ class IncrementalDetokenizer:
 
         # TODO: handle stop_token_ids here too?
 
-        # 3) Update the RequestOutput object with the new text.
+        # 5) Update the RequestOutput object with the new text.
         finished = bool(finish_reason)
         if self.output_kind == RequestOutputKind.FINAL_ONLY \
             and not finished:
@@ -333,6 +400,10 @@ class IncrementalDetokenizer:
 
         delta = self.output_kind == RequestOutputKind.DELTA
         output_text = self._get_next_output_text(finished, delta)
+        # DELTA -> new sampled tokens and logprobs + current cumulative prompt
+        #          logprob
+        # FINAL -> all sampled tokens and logprobs + current cumulative prompt
+        #          logprob
         token_ids = new_token_ids if delta else self.output_token_ids
         logprobs = new_logprobs if delta else self.request_logprobs
         prompt_logprobs = (new_prompt_logprobs
@@ -376,6 +447,7 @@ class IncrementalDetokenizer:
 
 
 class Detokenizer:
+    """Track and implement detokenization of multiple requests"""
 
     def __init__(self,
                  tokenizer_name: str,
