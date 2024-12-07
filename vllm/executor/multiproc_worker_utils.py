@@ -16,7 +16,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
-from vllm.utils import cuda_is_initialized, get_vllm_instance_id
+from vllm.utils import cuda_is_initialized
 
 if HAS_TRITON:
     from vllm.triton_utils import maybe_set_triton_cache_manager
@@ -290,9 +290,6 @@ def set_multiprocessing_worker_envs(parallel_config):
                        "the `spawn` multiprocessing start method. Setting "
                        "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.")
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-    # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
-    os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
 
     # Configure thread parallelism if OMP_NUM_THREADS isn't set
     #
