@@ -369,9 +369,7 @@ struct cutlass_3x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
 
-  using ElementAcc =
-      typename std::conditional<std::is_same_v<ElementAB, int8_t>, AccType,
-                                AccType>::type;
+  using ElementAcc = AccType;
 
   using EpilogueDescriptor =
       cutlass::epilogue::collective::detail::EpilogueDescriptor<
@@ -386,12 +384,16 @@ struct cutlass_3x_gemm {
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
+  static constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentCD  = 128 / cutlass::sizeof_bits<ElementD>::value;
+
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAcc, float, ElementC, StrideC, 4, ElementD, StrideD, 4,
-          EpilogueSchedule, EVTCompute>::CollectiveOp;
+          ElementAcc, float, ElementC, StrideC, AlignmentCD, ElementD,
+          StrideD, AlignmentCD, EpilogueSchedule, EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
@@ -402,8 +404,8 @@ struct cutlass_3x_gemm {
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, 
-          ElementAB, cutlass::layout::RowMajor, 16, 
-          ElementAB, cutlass::layout::ColumnMajor, 16, 
+          ElementAB, cutlass::layout::RowMajor, AlignmentA, 
+          ElementAB, cutlass::layout::ColumnMajor, AlignmentB, 
           ElementAcc, TileShape, ClusterShape,
           Stages,
           KernelSchedule>::CollectiveOp;
@@ -425,7 +427,7 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 
   int32_t m = a.size(0);
   int32_t n = b.size(1);
-  int32_t k = a.size(1);
+  int32_t k = b.size(0);
 
   int64_t lda = a.stride(0);
   int64_t ldb = b.stride(1);
