@@ -680,26 +680,30 @@ class ModelConfig:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
 
-    def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+    def get_layers_start_end_indices(
+            self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
         pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
+        return start, end
+
+    def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+        start, end = self.get_layers_start_end_indices(parallel_config)
         return end - start
 
-    def get_num_attention_layers(self,
-                                 parallel_config: "ParallelConfig") -> int:
-        if self.is_attention_free:
-            return 0
-
-        num_layers = self.get_num_layers(parallel_config)
+    def get_num_layers_by_block_type(self,
+                                     parallel_config: "ParallelConfig",
+                                     block_type="attention") -> int:
+        start, end = self.get_layers_start_end_indices(parallel_config)
 
         # Transformers supports layers_block_type @property
-        layers = getattr(self.hf_config, "layers_block_type",
-                         ["attention"] * num_layers)
-        return len([t for t in layers if t == "attention"])
+        layers_block_type = getattr(self.hf_config, "layers_block_type",
+                                    ["attention"] * (end - start))
+        return len(
+            [t for t in layers_block_type[start:end] if t == block_type])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
