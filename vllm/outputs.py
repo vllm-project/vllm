@@ -127,24 +127,37 @@ class RequestOutput:
         prompt_token_ids: Optional[List[int]],
         text: str,
         token_ids: List[int],
+        logprobs: Optional[SampleLogprobs],
+        prompt_logprobs: Optional[PromptLogprobs],
+        cumulative_logprob: Optional[float],
         finished: bool = False,
     ) -> "RequestOutput":
-        """Initialize a new RequestOutput object."""
+        """Initialize a new RequestOutput object.
+        
+        Args:
+          request_id
+          prompt: optional single prompt string
+          prompt_token_ids: optional list of prompt tokens
+          text: completion text
+          token_ids: completion token ids
+          logprobs: completion sample logprobs
+          prompt_logprobs: prompt logprobs
+          finished: whether the request is finished
+        """
 
         # TODO: Support `n` > 1.
         completion_output = CompletionOutput(
             index=0,
             text=text,
             token_ids=token_ids,
-            cumulative_logprob=None,
-            logprobs=None,  # TODO
-        )
+            cumulative_logprob=cumulative_logprob,
+            logprobs=logprobs)
 
         return RequestOutput(
             request_id=request_id,
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=None,  # TODO
+            prompt_logprobs=prompt_logprobs,
             outputs=[completion_output],
             finished=finished,
         )
@@ -192,7 +205,7 @@ class RequestOutput:
         # NOTE: We need omit logprobs here explicitly because the sequence
         # always has the logprobs of the sampled tokens even if the
         # logprobs are not requested.
-        include_logprobs = sampling_params.logprobs is not None
+        include_logprobs = sampling_params.request_sample_logprobs is not None
         text_buffer_length = sampling_params.output_text_buffer_length
         delta = sampling_params.output_kind == RequestOutputKind.DELTA
 

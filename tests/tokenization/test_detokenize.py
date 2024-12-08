@@ -201,7 +201,7 @@ def test_decode_sequence_logprobs(complete_sequence: str,
                                   skip_special_tokens: bool):
     """Verify Detokenizer decodes logprobs correctly."""
     sampling_params = SamplingParams(skip_special_tokens=skip_special_tokens,
-                                     logprobs=2)
+                                     request_sample_logprobs=2)
 
     # Run sequentially.
     seq = create_sequence()
@@ -234,7 +234,7 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: List[int],
                                 detokenizer: Detokenizer):
     """Verify Detokenizer decodes prompt logprobs correctly."""
     sampling_params = SamplingParams(skip_special_tokens=True,
-                                     prompt_logprobs=1)
+                                     request_prompt_logprobs=1)
 
     # Run sequentially.
     seq = create_sequence(complete_sequence_token_ids)
@@ -294,8 +294,8 @@ def test_decode_prompt_logprobs_chunked_prefill(
                      max_num_seqs=max_num_seqs) as vllm_model:
 
         vllm_sampling_params = SamplingParams(max_tokens=10,
-                                              logprobs=5,
-                                              prompt_logprobs=5,
+                                              request_sample_logprobs=5,
+                                              request_prompt_logprobs=5,
                                               temperature=0.0)
         vllm_results = vllm_model.model.generate(
             example_prompts, sampling_params=vllm_sampling_params)

@@ -25,17 +25,18 @@ def test_ranks(
             temperature=0.0,
             top_p=1.0,
             max_tokens=max_tokens,
-            logprobs=num_top_logprobs,
-            prompt_logprobs=num_prompt_logprobs)
+            request_sample_logprobs=num_top_logprobs,
+            request_prompt_logprobs=num_prompt_logprobs)
         vllm_results = vllm_model.generate_w_logprobs(example_prompts,
                                                       vllm_sampling_params)
 
         ## Test non-greedy logprobs ranks
-        sampling_params = SamplingParams(temperature=1.0,
-                                         top_p=1.0,
-                                         max_tokens=max_tokens,
-                                         logprobs=num_top_logprobs,
-                                         prompt_logprobs=num_prompt_logprobs)
+        sampling_params = SamplingParams(
+            temperature=1.0,
+            top_p=1.0,
+            max_tokens=max_tokens,
+            request_sample_logprobs=num_top_logprobs,
+            request_prompt_logprobs=num_prompt_logprobs)
         res = vllm_model.generate_w_logprobs(example_prompts, sampling_params)
 
     for result in vllm_results:

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+import numpy.typing as npt
 import torch
 
 
@@ -11,13 +12,14 @@ class SamplerOutput:
     sampled_token_ids: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: Optional[torch.Tensor]
+    batch_sample_logprob_token_ids: Optional[torch.Tensor] = None
     # [num_reqs, max_num_logprobs + 1]
-    logprobs: Optional[torch.Tensor]
+    batch_sample_logprobs: Optional[torch.Tensor] = None
 
-    # TODO: Support prompt logprobs.
-    prompt_logprob_token_ids: Optional[torch.Tensor]
-    prompt_logprobs: Optional[torch.Tensor]
+    # [num_prompt_tokens, max_num_prompt_logprobs + 1]
+    batch_prompt_logprobs: Optional[torch.Tensor] = None
+    # [num_prompt_tokens, max_num_prompt_logprobs + 1]
+    batch_prompt_logprob_token_ids: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -32,6 +34,11 @@ class ModelRunnerOutput:
     sampled_token_ids_cpu: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids_cpu: Optional[torch.Tensor]
+    batch_logprob_token_ids_cpu: Optional[npt.NDArray]
     # [num_reqs, max_num_logprobs + 1]
-    logprobs_cpu: Optional[torch.Tensor]
+    batch_logprobs_cpu: Optional[npt.NDArray]
+
+    # [num_reqs, max_num_prompt_logprobs]
+    batch_prompt_logprob_token_ids_cpu: Optional[npt.NDArray]
+    # [num_reqs, max_num_prompt_logprobs]
+    batch_prompt_logprobs_cpu: Optional[npt.NDArray]
