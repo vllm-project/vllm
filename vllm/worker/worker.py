@@ -75,7 +75,7 @@ class Worker(LocalOrDistributedWorkerBase):
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_config.task == "embedding":
+        if model_config.runner_type == "pooling":
             ModelRunnerClass = PoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
