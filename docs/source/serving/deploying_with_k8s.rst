@@ -162,7 +162,7 @@ To test the deployment, run the following ``curl`` command:
     curl http://mistral-7b.default.svc.cluster.local/v1/completions \
       -H "Content-Type: application/json" \
       -d '{
-            "model": "facebook/opt-125m",
+            "model": "mistralai/Mistral-7B-Instruct-v0.3",
             "prompt": "San Francisco is a",
             "max_tokens": 7,
             "temperature": 0
