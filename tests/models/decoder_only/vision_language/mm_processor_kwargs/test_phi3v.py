@@ -57,19 +57,20 @@ def test_max_tokens_override(get_max_phi3v_image_tokens, model: str,
 
 
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("num_crops,expected_toks_per_img,num_imgs", [
-    (4, 757, 1),
-    (4, 757, 2),
-    (16, 1921, 1),
-    (16, 1921, 2),
-    # the default num_crops of phi-3.5-vision is 4
-    (None, 757, 2),
-    (None, 757, 2),
-])
-def test_processor_override(processor_for_phi3v,
-                                  image_assets: _ImageAssets, model: str,
-                                  num_crops: int, expected_toks_per_img: int,
-                                  num_imgs: int):
+@pytest.mark.parametrize(
+    "num_crops,expected_toks_per_img,num_imgs",
+    [
+        (4, 757, 1),
+        (4, 757, 2),
+        (16, 1921, 1),
+        (16, 1921, 2),
+        # the default num_crops of phi-3.5-vision is 4
+        (None, 757, 2),
+        (None, 757, 2),
+    ])
+def test_processor_override(processor_for_phi3v, image_assets: _ImageAssets,
+                            model: str, num_crops: Optional[int],
+                            expected_toks_per_img: int, num_imgs: int):
     """Ensure input_processor_for_phi3v handles num_crops properly."""
     # Same as the previous test - don't initialize mm_processor_kwargs
     # in this test and assume that the kwargs will be correctly expanded by
@@ -91,8 +92,8 @@ def test_processor_override(processor_for_phi3v,
     if num_crops is not None:
         mm_processor_kwargs = {"num_crops": num_crops}
 
-    proccessor = processor_for_phi3v(ctx)
-    processed_inputs = proccessor.apply(prompt, mm_data, mm_processor_kwargs)
+    processor = processor_for_phi3v(ctx)
+    processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
 
     # Ensure we have the right number of placeholders per num_crops size
     img_tok_count = processed_inputs["prompt_token_ids"].count(_IMAGE_TOKEN_ID)
