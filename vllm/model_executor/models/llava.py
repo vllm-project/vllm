@@ -591,7 +591,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
 class MantisProcessor(LlavaProcessor):
 
-    def _get_hf_processor(self) -> ProcessorMixin:
+    def _get_hf_processor(
+            self, mm_processor_kwargs: Mapping[str, object]) -> ProcessorMixin:
         try:
             from mantis.models.mllava import MLlavaProcessor
         except ModuleNotFoundError as exc:
