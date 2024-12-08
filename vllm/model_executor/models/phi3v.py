@@ -33,11 +33,12 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
-from vllm.multimodal.processing import (InputProcessingContext,
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        InputProcessingContext,
                                         ModalityProcessingMetadata,
                                         MultiModalDataDict,
                                         MultiModalProcessingMetadata,
-                                        BaseMultiModalProcessor, PromptReplacement)
+                                        PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
