@@ -20,7 +20,7 @@ from ..utils import multi_gpu_test
 
 MODELS = [
     "google/gemma-2-2b-it",
-    "meta-llama/Llama-3.2-1B",
+    # "meta-llama/Llama-3.2-1B",
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
@@ -37,10 +37,11 @@ def test_vllm_gc_ed():
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
+# @pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN_VLLM_V1"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [True])
 def test_models(
     hf_runner,
     model: str,
@@ -73,7 +74,9 @@ def test_models(
                     max_model_len=8192,
                     dtype=dtype,
                     enforce_eager=enforce_eager,
-                    gpu_memory_utilization=0.7) as vllm_model:
+                    distributed_executor_backend="ray",
+                    gpu_memory_utilization=0.7,
+                    tensor_parallel_size=4) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(

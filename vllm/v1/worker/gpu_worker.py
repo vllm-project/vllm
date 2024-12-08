@@ -56,7 +56,6 @@ class Worker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = GPUModelRunner(vllm_config)
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -93,6 +92,7 @@ class Worker:
             gc.collect()
             torch.cuda.empty_cache()
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
