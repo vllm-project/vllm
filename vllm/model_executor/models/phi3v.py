@@ -18,7 +18,8 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, CLIPVisionConfig, PretrainedConfig
+from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
+                          ProcessorMixin)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -362,6 +363,13 @@ class Phi3VProcessor(BaseMultiModalProcessor):
             ctx=ctx,
             metadata=create_metadata_for_phi3v(ctx),
         )
+
+    def _get_hf_processor(
+            self, mm_processor_kwargs: Mapping[str, object]) -> ProcessorMixin:
+        num_crops = mm_processor_kwargs.get("num_crops", None)
+        if num_crops is not None:
+            return self.ctx.get_hf_processor(num_crops=num_crops)
+        return self.ctx.get_hf_processor()
 
     def _apply_hf_processor(
         self,
