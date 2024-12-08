@@ -2177,8 +2177,8 @@ class CompilationConfig(BaseModel):
             TODO: move outside cudagraph logic into compilation.
             torch.compile will handle cudagraph capture logic in the future.
         - cudagraph_capture_sizes: sizes to capture cudagraph.
-            - None: capture sizes are inferred from compilation context.
-            - List[int]: capture sizes are specified.
+            - None (default): capture sizes are inferred from vllm config.
+            - List[int]: capture sizes are specified as given.
         - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
             It means the first several runs will be treated as warmup runs.
             Only after that, the execution will be recorded, and the recorded
