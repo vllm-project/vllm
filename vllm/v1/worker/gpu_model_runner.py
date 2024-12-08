@@ -69,7 +69,7 @@ class GPUModelRunner:
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
 
         # Model-related.
-        self.num_attn_layers = model_config.get_num_attention_layers(
+        self.num_attn_layers = model_config.get_num_layers_by_block_type(
             parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
