@@ -1,6 +1,5 @@
 import pytest
 import torch
-from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
@@ -9,7 +8,8 @@ from vllm.compilation.reshapes import RedundantReshapesPass
 from vllm.config import CompilationConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear)
+    apply_fp8_linear, cutlass_fp8_supported)
+from vllm.utils import FP8_DTYPE
 
 from .backend import TestBackend
 
@@ -24,16 +24,25 @@ class TestModel(torch.nn.Module):
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             for _ in range(2)
         ]
+        self.cutlass_fp8_supported = cutlass_fp8_supported()
 
     def forward(self, x):
         resid = torch.relu(x)
         y = self.norm[0](x)
 
-        x2 = apply_fp8_linear(y, self.w[0], self.scale[0], self.scale[1])
+        x2 = apply_fp8_linear(y,
+                              self.w[0],
+                              self.scale[0],
+                              self.scale[1],
+                              cutlass_fp8_supported=self.cutlass_fp8_supported)
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = apply_fp8_linear(y2, self.w[1], self.scale[2], self.scale[3])
+        x3 = apply_fp8_linear(y2,
+                              self.w[1],
+                              self.scale[2],
+                              self.scale[3],
+                              cutlass_fp8_supported=self.cutlass_fp8_supported)
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
@@ -42,8 +51,8 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [64, 3392, 4096])
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
-                    reason="Only test on CUDA")
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
+                    reason="Only test on CUDA and Rocm")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
     torch.set_default_device("cuda")
     torch.set_default_dtype(torch.float16)
