@@ -367,14 +367,23 @@ class CompressedTensorsConfig(QuantizationConfig):
         # so we do not have to re-write these functions
         # need to make accelerate optional in ct to do this
 
-        matched_target = find_matched_target(
-            layer_name=layer_name,
-            module=layer,
-            targets=self.target_scheme_map.keys())
+        # Will be empty for models with only sparsity
+        if self.target_scheme_map:
+            matched_target = find_matched_target(
+                layer_name=layer_name,
+                module=layer,
+                targets=self.target_scheme_map.keys())
 
-        scheme_dict = self.target_scheme_map[matched_target]
-        weight_quant = scheme_dict.get("weights")
-        input_quant = scheme_dict.get("input_activations")
+            scheme_dict = self.target_scheme_map[matched_target]
+            weight_quant = scheme_dict.get("weights")
+            input_quant = scheme_dict.get("input_activations")
+        elif self.sparsity_scheme_map:
+            matched_target = find_matched_target(
+                layer_name=layer_name,
+                module=layer,
+                targets=self.sparsity_scheme_map.keys())
+            weight_quant = None
+            input_quant = None
 
         sparsity_scheme: Optional[
             SparsityCompressionConfig] = self.sparsity_scheme_map.get(
