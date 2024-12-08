@@ -350,6 +350,11 @@ Text Embedding
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
     - 
     - ✅︎
+  * - :code:`GritLM`
+    - GritLM
+    - :code:`parasail-ai/GritLM-7B-vllm`.
+    - 
+    -
   * - :code:`LlamaModel`, :code:`LlamaForCausalLM`, :code:`MistralModel`, etc.
     - Llama-based
     - :code:`intfloat/e5-mistral-7b-instruct`, etc.
