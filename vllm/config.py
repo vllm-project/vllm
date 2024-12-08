@@ -2274,6 +2274,7 @@ class CompilationConfig(BaseModel):
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
+    max_capture_size: int = PrivateAttr
     bs_to_padded_graph_size: Dict[int, int] = PrivateAttr
 
     # keep track of enabled and disabled custom ops
@@ -2379,6 +2380,8 @@ class CompilationConfig(BaseModel):
             for bs in range(start, end):
                 self.bs_to_padded_graph_size[bs] = end
 
+        self.max_capture_size = self.capture_sizes[0]
+
 
 """
 cudagraph batchsize padding logic:
@@ -2448,9 +2451,9 @@ class VllmConfig:
         """Returns the padded batch size given actual batch size,
         considering the model's configuration.
         """
-        if batch_size in self.compilation_config.bs_to_padded_graph_size:
-            return self.compilation_config.bs_to_padded_graph_size[batch_size]
-        return self.compilation_config.capture_sizes[0]
+        if batch_size > self.compilation_config.max_capture_size:
+            return self.compilation_config.max_capture_size
+        return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
     @staticmethod
     def static_pad_for_cudagraph(batch_size: int) -> int:
