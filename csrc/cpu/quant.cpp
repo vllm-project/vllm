@@ -3,37 +3,30 @@
 
 namespace {
 template <typename scalar_t>
-struct KernelVecType {
-  using load_vec_type = void;
-  using azp_adj_load_vec_type = void;
-  using cvt_vec_type = void;
-};
+struct KernelVecType;
 
 template <>
 struct KernelVecType<float> {
-  using load_vec_type = vec_op::FP32Vec16;
-  using azp_adj_load_vec_type = vec_op::INT32Vec16;
-  using cvt_vec_type = vec_op::FP32Vec16;
+  using load_vec_type = vec_op::QuantVecTypeISA<float>::load_vec_type;
+  using azp_adj_load_vec_type =
+      vec_op::QuantVecTypeISA<float>::azp_adj_load_vec_type;
+  using cvt_vec_type = vec_op::QuantVecTypeISA<float>::cvt_vec_type;
 };
 
 template <>
 struct KernelVecType<c10::BFloat16> {
-  using load_vec_type = vec_op::BF16Vec16;
-  using azp_adj_load_vec_type = vec_op::INT32Vec16;
-  using cvt_vec_type = vec_op::FP32Vec16;
+  using load_vec_type = vec_op::QuantVecTypeISA<c10::BFloat16>::load_vec_type;
+  using azp_adj_load_vec_type =
+      vec_op::QuantVecTypeISA<c10::BFloat16>::azp_adj_load_vec_type;
+  using cvt_vec_type = vec_op::QuantVecTypeISA<c10::BFloat16>::cvt_vec_type;
 };
 
 template <>
 struct KernelVecType<c10::Half> {
-#ifdef __powerpc64__
-  // Power architecture-specific vector type
-  using load_vec_type = vec_op::FP32Vec16;
-#else
-  // Fallback for other architectures
-  using load_vec_type = vec_op::FP16Vec16;
-#endif
-  using azp_adj_load_vec_type = vec_op::INT32Vec16;
-  using cvt_vec_type = vec_op::FP32Vec16;
+  using load_vec_type = vec_op::QuantVecTypeISA<c10::Half>::load_vec_type;
+  using azp_adj_load_vec_type =
+      vec_op::QuantVecTypeISA<c10::Half>::azp_adj_load_vec_type;
+  using cvt_vec_type = vec_op::QuantVecTypeISA<c10::Half>::cvt_vec_type;
 };
 
 #ifdef __AVX512F__
