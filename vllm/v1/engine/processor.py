@@ -45,7 +45,7 @@ class Processor:
         self.mm_input_mapper = MMInputMapper(model_config)
 
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
-    # This ideally should releases the GIL, so we should not block the
+    # This ideally should release the GIL, so we should not block the
     # asyncio loop while this is running.
     def process_inputs(
         self,
@@ -122,6 +122,7 @@ class Processor:
             sampling_params.output_kind,
             sampling_params.stop,
             sampling_params.include_stop_str_in_output,
+            lora_request,
         )
 
         # Make Request for EngineCore.
