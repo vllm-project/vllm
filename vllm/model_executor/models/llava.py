@@ -188,7 +188,8 @@ class LlavaProcessor(BaseMultiModalProcessor):
 
         hf_processor.__is_patched__ = True  # type: ignore
 
-    def _get_hf_processor(self) -> ProcessorMixin:
+    def _get_hf_processor(
+            self, mm_processor_kwargs: Mapping[str, object]) -> ProcessorMixin:
         hf_processor = self.ctx.get_hf_processor()
 
         if isinstance(hf_processor, PixtralProcessor):
