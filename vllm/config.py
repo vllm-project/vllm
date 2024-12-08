@@ -2191,14 +2191,10 @@ class CompilationConfig(BaseModel):
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
             - True: inductor compilation is used. one graph for symbolic shape
-                is compiled. In addition, compile for different sizes specified
-                in inductor_compile_sizes, using configurations
+                is compiled. In addition, compile for cudagraph sizes that are
+                in candidate_compile_sizes, using configurations
                 in inductor_compile_config.
-        - inductor_compile_sizes: sizes to compile for inductor.
-        - inductor_specialize_for_cudagraph_no_more_than: an optional integer
-            to specialize inductor for cudagraph sizes no more than the
-            specified size. It is useful when we want to specialize inductor
-            with a subset of cudagraph sizes.
+        - candidate_compile_sizes: sizes to compile for inductor.
         - inductor_compile_config: additional configurations for inductor.
             - None: use default configurations.
         - inductor_passes: additional passes for inductor. It is a dictionary
@@ -2227,8 +2223,7 @@ class CompilationConfig(BaseModel):
     ])
 
     use_inductor: bool = True
-    inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
-    inductor_compile_sizes: Optional[List[int]] = Field(default=None)
+    candidate_compile_sizes: Optional[List[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2355,18 +2350,12 @@ class CompilationConfig(BaseModel):
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
                         sizes_to_specialize, self.cudagraph_capture_sizes)
-        if self.inductor_specialize_for_cudagraph_no_more_than is not None:
-            assert self.inductor_compile_sizes is None, (
-                "inductor_compile_sizes should be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is not None")
-            self.compile_sizes = [
-                x for x in self.capture_sizes
-                if x <= self.inductor_specialize_for_cudagraph_no_more_than
-            ]
-        else:
-            if self.inductor_compile_sizes is None:
-                self.inductor_compile_sizes = []
-            self.compile_sizes = self.inductor_compile_sizes
+
+        if self.candidate_compile_sizes is None:
+            self.candidate_compile_sizes = []
+        self.compile_sizes = [
+            x for x in self.candidate_compile_sizes if x in self.capture_sizes
+        ]
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
