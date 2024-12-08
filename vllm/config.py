@@ -2358,6 +2358,14 @@ class CompilationConfig(BaseModel):
         self.compile_sizes = [
             x for x in self.candidate_compile_sizes if x in self.capture_sizes
         ]
+        ignored_sizes = [
+            x for x in self.candidate_compile_sizes
+            if x not in self.capture_sizes
+        ]
+        if ignored_sizes:
+            logger.warning(("candidate_compile_sizes %s are ignored "
+                            "because they are not cudagraph capture sizes."),
+                           ignored_sizes)
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
