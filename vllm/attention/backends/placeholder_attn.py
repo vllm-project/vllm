@@ -114,6 +114,10 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
     _cached_prefill_metadata: Optional["PlaceholderAttentionMetadata"] = None
     _cached_decode_metadata: Optional["PlaceholderAttentionMetadata"] = None
 
+    def advance_step(self, *args, **kwargs):
+        # No need to do anything here
+        pass
+
     @property
     def prefill_metadata(self) -> Optional["PlaceholderAttentionMetadata"]:
         if self.num_prefills == 0:
