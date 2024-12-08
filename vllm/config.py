@@ -1,3 +1,4 @@
+import ast
 import copy
 import enum
 import hashlib
@@ -2289,7 +2290,8 @@ class CompilationConfig(BaseModel):
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
-        return CompilationConfig.model_validate_json(cli_value)
+        dict_value = ast.literal_eval(cli_value)
+        return CompilationConfig.model_validate(dict_value)
 
     def model_post_init(self, __context: Any) -> None:
 
