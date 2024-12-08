@@ -58,10 +58,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import (MultiModalData, MultiModalDataDict,
-                                    MultiModalKwargs, NestedTensors,
-                                    PlaceholderRange)
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges)
+                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.config import uses_mrope
@@ -69,8 +67,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -793,7 +790,6 @@ def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
         _get_max_image_info(image_processor, data_type_key=data_type_key,
                             mm_count=1, min_pixels=min_pixels,
                             max_pixels=max_pixels)
-
     return max_llm_image_tokens
 
 
@@ -850,18 +846,11 @@ def dummy_data_for_qwen2_vl(
 
     dummy_image = Image.new("RGB", (max_resized_width, max_resized_height),
                             color=0)
-    dummy_multimodal_data = {
-        "image": dummy_image if num_images == 1 else [dummy_image] * num_images
-    }
-    size_per_image = max_llm_image_tokens // num_images
-    dummy_mm_placeholders = {
+
+    return DummyData(dummy_seqdata, {
         "image":
-        consecutive_placeholder_ranges(num_items=num_images,
-                                       item_size=size_per_image,
-                                       initial_offset=1)
-    }
-    return DummyData(dummy_seqdata, dummy_multimodal_data,
-                     dummy_mm_placeholders)
+        dummy_image if num_images == 1 else [dummy_image] * num_images
+    })
 
 
 def _get_llm_num_vision_tokens(
@@ -893,11 +882,10 @@ def _get_llm_num_vision_tokens(
     return llm_num_vision_tokens
 
 
-def _expand_pad_tokens(
-        inputs: list, token_id: int, make_batched_fn: Callable,
-        data_type_key: str, image_processor: Any, prompt_token_ids: List[int],
-        min_pixels: Optional[int],
-        max_pixels: Optional[int]) -> Tuple[List[int], List[PlaceholderRange]]:
+def _expand_pad_tokens(inputs: list, token_id: int, make_batched_fn: Callable,
+                       data_type_key: str, image_processor: Any,
+                       prompt_token_ids: List[int], min_pixels: Optional[int],
+                       max_pixels: Optional[int]) -> List[int]:
     """
     Expand pad tokens for multi-modal inputs (e.g., images or videos).
 
@@ -913,8 +901,6 @@ def _expand_pad_tokens(
 
     Returns:
         List[int]: The list of token IDs for the multi-modal inputs.
-        List[PlaceholderRange]]: The list of PlaceholderRange objects with
-            the positions of the pad token in the prompt token ids.
     """
     indices = [
         idx for idx, token in enumerate(prompt_token_ids) if token == token_id
@@ -923,7 +909,6 @@ def _expand_pad_tokens(
     assert len(indices) == len(inputs)
 
     prompt_token_ids_with_data = []
-    placeholder_ranges = []
     for cnt, data in enumerate(inputs):
         num_tokens = _get_llm_num_vision_tokens(
             [data] if data_type_key == "image" else data,
@@ -939,12 +924,9 @@ def _expand_pad_tokens(
             non_data_tokens = prompt_token_ids[indices[cnt - 1] +
                                                1:indices[cnt]]
         prompt_token_ids_with_data.extend(non_data_tokens)
-        placeholder_ranges.append(
-            PlaceholderRange(offset=len(prompt_token_ids_with_data),
-                             length=num_tokens))
         prompt_token_ids_with_data.extend(token_id for _ in range(num_tokens))
     prompt_token_ids_with_data.extend(prompt_token_ids[indices[-1] + 1:])
-    return prompt_token_ids_with_data, placeholder_ranges
+    return prompt_token_ids_with_data
 
 
 def input_processor_for_qwen2_vl(
@@ -990,7 +972,7 @@ def input_processor_for_qwen2_vl(
     prompt_token_ids = inputs["prompt_token_ids"]
 
     # Expand image pad tokens.
-    multi_modal_placeholders = {}
+
     if image_inputs is not None:
         if isinstance(image_inputs, dict):
             prompt_token_ids_with_image = []
@@ -1006,7 +988,6 @@ def input_processor_for_qwen2_vl(
 
             image_counter = 0
             pad_token_counter = 0
-            placeholder_ranges = []
             for idx, token in enumerate(prompt_token_ids):
                 if idx in image_indices:
                     grid_thw = image_inputs["image_grid_thw"][image_counter]
@@ -1014,10 +995,6 @@ def input_processor_for_qwen2_vl(
                     num_pad_tokens = (grid_t * grid_h * grid_w //
                                       image_processor.merge_size //
                                       image_processor.merge_size)
-                    placeholder_ranges.append(
-                        PlaceholderRange(
-                            offset=len(prompt_token_ids_with_image),
-                            length=num_pad_tokens))
                     prompt_token_ids_with_image.extend([token] *
                                                        num_pad_tokens)
                     image_counter += 1
@@ -1032,17 +1009,14 @@ def input_processor_for_qwen2_vl(
 
             prompt_token_ids = prompt_token_ids_with_image
         else:
-            prompt_token_ids, placeholder_ranges = _expand_pad_tokens(
-                image_inputs,
-                hf_config.image_token_id,
-                make_batched_images,
-                "image",
-                image_processor,
-                prompt_token_ids,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels)
-
-        multi_modal_placeholders["image"] = placeholder_ranges
+            prompt_token_ids = _expand_pad_tokens(image_inputs,
+                                                  hf_config.image_token_id,
+                                                  make_batched_images,
+                                                  "image",
+                                                  image_processor,
+                                                  prompt_token_ids,
+                                                  min_pixels=min_pixels,
+                                                  max_pixels=max_pixels)
 
     if video_inputs is not None:
         if isinstance(video_inputs, dict):
@@ -1059,7 +1033,6 @@ def input_processor_for_qwen2_vl(
 
             video_counter = 0
             pad_token_counter = 0
-            placeholder_ranges = []
             for idx, token in enumerate(prompt_token_ids):
                 if idx in video_indices:
                     grid_thw = video_inputs["video_grid_thw"][video_counter]
@@ -1067,10 +1040,6 @@ def input_processor_for_qwen2_vl(
                     num_pad_tokens = (grid_t * grid_h * grid_w //
                                       image_processor.merge_size //
                                       image_processor.merge_size)
-                    placeholder_ranges.append(
-                        PlaceholderRange(
-                            offset=len(prompt_token_ids_with_image),
-                            length=num_pad_tokens))
                     prompt_token_ids_with_video.extend([token] *
                                                        num_pad_tokens)
                     video_counter += 1
@@ -1085,17 +1054,14 @@ def input_processor_for_qwen2_vl(
 
             prompt_token_ids = prompt_token_ids_with_video
         else:
-            prompt_token_ids, placeholder_ranges = _expand_pad_tokens(
-                video_inputs,
-                hf_config.video_token_id,
-                make_batched_videos,
-                "video",
-                image_processor,
-                prompt_token_ids,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels)
-
-        multi_modal_placeholders["video"] = placeholder_ranges
+            prompt_token_ids = _expand_pad_tokens(video_inputs,
+                                                  hf_config.video_token_id,
+                                                  make_batched_videos,
+                                                  "video",
+                                                  image_processor,
+                                                  prompt_token_ids,
+                                                  min_pixels=min_pixels,
+                                                  max_pixels=max_pixels)
 
     prompt = inputs.get("prompt")
     if prompt is None:
@@ -1105,7 +1071,6 @@ def input_processor_for_qwen2_vl(
         prompt_token_ids=prompt_token_ids,
         prompt=prompt,
         multi_modal_data=multi_modal_data,
-        multi_modal_placeholders=multi_modal_placeholders,
     )
 
 
@@ -1281,14 +1246,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values = image_input["pixel_values"].type(self.visual.dtype)
         image_embeds = self.visual(pixel_values,
                                    grid_thw=image_input["image_grid_thw"])
-
-        # Use grid information to get embedding sizes of each data item
-        merge_size = self.config.vision_config.spatial_merge_size
-        image_grids = [
-            torch.prod(image_grid) // merge_size // merge_size
-            for image_grid in image_input["image_grid_thw"]
-        ]
-        image_embeds = image_embeds.split(image_grids)
         return image_embeds
 
     def _process_video_input(self,
@@ -1300,15 +1257,18 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.visual.dtype)
         video_embeds = self.visual(pixel_values_videos,
                                    grid_thw=video_input["video_grid_thw"])
-
-        # Use grid information to get embedding sizes of each data item
-        merge_size = self.config.vision_config.spatial_merge_size
-        video_grids = [
-            torch.prod(video_grid) // merge_size // merge_size
-            for video_grid in video_input["video_grid_thw"]
-        ]
-        video_embeds = video_embeds.split(video_grids)
         return video_embeds
+
+    def _merge_multimodal_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        multimodal_embeddings: torch.Tensor,
+        placeholder_token_id: int,
+    ) -> torch.Tensor:
+        mask = (input_ids == placeholder_token_id)
+        inputs_embeds[mask, :] = multimodal_embeddings
+        return inputs_embeds
 
     def get_multimodal_embeddings(
             self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
@@ -1318,15 +1278,16 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if image_input is None and video_input is None:
             return None
 
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            return image_embeds
-
-        # We add a modality key along with the Nested tensor as a
-        # temporary solution to differentiate embeddings from modalities
-        # other than `image`.
+        # We make a tuple of each embedding with its modality string. This is a
+        # temporary workaround for models to handle mixed modalities when
+        # get_multimodal_embeddings and get_input_embeddings are called
+        # separately.
         # TODO(ywang96): Add support for mixed-modality inference for v1.
         multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
+
+        if image_input is not None:
+            image_embeds = self._process_image_input(image_input)
+            multimodal_embeddings.append((image_embeds, "image"))
         if video_input is not None:
             video_embeds = self._process_video_input(video_input)
             multimodal_embeddings.append((video_embeds, "video"))
@@ -1341,19 +1302,21 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-
-            # Workaround for checking if this is a list
-            # of (embeddings, "video") tuple.
-            if isinstance(multimodal_embeddings[0], tuple):
-                for embeddings, modality in multimodal_embeddings:
-                    if modality == "video":
-                        inputs_embeds = merge_multimodal_embeddings(
-                            input_ids, inputs_embeds, multimodal_embeddings,
-                            self.config.video_token_id)
-            else:
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, multimodal_embeddings,
-                    self.config.image_token_id)
+            for embeddings, modality in multimodal_embeddings:
+                if modality == "image":
+                    inputs_embeds = self._merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        embeddings,
+                        placeholder_token_id=self.config.image_token_id,
+                    )
+                if modality == "video":
+                    inputs_embeds = self._merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        embeddings,
+                        placeholder_token_id=self.config.video_token_id,
+                    )
         return inputs_embeds
 
     def forward(
