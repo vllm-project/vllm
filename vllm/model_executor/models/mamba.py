@@ -25,7 +25,8 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .utils import (make_empty_intermediate_tensors_factory, make_layers,
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -267,6 +268,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                 name = name.replace("A_log", "A")
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
 
             param = params_dict[name]
