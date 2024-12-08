@@ -10,9 +10,10 @@ from compressed_tensors.quantization import QuantizationType
 
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16, CompressedTensors24)
+    CompressedTensors24, CompressedTensorsLinearMethod,
+    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
+    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA16)
 
 
 @pytest.mark.parametrize(
@@ -232,9 +233,9 @@ def test_compressed_tensors_2of4(vllm_runner, args_2of4):
 
         assert qkv_proj.scheme.weight_quant.strategy == weight_strategy
         assert qkv_proj.scheme.input_quant.strategy == input_strategy
-        assert qkv_proj.scheme.quantized == True
+        assert qkv_proj.scheme.quantized
         assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
-        sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map
+        sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
         assert sparsity_map.get("Linear").format == "dense"
         assert sparsity_map.get("Linear").sparsity_structure == "2:4"
 

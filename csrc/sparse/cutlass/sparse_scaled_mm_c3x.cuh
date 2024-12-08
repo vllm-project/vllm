@@ -47,9 +47,9 @@ template <typename Kernel>
 struct enable_sm90_or_later : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE void operator()(Args&&... args) {
-  #if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
     Kernel::operator()(std::forward<Args>(args)...);
-  #endif
+#endif
   }
 };
 
@@ -364,8 +364,8 @@ struct cutlass_3x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
   using ElementAcc = AccType;
-      // typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
-      //                           float>::type;
+  // typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
+  //                           float>::type;
 
   using EpilogueDescriptor =
       cutlass::epilogue::collective::detail::EpilogueDescriptor<
@@ -380,9 +380,12 @@ struct cutlass_3x_gemm {
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
-  static constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentCD  = 128 / cutlass::sizeof_bits<ElementD>::value;
+  static constexpr int AlignmentA =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentB =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentCD =
+      128 / cutlass::sizeof_bits<ElementD>::value;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
@@ -416,8 +419,8 @@ struct cutlass_3x_gemm {
 
 template <typename Gemm, typename... EpilogueArgs>
 void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
-                         torch::Tensor const& e, torch::Tensor const& b,
-                         EpilogueArgs&&... epilogue_params) {
+                                torch::Tensor const& e, torch::Tensor const& b,
+                                EpilogueArgs&&... epilogue_params) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -453,9 +456,8 @@ void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
   auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
   auto e_ptr = static_cast<ElementE*>(e.data_ptr());
-  typename GemmKernel::MainloopArguments mainloop_args{a_ptr, a_layout,
-                                                       b_ptr, b_stride,
-                                                       e_ptr, e_layout};
+  typename GemmKernel::MainloopArguments mainloop_args{
+      a_ptr, a_layout, b_ptr, b_stride, e_ptr, e_layout};
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
@@ -487,8 +489,7 @@ template <typename InType, typename OutType,
 struct sm90_fp16_config_default {
   // M in (128, inf)
   static_assert(std::is_same<InType, cutlass::half_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedPingpong;
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpong;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
@@ -502,8 +503,7 @@ template <typename InType, typename OutType,
 struct sm90_bf16_config_default {
   // M in (128, inf)
   static_assert(std::is_same<InType, cutlass::bfloat16_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedPingpong;
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpong;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
@@ -517,11 +517,10 @@ template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_1 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_64,_64,_256>;
-  using ClusterShape = Shape<_8,_1,_1>;
+  using TileShape = Shape<_64, _64, _256>;
+  using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -533,9 +532,10 @@ struct sm90_fp8_config_2 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-  using TileShape = Shape<_128,_64,_256>;
-  using ClusterShape = Shape<_8,_1,_1>;
+  using EpilogueSchedule =
+      typename cutlass::epilogue::TmaWarpSpecializedCooperative;
+  using TileShape = Shape<_128, _64, _256>;
+  using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -545,11 +545,10 @@ template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_3 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_64,_64,_256>;
-  using ClusterShape = Shape<_1,_2,_1>;
+  using TileShape = Shape<_64, _64, _256>;
+  using ClusterShape = Shape<_1, _2, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -559,11 +558,11 @@ template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_4 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-  using TileShape = Shape<_64,_128,_256>;
-  using ClusterShape = Shape<_8,_1,_1>;
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
+  using EpilogueSchedule =
+      typename cutlass::epilogue::TmaWarpSpecializedCooperative;
+  using TileShape = Shape<_64, _128, _256>;
+  using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -576,8 +575,8 @@ struct sm90_fp8_config_5 {
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_128,_128,_256>;
-  using ClusterShape = Shape<_8,_1,_1>;
+  using TileShape = Shape<_128, _128, _256>;
+  using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -587,11 +586,10 @@ template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_6 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_64,_128,_256>;
-  using ClusterShape = Shape<_1,_2,_1>;
+  using TileShape = Shape<_64, _128, _256>;
+  using ClusterShape = Shape<_1, _2, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -603,9 +601,10 @@ struct sm90_fp8_config_7 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-  using TileShape = Shape<_128,_128,_256>;
-  using ClusterShape = Shape<_1,_1,_1>;
+  using EpilogueSchedule =
+      typename cutlass::epilogue::TmaWarpSpecializedCooperative;
+  using TileShape = Shape<_128, _128, _256>;
+  using ClusterShape = Shape<_1, _1, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -617,9 +616,10 @@ struct sm90_fp8_config_8 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-  using TileShape = Shape<_128,_256,_128>;
-  using ClusterShape = Shape<_8,_1,_1>;
+  using EpilogueSchedule =
+      typename cutlass::epilogue::TmaWarpSpecializedCooperative;
+  using TileShape = Shape<_128, _256, _128>;
+  using ClusterShape = Shape<_8, _1, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -631,11 +631,10 @@ template <typename InType, typename OutType,
 struct sm90_fp8_config_default {
   // M in (128, inf)
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_128,_128,_128>;
-  using ClusterShape = Shape<_1,_2,_1>;
+  using TileShape = Shape<_128, _128, _128>;
+  using ClusterShape = Shape<_1, _2, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -646,9 +645,9 @@ template <typename InType, typename OutType,
 struct sm90_fp8_config_M64 {
   // M in [1, 64]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
+  using EpilogueSchedule =
+      typename cutlass::epilogue::TmaWarpSpecializedCooperative;
   using TileShape = Shape<_64, _64, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
@@ -656,8 +655,7 @@ struct sm90_fp8_config_M64 {
 
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                      KernelSchedule, EpilogueSchedule, float,
-                      TileSchedule>;
+                      KernelSchedule, EpilogueSchedule, float, TileSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -675,8 +673,7 @@ struct sm90_fp8_config_M128 {
 
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                      KernelSchedule, EpilogueSchedule, float,
-                      TileSchedule>;
+                      KernelSchedule, EpilogueSchedule, float, TileSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -686,7 +683,8 @@ struct sm90_fp8_config_M256 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
+  using EpilogueSchedule =
+      typename cutlass::epilogue::TmaWarpSpecializedCooperative;
   using TileShape = Shape<_128, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
@@ -694,8 +692,7 @@ struct sm90_fp8_config_M256 {
 
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                      KernelSchedule, EpilogueSchedule, float,
-                      TileSchedule>;
+                      KernelSchedule, EpilogueSchedule, float, TileSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -705,7 +702,8 @@ struct sm90_fp8_config_M512 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
+  using EpilogueSchedule =
+      typename cutlass::epilogue::TmaWarpSpecializedCooperative;
   using TileShape = Shape<_128, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
@@ -713,8 +711,7 @@ struct sm90_fp8_config_M512 {
 
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                      KernelSchedule, EpilogueSchedule, float,
-                      TileSchedule>;
+                      KernelSchedule, EpilogueSchedule, float, TileSchedule>;
 };
 
 template <typename InType, typename OutType,

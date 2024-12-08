@@ -5,11 +5,11 @@
 
 #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
 void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
-                            torch::Tensor const& e,
-                            torch::Tensor const& b,
-                            torch::Tensor const& a_scales,
-                            torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias);
+                                   torch::Tensor const& e,
+                                   torch::Tensor const& b,
+                                   torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   c10::optional<torch::Tensor> const& bias);
 #endif
 
 bool cutlass_scaled_sparse_mm_supports_fp8(int64_t cuda_device_capability) {
@@ -39,10 +39,10 @@ int32_t test_get_sm_version_num() {
 }
 
 void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
-                       torch::Tensor const& e,
-                       torch::Tensor const& b, torch::Tensor const& a_scales,
-                       torch::Tensor const& b_scales,
-                       c10::optional<torch::Tensor> const& bias) {
+                              torch::Tensor const& e, torch::Tensor const& b,
+                              torch::Tensor const& a_scales,
+                              torch::Tensor const& b_scales,
+                              c10::optional<torch::Tensor> const& bias) {
   // Checks for conformality
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) * 2 == b.size(0) &&

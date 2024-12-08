@@ -1,10 +1,11 @@
 import dataclasses
-import random
-from typing import Any, Callable, Iterable, Optional, Tuple, Dict, List
-
 import multiprocessing as mp
+import os
+import traceback
 from multiprocessing import Process, Queue
+from pathlib import Path
 from queue import Empty
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -12,13 +13,6 @@ from torch.utils.benchmark import Measurement as TMeasurement
 from utils import make_n_rand_sparse_tensors
 
 import vllm._custom_ops as ops
-import traceback
-
-import json
-import os
-import hashlib
-from datetime import datetime
-from pathlib import Path
 
 
 @dataclasses.dataclass
@@ -224,30 +218,29 @@ class BenchMM:
             print(f"exc traceback {traceback}")
 
 
-def run_single_benchmark_process(kernel_config: Dict, gpu_id: int, queue: Queue):
+def run_single_benchmark_process(kernel_config: Dict, gpu_id: int,
+                                 queue: Queue):
     """
     Run a single kernel benchmark in an isolated process.
     Puts (success, result, config) tuple in the queue.
     """
     try:
         torch.cuda.set_device(gpu_id)
-        
+
         # Initialize CUDA tensors
         m, k, n = kernel_config['m'], kernel_config['k'], kernel_config['n']
         dtype = kernel_config['dtype']
-        
+
         # Create tensors
         BComps, Es, As, Bs = make_n_rand_sparse_tensors(
-            kernel_config.get('arg_pool_size', 1), 
-            dtype, m, n, k
-        )
+            kernel_config.get('arg_pool_size', 1), dtype, m, n, k)
         AsT = [x.t() for x in As]
         bf16_As = [x.to(dtype=torch.bfloat16) for x in As]
         bf16_Bs = [x.to(dtype=torch.bfloat16) for x in Bs]
         scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
         scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
         # Because the transposed output will be computed
-        out = torch.zeros((n, m), dtype=torch.bfloat16, device="cuda")
+        # out = torch.zeros((n, m), dtype=torch.bfloat16, device="cuda")
 
         # Setup benchmark params
         cuda_graph_params = None
@@ -263,41 +256,46 @@ def run_single_benchmark_process(kernel_config: Dict, gpu_id: int, queue: Queue)
 
         if kernel_type == 'pytorch_mm':
             bench = BenchMM(cuda_graph_params, label, sub_label,
-                            "pytorch_bf16_bf16_bf16_matmul-no-scales", 
-                            torch.mm,
-                            ArgPool(bf16_As), ArgPool(bf16_Bs))
+                            "pytorch_bf16_bf16_bf16_matmul-no-scales",
+                            torch.mm, ArgPool(bf16_As), ArgPool(bf16_Bs))
 
         elif kernel_type == 'pytorch_scaled_mm':
-            bench = BenchMM(cuda_graph_params, label, sub_label,
+            bench = BenchMM(cuda_graph_params,
+                            label,
+                            sub_label,
                             "pytorch_fp8_fp8_bf16_scaled_mm",
                             torch._scaled_mm,
-                            ArgPool(As), ArgPool(Bs),
-                            scale_a=scale_a, scale_b=scale_b,
+                            ArgPool(As),
+                            ArgPool(Bs),
+                            scale_a=scale_a,
+                            scale_b=scale_b,
                             out_dtype=torch.bfloat16)
 
         elif kernel_type == 'pytorch_scaled_mm_fast':
-            bench = BenchMM(cuda_graph_params, label, sub_label,
+            bench = BenchMM(cuda_graph_params,
+                            label,
+                            sub_label,
                             "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum",
                             torch._scaled_mm,
-                            ArgPool(As), ArgPool(Bs),
-                            scale_a=scale_a, scale_b=scale_b,
+                            ArgPool(As),
+                            ArgPool(Bs),
+                            scale_a=scale_a,
+                            scale_b=scale_b,
                             out_dtype=torch.bfloat16,
                             use_fast_accum=True)
 
         elif kernel_type == 'cutlass_scaled_mm':
             bench = BenchMM(cuda_graph_params, label, sub_label,
-                            "cutlass_fp8_fp8_bf16_scaled_mm", 
-                            ops.cutlass_scaled_mm,
-                            ArgPool(As), ArgPool(Bs), scale_a, scale_b,
-                            torch.bfloat16)
+                            "cutlass_fp8_fp8_bf16_scaled_mm",
+                            ops.cutlass_scaled_mm, ArgPool(As), ArgPool(Bs),
+                            scale_a, scale_b, torch.bfloat16)
 
         elif kernel_type == 'cutlass_scaled_sparse_mm':
             bench = BenchMM(cuda_graph_params, label, sub_label,
-                            "cutlass_fp8_fp8_bf16_scaled_sparse_mm", 
-                            ops.cutlass_scaled_sparse_mm,
-                            ArgPool(BComps), ArgPool(Es), ArgPool(AsT), 
-                            scale_b, scale_a, torch.bfloat16)
-
+                            "cutlass_fp8_fp8_bf16_scaled_sparse_mm",
+                            ops.cutlass_scaled_sparse_mm, ArgPool(BComps),
+                            ArgPool(Es), ArgPool(AsT), scale_b, scale_a,
+                            torch.bfloat16)
 
         # Run the benchmark
         result = bench.run()
@@ -311,8 +309,11 @@ def run_single_benchmark_process(kernel_config: Dict, gpu_id: int, queue: Queue)
         # Explicit cleanup
         torch.cuda.empty_cache()
 
+
 def benchmark_gpu_worker(gpu_id: int, task_queue: Queue, result_queue: Queue):
-    """Worker process that spawns individual benchmark processes for each kernel."""
+    """
+    Worker process that spawns individual benchmark processes for each kernel.
+    """
     try:
         while True:
             try:
@@ -324,8 +325,8 @@ def benchmark_gpu_worker(gpu_id: int, task_queue: Queue, result_queue: Queue):
                 process_queue = Queue()
 
                 # Create and start a new process for this kernel benchmark
-                p = Process(target=run_single_benchmark_process, 
-                          args=(kernel_config, gpu_id, process_queue))
+                p = Process(target=run_single_benchmark_process,
+                            args=(kernel_config, gpu_id, process_queue))
                 p.start()
 
                 # Wait for result with timeout (5 minutes for benchmarking)
@@ -333,7 +334,8 @@ def benchmark_gpu_worker(gpu_id: int, task_queue: Queue, result_queue: Queue):
                     success, result, config = process_queue.get(timeout=300)
                     result_queue.put((success, result, config))
                 except Empty:
-                    print(f"Kernel {kernel_config.get('kernel_type')} benchmark timed out")
+                    print(f"Kernel {kernel_config.get('kernel_type')} ",
+                          "benchmark timed out")
                     result_queue.put((False, None, kernel_config))
 
                 # Cleanup
@@ -353,7 +355,10 @@ def benchmark_gpu_worker(gpu_id: int, task_queue: Queue, result_queue: Queue):
     finally:
         print(f"GPU {gpu_id} worker finished")
 
-def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasurement], Dict]]:
+
+def run_kernels_on_gpus(
+        configs: List[Dict]
+) -> List[Tuple[bool, Optional[TMeasurement], Dict]]:
     MULTI_GPU_MULTI_PROCESS = False  # Set to False for single GPU testing
     if MULTI_GPU_MULTI_PROCESS:
         gpus_list = [0]
@@ -371,7 +376,8 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
         # Start GPU workers
         workers = []
         for gpu_id in gpus_list:
-            p = Process(target=benchmark_gpu_worker, args=(gpu_id, task_queue, result_queue))
+            p = Process(target=benchmark_gpu_worker,
+                        args=(gpu_id, task_queue, result_queue))
             p.start()
             workers.append(p)
 
@@ -403,24 +409,22 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
         gpu_id = 0  # Using the same GPU as before
         torch.cuda.set_device(gpu_id)
         # configs = configs[:10]  # Keep the original slice
-        
+
         for config in configs:
             try:
                 # Initialize CUDA tensors
                 m, k, n = config['m'], config['k'], config['n']
                 dtype = config['dtype']
-                
+
                 # Create tensors
                 BComps, Es, As, Bs = make_n_rand_sparse_tensors(
-                    config.get('arg_pool_size', 1), 
-                    dtype, m, n, k
-                )
+                    config.get('arg_pool_size', 1), dtype, m, n, k)
                 AsT = [x.t() for x in As]
                 bf16_As = [x.to(dtype=torch.bfloat16) for x in As]
                 bf16_Bs = [x.to(dtype=torch.bfloat16) for x in Bs]
                 scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
                 scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-                out = torch.zeros((n, m), dtype=torch.bfloat16, device="cuda")
+                # out = torch.zeros((n, m), dtype=torch.bfloat16, device="cuda")
 
                 # Setup benchmark params
                 cuda_graph_params = None
@@ -436,49 +440,58 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
 
                 if kernel_type == 'pytorch_mm':
                     bench = BenchMM(cuda_graph_params, label, sub_label,
-                                    "pytorch_bf16_bf16_bf16_matmul-no-scales", 
-                                    torch.mm,
-                                    ArgPool(bf16_As), ArgPool(bf16_Bs))
+                                    "pytorch_bf16_bf16_bf16_matmul-no-scales",
+                                    torch.mm, ArgPool(bf16_As),
+                                    ArgPool(bf16_Bs))
 
                 elif kernel_type == 'pytorch_scaled_mm':
-                    bench = BenchMM(cuda_graph_params, label, sub_label,
+                    bench = BenchMM(cuda_graph_params,
+                                    label,
+                                    sub_label,
                                     "pytorch_fp8_fp8_bf16_scaled_mm",
                                     torch._scaled_mm,
-                                    ArgPool(As), ArgPool(Bs),
-                                    scale_a=scale_a, scale_b=scale_b,
+                                    ArgPool(As),
+                                    ArgPool(Bs),
+                                    scale_a=scale_a,
+                                    scale_b=scale_b,
                                     out_dtype=torch.bfloat16)
 
                 elif kernel_type == 'pytorch_scaled_mm_fast':
-                    bench = BenchMM(cuda_graph_params, label, sub_label,
-                                    "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum",
-                                    torch._scaled_mm,
-                                    ArgPool(As), ArgPool(Bs),
-                                    scale_a=scale_a, scale_b=scale_b,
-                                    out_dtype=torch.bfloat16,
-                                    use_fast_accum=True)
+                    bench = BenchMM(
+                        cuda_graph_params,
+                        label,
+                        sub_label,
+                        "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum",
+                        torch._scaled_mm,
+                        ArgPool(As),
+                        ArgPool(Bs),
+                        scale_a=scale_a,
+                        scale_b=scale_b,
+                        out_dtype=torch.bfloat16,
+                        use_fast_accum=True)
 
                 elif kernel_type == 'cutlass_scaled_mm':
                     bench = BenchMM(cuda_graph_params, label, sub_label,
-                                    "cutlass_fp8_fp8_bf16_scaled_mm", 
-                                    ops.cutlass_scaled_mm,
-                                    ArgPool(As), ArgPool(Bs), scale_a, scale_b,
+                                    "cutlass_fp8_fp8_bf16_scaled_mm",
+                                    ops.cutlass_scaled_mm, ArgPool(As),
+                                    ArgPool(Bs), scale_a, scale_b,
                                     torch.bfloat16)
 
                 elif kernel_type == 'cutlass_scaled_sparse_mm':
                     bench = BenchMM(cuda_graph_params, label, sub_label,
-                                    "cutlass_fp8_fp8_bf16_scaled_sparse_mm", 
+                                    "cutlass_fp8_fp8_bf16_scaled_sparse_mm",
                                     ops.cutlass_scaled_sparse_mm,
-                                    ArgPool(BComps), ArgPool(Es), ArgPool(AsT), 
+                                    ArgPool(BComps), ArgPool(Es), ArgPool(AsT),
                                     scale_b, scale_a, torch.bfloat16)
 
                 # Run the benchmark
                 result = bench.run()
-                
+
                 # Print progress
                 print(f"Success: {kernel_type}")
-                    
+
                 results.append((True, result, config))
-                
+
                 # Cleanup
                 torch.cuda.empty_cache()
 
@@ -487,25 +500,26 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
                 print(traceback.format_exc())
                 results.append((False, None, config))
                 torch.cuda.empty_cache()
-                
+
         return results
 
 
 def get_cache_path() -> str:
     """Get the path to the cache file for the given configuration hash."""
-    return f'{Path(os.path.dirname(os.path.realpath(__file__)))}/stable_kernels.json'
+    path = Path(os.path.dirname(os.path.realpath(__file__)))
+    return f'{path}/stable_kernels.json'
 
 
 def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
               with_arg_pool: Optional[int], m: int, k: int, n: int, label: str,
               sub_label: str) -> Iterable[TMeasurement]:
-    
+
     # Check if context is not set
-    try:
+    try:  # noqa: SIM105
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
         pass
-    
+
     timers = []
     gpus_list = [5]  # Using the same GPU list as original code
 
@@ -520,28 +534,34 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
         'label': label,
         'sub_label': sub_label
     }
-    
+
     # Prepare configs for all kernels
     standard_kernels = [
         # {'kernel_type': 'pytorch_mm'},
         # {'kernel_type': 'pytorch_scaled_mm'},
         # {'kernel_type': 'pytorch_scaled_mm_fast'},
-        {'kernel_type': 'cutlass_scaled_mm'},
-        {'kernel_type': 'cutlass_scaled_sparse_mm'}
+        {
+            'kernel_type': 'cutlass_scaled_mm'
+        },
+        {
+            'kernel_type': 'cutlass_scaled_sparse_mm'
+        }
     ]
-    
+
     # Create configs for standard kernels
     all_configs = [{**base_config, **kernel} for kernel in standard_kernels]
-    
+
     # Run all kernels distributed across GPUs
-    print(f"Running {len(all_configs)} benchmarks across {len(gpus_list)} GPUs...")
+    print(
+        f"Running {len(all_configs)} benchmarks across {len(gpus_list)} GPUs..."
+    )
     results = run_kernels_on_gpus(all_configs)
-    
+
     # Process results
     for success, result, _ in results:
         if success and result is not None:
             timers.append(result)
-    
+
     return timers
 
 

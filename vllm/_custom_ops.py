@@ -533,7 +533,8 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
 
 
 def cutlass_scaled_sparse_mm_supports_fp8(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_sparse_mm_supports_fp8(cuda_device_capability)
+    return torch.ops._C.cutlass_scaled_sparse_mm_supports_fp8(
+        cuda_device_capability)
 
 
 def cutlass_compress_entry(a: torch.Tensor) \
@@ -548,7 +549,9 @@ def cutlass_compress_entry(a: torch.Tensor) \
     m = a.shape[0]
     k = a.shape[1]
     a_compressed = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
-    e = torch.empty((m, k // 2 // elemsPerElemE), dtype=torch.uint8, device=a.device)
+    e = torch.empty((m, k // 2 // elemsPerElemE),
+                    dtype=torch.uint8,
+                    device=a.device)
 
     if not (torch.ops._C.cutlass_compress_entry(a_compressed, e, a)):
         raise ValueError
@@ -556,13 +559,14 @@ def cutlass_compress_entry(a: torch.Tensor) \
     return a_compressed, e
 
 
-def cutlass_scaled_sparse_mm(a: torch.Tensor,
-                      e: torch.Tensor,
-                      b: torch.Tensor,
-                      scale_a: torch.Tensor,
-                      scale_b: torch.Tensor,
-                      out_dtype: torch.dtype,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+def cutlass_scaled_sparse_mm(
+        a: torch.Tensor,
+        e: torch.Tensor,
+        b: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     # assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.shape[0] == a.shape[0] \

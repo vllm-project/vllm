@@ -1,7 +1,9 @@
 from typing import Any, Dict, List, Literal, Optional, cast
 
 import torch
-from compressed_tensors.config import CompressionFormat
+from compressed_tensors.config import (CompressionFormat,
+                                       SparsityCompressionConfig,
+                                       SparsityStructure)
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy,
                                              QuantizationType)
@@ -15,17 +17,15 @@ from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
+    W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS, CompressedTensors24,
     CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16, CompressedTensors24)
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
-from compressed_tensors.compressors import ModelCompressor
-from compressed_tensors.config import SparsityCompressionConfig, SparsityStructure
 
 __all__ = ["CompressedTensorsLinearMethod"]
 
@@ -40,9 +40,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         target_scheme_map: Dict[str, Any],
         ignore: List[str],
         quant_format: str,
+        sparsity_scheme_map: Dict[str, SparsityCompressionConfig],
         kv_cache_scheme: Optional[Dict[str, Any]] = None,
-        sparsity_scheme_map: Optional[Dict[str,
-                                           SparsityCompressionConfig]] = None,
         config: Optional[Dict[str, Any]] = None,
     ):
 
@@ -166,7 +165,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                             "weights"].type == QuantizationType.FLOAT
                     else:
                         target_scheme_map[target][
-                            "input_activations"] = QuantizationArgs.model_validate(
+                            "input_activations"] = QuantizationArgs.model_validate(  # noqa: E501
                                 quant_config.get("input_activations"))
         return target_scheme_map
 
@@ -392,7 +391,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                                          input_quant=input_quant)
         else:
             # Find the quant_scheme
-            scheme = self._get_scheme_from_parts(
+            scheme = self._get_scheme_from_parts(  # type: ignore
                 weight_quant=weight_quant,
                 input_quant=input_quant,
             )
@@ -441,6 +440,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             QuantizationStrategy.CHANNEL.value
         ]
 
+        assert weight_quant is not None
+        assert input_quant is not None
         if weight_quant.strategy not in supported_weight_quant_strategies:
             return False
 

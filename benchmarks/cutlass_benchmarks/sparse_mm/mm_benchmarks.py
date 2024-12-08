@@ -41,7 +41,8 @@ def run(args, MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
                               args.with_arg_pool, m, k, n, label,
                               f"MKN=({m}x{k}x{n})")
         else:
-            timers = bench_v1(args.dtype, m, k, n, f"scaled-sparse-{dtype}-gemm",
+            timers = bench_v1(args.dtype, m, k, n,
+                              f"scaled-sparse-{dtype}-gemm",
                               f"MKN=({m}x{k}x{n})")
 
         print_timers(timers)
@@ -161,10 +162,11 @@ Benchmark Cutlass GEMM.
             """,  # noqa: E501
         formatter_class=argparse.RawTextHelpFormatter)
 
-    parser.add_argument("--dtype",
-                        type=to_torch_dtype,
-                        required=True,
-                        help="Available options are ['int8', 'fp8', 'fp16', 'bf16']")
+    parser.add_argument(
+        "--dtype",
+        type=to_torch_dtype,
+        required=True,
+        help="Available options are ['int8', 'fp8', 'fp16', 'bf16']")
     parser.add_argument(
         '--with-cuda-graph',
         type=int,

@@ -3,14 +3,13 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.model_executor.layers.sparsity.utils.cusparse_2_4_utils import (
-    compress_to_torch_sparse_semi_structured_mat,
+    clear_cache, compress_to_torch_sparse_semi_structured_mat,
     decompress_torch_sparse_semi_structured_mat, dense_matmul,
     generate_pruned_semi_structured_mat, get_random_mat,
     is_semi_structured_supported, semi_structured_dense_sparse_T_gemm,
     semi_structured_dense_sparse_T_gemm_scaled,
     semi_structured_sparse_dense_gemm,
-    semi_structured_sparse_dense_gemm_scaled,
-    clear_cache)
+    semi_structured_sparse_dense_gemm_scaled)
 
 DTYPES = [torch.float16, torch.bfloat16, torch.int8]
 SIZES = [(128, 128), (1024, 8192)]

@@ -384,16 +384,19 @@ struct cutlass_3x_gemm {
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
-  static constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentCD  = 128 / cutlass::sizeof_bits<ElementD>::value;
+  static constexpr int AlignmentA =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentB =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentCD =
+      128 / cutlass::sizeof_bits<ElementD>::value;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAcc, float, ElementC, StrideC, AlignmentCD, ElementD,
-          StrideD, AlignmentCD, EpilogueSchedule, EVTCompute>::CollectiveOp;
+          ElementAcc, float, ElementC, StrideC, AlignmentCD, ElementD, StrideD,
+          AlignmentCD, EpilogueSchedule, EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
@@ -474,18 +477,23 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   CUTLASS_CHECK(status);
 }
 
-using ReductionMode = cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90StreamKParams::ReductionMode;
-using DecompositionMode = cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90StreamKParams::DecompositionMode;
-using RasterOrderOptions = cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions; 
+using ReductionMode = cutlass::gemm::kernel::detail::
+    PersistentTileSchedulerSm90StreamKParams::ReductionMode;
+using DecompositionMode = cutlass::gemm::kernel::detail::
+    PersistentTileSchedulerSm90StreamKParams::DecompositionMode;
+using RasterOrderOptions = cutlass::gemm::kernel::detail::
+    PersistentTileSchedulerSm90Params::RasterOrderOptions;
 
 template <typename Gemm, typename... EpilogueArgs>
-inline void cutlass_gemm_caller_streamk(torch::Tensor& out, torch::Tensor const& a,
-                                torch::Tensor const& b,
-                                ReductionMode reduction_mode,
-                                DecompositionMode decomposition_mode,
-                                EpilogueArgs&&... epilogue_params) {
-
-  static_assert(std::is_same<typename Gemm::KernelType::TileSchedulerTag, cutlass::gemm::StreamKScheduler>::value, "Must be streamk scheduler");
+inline void cutlass_gemm_caller_streamk(torch::Tensor& out,
+                                        torch::Tensor const& a,
+                                        torch::Tensor const& b,
+                                        ReductionMode reduction_mode,
+                                        DecompositionMode decomposition_mode,
+                                        EpilogueArgs&&... epilogue_params) {
+  static_assert(std::is_same<typename Gemm::KernelType::TileSchedulerTag,
+                             cutlass::gemm::StreamKScheduler>::value,
+                "Must be streamk scheduler");
 
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
@@ -521,24 +529,23 @@ inline void cutlass_gemm_caller_streamk(torch::Tensor& out, torch::Tensor const&
       c_ptr, c_stride, c_ptr, c_stride};
 
   typename GemmKernel::TileSchedulerArguments tile_scheduler_args(
-    1,
-    1,
-    RasterOrderOptions::Heuristic,
-    decomposition_mode
-  );
+      1, 1, RasterOrderOptions::Heuristic, decomposition_mode);
   tile_scheduler_args.reduction_mode = reduction_mode;
 
   // Copied from examples...
-  // The KernelHardwareInfo struct holds the number of SMs on the GPU with a given device ID. This
-  // information is used by the underlying kernel.
+  // The KernelHardwareInfo struct holds the number of SMs on the GPU with a
+  // given device ID. This information is used by the underlying kernel.
   cutlass::KernelHardwareInfo hw_info;
-  // Change device_id to another value if you are running on a machine with multiple GPUs and wish
-  // to use a GPU other than that with device ID 0.
+  // Change device_id to another value if you are running on a machine with
+  // multiple GPUs and wish to use a GPU other than that with device ID 0.
   hw_info.device_id = 0;
-  hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+  hw_info.sm_count =
+      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
+          hw_info.device_id);
 
-  typename GemmKernel::Arguments args{Gemm::Mode, prob_shape, mainloop_args,
-                                      epilogue_args, hw_info, tile_scheduler_args};
+  typename GemmKernel::Arguments args{Gemm::Mode,    prob_shape,
+                                      mainloop_args, epilogue_args,
+                                      hw_info,       tile_scheduler_args};
 
   // Launch the CUTLASS GEMM kernel.
   using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;

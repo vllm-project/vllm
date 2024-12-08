@@ -28,14 +28,16 @@ def prune_to_2_4(tensor):
     # Reshape tensor to [N, 4] where N is number of groups of 4
     original_shape = tensor.shape
     reshaped = tensor.reshape(-1, 4)
-    
+
     # Get indices of top 2 absolute values in each group of 4
     _, indices = torch.topk(torch.abs(reshaped), k=2, dim=1)
-    
+
     # Create binary mask
     mask = torch.zeros_like(reshaped)
-    mask.scatter_(dim=1, index=indices, src=torch.ones_like(indices, dtype=mask.dtype))
-    
+    mask.scatter_(dim=1,
+                  index=indices,
+                  src=torch.ones_like(indices, dtype=mask.dtype))
+
     # Apply mask and reshape back
     pruned = reshaped * mask
 
@@ -43,7 +45,6 @@ def prune_to_2_4(tensor):
     pruned[pruned == -0.0] = 0.0
 
     return pruned.reshape(original_shape)
-
 
 
 def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
