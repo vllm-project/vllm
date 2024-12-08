@@ -31,12 +31,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 from vllm.multimodal.processing import (InputProcessingContext,
                                         ModalityProcessingMetadata,
                                         MultiModalDataDict,
                                         MultiModalProcessingMetadata,
-                                        MultiModalProcessor, PromptReplacement)
+                                        BaseMultiModalProcessor, PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -305,10 +306,17 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 def get_max_phi3v_image_tokens(ctx: InputContext,
                                *,
                                num_crops: Optional[int] = None):
-    hf_processor = ctx.get_hf_processor()
-    image_processor = hf_processor.image_processor  # type: ignore
+    mm_processor_kwargs = {}
     if num_crops is not None:
-        image_processor.num_crops = num_crops
+        mm_processor_kwargs["num_crops"] = num_crops
+
+    model_config = ctx.model_config
+    image_processor = cached_get_image_processor(
+        model_config.model,
+        trust_remote_code=model_config.trust_remote_code,
+        **mm_processor_kwargs,
+    )
+
     num_tokens = image_processor.calc_num_image_tokens_from_image_size(
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
@@ -346,7 +354,13 @@ def create_metadata_for_phi3v(
     }
 
 
-class Phi3VProcessor(MultiModalProcessor):
+class Phi3VProcessor(BaseMultiModalProcessor):
+
+    def __init__(self, ctx: InputProcessingContext) -> None:
+        super().__init__(
+            ctx=ctx,
+            metadata=create_metadata_for_phi3v(ctx),
+        )
 
     def _apply_hf_processor(
         self,
@@ -372,10 +386,7 @@ class Phi3VProcessor(MultiModalProcessor):
 
 
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
-@MULTIMODAL_REGISTRY.register_processor(lambda ctx: Phi3VProcessor(
-    ctx=ctx,
-    metadata=create_metadata_for_phi3v(ctx),
-))
+@MULTIMODAL_REGISTRY.register_processor(Phi3VProcessor)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
