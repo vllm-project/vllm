@@ -3,8 +3,9 @@ from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.metrics_types import StatLoggerBase
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.protocol import EngineClient
+from vllm.envs import VLLM_STATS_ENGINE_POLLING_INTERVAL_S
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -16,11 +17,14 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.stats.stats_manager import (NoopEngineStatsManager,
+                                         ThreadSafeEngineStatsManager)
 
 logger = init_logger(__name__)
 
@@ -42,7 +46,7 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.log_requests = log_requests
-        self.log_stats = log_stats
+        self.log_stats = vllm_config.observability_config.log_stats
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
@@ -74,9 +78,26 @@ class AsyncLLM(EngineClient):
             usage_context=usage_context,
             multiprocess_mode=True,
             asyncio_mode=True,
+            log_stats=self.log_stats,
         )
 
-        self.output_handler = None
+        # Async tasks that run in the background.
+        # We don't initialize the handlers until we have a request so
+        # they are None first.
+        self.output_handler: Optional[asyncio.Task] = None
+        self.stats_handler: Optional[asyncio.Task] = None
+
+        if vllm_config.observability_config.log_stats:
+            # The stats manager will be invoked from different threads:
+            # 1. stats_handler: a background busy event loop that pulls stats
+            # from the EngineCore periodically. The stats logging also happens
+            # on the background thread.
+            # 2. the main event loop when a request is added (and input
+            # processed).
+            self.stats_manager = ThreadSafeEngineStatsManager(
+                vllm_config, stat_loggers)
+        else:
+            self.stats_manager = NoopEngineStatsManager()
 
     def __del__(self):
         self.shutdown()
@@ -119,6 +140,9 @@ class AsyncLLM(EngineClient):
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
 
+        if handler := getattr(self, "stats_handler", None):
+            handler.cancel()
+
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig):
         return GPUExecutor
@@ -146,6 +170,7 @@ class AsyncLLM(EngineClient):
         detokenizer_req, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
+        self.stats_manager.record_engine_input(engine_core_req)
 
         # 3) Add the request to Detokenizer (this process).
         self.detokenizer.add_request(detokenizer_req)
@@ -193,6 +218,9 @@ class AsyncLLM(EngineClient):
             self.output_handler = asyncio.create_task(
                 self._run_output_handler())
 
+        if self.stats_handler is None and self.log_stats:
+            self.stats_handler = asyncio.create_task(self._run_stats_handler())
+
         async for output in await self.add_request(
                 request_id,
                 prompt,
@@ -216,6 +244,9 @@ class AsyncLLM(EngineClient):
 
         if request_id in self.request_streams:
             raise ValueError(f"Request id {request_id} already running.")
+
+        # Add the request to the stats manager to start tracking.
+        self.stats_manager.add_request(request_id)
 
         # Avoid streams having circular ref to parent AsyncLLM object.
         aborted_reqs = self.client_aborted_requests
@@ -263,6 +294,7 @@ class AsyncLLM(EngineClient):
         for request_output in request_outputs:
             request_id = request_output.request_id
             assert request_id in self.request_streams
+            self.stats_manager.record_request_output(request_output)
 
             # Each request in the API server pulls from the per-request stream.
             stream = self.request_streams.get(request_id)
@@ -281,10 +313,14 @@ class AsyncLLM(EngineClient):
         try:
             while True:
                 # 1) Pull EngineCoreOutput from the EngineCore.
-                outputs = await self.engine_core.get_output_async()
+                outputs: EngineCoreOutputs = (
+                    await self.engine_core.get_output_async())
+                for output in outputs.outputs:
+                    self.stats_manager.record_engine_output(output)
 
                 # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
+                request_outputs, reqs_to_abort = self.detokenizer.step(
+                    outputs.outputs)
 
                 # 3) Put the RequestOutputs into the per-request AsyncStreams.
                 self._process_request_outputs(request_outputs)
@@ -295,11 +331,44 @@ class AsyncLLM(EngineClient):
                 # 5) Abort any requests due to client cancellations.
                 await self._process_cancellations()
 
+        except asyncio.CancelledError:
+            logger.info("Engine shutting down.")
+            self.shutdown()
         except BaseException as e:
             logger.error(e)
             raise e
 
-    # TODO: can we eliminate these?
+    async def _run_stats_handler(self):
+        while True:
+            try:
+                # Pull the stats from the EngineCore every X seconds.
+                await asyncio.sleep(VLLM_STATS_ENGINE_POLLING_INTERVAL_S)
+
+                # Pull the stats from the EngineCore before finalizing the
+                # snapshot for an updated view of the current stats.
+                stats_snapshot_from_engine = (
+                    await self.engine_core.poll_stats_async())
+
+                # Make the stats.
+                stats = self.stats_manager.make_stats(
+                    stats_snapshot_from_engine)
+                self.stats_manager.log_stats(stats)
+            except Exception:
+                logger.exception(
+                    "Error in stats handler. Suppressing exceptions and "
+                    "exiting stats handler. Please file an issue at "
+                    "https://github.com/vllm-project/vllm/issues/new/choose")
+                raise
+
+    def _log_stats(self, stats: Stats):
+        for stat_logger in self.stat_loggers.values():
+            # TODO(rickyx): we here assume loggers are lightweight and
+            # non-blocking. To make this more robust, we should really
+            # have an async logger interface, which implements actual
+            # logging that could be cpu-heavy in a separate process
+            # to minimize the latency impact on the frontend engine's
+            # event loop.
+            stat_logger.log(stats)
 
     async def abort(self, request_id: str) -> None:
         # Note: Who Calls this? I dont think this is actually used.
@@ -340,7 +409,9 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        logger.debug("Called do_log_stats.")
+        raise NotImplementedError(
+            "V1 stats logging should not be called by user. "
+            "The engine client handles logging internally.")
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")

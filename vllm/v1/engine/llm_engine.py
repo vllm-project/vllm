@@ -14,10 +14,12 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.stats.common import initialize_stats_loggers
 
 logger = init_logger(__name__)
 
@@ -70,6 +72,13 @@ class LLMEngine:
             multiprocess_mode=multiprocess_mode,
             asyncio_mode=False,
         )
+
+        self.stat_loggers: Dict[str, StatLoggerBase] = {}
+        if log_stats:
+            self.stat_loggers = stat_loggers or initialize_stats_loggers(
+                vllm_config)
+        if self.stat_loggers:
+            logger.info("Logging stats to: %s", list(self.stat_loggers.keys()))
 
     @classmethod
     def from_engine_args(
@@ -146,7 +155,8 @@ class LLMEngine:
     def step(self) -> List[RequestOutput]:
 
         # 1) Get EngineCoreOutput from the EngineCore.
-        engine_core_outputs = self.engine_core.get_output()
+        engine_core_outputs: List[EngineCoreOutput] = (
+            self.engine_core.get_output())
 
         # 2) Detokenizer the EngineCoreOutput.
         request_outputs, requests_to_abort = self.detokenizer.step(
@@ -157,6 +167,13 @@ class LLMEngine:
             self.abort_request(requests_to_abort)
 
         return request_outputs
+
+    # def _log_stats(self, engine_core_stats: EngineCoreStats) -> None:
+    #     if not self.stat_loggers:
+    #         return
+    #     stats = make_stats(engine_core_stats)
+    #     for logger in self.stat_loggers.values():
+    #         logger.log(stats)
 
     # TODO(rob): Can we get rid of these?
 

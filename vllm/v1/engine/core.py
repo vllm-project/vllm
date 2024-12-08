@@ -2,11 +2,10 @@ import multiprocessing
 import pickle
 import queue
 import threading
-import time
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
-from typing import Any, Iterator, List, Tuple, Type, Union
+from typing import Any, Iterator, List, Optional, Tuple, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -23,6 +22,8 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapper
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.stats.common import EngineStatsSnapshot
+from vllm.v1.stats.stats_agent import ThreadSafeEngineStatsAgent
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -43,8 +44,11 @@ class EngineCore:
     ):
         assert vllm_config.model_config.task != "embedding"
 
-        logger.info("Initializing an LLM engine (v%s) with config: %s",
-                    VLLM_VERSION, vllm_config)
+        logger.info(
+            "Initializing an LLM engine (v%s) with config: %s",
+            VLLM_VERSION,
+            vllm_config,
+        )
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -58,12 +62,17 @@ class EngineCore:
         # Set up multimodal input mapper (e.g., convert PIL images to tensors).
         self.mm_input_mapper = MMInputMapper(vllm_config.model_config)
 
-        # Setup scheduler.
-        self.scheduler = Scheduler(vllm_config.scheduler_config,
-                                   vllm_config.cache_config,
-                                   vllm_config.lora_config)
+        # Setup stats agent.
+        self.stats_agent = ThreadSafeEngineStatsAgent()
 
-        self._last_logging_time = time.time()
+        # Setup scheduler.
+        self.scheduler = Scheduler(
+            vllm_config.scheduler_config,
+            vllm_config.cache_config,
+            vllm_config.lora_config,
+            self.stats_agent,
+            vllm_config.observability_config.log_stats,
+        )
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -75,8 +84,10 @@ class EngineCore:
             num_gpu_blocks_override = cache_config.num_gpu_blocks_override
             logger.info(
                 "Overriding num_gpu_blocks=%d with "
-                "num_gpu_blocks_override=%d", num_gpu_blocks,
-                num_gpu_blocks_override)
+                "num_gpu_blocks_override=%d",
+                num_gpu_blocks,
+                num_gpu_blocks_override,
+            )
             num_gpu_blocks = num_gpu_blocks_override
 
         num_cpu_blocks = 0
@@ -107,13 +118,30 @@ class EngineCore:
             return []
 
         scheduler_output = self.scheduler.schedule()
+
         output = self.model_executor.execute_model(scheduler_output)
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs
 
     def profile(self, is_start=True):
         self.model_executor.worker.profile(is_start)
+
+    def make_stats_snapshot(self) -> EngineStatsSnapshot:
+        """
+        Make a stats snapshot and reset the agent to track the next update.
+        """
+        assert self.stats_agent is not None, "Stats collection is disabled."
+        snapshot = EngineStatsSnapshot()
+
+        updates = self.stats_agent.take_requests_updates()
+        snapshot.requests_stats_updates = updates
+
+        scheduler_stats = self.scheduler.get_scheduler_stats()
+        snapshot.scheduler_stats = scheduler_stats
+
+        return snapshot
 
 
 class EngineCoreProc(EngineCore):
@@ -128,10 +156,15 @@ class EngineCoreProc(EngineCore):
         usage_context: UsageContext,
         input_path: str,
         output_path: str,
+        stats_path: Optional[str],
         ready_path: str,
         should_shutdown: Synchronized,
     ):
-        super().__init__(vllm_config, executor_class, usage_context)
+        super().__init__(
+            vllm_config,
+            executor_class,
+            usage_context,
+        )
 
         # Signal from main process to shutdown (multiprocessing.Value).
         self.should_shutdown = should_shutdown
@@ -141,8 +174,8 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue = queue.Queue()
-        self.output_queue = queue.Queue()
+        self.input_queue: queue.Queue[EngineCoreRequest] = queue.Queue()
+        self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
                          daemon=True).start()
@@ -150,13 +183,23 @@ class EngineCoreProc(EngineCore):
                          args=(output_path, ),
                          daemon=True).start()
 
+        if stats_path is not None:
+            self.stats_queue: queue.Queue[EngineStatsSnapshot] = queue.Queue()
+            threading.Thread(
+                target=self.process_stats_socket,
+                args=(stats_path, ),
+                daemon=True,
+            ).start()
+        else:
+            self.stats_queue = None
+
         # Send Readiness signal to EngineClient.
         with self.make_socket(ready_path, zmq.constants.PUSH) as ready_socket:
             ready_socket.send_string(EngineCoreProc.READY_STR)
 
     @contextmanager
     def make_socket(self, path: str, type: Any) -> Iterator[zmq.Socket]:
-        """Context manager for use """
+        """Context manager for use"""
 
         ctx = zmq.Context()
         try:
@@ -213,6 +256,7 @@ class EngineCoreProc(EngineCore):
         usage_context: UsageContext,
         input_path: str,
         output_path: str,
+        stats_path: Optional[str],
         ready_path: str,
         should_shutdown: Synchronized,
     ) -> BaseProcess:
@@ -225,11 +269,12 @@ class EngineCoreProc(EngineCore):
         process_kwargs = {
             "input_path": input_path,
             "output_path": output_path,
+            "stats_path": stats_path,
             "ready_path": ready_path,
             "vllm_config": vllm_config,
             "executor_class": executor_class,
             "usage_context": usage_context,
-            "should_shutdown": should_shutdown
+            "should_shutdown": should_shutdown,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=EngineCoreProc.run_engine_core,
@@ -268,7 +313,6 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
-                        self._log_stats()
                         logger.debug("EngineCore busy loop waiting.")
                         if self.should_shutdown:
                             return
@@ -282,23 +326,7 @@ class EngineCoreProc(EngineCore):
             outputs = self.step()
 
             # 4) Put EngineCoreOutputs into the output queue.
-            self.output_queue.put_nowait(outputs)
-
-            self._log_stats()
-
-    def _log_stats(self):
-        """Log basic stats every LOGGING_TIME_S"""
-
-        now = time.time()
-
-        if now - self._last_logging_time > LOGGING_TIME_S:
-            logger.info(
-                "RUNNING: %s | WAITING: %s",
-                len(self.scheduler.running),
-                len(self.scheduler.waiting),
-            )
-
-            self._last_logging_time = now
+            self.output_queue.put_nowait(EngineCoreOutputs(outputs=outputs))
 
     def _handle_client_request(
         self, request: Union[EngineCoreRequest, EngineCoreProfile,
@@ -328,6 +356,18 @@ class EngineCoreProc(EngineCore):
                 request_type = type_frame.buffer
                 request_data = data_frame.buffer
 
+                if request_type == EngineCoreRequestType.STATS.value:
+                    # We get the stats update directly in this thread without
+                    # adding the request to the input queue so that we could
+                    # overlap stats update polling with other work.
+                    # TODO(rickyx): we could further optimize this by
+                    # isolating the stats polling from this IO thread.
+                    snapshot = self.make_stats_snapshot()
+                    self._fill_engine_core_proc_stats(snapshot)
+                    assert self.stats_queue is not None
+                    self.stats_queue.put_nowait(snapshot)
+                    continue
+
                 # Deserialize the request data.
                 if request_type == EngineCoreRequestType.ADD.value:
                     request = decoder_add_req.decode(request_data)
@@ -341,17 +381,34 @@ class EngineCoreProc(EngineCore):
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait(request)
 
-    def process_output_socket(self, output_path: str):
-        """Output socket IO thread."""
+    def _fill_engine_core_proc_stats(self,
+                                     snapshot: EngineStatsSnapshot) -> None:
+        """
+        Fill the engine core process stats.
+        """
+        snapshot.engine_core_process_stats.input_queue_size = (
+            self.input_queue.qsize())
+        snapshot.engine_core_process_stats.output_queue_size = (
+            self.output_queue.qsize())
+
+    def _process_output_socket(self, queue: queue.Queue, path: str):
+        """Outgoing socket processing helper."""
 
         # Msgpack serialization encoding.
         encoder = msgpack.Encoder()
         # Reuse send buffer.
         buffer = bytearray()
 
-        with self.make_socket(output_path, zmq.constants.PUSH) as socket:
+        with self.make_socket(path, zmq.constants.PUSH) as socket:
             while True:
-                engine_core_outputs = self.output_queue.get()
-                outputs = EngineCoreOutputs(outputs=engine_core_outputs)
-                encoder.encode_into(outputs, buffer)
+                data = queue.get()
+                encoder.encode_into(data, buffer)
                 socket.send_multipart((buffer, ), copy=False)
+
+    def process_stats_socket(self, stats_path: str):
+        """Stats socket IO thread."""
+        self._process_output_socket(self.stats_queue, stats_path)
+
+    def process_output_socket(self, output_path: str):
+        """Output socket IO thread."""
+        self._process_output_socket(self.output_queue, output_path)

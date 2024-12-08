@@ -72,6 +72,11 @@ class EngineCoreProfile:
     is_start: bool
 
 
+@dataclass
+class EngineCoreStatsRequest:
+    pass
+
+
 class EngineCoreRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
@@ -80,3 +85,4 @@ class EngineCoreRequestType(enum.Enum):
     ADD = b'\x00'
     ABORT = b'\x01'
     PROFILE = b'\x02'
+    STATS = b"\x03"

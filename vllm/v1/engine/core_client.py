@@ -10,9 +10,10 @@ from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType)
+                            EngineCoreRequestType, EngineCoreStatsRequest)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.stats.common import EngineStatsSnapshot
 
 logger = init_logger(__name__)
 
@@ -59,19 +60,25 @@ class EngineCoreClient:
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
+    def poll_stats(self) -> EngineStatsSnapshot:
+        raise NotImplementedError
+
     async def profile(self, is_start=True) -> None:
         raise NotImplementedError
 
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    async def get_output_async(self) -> List[EngineCoreOutput]:
+    async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
+        raise NotImplementedError
+
+    async def poll_stats_async(self) -> EngineStatsSnapshot:
         raise NotImplementedError
 
 
@@ -99,6 +106,9 @@ class InprocClient(EngineCoreClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self.engine_core.abort_requests(request_ids)
 
+    def poll_stats(self) -> EngineStatsSnapshot:
+        return self.engine_core.finalize_stats_snapshot()
+
     async def profile(self, is_start=True) -> None:
         self.engine_core.profile(is_start)
 
@@ -111,7 +121,7 @@ class MPClient(EngineCoreClient):
 
         * pushes EngineCoreRequests via input_socket
         * pulls EngineCoreOutputs via output_socket
-    
+        * pulls EngineStatsSnapshot via stats_socket
         * AsyncMPClient subclass for AsyncLLM usage
         * SyncMPClient subclass for LLM usage
     """
@@ -120,11 +130,13 @@ class MPClient(EngineCoreClient):
         self,
         *args,
         asyncio_mode: bool,
+        log_stats: bool,
         **kwargs,
     ):
         # Serialization setup.
         self.encoder = PickleEncoder()
-        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+        self.output_decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+        self.stats_decoder = msgspec.msgpack.Decoder(EngineStatsSnapshot)
 
         # ZMQ setup.
         self.ctx = (zmq.asyncio.Context() if asyncio_mode else zmq.Context())
@@ -138,6 +150,15 @@ class MPClient(EngineCoreClient):
         self.output_socket = self.ctx.socket(zmq.constants.PULL)
         self.output_socket.connect(output_path)
 
+        # Get stats (EngineStatsSnapshot) from EngineCore.
+        if log_stats:
+            stats_path = get_open_zmq_ipc_path()
+            self.stats_socket = self.ctx.socket(zmq.constants.PULL)
+            self.stats_socket.connect(stats_path)
+        else:
+            self.stats_socket = None
+            stats_path = None
+
         # Send input (EngineCoreRequest) to EngineCore.
         self.input_socket = self.ctx.socket(zmq.constants.PUSH)
         self.input_socket.bind(input_path)
@@ -148,6 +169,7 @@ class MPClient(EngineCoreClient):
             *args,
             input_path=input_path,
             output_path=output_path,
+            stats_path=stats_path,
             ready_path=ready_path,
             should_shutdown=self.should_shutdown,
             **kwargs,
@@ -178,16 +200,22 @@ class SyncMPClient(MPClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, asyncio_mode=False, **kwargs)
 
-    def get_output(self) -> List[EngineCoreOutput]:
-
+    def get_output(self) -> EngineCoreOutputs:
         (frame, ) = self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frame.buffer).outputs
+        engine_core_outputs = self.output_decoder.decode(frame.buffer)
         return engine_core_outputs
 
+    def poll_stats(self) -> EngineStatsSnapshot:
+        self._send_input(EngineCoreRequestType.STATS, EngineCoreStatsRequest())
+        (frame, ) = self.stats_socket.recv_multipart(copy=False)
+        return self.stats_decoder.decode(frame.buffer)
+
     def _send_input(
-        self, request_type: EngineCoreRequestType,
-        request: Union[EngineCoreRequest, EngineCoreProfile,
-                       List[str]]) -> None:
+        self,
+        request_type: EngineCoreRequestType,
+        request: Union[EngineCoreRequest, EngineCoreProfile, List[str],
+                       EngineCoreStatsRequest, ],
+    ) -> None:
 
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
@@ -210,17 +238,25 @@ class AsyncMPClient(MPClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, asyncio_mode=True, **kwargs)
 
-    async def get_output_async(self) -> List[EngineCoreOutput]:
+    async def get_output_async(self) -> EngineCoreOutputs:
 
         frames = await self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
+        engine_core_outputs = self.output_decoder.decode(frames[0].buffer)
 
         return engine_core_outputs
 
+    async def poll_stats_async(self) -> EngineStatsSnapshot:
+        await self._send_input(EngineCoreRequestType.STATS,
+                               EngineCoreStatsRequest())
+        frames = await self.stats_socket.recv_multipart(copy=False)
+        return self.stats_decoder.decode(frames[0].buffer)
+
     async def _send_input(
-        self, request_type: EngineCoreRequestType,
-        request: Union[EngineCoreRequest, EngineCoreProfile,
-                       List[str]]) -> None:
+        self,
+        request_type: EngineCoreRequestType,
+        request: Union[EngineCoreRequest, EngineCoreProfile, List[str],
+                       EngineCoreStatsRequest, ],
+    ) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)

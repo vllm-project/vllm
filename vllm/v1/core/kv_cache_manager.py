@@ -7,6 +7,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock, hash_block_tokens,
                                          hash_request_tokens)
 from vllm.v1.request import Request
+from vllm.v1.stats.common import KVCacheStats
 
 logger = init_logger(__name__)
 
@@ -336,6 +337,17 @@ class KVCacheManager:
                 self.cached_block_hash_to_block[block_hash].keys())[0]
             return self.cached_block_hash_to_block[block_hash][first_block_id]
         return None
+
+    def get_kv_cache_stats(self) -> KVCacheStats:
+        num_free_blocks = self.free_block_queue.num_free_blocks
+        num_used_blocks = self.num_gpu_blocks - num_free_blocks
+        assert num_used_blocks <= self.num_gpu_blocks
+        return KVCacheStats(
+            gpu_cache_usage_sys=num_used_blocks / self.num_gpu_blocks,
+            # TODO: we might just be able to compute this from the request's
+            # num cached tokens count
+            gpu_prefix_cache_hit_rate=0.0,
+        )
 
     def _touch(self, blocks: List[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove

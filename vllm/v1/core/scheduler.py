@@ -1,20 +1,17 @@
 from collections import deque
-from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.v1.core.common import (NewRequestData, ResumedRequestData,
+                                 RunningRequestData, SchedulerOutput)
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-
-if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.base import PlaceholderRange
+from vllm.v1.stats.common import SchedulerStats
+from vllm.v1.stats.stats_agent import ThreadSafeEngineStatsAgent
 
 logger = init_logger(__name__)
 
@@ -26,10 +23,14 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        stats_agent: ThreadSafeEngineStatsAgent,
+        log_stats: bool,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.stats_agent = stats_agent
+        self.log_stats = log_stats
         # TODO: Support LoRA.
         assert lora_config is None, "V1 does not support LoRA yet."
 
@@ -47,7 +48,8 @@ class Scheduler:
             num_gpu_blocks=num_gpu_blocks,
             max_model_len=self.max_model_len,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            enable_caching=self.cache_config.enable_prefix_caching,
+        )
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
@@ -80,7 +82,7 @@ class Scheduler:
         # is preallocated in the profiling run.
         self.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
 
-    def schedule(self) -> "SchedulerOutput":
+    def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and num_tokens,
@@ -121,10 +123,12 @@ class Scheduler:
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
-                self._try_schedule_encoder_inputs(request,
-                                                  request.num_computed_tokens,
-                                                  num_new_tokens,
-                                                  encoder_budget))
+                self._try_schedule_encoder_inputs(
+                    request,
+                    request.num_computed_tokens,
+                    num_new_tokens,
+                    encoder_budget,
+                ))
             assert num_new_tokens > 0
 
             while True:
@@ -205,10 +209,14 @@ class Scheduler:
                 assert num_new_tokens > 0
 
                 # Schedule encoder inputs.
-                (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
-                     request, num_computed_tokens, num_new_tokens,
-                     encoder_budget)
+                (
+                    encoder_inputs_to_schedule,
+                    num_new_tokens,
+                    new_encoder_budget,
+                ) = self._try_schedule_encoder_inputs(request,
+                                                      num_computed_tokens,
+                                                      num_new_tokens,
+                                                      encoder_budget)
                 if num_new_tokens == 0:
                     # The request cannot be scheduled.
                     break
@@ -253,25 +261,30 @@ class Scheduler:
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
-        assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
-                len(scheduled_running_reqs) == len(self.running))
+        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
+            scheduled_running_reqs) == len(self.running)
 
         # Construct the scheduler output.
         new_reqs_data = [
-            NewRequestData.from_request(req,
-                                        req_to_new_block_ids[req.request_id],
-                                        req.num_computed_tokens)
-            for req in scheduled_new_reqs
+            NewRequestData.from_request(
+                req,
+                req_to_new_block_ids[req.request_id],
+                req.num_computed_tokens,
+            ) for req in scheduled_new_reqs
         ]
         resumed_reqs_data = [
             ResumedRequestData.from_request(
-                req, req_to_new_block_ids[req.request_id],
-                req.num_computed_tokens) for req in scheduled_resumed_reqs
+                req,
+                req_to_new_block_ids[req.request_id],
+                req.num_computed_tokens,
+            ) for req in scheduled_resumed_reqs
         ]
         running_reqs_data = [
             self._make_running_request_data(
-                req, req_to_new_block_ids[req.request_id],
-                req.num_computed_tokens) for req in scheduled_running_reqs
+                req,
+                req_to_new_block_ids[req.request_id],
+                req.num_computed_tokens,
+            ) for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
         scheduler_output = SchedulerOutput(
@@ -289,6 +302,9 @@ class Scheduler:
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
         )
+
+        if self.log_stats:
+            self.stats_agent.record_scheduler_output(scheduler_output)
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -379,8 +395,8 @@ class Scheduler:
 
     def update_from_output(
         self,
-        scheduler_output: "SchedulerOutput",
-        model_runner_output: "ModelRunnerOutput",
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
@@ -424,7 +440,8 @@ class Scheduler:
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason)
+                    stop_reason=request.stop_reason,
+                )
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
@@ -459,6 +476,8 @@ class Scheduler:
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
+        if self.log_stats:
+            self.stats_agent.record_queued_request(request)
         self.requests[request.request_id] = request
 
     def finish_requests(
@@ -491,6 +510,7 @@ class Scheduler:
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
+
         self.kv_cache_manager.free(request)
         self.running_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
@@ -502,91 +522,9 @@ class Scheduler:
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
 
-
-@dataclass
-class NewRequestData:
-
-    req_id: str
-    prompt_token_ids: List[int]
-    prompt: Optional[str]
-    mm_inputs: List["MultiModalKwargs"]
-    mm_positions: List["PlaceholderRange"]
-    sampling_params: SamplingParams
-    block_ids: List[int]
-    num_computed_tokens: int
-
-    @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        block_ids: List[int],
-        num_computed_tokens: int,
-    ) -> "NewRequestData":
-        return cls(
-            req_id=request.request_id,
-            prompt_token_ids=request.prompt_token_ids,
-            prompt=request.prompt,
-            mm_inputs=request.mm_inputs,
-            mm_positions=request.mm_positions,
-            sampling_params=request.sampling_params,
-            block_ids=block_ids,
-            num_computed_tokens=num_computed_tokens,
+    def get_scheduler_stats(self) -> SchedulerStats:
+        return SchedulerStats(
+            num_running_reqs=len(self.running),
+            num_waiting_reqs=len(self.waiting),
+            kv_cache_stats=self.kv_cache_manager.get_kv_cache_stats(),
         )
-
-
-@dataclass
-class ResumedRequestData:
-
-    req_id: str
-    block_ids: List[int]
-    num_computed_tokens: int
-
-    @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        block_ids: List[int],
-        num_computed_tokens: int,
-    ) -> "ResumedRequestData":
-        return cls(
-            req_id=request.request_id,
-            block_ids=block_ids,
-            num_computed_tokens=num_computed_tokens,
-        )
-
-
-@dataclass
-class RunningRequestData:
-
-    req_id: str
-    new_block_ids: List[int]
-    num_computed_tokens: int
-
-    @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        new_block_ids: List[int],
-        num_computed_tokens: int,
-    ) -> "RunningRequestData":
-        return cls(
-            req_id=request.request_id,
-            new_block_ids=new_block_ids,
-            num_computed_tokens=num_computed_tokens,
-        )
-
-
-@dataclass
-class SchedulerOutput:
-
-    scheduled_new_reqs: List[NewRequestData]
-    scheduled_resumed_reqs: List[ResumedRequestData]
-    scheduled_running_reqs: List[RunningRequestData]
-
-    num_scheduled_tokens: Dict[str, int]
-    total_num_scheduled_tokens: int
-    scheduled_encoder_inputs: Dict[str, List[int]]
-
-    preempted_req_ids: Set[str]
-    finished_req_ids: Set[str]
-    free_encoder_input_ids: List[Tuple[str, int]]
