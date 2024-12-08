@@ -2374,10 +2374,31 @@ class CompilationConfig(BaseModel):
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = {}
-        for end, start in zip(self.capture_sizes, self.capture_sizes[1:]):
+        for end, start in zip(self.capture_sizes,
+                              self.capture_sizes[1:] + [0]):
             for bs in range(start, end):
                 self.bs_to_padded_graph_size[bs] = end
 
+
+"""
+cudagraph batchsize padding logic:
+
+In the default case, `_BATCH_SIZES_TO_CAPTURE` is a list of all possible
+batch sizes that cudagraph will capture. We pre-build a mapping from batch size
+to padded graph size, so that we can quickly find the padded graph size for a
+given batch size. Depending on the model's configuration, like `max_num_seqs`,
+the candidate batch sizes to capture cudagraph will shrink to the subset of
+`_BATCH_SIZES_TO_CAPTURE` that is less than or equal to `max_num_seqs`.
+
+However, if users specify the cudagraph capture sizes through compilation
+config, we will use the specified sizes instead.
+
+In the end, `vllm_config.compilation_config.capture_sizes` will be the final
+sizes to capture cudagraph (in descending order), and
+`vllm_config.compilation_config.bs_to_padded_graph_size` will be the mapping
+from batch size to padded graph size, if the batch size is less than or equal to
+the largest size in `vllm_config.compilation_config.capture_sizes`.
+"""
 
 _BATCH_SIZE_ALIGNMENT = 8
 # all the token sizes that **can** be captured by cudagraph.
@@ -2390,7 +2411,8 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 
 bs_to_padded_graph_size: Dict[int, int] = {}
-for start, end in zip(_BATCH_SIZES_TO_CAPTURE, _BATCH_SIZES_TO_CAPTURE[1:]):
+for start, end in zip([0] + _BATCH_SIZES_TO_CAPTURE[:-1],
+                      _BATCH_SIZES_TO_CAPTURE):
     for bs in range(start, end):
         bs_to_padded_graph_size[bs] = end
 
