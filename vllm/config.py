@@ -1,3 +1,4 @@
+import ast
 import copy
 import enum
 import hashlib
@@ -27,7 +28,8 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once, resolve_obj_by_qualname)
+                        print_warning_once, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -2082,7 +2084,7 @@ class KVTransferConfig(BaseModel):
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
-        """Parse the CLI value for the compilation config."""
+        """Parse the CLI value for the kv cache transfer config."""
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
@@ -2190,14 +2192,10 @@ class CompilationConfig(BaseModel):
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
             - True: inductor compilation is used. one graph for symbolic shape
-                is compiled. In addition, compile for different sizes specified
-                in inductor_compile_sizes, using configurations
+                is compiled. In addition, compile for cudagraph sizes that are
+                in candidate_compile_sizes, using configurations
                 in inductor_compile_config.
-        - inductor_compile_sizes: sizes to compile for inductor.
-        - inductor_specialize_for_cudagraph_no_more_than: an optional integer
-            to specialize inductor for cudagraph sizes no more than the
-            specified size. It is useful when we want to specialize inductor
-            with a subset of cudagraph sizes.
+        - candidate_compile_sizes: sizes to compile for inductor.
         - inductor_compile_config: additional configurations for inductor.
             - None: use default configurations.
         - inductor_passes: additional passes for inductor. It is a dictionary
@@ -2226,8 +2224,7 @@ class CompilationConfig(BaseModel):
     ])
 
     use_inductor: bool = True
-    inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
-    inductor_compile_sizes: Optional[List[int]] = Field(default=None)
+    candidate_compile_sizes: Optional[List[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2293,7 +2290,9 @@ class CompilationConfig(BaseModel):
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
-        return CompilationConfig.model_validate_json(cli_value)
+        # do not use `eval`, it is dangerous and can execute arbitrary code
+        dict_value = ast.literal_eval(cli_value)
+        return CompilationConfig.model_validate(dict_value)
 
     def model_post_init(self, __context: Any) -> None:
 
@@ -2354,18 +2353,20 @@ class CompilationConfig(BaseModel):
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
                         sizes_to_specialize, self.cudagraph_capture_sizes)
-        if self.inductor_specialize_for_cudagraph_no_more_than is not None:
-            assert self.inductor_compile_sizes is None, (
-                "inductor_compile_sizes should be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is not None")
-            self.compile_sizes = [
-                x for x in self.capture_sizes
-                if x <= self.inductor_specialize_for_cudagraph_no_more_than
-            ]
-        else:
-            if self.inductor_compile_sizes is None:
-                self.inductor_compile_sizes = []
-            self.compile_sizes = self.inductor_compile_sizes
+
+        if self.candidate_compile_sizes is None:
+            self.candidate_compile_sizes = []
+        self.compile_sizes = [
+            x for x in self.candidate_compile_sizes if x in self.capture_sizes
+        ]
+        ignored_sizes = [
+            x for x in self.candidate_compile_sizes
+            if x not in self.capture_sizes
+        ]
+        if ignored_sizes:
+            logger.warning(("candidate_compile_sizes %s are ignored "
+                            "because they are not cudagraph capture sizes."),
+                           ignored_sizes)
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
@@ -2408,6 +2409,7 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    instance_id: str = ""
 
     @staticmethod
     def get_graph_batch_size(batch_size: int) -> int:
@@ -2472,7 +2474,15 @@ class VllmConfig:
             return quant_config
         return None
 
-    def with_hf_config(self, hf_config: PretrainedConfig) -> "VllmConfig":
+    def with_hf_config(
+        self,
+        hf_config: PretrainedConfig,
+        architectures: Optional[list[str]] = None,
+    ) -> "VllmConfig":
+        if architectures is not None:
+            hf_config = copy.deepcopy(hf_config)
+            hf_config.architectures = architectures
+
         model_config = copy.deepcopy(self.model_config)
         model_config.hf_config = hf_config
 
@@ -2564,6 +2574,9 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
+
+        if not self.instance_id:
+            self.instance_id = random_uuid()[:5]
 
     def __str__(self):
         return ("model=%r, speculative_config=%r, tokenizer=%r, "
