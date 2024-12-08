@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, LayerBlockType, cdiv,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
@@ -70,7 +70,7 @@ class GPUModelRunner:
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
-            parallel_config)
+            parallel_config, LayerBlockType.attention)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()

@@ -27,9 +27,14 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
+<<<<<<< HEAD
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         print_warning_once, random_uuid,
                         resolve_obj_by_qualname)
+=======
+from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless, get_cpu_memory,
+                        print_warning_once, resolve_obj_by_qualname)
+>>>>>>> 121764ea9 (Introduce LayerBlockType)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -694,16 +699,22 @@ class ModelConfig:
         start, end = self.get_layers_start_end_indices(parallel_config)
         return end - start
 
-    def get_num_layers_by_block_type(self,
-                                     parallel_config: "ParallelConfig",
-                                     block_type="attention") -> int:
+    def get_num_layers_by_block_type(
+        self,
+        parallel_config: "ParallelConfig",
+        block_type: LayerBlockType = LayerBlockType.attention,
+    ) -> int:
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         # Transformers supports layers_block_type @property
-        layers_block_type = getattr(self.hf_config, "layers_block_type",
-                                    ["attention"] * (end - start))
+        layers_block_type_value = getattr(self.hf_config, "layers_block_type",
+                                    [block_type.value] * (end - start))
         return len(
-            [t for t in layers_block_type[start:end] if t == block_type])
+            [
+                t
+                for t in layers_block_type_value[start:end]
+                if t == block_type.value
+            ])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """

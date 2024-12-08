@@ -168,6 +168,9 @@ class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
 
+class LayerBlockType(enum.Enum):
+    attention = "attention"
+    mamba = "mamba"
 
 class Counter:
 

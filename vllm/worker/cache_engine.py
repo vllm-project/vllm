@@ -6,7 +6,7 @@ import torch
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size,
                         is_pin_memory_available)
 
 logger = init_logger(__name__)
@@ -35,7 +35,7 @@ class CacheEngine:
         self.head_size = model_config.get_head_size()
         # Models like Jamba, have mixed typed layers, E.g Mamba
         self.num_attention_layers = model_config.get_num_layers_by_block_type(
-            parallel_config)
+            parallel_config, LayerBlockType.attention)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
 
         self.block_size = cache_config.block_size
@@ -106,7 +106,7 @@ class CacheEngine:
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_attention_layers = model_config.get_num_layers_by_block_type(
-            parallel_config)
+            parallel_config, LayerBlockType.attention)
 
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
