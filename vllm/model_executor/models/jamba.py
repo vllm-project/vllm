@@ -26,6 +26,7 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.utils import LayerBlockType
 
 from .interfaces import HasInnerState, SupportsLoRA, SupportsPP
 from .utils import (is_pp_missing_parameter,
