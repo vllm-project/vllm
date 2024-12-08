@@ -379,11 +379,11 @@ class Phi3VProcessor(BaseMultiModalProcessor):
     ) -> BatchFeature:
         processed_outputs = super()._apply_hf_processor(
             prompt, mm_data, mm_processor_kwargs)
-        # Phi3v processor has inserted -1 as placeholder in the prompt_ids,
+        # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
         # which will cause OverflowError when decoding the prompt_ids.
         # Therefore, we need to do an early replacement here
         token_ids = processed_outputs['input_ids']
-        token_ids[token_ids == -1] = _IMAGE_TOKEN_ID
+        token_ids[token_ids < 0] = _IMAGE_TOKEN_ID
         processed_outputs['input_ids'] = token_ids
         return processed_outputs
 
