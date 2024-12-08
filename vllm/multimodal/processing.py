@@ -549,7 +549,9 @@ class BaseMultiModalProcessor(ABC):
                                          or {})
 
     def _get_hf_processor(
-            self, mm_processor_kwargs: Mapping[str, object]) -> ProcessorMixin:
+        self,
+        **mm_processor_kwargs: Mapping[str, object],
+    ) -> ProcessorMixin:
         # by default, we won't pass any kwargs to the processor initialization
         return self.ctx.get_hf_processor()
 
@@ -593,7 +595,7 @@ class BaseMultiModalProcessor(ABC):
             **self.init_mm_processor_kwargs,
             **mm_processor_kwargs,
         }
-        hf_processor = self._get_hf_processor(processor_init_kwargs)
+        hf_processor = self._get_hf_processor(**processor_init_kwargs)
 
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()

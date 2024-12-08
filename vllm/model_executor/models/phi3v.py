@@ -365,8 +365,10 @@ class Phi3VProcessor(BaseMultiModalProcessor):
         )
 
     def _get_hf_processor(
-            self, mm_processor_kwargs: Mapping[str, object]) -> ProcessorMixin:
-        num_crops = mm_processor_kwargs.get("num_crops", None)
+        self,
+        *,
+        num_crops: Optional[int] = None,
+    ) -> ProcessorMixin:
         if num_crops is not None:
             return self.ctx.get_hf_processor(num_crops=num_crops)
         return self.ctx.get_hf_processor()

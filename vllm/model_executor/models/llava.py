@@ -188,8 +188,7 @@ class LlavaProcessor(BaseMultiModalProcessor):
 
         hf_processor.__is_patched__ = True  # type: ignore
 
-    def _get_hf_processor(
-            self, mm_processor_kwargs: Mapping[str, object]) -> ProcessorMixin:
+    def _get_hf_processor(self) -> ProcessorMixin:
         hf_processor = self.ctx.get_hf_processor()
 
         if isinstance(hf_processor, PixtralProcessor):
@@ -591,8 +590,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
 class MantisProcessor(LlavaProcessor):
 
-    def _get_hf_processor(
-            self, mm_processor_kwargs: Mapping[str, object]) -> ProcessorMixin:
+    def _get_hf_processor(self) -> ProcessorMixin:
         try:
             from mantis.models.mllava import MLlavaProcessor
         except ModuleNotFoundError as exc:
