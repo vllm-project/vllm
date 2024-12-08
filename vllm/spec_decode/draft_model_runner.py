@@ -1,3 +1,4 @@
+import weakref
 from typing import List, Optional
 
 import torch
@@ -222,7 +223,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                     model_input.prompt_adapter_requests,
                     model_input.prompt_adapter_mapping)
 
-            self.attn_state.begin_forward(model_input)
+            self.attn_state.begin_forward(model_input,
+                                          weakref.proxy(self.model))
 
         # Detect exec mode
         assert model_input.attn_metadata is not None
