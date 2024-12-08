@@ -19,6 +19,7 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+from vllm.utils import get_token_bin_counts_and_mask
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     import flashinfer.sampling
@@ -336,23 +337,6 @@ class Sampler(nn.Module):
         return self.should_modify_greedy_probs_inplace
 
 
-def _get_bin_counts_and_mask(
-    tokens: torch.Tensor,
-    vocab_size: int,
-    num_seqs: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    # Compute the bin counts for the tokens.
-    # vocab_size + 1 for padding.
-    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
-                             dtype=torch.long,
-                             device=tokens.device)
-    bin_counts.scatter_add_(1, tokens, torch.ones_like(tokens))
-    bin_counts = bin_counts[:, :vocab_size]
-    mask = bin_counts > 0
-
-    return bin_counts, mask
-
-
 def _apply_min_tokens_penalty(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -406,9 +390,9 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
                      frequency_penalties: torch.Tensor,
                      repetition_penalties: torch.Tensor) -> torch.Tensor:
     num_seqs, vocab_size = logits.shape
-    _, prompt_mask = _get_bin_counts_and_mask(prompt_tokens_tensor, vocab_size,
-                                              num_seqs)
-    output_bin_counts, output_mask = _get_bin_counts_and_mask(
+    _, prompt_mask = get_token_bin_counts_and_mask(prompt_tokens_tensor,
+                                                   vocab_size, num_seqs)
+    output_bin_counts, output_mask = get_token_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs)
 
     repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
