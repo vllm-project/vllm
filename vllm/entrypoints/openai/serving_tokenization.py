@@ -1,5 +1,7 @@
 from typing import Final, List, Optional, Union
 
+from fastapi import Request
+
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -17,7 +19,6 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -48,12 +49,13 @@ class OpenAIServingTokenization(OpenAIServing):
     async def create_tokenize(
         self,
         request: TokenizeRequest,
+        raw_request: Request,
     ) -> Union[TokenizeResponse, ErrorResponse]:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tokn-{random_uuid()}"
+        request_id = f"tokn-{self._base_request_id(raw_request)}"
 
         try:
             (
@@ -112,12 +114,13 @@ class OpenAIServingTokenization(OpenAIServing):
     async def create_detokenize(
         self,
         request: DetokenizeRequest,
+        raw_request: Request,
     ) -> Union[DetokenizeResponse, ErrorResponse]:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tokn-{random_uuid()}"
+        request_id = f"tokn-{self._base_request_id(raw_request)}"
 
         (
             lora_request,

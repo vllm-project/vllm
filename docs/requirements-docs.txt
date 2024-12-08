@@ -16,5 +16,6 @@ mistral_common >= 1.5.0
 aiohttp
 starlette
 openai # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
+fastapi # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
 partial-json-parser # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
 requests
