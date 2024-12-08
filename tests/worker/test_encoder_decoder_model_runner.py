@@ -548,7 +548,7 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     # With CUDA Graph capture and replay enabled, the decoder and encoder
     # input sequences will be padded. Create the expected padded tensors
     # accordingly.
-    graph_batch_size = VllmConfig.get_graph_batch_size(expanded_batch_size)
+    graph_batch_size = VllmConfig.static_pad_for_cudagraph(expanded_batch_size)
     cuda_graph_pad_size = graph_batch_size - expanded_batch_size
     padded_seq_lens = seq_lens + list(itertools.repeat(1, cuda_graph_pad_size))
     padded_encoder_seq_lens = encoder_seq_lens + list(

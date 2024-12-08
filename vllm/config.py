@@ -2274,6 +2274,7 @@ class CompilationConfig(BaseModel):
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
+    bs_to_padded_graph_size: Dict[int, int] = PrivateAttr
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
@@ -2371,6 +2372,12 @@ class CompilationConfig(BaseModel):
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
 
+        # pre-compute the mapping from batch size to padded graph size
+        self.bs_to_padded_graph_size = {}
+        for end, start in zip(self.capture_sizes, self.capture_sizes[1:]):
+            for bs in range(start, end):
+                self.bs_to_padded_graph_size[bs] = end
+
 
 _BATCH_SIZE_ALIGNMENT = 8
 # all the token sizes that **can** be captured by cudagraph.
@@ -2378,10 +2385,14 @@ _BATCH_SIZE_ALIGNMENT = 8
 # currently it includes: 1, 2, 4, 8, 16, 24, 32, 40, ..., 8192.
 # the actual sizes to capture will be determined by the model,
 # depending on the model's max_num_seqs.
-# NOTE: get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 1025)
 ]
+
+bs_to_padded_graph_size: Dict[int, int] = {}
+for start, end in zip(_BATCH_SIZES_TO_CAPTURE, _BATCH_SIZES_TO_CAPTURE[1:]):
+    for bs in range(start, end):
+        bs_to_padded_graph_size[bs] = end
 
 
 @dataclass
@@ -2411,39 +2422,28 @@ class VllmConfig:
                                                  init=True)  # type: ignore
     instance_id: str = ""
 
-    @staticmethod
-    def get_graph_batch_size(batch_size: int) -> int:
-        """Returns the padded batch size given actual batch size.
-
-        Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
-        2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
+    def model_pad_for_cudagraph(self, batch_size: int) -> int:
+        """Returns the padded batch size given actual batch size,
+        considering the model's configuration.
         """
-        if batch_size <= 2:
-            return batch_size
-        elif batch_size <= 4:
-            return 4
-        else:
-            return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
-                    _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
+        if batch_size in self.compilation_config.bs_to_padded_graph_size:
+            return self.compilation_config.bs_to_padded_graph_size[batch_size]
+        return self.compilation_config.capture_sizes[0]
 
     @staticmethod
-    def get_max_graph_batch_size(max_num_seqs: int) -> int:
+    def static_pad_for_cudagraph(batch_size: int) -> int:
         """
-        max_num_seqs: Maximum number of sequences in a batch.
-        _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
-
-        pad the max_num_seqs if necessary by calling get_graph_batch_size,
-        which will deal with some edge cases like 1, 2, 4.
+        This function statically pads the batch size to the nearest
+        number in _BATCH_SIZES_TO_CAPTURE , without considering the
+        model's configuration.
 
         if the padded size is in _BATCH_SIZES_TO_CAPTURE, return the padded
         size. if not, it means the padded size is larger than the largest size
         in _BATCH_SIZES_TO_CAPTURE, return the largest size in
         _BATCH_SIZES_TO_CAPTURE.
         """
-        padded_size = VllmConfig.get_graph_batch_size(max_num_seqs)
-        if padded_size in _BATCH_SIZES_TO_CAPTURE:
-            return padded_size
-        assert padded_size > _BATCH_SIZES_TO_CAPTURE[-1]
+        if batch_size in bs_to_padded_graph_size:
+            return bs_to_padded_graph_size[batch_size]
         return _BATCH_SIZES_TO_CAPTURE[-1]
 
     @staticmethod
@@ -2543,7 +2543,7 @@ class VllmConfig:
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
                 max_batchsize_to_capture = \
-                    self.get_max_graph_batch_size(
+                    self.static_pad_for_cudagraph(
                     self.scheduler_config.max_num_seqs)
             batch_size_capture_list = [
                 size for size in _BATCH_SIZES_TO_CAPTURE

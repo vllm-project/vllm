@@ -185,7 +185,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
-            max_batch_size = (VllmConfig.get_graph_batch_size(
+            max_batch_size = (VllmConfig.static_pad_for_cudagraph(
                 self.scheduler_config.max_num_seqs) if self.scheduler_config
                               else max(_BATCH_SIZES_TO_CAPTURE) + 2)
             self.mamba_cache = MambaCacheManager(
