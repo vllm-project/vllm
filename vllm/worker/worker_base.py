@@ -12,7 +12,9 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
-from vllm.sequence import ExecuteModelRequest, IntermediateTensors
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SequenceGroupMetadata)
+from vllm.store.kv_store import BlockMappingFromCPU, KVBlockStore, KVStoreMeta
 from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, update_environment_variables)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
@@ -31,6 +33,7 @@ class WorkerBase(ABC):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        local_rank: int = 0,
     ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -44,6 +47,14 @@ class WorkerBase(ABC):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
+        self.local_rank = local_rank
+
+        if (self.cache_config.enable_kv_store):
+            self.cache_config.kv_store = KVBlockStore.from_configs(
+                self.cache_config, self.model_config, self.parallel_config,
+                torch.device(f"cuda:{self.local_rank}"))
+        self.kv_store = self.cache_config.kv_store
+        self.kv_store_manager = self.cache_config.kv_store_manager
 
     @abstractmethod
     def init_device(self) -> None:
@@ -148,6 +159,9 @@ class WorkerInput:
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
     num_steps: int = 1
+    kv_store_block_mapping: Optional[torch.Tensor] = None
+    kv_store_block_offsets: Optional[torch.Tensor] = None
+    kv_store_block_req_ids: Optional[torch.Tensor] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -165,6 +179,9 @@ class WorkerInput:
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
             num_steps=tensor_dict.pop("num_steps"),
+            kv_store_block_mapping=tensor_dict.pop("kv_block_mapping"),
+            kv_store_block_offsets=tensor_dict.pop("kv_block_mapping_offsets"),
+            kv_store_block_req_ids=tensor_dict.pop("kv_block_mapping_req_ids"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -179,6 +196,9 @@ class WorkerInput:
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
             "num_steps": self.num_steps,
+            "kv_block_mapping": self.kv_store_block_mapping,
+            "kv_block_mapping_offsets": self.kv_store_block_offsets,
+            "kv_block_mapping_req_ids": self.kv_store_block_req_ids,
         }
 
         return tensor_dict
@@ -237,6 +257,46 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
+    def prepare_kv_store_meta(self,
+                              is_prefill: Optional[bool],
+                              incomplete_put_block_ids: torch.Tensor,
+                              put_block_ids: torch.Tensor,
+                              seq_g_list: List[SequenceGroupMetadata]) \
+                                      -> KVStoreMeta:
+        ret_incomplete_put_blocks = torch.Tensor()
+        ret_put_blocks_mapping = torch.Tensor()
+        ret_seq_g_ids = torch.Tensor()
+        if (self.local_rank == 0) and (self.kv_store_manager is not None):
+            self.kv_store_manager.is_prefill = is_prefill
+            (ret_incomplete_put_blocks, ret_put_blocks_mapping) = \
+                    self.kv_store_manager.get_put_blocks_mapping(
+                        incomplete_put_block_ids, put_block_ids)
+            self.kv_store_manager.is_prefill = False
+            if (is_prefill) and (ret_incomplete_put_blocks.numel() + \
+                    ret_put_blocks_mapping.numel() > 0):
+                # XXX: use first seq_id representing the seq_group id
+                seq_g_ids = [seq_g.get_first_seq_id() for seq_g in seq_g_list]
+                ret_seq_g_ids = torch.tensor(seq_g_ids,
+                                             device="cpu",
+                                             dtype=torch.int64).view(-1)
+        return KVStoreMeta(ret_incomplete_put_blocks, ret_put_blocks_mapping,
+                           ret_seq_g_ids)
+
+    def put_stream_sync(self):
+        if (self.kv_store is not None):
+            self.kv_store.put_stream_sync()
+
+    def issue_blocks_copy(self, worker_input: WorkerInput) -> None:
+        if (self.kv_store is None):
+            return
+        kv_caches = (self.kv_cache[worker_input.virtual_engine]
+                     if self.kv_cache is not None else None)
+        self.kv_store.get_blocks(
+            BlockMappingFromCPU(worker_input.kv_store_block_mapping,
+                                worker_input.kv_store_block_offsets,
+                                worker_input.kv_store_block_req_ids),
+            kv_caches)
+
     def _get_worker_input_from_broadcast(
         self
     ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
@@ -265,11 +325,20 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
-        model_input: ModelRunnerInputBase = (
-            self.model_runner.prepare_model_input(
-                execute_model_req.seq_group_metadata_list,
-                execute_model_req.virtual_engine,
-                execute_model_req.finished_requests_ids))
+        model_input = (self.model_runner.prepare_model_input(
+            execute_model_req.seq_group_metadata_list,
+            execute_model_req.virtual_engine,
+            execute_model_req.finished_requests_ids))
+
+        incomplete_put_block_ids = \
+                model_input.attn_metadata.kv_store_meta.incomplete_put_block_ids
+        put_block_ids = \
+                model_input.attn_metadata.kv_store_meta.put_block_ids_mapping
+        model_input.attn_metadata.kv_store_meta = \
+            self.prepare_kv_store_meta(model_input.is_prompt,
+                                       incomplete_put_block_ids,
+                                       put_block_ids,
+                                       execute_model_req.seq_group_metadata_list)
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
@@ -325,6 +394,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         self.execute_worker(worker_input)
 
+        self.issue_blocks_copy(worker_input)
+
         # If there is no input, we don't need to execute the model.
         if worker_input.num_seq_groups == 0:
             return []
@@ -349,6 +420,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             **kwargs,
         )
 
+        self.put_stream_sync()
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
@@ -475,7 +547,7 @@ def extract_previous_hidden_states(
         data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]]) -> \
             Dict[str, torch.Tensor]:
     """If data contains previous_hidden_states, extract it. This returns a dict
-    which can be used directly as additional kwargs in any following 
+    which can be used directly as additional kwargs in any following
     execute_model calls. This is used in draft models like EAGLE."""
     output = {}
 
