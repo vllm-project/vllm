@@ -536,6 +536,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         Returns:
             A tuple of two lists: (blocks_to_swap_out, blocks_to_swap_in).
             Each list is a List[Tuple[int, int]], containing the mapping of 
-            source to destination block IDs.
+            source to destination block IDs. The block IDs are physical block
+            IDs and it's expected to be used by the cache engine directly.
         """
         return self.block_allocator.get_and_reset_swaps(now)

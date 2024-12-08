@@ -266,7 +266,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         Returns:
             A tuple of two lists: (blocks_to_swap_out, blocks_to_swap_in).
             Each list is a List[Tuple[int, int]], containing the mapping of 
-            source to destination block IDs.
+            source to destination block IDs. The block IDs are physical block
+            IDs and it's expected to be used by the cache engine directly.
         """
 
         allocator = self._allocators[Device.GPU]
@@ -328,9 +329,13 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             # only two possible cases: CPU -> GPU, or GPU -> CPU
             if src in self._allocators[Device.GPU].all_block_ids:
                 # swap out
+                src = self._allocators[Device.GPU].get_physical_block_id(src)
+                dst = self._allocators[Device.CPU].get_physical_block_id(dst)
                 blocks_to_swap_out.append((src, dst))
             else:
                 # swap in
+                src = self._allocators[Device.CPU].get_physical_block_id(src)
+                dst = self._allocators[Device.GPU].get_physical_block_id(dst)
                 blocks_to_swap_in.append((src, dst))
         self._swap_mapping.clear()
         return blocks_to_swap_out, blocks_to_swap_in
