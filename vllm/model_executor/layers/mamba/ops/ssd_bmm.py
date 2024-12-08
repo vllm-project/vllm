@@ -48,7 +48,7 @@ def _bmm_chunk_fwd_kernel(
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_b = tl.program_id(axis=1)
-    pid_ch = tl.program_id(axis=2)
+    pid_ch = tl.program_id(axis=2).to(tl.int64)
     pid_c = pid_ch // ngroups
     pid_h = pid_ch - pid_c * ngroups
     num_pid_n = tl.cdiv(chunk_size, BLOCK_SIZE_N)
