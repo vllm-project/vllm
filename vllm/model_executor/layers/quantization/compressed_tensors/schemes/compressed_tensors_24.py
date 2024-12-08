@@ -82,6 +82,17 @@ class CompressedTensors24(CompressedTensorsScheme):
 
                 layer.register_parameter("input_scale", input_scale)
 
+        else:
+            # for sparse-only, pass in 1 for weight/input scales
+            weight_scale = torch.nn.Parameter(data=torch.ones(
+                1, dtype=torch.float32),
+                                              requires_grad=False)
+            input_scale = torch.nn.Parameter(data=torch.ones(
+                1, dtype=torch.float32),
+                                             requires_grad=False)
+            layer.register_parameter("input_scale", input_scale)
+            layer.register_parameter("weight_scale", weight_scale)
+
         layer.register_parameter("weight", weight)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -95,12 +106,22 @@ class CompressedTensors24(CompressedTensorsScheme):
         :param layer: The layer with the weights to be processed
         
         """
-        if (self.weight_quant and self.weight_quant.strategy
-                == QuantizationStrategy.TENSOR.value):
-            layer.weight_scale = torch.nn.Parameter(convert_to_channelwise(
-                weight_scale=layer.weight_scale,
-                logical_widths=layer.logical_widths),
-                                                    requires_grad=False)
+        # torch.compile workaround
+        if hasattr(layer, "input_scale"):
+            layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
+                                                   requires_grad=False)
+
+        if self.weight_quant:
+            if self.weight_quant.strategy == QuantizationStrategy.TENSOR.value:
+                layer.weight_scale = torch.nn.Parameter(convert_to_channelwise(
+                    weight_scale=layer.weight_scale,
+                    logical_widths=layer.logical_widths),
+                                                        requires_grad=False)
+            else:
+                # torch.compile workaround
+                layer.weight_scale = torch.nn.Parameter(
+                    layer.weight_scale.data, requires_grad=False)
+
         w_compressed, meta = ops.cutlass_compress_entry(layer.weight.data)
         layer.weight = torch.nn.Parameter(w_compressed, requires_grad=False)
         layer.meta = torch.nn.Parameter(meta, requires_grad=False)
@@ -120,21 +141,27 @@ class CompressedTensors24(CompressedTensorsScheme):
         :param bias: The bias to be added to the output tensor
         :return: The output tensor of the layer 
         """
-        scale = None
-        if hasattr(layer, "input_scale"):
-            scale = layer.input_scale
+        if self.quantized:
+            scale = None
+            if hasattr(layer, "input_scale"):
+                scale = layer.input_scale
 
-        if self.weights_dtype == torch.int8:
-            ops_output = ops.scaled_int8_quant(x, scale=scale)
-            q_input = ops_output[0]
-            input_scale = ops_output[1]
-        else:
-            assert self.weights_dtype == torch.float8_e4m3fn
-            if scale is not None:
-                q_input, input_scale = ops.scaled_fp8_quant(x, scale=scale)
+            if self.weights_dtype == torch.int8:
+                ops_output = ops.scaled_int8_quant(x, scale=scale)
+                q_input = ops_output[0]
+                input_scale = ops_output[1]
             else:
-                q_input, input_scale = ops.scaled_fp8_quant(
-                    x, use_per_token_if_dynamic=True)
+                assert self.weights_dtype == torch.float8_e4m3fn
+                if scale is not None:
+                    q_input, input_scale = ops.scaled_fp8_quant(x, scale=scale)
+                else:
+                    q_input, input_scale = ops.scaled_fp8_quant(
+                        x, use_per_token_if_dynamic=True)
+
+        else:
+            # Not quantized, nothing to do with the input_scales, use as is
+            input_scale = layer.input_scale
+            q_input = x
 
         out = ops.cutlass_scaled_sparse_mm(a=layer.weight,
                                            e=layer.meta,
@@ -143,7 +170,6 @@ class CompressedTensors24(CompressedTensorsScheme):
                                            scale_b=input_scale,
                                            out_dtype=self.output_dtype,
                                            bias=bias)
-
         assert out.is_contiguous()
         return out
 

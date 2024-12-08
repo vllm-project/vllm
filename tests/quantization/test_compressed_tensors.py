@@ -221,7 +221,7 @@ def test_compressed_tensors_kv_cache(vllm_runner):
     ("nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-IA-Per-Tensor-Weight-testing",
      "tensor", "token")
 ])
-def test_compressed_tensors_2of4(vllm_runner, args_2of4):
+def test_compressed_tensors_2of4_quant(vllm_runner, args_2of4):
     model, weight_strategy, input_strategy = args_2of4
     with vllm_runner(model) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
@@ -234,6 +234,31 @@ def test_compressed_tensors_2of4(vllm_runner, args_2of4):
         assert qkv_proj.scheme.weight_quant.strategy == weight_strategy
         assert qkv_proj.scheme.input_quant.strategy == input_strategy
         assert qkv_proj.scheme.quantized
+        assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
+        sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
+        assert sparsity_map.get("Linear").format == "dense"
+        assert sparsity_map.get("Linear").sparsity_structure == "2:4"
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        assert output
+
+
+@pytest.mark.parametrize(
+    "args_2of4",
+    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-2of4-Sparse-Dense-Compressor")])
+def test_compressed_tensors_2of4_sparse(vllm_runner, args_2of4):
+    model = args_2of4
+    with vllm_runner(model) as llm:
+        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        layer = model.model.layers[0]
+
+        qkv_proj = layer.self_attn.qkv_proj
+        assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+        assert isinstance(qkv_proj.scheme, CompressedTensors24)
+
+        assert qkv_proj.scheme.weight_quant is None
+        assert qkv_proj.scheme.input_quant is None
+        assert not qkv_proj.scheme.quantized
         assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
         sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
         assert sparsity_map.get("Linear").format == "dense"

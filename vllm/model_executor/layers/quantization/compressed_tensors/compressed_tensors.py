@@ -385,6 +385,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             weight_quant = None
             input_quant = None
 
+        # For models with sparsity, assumes that the sparse layers are also
+        # quantized for cutlass 2:4 support
         sparsity_scheme: Optional[
             SparsityCompressionConfig] = self.sparsity_scheme_map.get(
                 matched_target)
