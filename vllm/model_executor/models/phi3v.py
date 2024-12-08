@@ -341,7 +341,7 @@ def dummy_mm_kwargs_for_phi3v(ctx: InputProcessingContext,
     image_processor = hf_processor.image_processor  # type: ignore
     hf_inputs = image_processor.preprocess(data['image'], return_tensors="pt")
 
-    return MultiModalKwargs(**hf_inputs, )
+    return MultiModalKwargs(**hf_inputs)
 
 
 def create_metadata_for_phi3v(
