@@ -2290,6 +2290,7 @@ class CompilationConfig(BaseModel):
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
+        # do not use `eval`, it is dangerous and can execute arbitrary code
         dict_value = ast.literal_eval(cli_value)
         return CompilationConfig.model_validate(dict_value)
 
