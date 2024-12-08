@@ -310,10 +310,14 @@ void reshape_and_cache_flash(
     torch::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
     const std::string& kv_cache_dtype, const double k_scale,
     const double v_scale) {
-  // NOTE(woosuk): key.size(0) can be different from slot_mapping.size(0)
-  // because of padding. Specifically, key.size(0) is the number of tokens
-  // after padding (for CUDA graphs), while slot_mapping.size(0) can be
-  // the actual number of tokens without padding (in vLLM V1).
+  // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
+  // slot_mapping.size(0) because of padding for CUDA graphs.
+  // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
+  // both include padding.
+  // In vLLM V1, however, key.size(0) can be larger than slot_mapping.size(0)
+  // since key includes padding for CUDA graphs, while slot_mapping does not.
+  // In this case, slot_mapping.size(0) represents the actual number of tokens
+  // before padding.
   // For compatibility with both cases, we use slot_mapping.size(0) as the
   // number of tokens.
   int num_tokens = slot_mapping.size(0);
