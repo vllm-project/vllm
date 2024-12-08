@@ -27,8 +27,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
-from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once, random_uuid,
+from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
+                        get_cpu_memory, print_warning_once, random_uuid,
                         resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
