@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 import ipaddress
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -1652,3 +1653,28 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
+
+
+def kill_process_tree(pid: int):
+    """
+    Kills all descendant processes of the given pid by sending SIGKILL.
+
+    Args:
+        pid (int): Process ID of the parent process
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    # Get all children recursively
+    children = parent.children(recursive=True)
+
+    # Send SIGKILL to all children first
+    for child in children:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child.pid, signal.SIGKILL)
+
+    # Finally kill the parent
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
