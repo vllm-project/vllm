@@ -33,7 +33,7 @@ class FlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -144,6 +144,8 @@ class FlashAttentionImpl(AttentionImpl):
         # in this method. For example, `view` and `slice` (or `[:n]`) operations
         # are surprisingly slow even in the case they do not invoke any GPU ops.
         # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         # Reshape the input keys and values and store them in the cache.
