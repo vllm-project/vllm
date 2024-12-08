@@ -51,6 +51,12 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
+        def get_node_and_accelerator_ids(
+                self) -> Tuple[str, Dict[str, List[int]]]:
+            node_id = ray.get_runtime_context().get_node_id()
+            accelerator_ids = ray.get_runtime_context().get_accelerator_ids()
+            return node_id, accelerator_ids
+
         def execute_model_spmd(
             self, req_or_tuple: Union[bytes,
                                       Tuple[bytes,
@@ -230,6 +236,10 @@ def initialize_ray_cluster(
     """
     assert_ray_available()
 
+    if current_platform.is_npu():
+        # Auto set visible devices in ray will cause torch.npu.set_device fail
+        os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
+
     # Connect to a ray cluster.
     if current_platform.is_rocm() or current_platform.is_xpu():
         # Try to connect existing ray instance and create a new one if not found
@@ -254,6 +264,8 @@ def initialize_ray_cluster(
         device_str = "TPU"
     elif current_platform.is_hpu():
         device_str = 'HPU'
+    elif current_platform.is_npu():
+        device_str = "NPU"
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:

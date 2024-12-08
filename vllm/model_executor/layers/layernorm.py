@@ -135,6 +135,22 @@ class RMSNorm(CustomOp):
             self.variance_epsilon,
         )
 
+    def forward_npu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        import torch_npu
+
+        if residual is not None:
+            x, _, residual = torch_npu.npu_add_rms_norm(
+                x, residual, self.weight, self.variance_epsilon)
+            return x, residual
+
+        x, residual = torch_npu.npu_rms_norm(x, self.weight,
+                                             self.variance_epsilon)
+        return x
+
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
         s += f", eps={self.variance_epsilon}"

@@ -163,6 +163,10 @@ def _cached_get_attn_backend(
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
+    elif backend == _Backend.ASCEND:
+        logger.info("Using ASCEND backend.")
+        from vllm.attention.backends.ascend import AscendAttentionBackend
+        return AscendAttentionBackend
     elif backend == _Backend.NO_ATTENTION:
         from vllm.attention.backends.placeholder_attn import (
             PlaceholderAttentionBackend)
@@ -206,6 +210,12 @@ def which_attn_to_use(head_size: int,
         selected_backend)
     if default_backend is not None:
         return default_backend
+
+    if current_platform.is_npu():
+        # Ascend NPU
+        if selected_backend != _Backend.ASCEND:
+            logger.info("Cannot use %s backend on NPU.", selected_backend)
+        return _Backend.ASCEND
 
     if use_v1:
         return _Backend.FLASH_ATTN_VLLM_V1
