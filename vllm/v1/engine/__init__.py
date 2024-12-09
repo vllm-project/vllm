@@ -1,8 +1,9 @@
 import enum
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import msgspec
+import numpy.typing as npt
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
@@ -21,6 +22,11 @@ class DetokenizerRequest:
 
     stop: List[str]
     include_stop_str_in_output: bool
+
+    # Per-request logprobs & prompt logprobs
+    # counts; None is equivalent to 0
+    logprobs: Optional[int]
+    prompt_logprobs: Optional[int]
 
 
 @dataclass
@@ -51,6 +57,9 @@ class EngineCoreOutput(msgspec.Struct,
     request_id: str
     new_token_ids: List[int]
     finished: bool
+    logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]]
+    prompt_logprobs: Optional[npt.NDArray]
+    prompt_logprobs_token_ids: Optional[npt.NDArray]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
 

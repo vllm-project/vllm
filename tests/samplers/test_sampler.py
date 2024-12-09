@@ -176,7 +176,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             max_tokens=9999,  # keep higher than max of min_tokens
             stop_token_ids=stop_token_ids,
             # requesting prompt_logprobs changes the structure of `logits`
-            prompt_logprobs=prompt_logprobs,
+            request_prompt_logprobs=prompt_logprobs,
         )
         sampling_params.all_stop_token_ids.add(eos_token_id)
         return sampling_params
@@ -395,7 +395,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 seq_lens.append(prompt_len)
 
                 assert sgm.sampling_params is not None
-                if sgm.sampling_params.prompt_logprobs:
+                if sgm.sampling_params.request_prompt_logprobs:
                     # with prompt_logprobs each token in the prompt has a row in
                     # logits
                     num_rows = prompt_len
