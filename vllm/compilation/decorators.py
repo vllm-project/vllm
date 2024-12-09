@@ -157,9 +157,6 @@ def _support_torch_compile(
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)
 
-        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
-            start_monitoring_torch_compile(vllm_config.compilation_config)
-
     cls.__init__ = __init__
 
     def __call__(self, *args, **kwargs):
@@ -186,6 +183,7 @@ def _support_torch_compile(
                         raise ValueError(
                             "Unsupported dynamic dimensions"
                             f" {dims} for argument {k} with type {type(arg)}.")
+            start_monitoring_torch_compile(self.vllm_config.compilation_config)
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
