@@ -699,6 +699,9 @@ class ModelConfig:
         parallel_config: "ParallelConfig",
         block_type: LayerBlockType = LayerBlockType.attention,
     ) -> int:
+        # This function relies on 'layers_block_type' in hf_config,
+        # for hybrid/attention free models w/o this attribute,
+        # we will need to have workarounds like so
         if self.is_attention_free and block_type == LayerBlockType.attention:
             return 0
         start, end = self.get_layers_start_end_indices(parallel_config)
