@@ -219,11 +219,10 @@ class LlavaProcessor(BaseMultiModalProcessor):
         hf_inputs = image_processor.preprocess(data['image'],
                                                return_tensors="pt")
         if 'is_pixtral' not in hf_inputs:
-            hf_inputs['is_pixtral'] = isinstance(hf_processor, PixtralProcessor)
+            hf_inputs['is_pixtral'] = isinstance(hf_processor,
+                                                 PixtralProcessor)
 
-        return MultiModalKwargs(
-            **hf_inputs
-        )
+        return MultiModalKwargs(**hf_inputs)
 
 
 class LlavaLikeConfig(Protocol):
