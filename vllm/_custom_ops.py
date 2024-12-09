@@ -249,6 +249,40 @@ def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
         block_table_bound)
 
 
+# fused quant layer norm ops
+def rms_norm_dynamic_per_token_quant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    scale_ub: Optional[torch.Tensor] = None,
+    residual: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(input, dtype=quant_dtype)
+    scales = torch.empty((input.numel() // input.shape[-1], 1),
+                         device=input.device,
+                         dtype=torch.float32)
+
+    torch.ops._C.rms_norm_dynamic_per_token_quant(output, input, weight,
+                                                  scales, epsilon, scale_ub,
+                                                  residual)
+    return output, scales
+
+
+if hasattr(torch.ops._C, "rms_norm_dynamic_per_token_quant"):
+
+    @register_fake("_C::rms_norm_dynamic_per_token_quant")
+    def _rms_norm_dynamic_per_token_quant_fake(
+            output: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            scales: torch.Tensor,
+            epsilon: float,
+            scale_ub: Optional[torch.Tensor] = None,
+            residual: Optional[torch.Tensor] = None) -> None:
+        return None
+
+
 # quantization ops
 # awq
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
