@@ -118,11 +118,14 @@ class Metrics:
             name="vllm:tokens_total",
             documentation="Number of prefill plus generation tokens processed.",
             labelnames=labelnames)
+        buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
+        if not vllm_config.model_config.enforce_eager:
+            buckets = vllm_config.compilation_config.capture_sizes
         self.histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
             documentation="Histogram of number of tokens per engine_step.",
             labelnames=labelnames,
-            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096])
+            buckets=buckets)
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
