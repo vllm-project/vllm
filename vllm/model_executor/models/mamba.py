@@ -24,6 +24,7 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.utils import LayerBlockType
 
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -163,7 +164,9 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
 
         super().__init__()
         self.config = config
+        self.vllm_config = vllm_config
         self.scheduler_config = scheduler_config
+        self.model_config = vllm_config.model_config
         self.backbone = MambaModel(vllm_config=vllm_config,
                                    prefix=maybe_prefix(prefix, "backbone"))
         self.unpadded_vocab_size = config.vocab_size
@@ -207,8 +210,11 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
             max_batch_size = (VllmConfig.get_graph_batch_size(
                 self.scheduler_config.max_num_seqs) if self.scheduler_config
                               else max(_BATCH_SIZES_TO_CAPTURE) + 2)
+            
+            num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+                self.vllm_config.parallel_config, LayerBlockType.mamba)
             self.mamba_cache = MambaCacheManager(
-                self.lm_head.weight.dtype, self.config.num_hidden_layers,
+                self.lm_head.weight.dtype, num_mamba_layers,
                 max_batch_size, *self._get_mamba_cache_shape())
 
         (
