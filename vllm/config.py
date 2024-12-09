@@ -2372,6 +2372,7 @@ class CompilationConfig(BaseModel):
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
+        self.max_capture_size = self.capture_sizes[0]
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = {}
@@ -2382,8 +2383,8 @@ class CompilationConfig(BaseModel):
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
-
-        self.max_capture_size = self.capture_sizes[0]
+        self.bs_to_padded_graph_size[
+            self.max_capture_size] = self.max_capture_size
 
 
 """
@@ -2415,6 +2416,7 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 1025)
 ]
+_MAX_BATCH_SIZE_TO_CAPTURE = _BATCH_SIZES_TO_CAPTURE[-1]
 
 bs_to_padded_graph_size: Dict[int, int] = {}
 for start, end in zip([0] + _BATCH_SIZES_TO_CAPTURE[:-1],
@@ -2424,8 +2426,8 @@ for start, end in zip([0] + _BATCH_SIZES_TO_CAPTURE[:-1],
             bs_to_padded_graph_size[bs] = start
         else:
             bs_to_padded_graph_size[bs] = end
-
-_MAX_BATCH_SIZE_TO_CAPTURE = _BATCH_SIZES_TO_CAPTURE[-1]
+bs_to_padded_graph_size[
+    _MAX_BATCH_SIZE_TO_CAPTURE] = _MAX_BATCH_SIZE_TO_CAPTURE
 
 
 @dataclass
