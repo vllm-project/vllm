@@ -2379,9 +2379,9 @@ class CompilationConfig(BaseModel):
                               self.capture_sizes[1:] + [0]):
             for bs in range(start, end):
                 if bs == start:
-                    bs_to_padded_graph_size[bs] = start
+                    self.bs_to_padded_graph_size[bs] = start
                 else:
-                    bs_to_padded_graph_size[bs] = end
+                    self.bs_to_padded_graph_size[bs] = end
 
         self.max_capture_size = self.capture_sizes[0]
 
