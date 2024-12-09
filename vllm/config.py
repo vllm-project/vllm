@@ -2287,6 +2287,17 @@ class CompilationConfig(BaseModel):
     # Map from layer name to the attention cls
     static_forward_context: Dict[str, Any] = PrivateAttr
 
+    def __str__(self) -> str:
+        exclude = [
+            "static_forward_context",
+            "enabled_custom_ops",
+            "disabled_custom_ops",
+            "compilation_time",
+            "bs_to_padded_graph_size",
+            "pass_config",
+        ]
+        return self.json(exclude=exclude)
+
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
         """Parse the CLI value for the compilation config."""
