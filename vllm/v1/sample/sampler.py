@@ -179,7 +179,7 @@ def _apply_min_token_penalties(logits: torch.Tensor,
     """
     min_tokens_logits_to_penalize: List[Tuple[int, int]] = []
     for index, min_token in enumerate(min_tokens):
-        if (min_token > 0 and len(output_token_ids[index]) < min_token):
+        if (len(output_token_ids[index]) < min_token):
             for stop_token_id in stop_token_ids[index]:
                 min_tokens_logits_to_penalize.append((index, stop_token_id))
     if min_tokens_logits_to_penalize:
