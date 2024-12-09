@@ -2298,8 +2298,6 @@ class CompilationConfig(BaseModel):
         ]
         return self.json(exclude=exclude)
 
-    __str__ = __repr__
-
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
         """Parse the CLI value for the compilation config."""
