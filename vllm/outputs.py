@@ -205,7 +205,7 @@ class RequestOutput:
         # NOTE: We need omit logprobs here explicitly because the sequence
         # always has the logprobs of the sampled tokens even if the
         # logprobs are not requested.
-        include_logprobs = sampling_params.request_sample_logprobs is not None
+        include_logprobs = sampling_params.logprobs is not None
         text_buffer_length = sampling_params.output_text_buffer_length
         delta = sampling_params.output_kind == RequestOutputKind.DELTA
 

@@ -62,8 +62,8 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     # Generate SamplingParams
     vllm_sampling_params = [
         SamplingParams(max_tokens=max_tokens,
-                       request_sample_logprobs=lp,
-                       request_prompt_logprobs=plp,
+                       logprobs=lp,
+                       prompt_logprobs=plp,
                        temperature=0.0,
                        detokenize=detokenize)
         for lp, plp in logprob_prompt_logprob_list
@@ -288,11 +288,11 @@ def test_max_logprobs(monkeypatch):
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
-    vllm_sampling_params = SamplingParams(request_sample_logprobs=1)
+    vllm_sampling_params = SamplingParams(logprobs=1)
     # should pass
     runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
-    bad_sampling_params = SamplingParams(request_sample_logprobs=2)
+    bad_sampling_params = SamplingParams(logprobs=2)
     with pytest.raises(ValueError):
         runner.generate(["Hello world"], sampling_params=bad_sampling_params)
 
@@ -319,11 +319,10 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
-        sampling_params_logprobs_none = SamplingParams(
-            max_tokens=max_tokens,
-            request_sample_logprobs=None,
-            request_prompt_logprobs=None,
-            temperature=0.0)
+        sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
+                                                       logprobs=None,
+                                                       prompt_logprobs=None,
+                                                       temperature=0.0)
         results_logprobs_none = vllm_model.model.generate(
             example_prompts, sampling_params=sampling_params_logprobs_none)
 

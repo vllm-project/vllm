@@ -24,9 +24,7 @@ MISTRAL_FORMAT_MODELS = [
     # "mistralai/Mistral-Nemo-Instruct-2407"
 ]
 
-SAMPLING_PARAMS = SamplingParams(max_tokens=512,
-                                 temperature=0.0,
-                                 request_sample_logprobs=5)
+SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 SYMBOLIC_LANG_PROMPTS = [
     "勇敢な船乗りについての詩を書く",  # japanese
     "寫一首關於勇敢的水手的詩",  # chinese

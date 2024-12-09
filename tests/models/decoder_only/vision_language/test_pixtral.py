@@ -116,9 +116,7 @@ ENGINE_INPUTS = [
     _create_engine_inputs(IMG_URLS),
 ]
 
-SAMPLING_PARAMS = SamplingParams(max_tokens=512,
-                                 temperature=0.0,
-                                 request_sample_logprobs=5)
+SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 LIMIT_MM_PER_PROMPT = dict(image=4)
 
 MAX_MODEL_LEN = [8192, 65536]

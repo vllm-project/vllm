@@ -211,7 +211,7 @@ def test_logprobs_temp_1(vllm_runner, common_llm_kwargs,
         max_tokens=output_len,
         ignore_eos=True,
         temperature=temperature,
-        request_sample_logprobs=logprobs,
+        logprobs=logprobs,
     )
 
     sd_args = {

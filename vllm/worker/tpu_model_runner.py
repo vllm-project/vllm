@@ -520,10 +520,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     f"Best of > {_MAX_NUM_SAMPLES} is not supported by the TPU "
                     "backend.")
             n.append(sampling_params.n)
-            if sampling_params.request_sample_logprobs is not None:
+            if sampling_params.logprobs is not None:
                 raise NotImplementedError(
                     "logprobs is not currently supported by the TPU backend.")
-            if sampling_params.request_prompt_logprobs is not None:
+            if sampling_params.prompt_logprobs is not None:
                 raise NotImplementedError(
                     "prompt_logprobs is not currently supported by the TPU "
                     "backend.")

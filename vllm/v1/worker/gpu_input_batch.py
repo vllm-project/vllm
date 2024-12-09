@@ -150,13 +150,13 @@ class InputBatch:
 
         self.generators[req_index] = request.generator
 
-        num_logprobs = sampling_params.request_sample_logprobs
-        num_prompt_logprobs = sampling_params.request_prompt_logprobs
+        num_logprobs = sampling_params.logprobs
+        num_prompt_logprobs = sampling_params.prompt_logprobs
         if num_logprobs is not None and num_logprobs > 0:
             self.num_logprobs[req_id] = num_logprobs
         if num_prompt_logprobs is not None and num_prompt_logprobs > 0:
             self.num_prompt_logprobs[req_id] = num_prompt_logprobs
-        if sampling_params.request_prompt_logprobs:
+        if sampling_params.prompt_logprobs:
             self.prompt_logprob_reqs.add(req_id)
 
     def remove_request(self, req_id: str) -> Optional[int]:

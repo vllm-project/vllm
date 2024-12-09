@@ -48,8 +48,8 @@ class Request:
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
         # Number of sample logprobs and prompt logprobs requested,
         # respectively
-        self.request_sample_logprobs = sampling_params.request_sample_logprobs
-        self.request_prompt_logprobs = sampling_params.request_prompt_logprobs
+        self.request_sample_logprobs = sampling_params.logprobs
+        self.request_prompt_logprobs = sampling_params.prompt_logprobs
         # If sample logprobs are enabled, the number of sample logprobs cannot
         # be anticipated in advance (because the LLM is partially responsible
         # for deciding when the completion is finished.) So,

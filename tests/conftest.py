@@ -794,7 +794,7 @@ class VllmRunner:
             self._final_steps_generate_w_logprobs(req_outputs))
         # Omit prompt logprobs if not required by sampling params
         return ([x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
-                if sampling_params.request_prompt_logprobs is None else
+                if sampling_params.prompt_logprobs is None else
                 toks_str_logsprobs_prompt_logprobs)
 
     def generate_encoder_decoder_w_logprobs(
@@ -807,14 +807,14 @@ class VllmRunner:
         Logprobs generation for vLLM encoder/decoder models
         '''
 
-        assert sampling_params.request_sample_logprobs is not None
+        assert sampling_params.logprobs is not None
         req_outputs = self.model.generate(encoder_decoder_prompts,
                                           sampling_params=sampling_params)
         toks_str_logsprobs_prompt_logprobs = (
             self._final_steps_generate_w_logprobs(req_outputs))
         # Omit prompt logprobs if not required by sampling params
         return ([x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
-                if sampling_params.request_prompt_logprobs is None else
+                if sampling_params.prompt_logprobs is None else
                 toks_str_logsprobs_prompt_logprobs)
 
     def generate_greedy(
@@ -850,8 +850,8 @@ class VllmRunner:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
             max_tokens=max_tokens,
-            request_sample_logprobs=num_logprobs,
-            request_prompt_logprobs=num_prompt_logprobs,
+            logprobs=num_logprobs,
+            prompt_logprobs=num_prompt_logprobs,
             stop_token_ids=stop_token_ids,
             stop=stop)
 
@@ -872,8 +872,8 @@ class VllmRunner:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
             max_tokens=max_tokens,
-            request_sample_logprobs=num_logprobs,
-            request_prompt_logprobs=(num_prompt_logprobs),
+            logprobs=num_logprobs,
+            prompt_logprobs=(num_prompt_logprobs),
         )
         '''
         Greedy logprobs generation for vLLM encoder/decoder models

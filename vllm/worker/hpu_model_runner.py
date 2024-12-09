@@ -846,8 +846,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             lora_index_mapping += [lora_id] * (max_prompt_len - context_len)
             lora_prompt_mapping.extend(
                 [lora_id] *
-                (max_prompt_len - context_len if seq_group_metadata.
-                 sampling_params.request_prompt_logprobs else 1))
+                (max_prompt_len - context_len
+                 if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_len=max_prompt_len,
@@ -1154,8 +1154,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         paddings = list(itertools.accumulate(paddings))
         paddings_prompt_logprobs = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            if (seq_group_metadata.sampling_params.request_prompt_logprobs
-                    is not None and seq_group_metadata.is_prompt):
+            if (seq_group_metadata.sampling_params.prompt_logprobs is not None
+                    and seq_group_metadata.is_prompt):
                 paddings_prompt_logprobs += ([paddings[i]] * seq_lens[i])
         paddings = torch.tensor(
             paddings_prompt_logprobs if paddings_prompt_logprobs else paddings,

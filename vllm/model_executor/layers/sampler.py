@@ -967,9 +967,9 @@ def get_logprobs(
 
         # Update indices and tokens for prompt logprobs.
         if (seq_group.is_prompt
-                and sampling_params.request_prompt_logprobs is not None):
+                and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
-                                       sampling_params.request_prompt_logprobs)
+                                       sampling_params.prompt_logprobs)
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             query_indices.extend(seq_group.prompt_logprob_indices)
             next_token_ids.extend(next_prompt_tokens)
@@ -986,10 +986,9 @@ def get_logprobs(
                 [query_idx + parent_id for parent_id in parent_seq_ids])
             next_token_ids.extend(token_ids)
 
-            if sampling_params.request_sample_logprobs is not None:
-                largest_num_logprobs = max(
-                    largest_num_logprobs,
-                    sampling_params.request_sample_logprobs)
+            if sampling_params.logprobs is not None:
+                largest_num_logprobs = max(largest_num_logprobs,
+                                           sampling_params.logprobs)
 
         assert len(next_token_ids) == len(query_indices)
 
@@ -1071,9 +1070,9 @@ def _get_prompt_logprob_if_needed(
 
     # Find prompt logprobs
     prompt_logprobs: Optional[PromptLogprobs] = None
-    if is_prompt and sampling_params.request_prompt_logprobs is not None:
+    if is_prompt and sampling_params.prompt_logprobs is not None:
         prompt_logprobs = []
-        num_logprobs = sampling_params.request_prompt_logprobs
+        num_logprobs = sampling_params.prompt_logprobs
         next_prompt_tokens = _get_next_prompt_tokens(seq_group)
         # Pre-select indexes and create a list. It is faster than calling .item
         # repetitively.
@@ -1128,7 +1127,7 @@ def _get_sampled_logprob_if_needed(
 ):
     """Compute the sample logprob if needed."""
     seq_ids = seq_group.seq_ids
-    num_logprobs = seq_group.sampling_params.request_sample_logprobs
+    num_logprobs = seq_group.sampling_params.logprobs
     sampled_logprobs: SampleLogprobs = []
     next_token_ids, parent_seq_ids = sample_result
 

@@ -52,7 +52,7 @@ class SequenceGroupToSample:
 
     def __post_init__(self):
         if len(self.prompt_logprob_indices) > 0:
-            assert self.sampling_params.request_prompt_logprobs is not None
+            assert self.sampling_params.prompt_logprobs is not None
         if self.is_prompt:
             assert self.seq_len is not None
             assert self.query_len is not None
@@ -300,7 +300,7 @@ def _prepare_seq_groups(
         logits = hidden_states[selected_token_indices]
         """
 
-        if sampling_params.request_prompt_logprobs is not None:
+        if sampling_params.prompt_logprobs is not None:
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + prompt_logprob_len))
         model_output_idx += prompt_logprob_len
@@ -322,7 +322,7 @@ def _prepare_seq_groups(
            # sample_indices to find sample indices.
         """
 
-        if sampling_params.request_prompt_logprobs is not None:
+        if sampling_params.prompt_logprobs is not None:
             prompt_logprob_indices.extend(
                 range(logit_idx, logit_idx + prompt_logprob_len))
             logit_idx += prompt_logprob_len
@@ -426,8 +426,7 @@ class SamplingTensors:
                 do_penalties = True
 
             is_prompt = seq_group.is_prompt
-            if (is_prompt
-                    and sampling_params.request_prompt_logprobs is not None):
+            if (is_prompt and sampling_params.prompt_logprobs is not None):
                 # For tokens in the prompt that we only need to get
                 # their logprobs
                 query_len = seq_group.query_len
@@ -456,8 +455,8 @@ class SamplingTensors:
             for seq_group in sampling_metadata.seq_groups:
                 seq_ids = seq_group.seq_ids
                 sampling_params = seq_group.sampling_params
-                if (seq_group.is_prompt and
-                        sampling_params.request_prompt_logprobs is not None):
+                if (seq_group.is_prompt
+                        and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
                     prompt_tokens.extend(
                         array(VLLM_TOKEN_ID_ARRAY_TYPE)

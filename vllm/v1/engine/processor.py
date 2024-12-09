@@ -59,10 +59,9 @@ class Processor:
         """
 
         if isinstance(params, SamplingParams) and (
-            (params.request_sample_logprobs
-             and params.request_sample_logprobs > max_logprobs) or
-            (params.request_prompt_logprobs
-             and params.request_prompt_logprobs > max_logprobs)):
+            (params.logprobs and params.logprobs > max_logprobs) or
+            (params.prompt_logprobs
+             and params.prompt_logprobs > max_logprobs)):
 
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs or prompt logprobs.")
@@ -167,8 +166,8 @@ class Processor:
             sampling_params.output_kind,
             sampling_params.stop,
             sampling_params.include_stop_str_in_output,
-            sampling_params.request_sample_logprobs,
-            sampling_params.request_prompt_logprobs,
+            sampling_params.logprobs,
+            sampling_params.prompt_logprobs,
         )
 
         # Make Request for EngineCore.
