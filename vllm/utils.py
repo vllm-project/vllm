@@ -24,9 +24,9 @@ from collections import UserDict, defaultdict
 from collections.abc import Iterable, Mapping
 from functools import lru_cache, partial, wraps
 from platform import uname
-from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
-                    Type, TypeVar, Union, overload)
+from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
+                    Dict, Generic, Hashable, List, Literal, Optional,
+                    OrderedDict, Set, Tuple, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np
@@ -42,6 +42,9 @@ from typing_extensions import ParamSpec, TypeIs, assert_never
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -333,17 +336,6 @@ def get_cpu_memory() -> int:
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
-
-
-@lru_cache(maxsize=None)
-def get_vllm_instance_id() -> str:
-    """
-    If the environment variable VLLM_INSTANCE_ID is set, return it.
-    Otherwise, return a random UUID.
-    Instance id represents an instance of the VLLM. All processes in the same
-    instance should have the same instance id.
-    """
-    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
 
 
 @lru_cache(maxsize=None)
@@ -997,7 +989,7 @@ def find_nccl_library() -> str:
     return so_file
 
 
-def enable_trace_function_call_for_thread() -> None:
+def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
@@ -1009,7 +1001,8 @@ def enable_trace_function_call_for_thread() -> None:
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
                     f"at_{datetime.datetime.now()}.log").replace(" ", "_")
-        log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+        log_path = os.path.join(tmp_dir, "vllm",
+                                f"vllm-instance-{vllm_config.instance_id}",
                                 filename)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)

@@ -17,7 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
+from vllm.utils import is_pin_memory_available, print_warning_once
 
 logger = init_logger(__name__)
 
@@ -251,12 +251,15 @@ def init_vllm_registered_model(
     """
     from vllm.model_executor.model_loader.loader import _initialize_model
 
-    if hf_config is not None:
-        vllm_config = vllm_config.with_hf_config(hf_config)
+    if hf_config is None and architectures is not None:
+        # So that the architectures field is overridden
+        hf_config = vllm_config.model_config.hf_config
 
-    return _initialize_model(vllm_config=vllm_config,
-                             prefix=prefix,
-                             architectures=architectures)
+    if hf_config is not None:
+        vllm_config = vllm_config.with_hf_config(hf_config,
+                                                 architectures=architectures)
+
+    return _initialize_model(vllm_config=vllm_config, prefix=prefix)
 
 
 @overload
@@ -406,16 +409,42 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: int,
+    placeholder_token_id: Union[int, List[int]],
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
     positions in ``inputs_embeds`` corresponding to placeholder tokens in
     ``input_ids``.
+    
+    ``placeholder_token_id`` can be a list of token ids (e.g, token ids 
+    of img_start, img_break, and img_end tokens) when needed: This means 
+    the order of these tokens in the ``input_ids`` MUST MATCH the order of 
+    their embeddings in ``multimodal_embeddings`` since we need to 
+    slice-merge instead of individually scattering.
+
+    For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
+    - T is text token
+    - S is image start token
+    - I is image embedding token
+    - B is image break token
+    - E is image end token.
+    
+    Then the image embeddings (that correspond to I's) from vision encoder 
+    must be padded with embeddings of S, B, and E in the same order of 
+    input_ids for a correct embedding merge.
 
     Note:
         This updates ``inputs_embeds`` in place.
     """
+    if isinstance(placeholder_token_id, list):
+        placeholder_token_id = torch.tensor(placeholder_token_id,
+                                            device=input_ids.device)
+        return _merge_multimodal_embeddings(
+            inputs_embeds,
+            torch.isin(input_ids, placeholder_token_id),
+            multimodal_embeddings,
+        )
+
     return _merge_multimodal_embeddings(
         inputs_embeds,
         (input_ids == placeholder_token_id),
@@ -592,7 +621,7 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
             if is_flash_attn_2_available():
                 selected_backend = _Backend.FLASH_ATTN
             else:
-                logger.warning(
+                print_warning_once(
                     "Current `vllm-flash-attn` has a bug inside vision module, "
                     "so we use xformers backend instead. You can run "
                     "`pip install flash-attn` to use flash-attention backend.")
