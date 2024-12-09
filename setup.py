@@ -332,7 +332,8 @@ def _is_hpu() -> bool:
             except (ValueError, FileNotFoundError, PermissionError,
                     subprocess.CalledProcessError):
                 is_hpu_available = False
-    return is_hpu_available or VLLM_TARGET_DEVICE == "hpu"
+    return ((is_hpu_available or VLLM_TARGET_DEVICE == "hpu")
+            and VLLM_TARGET_DEVICE != "xpu")
 
 
 def _no_device() -> bool:
