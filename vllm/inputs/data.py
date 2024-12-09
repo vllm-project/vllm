@@ -7,7 +7,8 @@ import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
+    from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
+                                 MultiModalPlaceholderDict)
     from vllm.multimodal.inputs import MultiModalInputsV2
 
 
@@ -150,6 +151,12 @@ class TokenInputs(TypedDict):
     if the model supports it.
     """
 
+    multi_modal_inputs: NotRequired["MultiModalKwargs"]
+    """
+    Optional multi-modal inputs to pass to the model,
+    if the model supports it.
+    """
+
     multi_modal_placeholders: NotRequired["MultiModalPlaceholderDict"]
     """
     Placeholder ranges for the multi-modal data.
@@ -169,6 +176,7 @@ def token_inputs(
     token_type_ids: Optional[List[int]] = None,
     prompt: Optional[str] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
+    multi_modal_inputs: Optional["MultiModalKwargs"] = None,
     multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> TokenInputs:
@@ -181,6 +189,8 @@ def token_inputs(
         inputs["token_type_ids"] = token_type_ids
     if multi_modal_data is not None:
         inputs["multi_modal_data"] = multi_modal_data
+    if multi_modal_inputs is not None:
+        inputs["multi_modal_inputs"] = multi_modal_inputs
     if multi_modal_placeholders is not None:
         inputs["multi_modal_placeholders"] = multi_modal_placeholders
     if mm_processor_kwargs is not None:
@@ -274,6 +284,18 @@ class SingletonInputsAdapter:
         assert_never(inputs)
 
     @cached_property
+    def multi_modal_inputs(self) -> Union[Dict, "MultiModalKwargs"]:
+        inputs = self.inputs
+
+        if inputs["type"] == "token":
+            return inputs.get("multi_modal_inputs", {})
+
+        if inputs["type"] == "multimodal":
+            return inputs.get("mm_kwargs", {})
+
+        assert_never(inputs)
+
+    @cached_property
     def multi_modal_placeholders(self) -> "MultiModalPlaceholderDict":
         inputs = self.inputs
 
@@ -358,34 +380,3 @@ def to_enc_dec_tuple_list(
     return [(enc_dec_prompt["encoder_prompt"],
              enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]
-
-
-def __getattr__(name: str):
-    import warnings
-
-    if name == "PromptInput":
-        msg = ("PromptInput has been renamed to PromptType. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return PromptType
-
-    if name == "LLMInputs":
-        msg = ("LLMInputs has been renamed to DecoderOnlyInputs. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return DecoderOnlyInputs
-
-    if name == "EncoderDecoderLLMInputs":
-        msg = (
-            "EncoderDecoderLLMInputs has been renamed to EncoderDecoderInputs. "
-            "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return EncoderDecoderInputs
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
