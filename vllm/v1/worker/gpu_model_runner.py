@@ -434,10 +434,12 @@ class GPUModelRunner:
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
-        # Run the encoder.
-        self._execute_encoder(scheduler_output)
-        encoder_outputs = (self._gather_encoder_outputs(scheduler_output)
-                           if self.is_multimodal_model else [])
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            self._execute_encoder(scheduler_output)
+            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        else:
+            encoder_outputs = []
 
         # Prepare the decoder inputs.
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
