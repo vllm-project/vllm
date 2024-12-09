@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Type, Union, cast
 import numpy as np
 import prometheus_client
 
+from vllm.config import VllmConfig
 from vllm.engine.metrics_types import (StatLoggerBase, Stats,
                                        SupportsMetricsInfo)
 from vllm.executor.ray_utils import ray
@@ -44,9 +45,11 @@ class Metrics:
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
 
-    def __init__(self, labelnames: List[str], max_model_len: int):
+    def __init__(self, labelnames: List[str], vllm_config: VllmConfig):
         # Unregister any existing vLLM collectors (for CI/CD)
         self._unregister_vllm_metrics()
+
+        max_model_len = vllm_config.model_config.max_model_len
 
         # System stats
         #   Scheduler State
@@ -361,10 +364,10 @@ class RayMetrics(Metrics):
     _histogram_cls: Type[prometheus_client.Histogram] = cast(
         Type[prometheus_client.Histogram], _RayHistogramWrapper)
 
-    def __init__(self, labelnames: List[str], max_model_len: int):
+    def __init__(self, labelnames: List[str], vllm_config: VllmConfig):
         if ray_metrics is None:
             raise ImportError("RayMetrics requires Ray to be installed.")
-        super().__init__(labelnames, max_model_len)
+        super().__init__(labelnames, vllm_config)
 
     def _unregister_vllm_metrics(self) -> None:
         # No-op on purpose
@@ -421,8 +424,8 @@ def get_throughput(tracked_stats: List[int], now: float,
 class LoggingStatLogger(StatLoggerBase):
     """LoggingStatLogger is used in LLMEngine to log to Stdout."""
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, local_interval: float, vllm_config: VllmConfig) -> None:
+        super().__init__(local_interval, vllm_config)
         self.last_prompt_throughput: Optional[float] = None
         self.last_generation_throughput: Optional[float] = None
 
@@ -515,12 +518,12 @@ class PrometheusStatLogger(StatLoggerBase):
     _gauge_cls = prometheus_client.Gauge
 
     def __init__(self, local_interval: float, labels: Dict[str, str],
-                 max_model_len: int) -> None:
-        super().__init__(local_interval)
+                 vllm_config: VllmConfig) -> None:
+        super().__init__(local_interval, vllm_config)
         # Prometheus metrics
         self.labels = labels
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
-                                         max_model_len=max_model_len)
+                                         vllm_config=vllm_config)
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
