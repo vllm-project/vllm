@@ -15,5 +15,5 @@ def start_monitoring_torch_compile(compilation_config: CompilationConfig):
 
 def end_monitoring_torch_compile(compilation_config: CompilationConfig):
     if compilation_config.level == CompilationLevel.PIECEWISE:
-        logger.info("graph compilation takes %.2f s in total",
+        logger.info("torch.compile takes %.2f s in total",
                     compilation_config.compilation_time)
