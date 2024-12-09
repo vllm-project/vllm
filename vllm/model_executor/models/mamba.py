@@ -6,7 +6,7 @@ from torch import nn
 from transformers import MambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import _BATCH_SIZES_TO_CAPTURE, CacheConfig, VllmConfig
+from vllm.config import _MAX_BATCH_SIZE_TO_CAPTURE, CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -187,7 +187,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         if self.mamba_cache is None:
             max_batch_size = (VllmConfig.static_pad_for_cudagraph(
                 self.scheduler_config.max_num_seqs) if self.scheduler_config
-                              else max(_BATCH_SIZES_TO_CAPTURE) + 2)
+                              else _MAX_BATCH_SIZE_TO_CAPTURE + 2)
             self.mamba_cache = MambaCacheManager(
                 self.lm_head.weight.dtype, self.config.num_hidden_layers,
                 max_batch_size, *self._get_mamba_cache_shape())
