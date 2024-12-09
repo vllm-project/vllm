@@ -513,11 +513,10 @@ class ModelConfig:
 
         # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
-        if device_config.device_type not in ("cuda", "tpu", "xpu", "hpu"):
+        if not current_platform.is_async_output_supported(self.enforce_eager):
             logger.warning(
-                "Async output processing is only supported for CUDA, TPU, XPU "
-                "and HPU."
-                "Disabling it for other platforms.")
+                "Async output processing is not supported on the "
+                "current platform type %s.", current_platform.device_type)
             self.use_async_output_proc = False
             return
 
@@ -525,16 +524,6 @@ class ModelConfig:
             logger.warning(
                 "Async output processing can not be enabled with ray spmd")
             self.use_async_output_proc = False
-            return
-
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
-        # If the feature combo become valid
-        if device_config.device_type == "cuda" and self.enforce_eager:
-            logger.warning(
-                "To see benefits of async output processing, enable CUDA "
-                "graph. Since, enforce-eager is enabled, async output "
-                "processor cannot be used")
-            self.use_async_output_proc = not self.enforce_eager
             return
 
         # Async postprocessor is not necessary with embedding mode
