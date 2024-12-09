@@ -1,7 +1,7 @@
 steps:
   - label: "Build wheel - CUDA 12.1"
     agents:
-      queue: cpu_queue
+      queue: cpu_queue_postmerge
     commands:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.1.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
@@ -18,7 +18,7 @@ steps:
   - label: "Build wheel - CUDA 11.8"
     # depends_on: block-build-cu118-wheel
     agents:
-      queue: cpu_queue
+      queue: cpu_queue_postmerge
     commands:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=11.8.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
@@ -26,3 +26,16 @@ steps:
       - "bash .buildkite/upload-wheels.sh"
     env:
       DOCKER_BUILDKIT: "1"
+
+  - block: "Build release image"
+    depends_on: ~
+    key: block-release-image-build
+
+  - label: "Build release image"
+    depends_on: block-release-image-build
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.1.0 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT --target vllm-openai --progress plain ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"

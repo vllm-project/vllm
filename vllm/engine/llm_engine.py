@@ -1,3 +1,4 @@
+import copy
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -10,7 +11,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
 import torch
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
@@ -246,60 +247,12 @@ class LLMEngine:
         )
 
         logger.info(
-            "Initializing an LLM engine (v%s) with config: "
-            "model=%r, speculative_config=%r, tokenizer=%r, "
-            "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "override_neuron_config=%s, tokenizer_revision=%s, "
-            "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
-            "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
-            "pipeline_parallel_size=%d, "
-            "disable_custom_all_reduce=%s, quantization=%s, "
-            "enforce_eager=%s, kv_cache_dtype=%s, "
-            "quantization_param_path=%s, device_config=%s, "
-            "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s, "
-            "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
-            "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
-            "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "mm_processor_kwargs=%s, pooler_config=%r,"
-            "compilation_config=%r",
+            "Initializing an LLM engine (v%s) with config: %r,"
+            "use_cached_outputs=%s, ",
             VLLM_VERSION,
-            self.model_config.model,
-            self.speculative_config,
-            self.model_config.tokenizer,
-            self.model_config.skip_tokenizer_init,
-            self.model_config.tokenizer_mode,
-            self.model_config.revision,
-            self.model_config.override_neuron_config,
-            self.model_config.tokenizer_revision,
-            self.model_config.trust_remote_code,
-            self.model_config.dtype,
-            self.model_config.max_model_len,
-            self.load_config.download_dir,
-            self.load_config.load_format,
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size,
-            self.parallel_config.disable_custom_all_reduce,
-            self.model_config.quantization,
-            self.model_config.enforce_eager,
-            self.cache_config.cache_dtype,
-            self.model_config.quantization_param_path,
-            self.device_config.device,
-            self.decoding_config,
-            self.observability_config,
-            self.model_config.seed,
-            self.model_config.served_model_name,
-            self.scheduler_config.num_scheduler_steps,
-            self.scheduler_config.chunked_prefill_enabled,
-            self.scheduler_config.multi_step_stream_outputs,
-            self.cache_config.enable_prefix_caching,
-            self.model_config.use_async_output_proc,
+            vllm_config,
             use_cached_outputs,
-            self.model_config.mm_processor_kwargs,
-            self.model_config.pooler_config,
-            vllm_config.compilation_config,
         )
-        # TODO(woosuk): Print more configs in debug mode.
 
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
@@ -472,6 +425,7 @@ class LLMEngine:
         The workers will determine the number of blocks in both the GPU cache
         and the swap CPU cache.
         """
+        start = time.time()
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
 
@@ -487,6 +441,9 @@ class LLMEngine:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        elapsed = time.time() - start
+        logger.info(("init engine (profile, create kv cache, "
+                     "warmup model) took %.2f seconds"), elapsed)
 
     @classmethod
     def _get_executor_cls(cls,
@@ -619,7 +576,7 @@ class LLMEngine:
             model_config=self.model_config,
             scheduler_config=self.scheduler_config,
             parallel_config=self.parallel_config,
-            enable_lora=bool(self.lora_config))
+            lora_config=self.lora_config)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -719,7 +676,8 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
@@ -1023,9 +981,9 @@ class LLMEngine:
         This function updates num_computed_tokens for prompt sequences
         when Multi-Step is enabled.
 
-        seq_group: SequenceGroup to update the num_computed_tokens for. 
+        seq_group: SequenceGroup to update the num_computed_tokens for.
         seq_group_meta: Metadata of the given SequenceGroup.
-        is_first_step_output: Optional[bool] - 
+        is_first_step_output: Optional[bool] -
             When available, is_first_step_output indicates if the appended
             output token is the output of the first-step in multi-step.
             A value of None indicates that outputs from all steps in
@@ -2035,7 +1993,11 @@ class LLMEngine:
 
         logits_processors = []
 
-        if (guided_decoding := sampling_params.guided_decoding) is not None:
+        if sampling_params.guided_decoding is not None:
+            # Defensively copy sampling params since guided decoding logits
+            # processors can have different state for each request
+            sampling_params = copy.copy(sampling_params)
+            guided_decoding = sampling_params.guided_decoding
 
             logger.debug(
                 "Building guided decoding logits processor in "
@@ -2046,7 +2008,9 @@ class LLMEngine:
                 self.decoding_config.guided_decoding_backend
 
             processor = get_local_guided_decoding_logits_processor(
-                guided_params=guided_decoding, tokenizer=tokenizer)
+                guided_params=guided_decoding,
+                tokenizer=tokenizer,
+                model_config=self.model_config)
             if processor:
                 logits_processors.append(processor)
 

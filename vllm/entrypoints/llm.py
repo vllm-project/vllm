@@ -1,11 +1,11 @@
 import itertools
-import json
 import warnings
 from contextlib import contextmanager
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
 from tqdm import tqdm
+from typing_extensions import deprecated
 
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -185,12 +185,9 @@ class LLM:
             kwargs["disable_log_stats"] = True
 
         if compilation_config is not None:
-            if isinstance(compilation_config, (int)):
+            if isinstance(compilation_config, (int, dict)):
                 compilation_config_instance = CompilationConfig.from_cli(
                     str(compilation_config))
-            elif isinstance(compilation_config, (dict)):
-                compilation_config_instance = CompilationConfig.from_cli(
-                    json.dumps(compilation_config))
             else:
                 compilation_config_instance = compilation_config
         else:
@@ -256,6 +253,7 @@ class LLM:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     @overload  # LEGACY: single (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: str,
@@ -268,6 +266,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: List[str],
@@ -280,6 +279,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: Optional[str] = None,
@@ -293,6 +293,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: Optional[List[str]] = None,
@@ -306,6 +307,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: None,
@@ -671,6 +673,7 @@ class LLM:
         )
 
     @overload  # LEGACY: single (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: str,
@@ -683,6 +686,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: List[str],
@@ -695,6 +699,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: Optional[str] = None,
@@ -708,6 +713,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: Optional[List[str]] = None,
@@ -721,6 +727,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: None,

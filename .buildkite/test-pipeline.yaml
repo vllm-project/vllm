@@ -50,9 +50,9 @@ steps:
   - tests/multimodal
   - tests/test_utils
   - tests/worker
-  - tests/test_lazy_torch_compile.py
+  - tests/standalone_tests/lazy_torch_compile.py
   commands:
-  - python3 test_lazy_torch_compile.py
+  - python3 standalone_tests/lazy_torch_compile.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
@@ -60,6 +60,13 @@ steps:
   - pytest -v -s multimodal
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
+
+- label: Python-only Installation Test
+  source_file_dependencies:
+  - tests/standalone_tests/python_only_compile.sh
+  - setup.py
+  commands:
+  - bash standalone_tests/python_only_compile.sh
 
 - label: Basic Correctness Test # 30min
   #mirror_hardwares: [amd]
@@ -230,7 +237,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore lora/test_long_context.py lora/test_chatglm3_tp.py lora/test_llama_tp.py
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py
   parallelism: 4
 
 - label: "PyTorch Fullgraph Smoke Test" # 9min
@@ -355,6 +362,7 @@ steps:
   - tests/models/embedding/vision_language
   - tests/models/encoder_decoder/vision_language
   commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/vision_language -m core_model
@@ -370,6 +378,7 @@ steps:
   - tests/models/embedding/vision_language
   - tests/models/encoder_decoder/vision_language
   commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
@@ -481,7 +490,6 @@ steps:
 
 - label: LoRA TP Test (Distributed)
   num_gpus: 4
-  soft_fail: true
   source_file_dependencies:
   - vllm/lora
   - tests/lora
