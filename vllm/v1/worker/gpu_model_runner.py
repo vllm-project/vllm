@@ -107,7 +107,7 @@ class GPUModelRunner:
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int64,
+                                     dtype=torch.int32,
                                      device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
