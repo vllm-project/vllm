@@ -16,7 +16,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.triton_utils.importing import HAS_TRITON
 from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
                         cuda_is_initialized, get_distributed_init_method,
-                        get_open_port, get_vllm_instance_id, make_async,
+                        get_open_port, make_async,
                         update_environment_variables)
 
 if HAS_TRITON:
@@ -36,9 +36,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Create the parallel GPU workers.
         world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
-
-        # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
-        os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
