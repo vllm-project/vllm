@@ -1,4 +1,3 @@
-# coding=utf-8
 """PyTorch MAMBA model."""
 from typing import Iterable, List, Optional, Tuple
 
@@ -7,225 +6,52 @@ from torch import nn
 from transformers import MambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn, causal_conv1d_update)
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
-    selective_scan_fn, selective_state_update)
+from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (
-    composed_weight_loader, default_weight_loader, sharded_weight_loader)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState,
                                                    IsAttentionFree)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
+from .utils import maybe_prefix
+
 KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-
-# Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
-class MambaMixer(nn.Module):
-    """
-    Compute ∆, A, B, C, and D the state space parameters and compute
-    the `contextualized_states`. A, D are input independent
-    (see Mamba paper [1] Section 3.5.2 "Interpretation of A"
-    for why A isn't selective) ∆, B, C are input-dependent
-    (this is a key difference between Mamba and the linear time
-    invariant S4, and is why Mamba is called
-    **selective** state spaces)
-    """
-
-    def __init__(self, config: MambaConfig, layer_idx):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.hidden_size = config.hidden_size
-        self.ssm_state_size = config.state_size
-        self.conv_kernel_size = config.conv_kernel
-        self.intermediate_size = config.intermediate_size
-        self.time_step_rank = int(config.time_step_rank)
-        self.is_falcon_mamba = config.model_type == "falcon_mamba"
-        self.conv1d = ColumnParallelLinear(
-            input_size=self.conv_kernel_size,
-            output_size=self.intermediate_size,
-            bias=config.use_conv_bias,
-        )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
-        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-
-        self.in_proj = MergedColumnParallelLinear(self.hidden_size,
-                                                  [self.intermediate_size] * 2,
-                                                  bias=config.use_bias)
-        # selective projection used to make dt, B and C input dependent
-        self.x_proj = RowParallelLinear(
-            self.intermediate_size,
-            self.time_step_rank + self.ssm_state_size * 2,
-            bias=False,
-        )
-        # time step projection (discretization) -
-        # In the forward we need to apply dt_proj without the bias,
-        # as the bias is added in the selective scan kernel.
-        self.dt_proj = ColumnParallelLinear(self.time_step_rank,
-                                            self.intermediate_size,
-                                            bias=True,
-                                            skip_bias_add=True)
-
-        tp_size = get_tensor_model_parallel_world_size()
-        self.A = nn.Parameter(
-            torch.empty(
-                self.intermediate_size // tp_size,
-                self.ssm_state_size,
-                dtype=torch.float32,
-            ))
-        self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
-
-        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
-        a_weight_loader = composed_weight_loader(
-            sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
-        set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
-
-        self.out_proj = RowParallelLinear(
-            self.intermediate_size,
-            self.hidden_size,
-            bias=config.use_bias,
-            input_is_parallel=True,
-        )
-        self.activation = config.hidden_act
-        if self.is_falcon_mamba:
-            self.dt_layernorm = RMSNorm(self.time_step_rank,
-                                        eps=config.mixer_rms_eps)
-            self.b_layernorm = RMSNorm(self.ssm_state_size,
-                                       eps=config.mixer_rms_eps)
-            self.c_layernorm = RMSNorm(self.ssm_state_size,
-                                       eps=config.mixer_rms_eps)
-
-    def forward(self, hidden_states: torch.Tensor,
-                attn_metadata: AttentionMetadata,
-                mamba_cache_params: MambaCacheParams):
-
-        # 1. Gated MLP's linear projection
-        projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
-        hidden_states, gate = projected_states.chunk(2, dim=-2)
-
-        # 2. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
-                                               self.conv1d.weight.size(2))
-
-        if attn_metadata.query_start_loc is not None \
-            and attn_metadata.context_lens_tensor is not None:
-            # |---------- N-1 iteration --------|
-            # |---------------- N iteration ---------------------|
-            # |- tokenA -|......................|-- newTokens ---|
-            # |---------- context_len ----------|
-            # |-------------------- seq_len ---------------------|
-            #                                   |-- query_len ---|
-            hidden_states = causal_conv1d_fn(
-                hidden_states,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=mamba_cache_params.conv_state,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
-                cache_indices=mamba_cache_params.state_indices_tensor,
-                query_start_loc=attn_metadata.query_start_loc)
-        else:
-            hidden_states = causal_conv1d_update(
-                hidden_states.transpose(0, 1),
-                mamba_cache_params.conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=mamba_cache_params.state_indices_tensor)
-            hidden_states = hidden_states.transpose(0, 1)
-
-        # 3. State Space Model sequence transformation
-        # 3.a. input varying initialization of time_step, B and C
-        ssm_parameters = self.x_proj(hidden_states.transpose(-2, -1))[0]
-
-        time_step, B, C = torch.split(
-            ssm_parameters,
-            [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
-            dim=-1,
-        )
-        # Note that Jamba and FalconMamba normalizes B, C, and time_step here
-        # but Mamba doesn't.
-        if self.is_falcon_mamba:
-            time_step = self.dt_layernorm(time_step.contiguous())
-            B = self.b_layernorm(B.contiguous())
-            C = self.c_layernorm(C.contiguous())
-
-        discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
-        # 3.c perform the recurrence y ← SSM(A, B, C)(x)
-        time_proj_bias = (self.dt_proj.bias.float() if hasattr(
-            self.dt_proj, "bias") else None)
-
-        if attn_metadata.query_start_loc is not None \
-            and attn_metadata.context_lens_tensor is not None:
-            scan_outputs = selective_scan_fn(
-                hidden_states,
-                mamba_cache_params.ssm_state,
-                discrete_time_step,
-                self.A,
-                B.transpose(-2, -1),
-                C.transpose(-2, -1),
-                self.D.float(),
-                gate,
-                time_proj_bias,
-                delta_softplus=True,
-                cache_indices=mamba_cache_params.state_indices_tensor,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
-                query_start_loc=attn_metadata.query_start_loc)
-        else:
-            scan_outputs = selective_state_update(
-                mamba_cache_params.ssm_state,
-                hidden_states.transpose(0, 1),
-                discrete_time_step.transpose(0, 1),
-                self.A,
-                B,
-                C,
-                self.D,
-                gate.transpose(0, 1),
-                time_proj_bias,
-                dt_softplus=True,
-                state_batch_indices=mamba_cache_params.state_indices_tensor)
-            scan_outputs = scan_outputs.transpose(0, 1)
-
-        # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(-2,
-                                                                     -1))[0]
-        return contextualized_states
 
 
 class MambaDecoderLayer(nn.Module):
 
     def __init__(self,
                  config: MambaConfig,
-                 layer_idx: int,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
-        self.layer_idx = layer_idx
         self.config = config
         self.is_falcon_mamba = config.model_type == "falcon_mamba"
-        self.mixer = MambaMixer(config, layer_idx)
+        mixer_rms_eps = config.mixer_rms_eps if self.is_falcon_mamba else None
+        self.mixer = MambaMixer(hidden_size=config.hidden_size,
+                                ssm_state_size=config.state_size,
+                                conv_kernel_size=config.conv_kernel,
+                                intermediate_size=config.intermediate_size,
+                                time_step_rank=config.time_step_rank,
+                                use_conv_bias=config.use_conv_bias,
+                                use_bias=config.use_bias,
+                                use_rms_norm=self.is_falcon_mamba,
+                                rms_norm_eps=mixer_rms_eps,
+                                activation=config.hidden_act)
+
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -249,14 +75,14 @@ class MambaDecoderLayer(nn.Module):
 
 class MambaModel(nn.Module):
 
-    def __init__(
-        self,
-        config: MambaConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
@@ -274,12 +100,14 @@ class MambaModel(nn.Module):
         for i in range(config.num_hidden_layers):
             decoder_layers.append(
                 MambaDecoderLayer(config,
-                                  layer_idx=i,
                                   cache_config=cache_config,
                                   quant_config=quant_config))
         self.layers = nn.ModuleList(decoder_layers)
         self.norm_f = RMSNorm(config.hidden_size,
                               eps=config.layer_norm_epsilon)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings(input_ids)
 
     def forward(
         self,
@@ -287,9 +115,13 @@ class MambaModel(nn.Module):
         positions: torch.Tensor,
         attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        hidden_states = self.embeddings(input_ids)
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.get_input_embeddings(input_ids)
         residual = None
 
         for i in range(len(self.layers)):
@@ -307,24 +139,19 @@ class MambaModel(nn.Module):
 
 class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
-    def __init__(
-        self,
-        config: MambaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        scheduler_config: Optional[SchedulerConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        lora_config = vllm_config.lora_config
+        scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \
             "Mamba does not support prefix caching"
 
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.backbone = MambaModel(config,
-                                   cache_config=cache_config,
-                                   quant_config=quant_config,
-                                   lora_config=lora_config)
+        self.backbone = MambaModel(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "backbone"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -346,7 +173,10 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.backbone.get_input_embeddings(input_ids)
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -354,6 +184,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                 kv_caches: List[KVCache],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
             max_batch_size = (_get_graph_batch_size(
@@ -374,7 +205,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                                               state_indices_tensor)
 
         hidden_states = self.backbone(input_ids, positions, attn_metadata,
-                                      mamba_cache_params)
+                                      mamba_cache_params, inputs_embeds)
 
         return hidden_states
 

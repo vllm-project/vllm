@@ -10,7 +10,7 @@ Requirements
 ============
 
 * OS: Linux
-* Python: 3.8 - 3.12
+* Python: 3.9 -- 3.12
 * GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
 Install released versions
@@ -66,7 +66,7 @@ If you want to access the wheels for previous commits, you can specify the commi
     $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
     $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 
-Note that the wheels are built with Python 3.8 ABI (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata.
+Note that the wheels are built with Python 3.8 ABI (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata. Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
 
 Another way to access the latest code is to use the docker images:
 
@@ -148,7 +148,7 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
 .. tip::
 
     Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
-    For example, you can install `ccache <https://github.com/ccache/ccache>`_ using ``conda install ccache`` or ``apt install ccache`` . 
+    For example, you can install `ccache <https://github.com/ccache/ccache>`_ using ``conda install ccache`` or ``apt install ccache`` .
     As long as ``which ccache`` command can find the ``ccache`` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
 
 
@@ -170,6 +170,18 @@ To build vLLM using an existing PyTorch installation:
     $ pip install -e . --no-build-isolation
 
 
+Use the local cutlass for compilation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Currently, before starting the build process, vLLM fetches cutlass code from GitHub. However, there may be scenarios where you want to use a local version of cutlass instead.
+To achieve this, you can set the environment variable VLLM_CUTLASS_SRC_DIR to point to your local cutlass directory.
+
+.. code-block:: console
+
+    $ git clone https://github.com/vllm-project/vllm.git
+    $ cd vllm
+    $ VLLM_CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
+
+
 Troubleshooting
 ~~~~~~~~~~~~~~~
 
@@ -181,8 +193,8 @@ to be run simultaneously, via the environment variable ``MAX_JOBS``. For example
     $ export MAX_JOBS=6
     $ pip install -e .
 
-This is especially useful when you are building on less powerful machines. For example, when you use WSL it only `assigns 50% of the total memory by default <https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings>`_, so using ``export MAX_JOBS=1`` can avoid compiling multiple files simultaneously and running out of memory. 
-A side effect is a much slower build process. 
+This is especially useful when you are building on less powerful machines. For example, when you use WSL it only `assigns 50% of the total memory by default <https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings>`_, so using ``export MAX_JOBS=1`` can avoid compiling multiple files simultaneously and running out of memory.
+A side effect is a much slower build process.
 
 Additionally, if you have trouble building vLLM, we recommend using the NVIDIA PyTorch Docker image.
 
@@ -209,7 +221,7 @@ Here is a sanity check to verify that the CUDA Toolkit is correctly installed:
 Unsupported OS build
 --------------------
 
-vLLM can fully run only on Linux but for development purposes, you can still build it on other systems (for example, macOS), allowing for imports and a more convenient development environment. The binaries will not be compiled and won't work on non-Linux systems. 
+vLLM can fully run only on Linux but for development purposes, you can still build it on other systems (for example, macOS), allowing for imports and a more convenient development environment. The binaries will not be compiled and won't work on non-Linux systems.
 
 Simply disable the ``VLLM_TARGET_DEVICE`` environment variable before installing:
 

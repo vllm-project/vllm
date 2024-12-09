@@ -3,6 +3,7 @@ from typing import Any, Dict, Generator, List, Optional
 import pytest
 from transformers import AutoTokenizer
 
+from vllm.inputs import token_inputs
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from vllm.transformers_utils.detokenizer import (Detokenizer,
                                                  detokenize_incrementally)
@@ -92,10 +93,10 @@ def test_mistral_edge_case(tokenizer, truth):
 def skip_special_tokens(request, tokenizer_name) -> Generator[bool, Any, None]:
     if "mistral" in tokenizer_name:
         yield (
-            bool(True) if request.param else
+            True if request.param else
             pytest.skip("mistral doesn't support skip_special_tokens=False"))
     else:
-        yield bool(True) if request.param else bool(False)
+        yield bool(request.param)
 
 
 @pytest.mark.parametrize("truth", TRUTH)
@@ -169,10 +170,7 @@ def create_sequence(prompt_token_ids=None):
     prompt_token_ids = prompt_token_ids or [1]
     return Sequence(
         seq_id=0,
-        inputs={
-            "prompt": "<s>",
-            "prompt_token_ids": prompt_token_ids,
-        },
+        inputs=token_inputs(prompt_token_ids, prompt="<s>"),
         block_size=16,
     )
 

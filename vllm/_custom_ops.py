@@ -1,6 +1,7 @@
 import contextlib
 import functools
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
+import importlib
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 import torch.library
@@ -13,14 +14,11 @@ from vllm.utils import is_navi
 
 logger = init_logger(__name__)
 
-if not current_platform.is_tpu():
+if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
         import vllm._C
     except ImportError as e:
         logger.warning("Failed to import from vllm._C with %r", e)
-
-if current_platform.is_rocm():
-    import vllm._rocm_C  # noqa: F401
 
 supports_moe_ops = False
 with contextlib.suppress(ImportError):
@@ -235,14 +233,14 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 def scaled_rms_norm(out: torch.Tensor, input: torch.Tensor,
                     weight: torch.Tensor, scale: torch.Tensor,
                     epsilon: float) -> None:
-    torch.ops._C.scaled_rms_norm(out, input, weight, scale, epsilon)
+    torch.ops._C.rms_norm_static_fp8_quant(out, input, weight, scale, epsilon)
 
 
 def scaled_fused_add_rms_norm(out: torch.Tensor, input: torch.Tensor,
                               residual: torch.Tensor, weight: torch.Tensor,
                               scale: torch.Tensor, epsilon: float) -> None:
-    torch.ops._C.scaled_fused_add_rms_norm(out, input, residual, weight, scale,
-                                           epsilon)
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant(out, input, residual,
+                                                     weight, scale, epsilon)
 
 
 def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
@@ -368,33 +366,9 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                size_k: torch.SymInt,
                                is_k_full: bool,
                                has_zp: bool = False,
-                               use_fp32_reduce: bool = False) -> torch.Tensor:
+                               use_fp32_reduce: bool = False,
+                               is_zp_float: bool = False) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::ggml_dequantize")
-    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
-                              m: torch.SymInt,
-                              n: torch.SymInt) -> torch.Tensor:
-        return torch.empty((m, n), dtype=torch.float16, device=W.device)
-
-    @register_fake("_C::ggml_mul_mat_vec_a8")
-    def _ggml_mul_mat_vec_a8_fake(
-        W: torch.Tensor,
-        X: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-    ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=torch.float16, device=W.device)
-
-    @register_fake("_C::ggml_mul_mat_a8")
-    def _ggml_mul_mat_a8_fake(
-        W: torch.Tensor,
-        X: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-    ) -> torch.Tensor:
-        batch = X.size(0)
-        return torch.empty((batch, row), dtype=torch.float16, device=W.device)
 
     @register_fake("_C::marlin_qqq_gemm")
     def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -469,18 +443,18 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                               size_k: torch.SymInt) -> torch.Tensor:
         return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
 
-    @register_fake("_C::machete_gemm")
-    def machete_gemm_fake(
+    @register_fake("_C::machete_mm")
+    def machete_mm_fake(
         a: torch.Tensor,
-        # Should be the tensor returned by machete_prepack_B
+        # b_q Should be the tensor returned by machete_prepack_B
         b_q: torch.Tensor,
         b_type: ScalarType,
-        b_scales: Optional[torch.Tensor] = None,
-        b_zeros: Optional[torch.Tensor] = None,
+        out_type: Optional[torch.dtype] = None,
+        b_group_scales: Optional[torch.Tensor] = None,
+        b_group_zeros: Optional[torch.Tensor] = None,
         b_group_size: Optional[int] = None,
-        c: Optional[torch.Tensor] = None,
-        alpha: Optional[float] = None,
-        beta: Optional[float] = None,
+        b_channel_scales: Optional[torch.Tensor] = None,
+        a_token_scales: Optional[torch.Tensor] = None,
         schedule: Optional[str] = None,
     ) -> torch.Tensor:
         m = a.size(0)
@@ -488,31 +462,44 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((m, n), device=a.device, dtype=a.dtype)
 
     @register_fake("_C::machete_prepack_B")
-    def machete_prepack_B_fake(b_q_weight: torch.Tensor,
-                               b_type: ScalarType) -> torch.Tensor:
+    def machete_prepack_B_fake(
+            b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
+            group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
+
+
+if hasattr(torch.ops._C, "ggml_dequantize"):
+
+    @register_fake("_C::ggml_dequantize")
+    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
+                              m: torch.SymInt,
+                              n: torch.SymInt) -> torch.Tensor:
+        return torch.empty((m, n), dtype=torch.float16, device=W.device)
+
+    @register_fake("_C::ggml_mul_mat_vec_a8")
+    def _ggml_mul_mat_vec_a8_fake(
+        W: torch.Tensor,
+        X: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+    ) -> torch.Tensor:
+        return torch.empty((1, row), dtype=torch.float16, device=W.device)
+
+    @register_fake("_C::ggml_mul_mat_a8")
+    def _ggml_mul_mat_a8_fake(
+        W: torch.Tensor,
+        X: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+    ) -> torch.Tensor:
+        batch = X.size(0)
+        return torch.empty((batch, row), dtype=torch.float16, device=W.device)
 
 
 # cutlass
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
-
-
-def scaled_mm_torch(a: torch.Tensor,
-                    b: torch.Tensor,
-                    scale_a: torch.Tensor,
-                    scale_b: torch.Tensor,
-                    out_dtype: Type[torch.dtype],
-                    bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    out = torch.mm(a.to(torch.float32), b.to(torch.float32))
-    out = scale_a * out
-    out = scale_b.T * out
-    out = out.to(out_dtype)
-    if bias is not None:
-        out = out + bias
-
-    return out
 
 
 def cutlass_scaled_mm(a: torch.Tensor,
@@ -530,10 +517,15 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
 
     if current_platform.is_rocm():
-        return scaled_mm_torch(a, b, scale_a, scale_b, out_dtype, bias)
-    else:
-        out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+        triton_scaled_mm_module = importlib.import_module(
+            "vllm.model_executor.layers.quantization.compressed_tensors."
+            "triton_scaled_mm")
+        triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+        return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out
 
@@ -546,10 +538,16 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
                           azp_adj: torch.Tensor,
                           azp: Optional[torch.Tensor] = None,
                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    :param azp_adj: In the per-tensor case, this should include the azp.
+    Always per-channel.
+    :param azp: Only set in the per-token case. Per-token if set.
+    """
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.numel(
     ) == b.shape[1] and bias.dtype == out_dtype
+    assert azp is None or azp.numel() == a.shape[0]
 
     m = a.shape[0]
     n = b.shape[1]
@@ -630,11 +628,12 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      size_k: int,
                      is_k_full: bool,
                      has_zp: bool = False,
-                     use_fp32_reduce: bool = False) -> torch.Tensor:
+                     use_fp32_reduce: bool = False,
+                     is_zp_float: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
-                                         has_zp, use_fp32_reduce)
+                                         has_zp, use_fp32_reduce, is_zp_float)
 
 
 # fp8 marlin
@@ -647,29 +646,41 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # machete
-def machete_supported_schedules(b_type: ScalarType) -> List[str]:
-    return torch.ops._C.machete_supported_schedules(b_type.id)
+def machete_supported_schedules(
+        a_type: torch.dtype,
+        b_type: ScalarType,
+        group_scales_type: Optional[torch.dtype],
+        group_zeros_type: Optional[torch.dtype] = None,
+        channel_scales_type: Optional[torch.dtype] = None,
+        token_scales_type: Optional[torch.dtype] = None,
+        out_type: Optional[torch.dtype] = None) -> List[str]:
+    return torch.ops._C.machete_supported_schedules(
+        a_type, b_type.id, group_scales_type, group_zeros_type,
+        channel_scales_type, token_scales_type, out_type)
 
 
-def machete_gemm(
-    a: torch.Tensor,
-    b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
-    b_type: ScalarType,
-    b_scales: Optional[torch.Tensor] = None,
-    b_zeros: Optional[torch.Tensor] = None,
-    b_group_size: Optional[int] = None,
-    c: Optional[torch.Tensor] = None,
-    alpha: Optional[float] = None,
-    beta: Optional[float] = None,
-    schedule: Optional[str] = None,
-) -> torch.Tensor:
-    return torch.ops._C.machete_gemm(a, b_q, b_type.id, b_scales, b_zeros,
-                                     b_group_size, c, alpha, beta, schedule)
+def machete_mm(
+        a: torch.Tensor,
+        # b_q Should be the tensor returned by machete_prepack_B
+        b_q: torch.Tensor,
+        b_type: ScalarType,
+        out_type: Optional[torch.dtype] = None,
+        b_group_scales: Optional[torch.Tensor] = None,
+        b_group_zeros: Optional[torch.Tensor] = None,
+        b_group_size: Optional[int] = None,
+        b_channel_scales: Optional[torch.Tensor] = None,
+        a_token_scales: Optional[torch.Tensor] = None,
+        schedule: Optional[str] = None) -> torch.Tensor:
+    return torch.ops._C.machete_mm(a, b_q, b_type.id, out_type, b_group_scales,
+                                   b_group_zeros, b_group_size,
+                                   b_channel_scales, a_token_scales, schedule)
 
 
-def machete_prepack_B(b_q_weight: torch.Tensor,
-                      b_type: ScalarType) -> torch.Tensor:
-    return torch.ops._C.machete_prepack_B(b_q_weight, b_type.id)
+def machete_prepack_B(
+        b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
+        group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
+    return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type.id,
+                                          group_scales_type)
 
 
 if hasattr(torch.ops._C, "permute_cols"):
@@ -772,7 +783,7 @@ def scaled_int8_quant(
             azp is
             None), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
-        return output, scale, None
+        return output, scale, azp
 
     # dynamic-per-token quantization.
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),

@@ -21,7 +21,8 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (MultiModalItemTracker,
                                          _parse_chat_message_content,
-                                         load_chat_template)
+                                         load_chat_template,
+                                         resolve_chat_template_content_format)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
@@ -64,6 +65,7 @@ class BackgroundRunner:
         self.tokenizer = None
         self.response_role: str
         self.chat_template: Optional[str]
+        self.chat_template_content_format = "auto"
 
     def set_response_role(self, role):
         self.response_role = role
@@ -340,15 +342,17 @@ async def chat_completions(request: ChatCompletionRequest,
 
     mm_tracker = MultiModalItemTracker(runner.engine_config.model_config,
                                        runner.tokenizer)
+    chat_template = request.chat_template or runner.chat_template
+    content_format = resolve_chat_template_content_format(
+        chat_template, runner.chat_template_content_format, runner.tokenizer)
     for msg in request.messages:
-        parsed_msg = _parse_chat_message_content(
-            msg, mm_tracker,
-            runner.engine_config.model_config.chat_template_text_format)
+        parsed_msg = _parse_chat_message_content(msg, mm_tracker,
+                                                 content_format)
         conversation.extend(parsed_msg)
 
     prompt = runner.tokenizer.apply_chat_template(  # type: ignore
         conversation=conversation,
-        chat_template=request.chat_template or runner.chat_template,
+        chat_template=chat_template,
         tokenize=False,
         add_generation_prompt=request.add_generation_prompt,
     )
@@ -398,6 +402,7 @@ if __name__ == "__main__":
     runner.set_engine_args(engine_args)
     runner.set_response_role(args.response_role)
     runner.chat_template = load_chat_template(args.chat_template)
+    runner.chat_template_content_format = args.chat_template_content_format
 
     app.add_middleware(
         CORSMiddleware,

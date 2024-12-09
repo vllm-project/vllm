@@ -20,17 +20,19 @@ class BitsAndBytesConfig(QuantizationConfig):
         load_in_8bit: bool = False,
         load_in_4bit: bool = True,
         bnb_4bit_compute_dtype: str = "float32",
+        bnb_4bit_quant_storage: str = "uint8",
         bnb_4bit_quant_type: str = "fp4",
         bnb_4bit_use_double_quant: bool = False,
         llm_int8_enable_fp32_cpu_offload: bool = False,
         llm_int8_has_fp16_weight: bool = False,
         llm_int8_skip_modules: Optional[List[str]] = None,
-        llm_int8_threshold: float = 0.0,
+        llm_int8_threshold: float = 6.0,
     ) -> None:
 
         self.load_in_8bit = load_in_8bit
         self.load_in_4bit = load_in_4bit
         self.bnb_4bit_compute_dtype = bnb_4bit_compute_dtype
+        self.bnb_4bit_quant_storage = bnb_4bit_quant_storage
         self.bnb_4bit_quant_type = bnb_4bit_quant_type
         self.bnb_4bit_use_double_quant = bnb_4bit_use_double_quant
         self.llm_int8_enable_fp32_cpu_offload = llm_int8_enable_fp32_cpu_offload
@@ -38,10 +40,15 @@ class BitsAndBytesConfig(QuantizationConfig):
         self.llm_int8_skip_modules = llm_int8_skip_modules or []
         self.llm_int8_threshold = llm_int8_threshold
 
+        if self.bnb_4bit_quant_storage not in ["uint8"]:
+            raise ValueError("Unsupported bnb_4bit_quant_storage: "
+                             f"{self.bnb_4bit_quant_storage}")
+
     def __repr__(self) -> str:
         return (f"BitsAndBytesConfig(load_in_8bit={self.load_in_8bit}, "
                 f"load_in_4bit={self.load_in_4bit}, "
                 f"bnb_4bit_compute_dtype={self.bnb_4bit_compute_dtype}, "
+                f"bnb_4bit_quant_storage={self.bnb_4bit_quant_storage}, "
                 f"bnb_4bit_quant_type={self.bnb_4bit_quant_type}, "
                 f"llm_int8_skip_modules={self.llm_int8_skip_modules})")
 
@@ -80,6 +87,9 @@ class BitsAndBytesConfig(QuantizationConfig):
         bnb_4bit_compute_dtype = get_safe_value(config,
                                                 ["bnb_4bit_compute_dtype"],
                                                 default_value="float32")
+        bnb_4bit_quant_storage = get_safe_value(config,
+                                                ["bnb_4bit_quant_storage"],
+                                                default_value="uint8")
         bnb_4bit_quant_type = get_safe_value(config, ["bnb_4bit_quant_type"],
                                              default_value="fp4")
         bnb_4bit_use_double_quant = get_safe_value(
@@ -93,12 +103,13 @@ class BitsAndBytesConfig(QuantizationConfig):
                                                ["llm_int8_skip_modules"],
                                                default_value=[])
         llm_int8_threshold = get_safe_value(config, ["llm_int8_threshold"],
-                                            default_value=0.0)
+                                            default_value=6.0)
 
         return cls(
             load_in_8bit=load_in_8bit,
             load_in_4bit=load_in_4bit,
             bnb_4bit_compute_dtype=bnb_4bit_compute_dtype,
+            bnb_4bit_quant_storage=bnb_4bit_quant_storage,
             bnb_4bit_quant_type=bnb_4bit_quant_type,
             bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
             llm_int8_enable_fp32_cpu_offload=llm_int8_enable_fp32_cpu_offload,
@@ -113,9 +124,6 @@ class BitsAndBytesConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
 
 
 def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
@@ -203,8 +211,9 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             qweight = create_qweight_for_8bit()
         else:
             qweight = create_qweight_for_4bit()
-
-        layer.register_parameter("qweight", qweight)
+        # Enable parameters to have the same name as in the BNB
+        # checkpoint format.
+        layer.register_parameter("weight", qweight)
         set_weight_attrs(qweight, extra_weight_attrs)
 
     def apply(self,
@@ -234,7 +243,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             reshape_after_matmul = True
         bf_x = x.to(torch.bfloat16)
 
-        qweight = layer.qweight
+        qweight = layer.weight
         offsets = qweight.bnb_shard_offsets
         quant_states = qweight.bnb_quant_state
         matmul_states = qweight.matmul_state
@@ -313,7 +322,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             reshape_after_matmul = True
         bf_x = x.to(torch.bfloat16)
 
-        qweight = layer.qweight
+        qweight = layer.weight
         quant_states = qweight.bnb_quant_state
         offsets = qweight.bnb_shard_offsets
 

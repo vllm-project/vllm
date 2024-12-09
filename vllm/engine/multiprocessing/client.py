@@ -31,10 +31,11 @@ from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
+from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -94,6 +95,8 @@ class MQLLMEngineClient(EngineClient):
             parallel_config=engine_config.parallel_config,
             enable_lora=bool(engine_config.lora_config),
         )
+        self.input_preprocessor = InputPreprocessor(self.model_config,
+                                                    self.tokenizer)
 
         # Send RPCGenerateRequest to the MQLLMEngine.
         self.input_socket: Socket = self.context.socket(zmq.constants.PUSH)
@@ -112,7 +115,11 @@ class MQLLMEngineClient(EngineClient):
 
         # Stream for each individual request.
         self.output_queues: Dict[str, asyncio.Queue] = {}
-        self.output_loop = asyncio.create_task(self.run_output_handler_loop())
+
+        # Loop to handle output of the LLMEngine periodically.
+        # Started after the MQLLMEngine is ready so that we can
+        # build the Client in an executor to enable clean shutdown.
+        self.output_loop: Optional[asyncio.Task] = None
 
         # Loop to check health of the LLMEngine periodically.
         # Started after the MQLLMEngine is ready.
@@ -247,6 +254,9 @@ class MQLLMEngineClient(EngineClient):
     async def setup(self):
         """Setup the client before it starts sending server requests."""
 
+        # Start output_loop
+        self.output_loop = asyncio.create_task(self.run_output_handler_loop())
+
         with self.get_data_socket() as socket:
             # Wait until server is ready.
             response = await self._wait_for_server_rpc(socket)
@@ -265,7 +275,8 @@ class MQLLMEngineClient(EngineClient):
         # Cancel background tasks.
         if self.health_loop is not None:
             self.health_loop.cancel()
-        self.output_loop.cancel()
+        if self.output_loop is not None:
+            self.output_loop.cancel()
 
     def _set_errored(self, e: BaseException):
         logger.exception(repr(e))
@@ -336,6 +347,9 @@ class MQLLMEngineClient(EngineClient):
         elif (not isinstance(response, str)
               or response != VLLM_RPC_SUCCESS_STR):
             raise ValueError(error_message)
+
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        return self.input_preprocessor
 
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
@@ -481,7 +495,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
         ...
 
     @overload
@@ -493,7 +507,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
         ...
 
     @deprecate_kwargs(
@@ -510,7 +524,7 @@ class MQLLMEngineClient(EngineClient):
         priority: int = 0,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from an embedding model.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -526,7 +540,7 @@ class MQLLMEngineClient(EngineClient):
             trace_headers: OpenTelemetry trace headers.
 
         Yields:
-            The output `EmbeddingRequestOutput` objects from the LLMEngine
+            The output `PoolingRequestOutput` objects from the LLMEngine
             for the request.
         """
         if inputs is not None:
@@ -535,7 +549,7 @@ class MQLLMEngineClient(EngineClient):
                 and request_id is not None)
 
         return cast(
-            AsyncGenerator[EmbeddingRequestOutput, None],
+            AsyncGenerator[PoolingRequestOutput, None],
             self._process_request(prompt,
                                   pooling_params,
                                   request_id,
@@ -553,7 +567,7 @@ class MQLLMEngineClient(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
-            EmbeddingRequestOutput, None]]:
+            PoolingRequestOutput, None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # If already dead, error out.

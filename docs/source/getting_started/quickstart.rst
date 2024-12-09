@@ -12,7 +12,7 @@ This guide will help you quickly get started with vLLM to:
 Prerequisites
 --------------
 - OS: Linux
-- Python: 3.8 - 3.12
+- Python: 3.9 -- 3.12
 - GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
 Installation

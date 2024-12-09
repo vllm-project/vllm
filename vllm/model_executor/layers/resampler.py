@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
@@ -177,7 +176,7 @@ class BaseResampler(nn.Module):
                                             embed_dim,
                                             bias=False,
                                             quant_config=quant_config,
-                                            prefix=prefix)
+                                            prefix=f"{prefix}.kv_proj")
         else:
             # Maintain the same return value with ReplicatedLinear.forward
             self.kv_proj = lambda *args, **kwargs: (  # type: ignore # noqa 

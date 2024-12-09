@@ -1,16 +1,18 @@
 # ruff: noqa
 # code borrowed from https://github.com/pytorch/pytorch/blob/main/torch/utils/collect_env.py
 
-# Unlike the rest of the PyTorch this file must be python2 compliant.
-# This script outputs relevant system environment info
-# Run it with `python collect_env.py` or `python -m torch.utils.collect_env`
 import datetime
 import locale
 import os
 import re
 import subprocess
 import sys
+# Unlike the rest of the PyTorch this file must be python2 compliant.
+# This script outputs relevant system environment info
+# Run it with `python collect_env.py` or `python -m torch.utils.collect_env`
 from collections import namedtuple
+
+from vllm.envs import environment_variables
 
 try:
     import torch
@@ -52,6 +54,7 @@ SystemEnv = namedtuple(
         'vllm_version',  # vllm specific field
         'vllm_build_flags',  # vllm specific field
         'gpu_topo',  # vllm specific field
+        'env_vars',
     ])
 
 DEFAULT_CONDA_PATTERNS = {
@@ -512,6 +515,22 @@ def is_xnnpack_available():
     else:
         return "N/A"
 
+def get_env_vars():
+    env_vars = ''
+    secret_terms=('secret', 'token', 'api', 'access', 'password')
+    report_prefix = ("TORCH", "NCCL", "PYTORCH",
+                     "CUDA", "CUBLAS", "CUDNN",
+                     "OMP_", "MKL_",
+                     "NVIDIA")
+    for k, v in os.environ.items():
+        if any(term in k.lower() for term in secret_terms):
+            continue
+        if k in environment_variables:
+            env_vars = env_vars + "{}={}".format(k, v) + "\n"
+        if k.startswith(report_prefix):
+            env_vars = env_vars + "{}={}".format(k, v) + "\n"
+
+    return env_vars
 
 def get_env_info():
     run_lambda = run
@@ -583,6 +602,7 @@ def get_env_info():
         vllm_version=vllm_version,
         vllm_build_flags=vllm_build_flags,
         gpu_topo=gpu_topo,
+        env_vars=get_env_vars(),
     )
 
 
@@ -631,6 +651,8 @@ vLLM Build Flags:
 {vllm_build_flags}
 GPU Topology:
 {gpu_topo}
+
+{env_vars}
 """.strip()
 
 

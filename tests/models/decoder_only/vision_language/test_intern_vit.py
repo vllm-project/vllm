@@ -11,21 +11,17 @@ from ....conftest import _ImageAssets
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
 DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
-models = [
-    snapshot_download("OpenGVLab/InternViT-300M-448px",
-                      allow_patterns=DOWNLOAD_PATTERN),
-    snapshot_download("OpenGVLab/InternViT-6B-448px-V1-5",
-                      allow_patterns=DOWNLOAD_PATTERN),
-]
 
 
 def run_intern_vit_test(
     image_assets: _ImageAssets,
-    model: str,
+    model_id: str,
     *,
     dtype: str,
     distributed_executor_backend: Optional[str] = None,
 ):
+    model = snapshot_download(model_id, allow_patterns=DOWNLOAD_PATTERN)
+
     img_processor = CLIPImageProcessor.from_pretrained(model)
     images = [asset.pil_image for asset in image_assets]
     pixel_values = [
@@ -67,12 +63,15 @@ def run_intern_vit_test(
         assert cos_similar(vllm_output, hf_output).mean() > 0.99
 
 
-@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("model_id", [
+    "OpenGVLab/InternViT-300M-448px",
+    "OpenGVLab/InternViT-6B-448px-V1-5",
+])
 @pytest.mark.parametrize("dtype", [torch.half])
 @torch.inference_mode()
-def test_models(dist_init, image_assets, model, dtype: str) -> None:
+def test_models(dist_init, image_assets, model_id, dtype: str) -> None:
     run_intern_vit_test(
         image_assets,
-        model,
+        model_id,
         dtype=dtype,
     )

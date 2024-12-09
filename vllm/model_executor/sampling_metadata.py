@@ -284,7 +284,8 @@ def _prepare_seq_groups(
         else:
             # Decode
             prompt_logprob_len = 0
-            query_len = query_lens[i] if query_lens is not None else 1
+            query_len = query_lens[i] if query_lens is not None and len(
+                query_lens) > 0 else 1
             sample_len = len(seq_ids) * query_len if do_sample else 0
 
             if sampling_params.seed is not None and generators is not None:
@@ -453,6 +454,7 @@ class SamplingTensors:
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
                 seq_ids = seq_group.seq_ids
+                sampling_params = seq_group.sampling_params
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)

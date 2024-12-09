@@ -243,6 +243,10 @@ To consume the server, you can use the OpenAI client like in the example below:
 A full code example can be found in `examples/openai_chat_completion_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client_for_multimodal.py>`_.
 
 .. tip::
+    Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via ``--allowed-local-media-path`` when launching the API server/engine,
+    and pass the file path as ``url`` in the API request.
+
+.. tip::
     There is no need to place image placeholders in the text content of the API request - they are already represented by the image content.
     In fact, you can place image placeholders in the middle of the text by interleaving text and image content.
 
@@ -305,5 +309,22 @@ Since the request schema is not defined by OpenAI client, we post a request to t
     response.raise_for_status()
     response_json = response.json()
     print("Embedding output:", response_json["data"][0]["embedding"])
+
+Here is an example for serving the ``MrLight/dse-qwen2-2b-mrl-v1`` model.
+
+.. code-block:: bash
+
+    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embedding \
+      --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
+
+.. important::
+
+    Like with VLM2Vec, we have to explicitly pass ``--task embedding``. Additionally, ``MrLight/dse-qwen2-2b-mrl-v1`` requires an EOS token for embeddings, 
+    which is handled by the jinja template.
+
+.. important::
+
+    Also important, ``MrLight/dse-qwen2-2b-mrl-v1`` requires a placeholder image of the minimum image size for text query embeddings. See the full code 
+    example below for details.
 
 A full code example can be found in `examples/openai_chat_embedding_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_embedding_client_for_multimodal.py>`_.

@@ -139,6 +139,11 @@ Text Generation
     - :code:`google/gemma-2-9b`, :code:`google/gemma-2-27b`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`GlmForCausalLM`
+    - GLM-4
+    - :code:`THUDM/glm-4-9b-chat-hf`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
@@ -177,7 +182,7 @@ Text Generation
   * - :code:`InternLM2ForCausalLM`
     - InternLM2
     - :code:`internlm/internlm2-7b`, :code:`internlm/internlm2-chat-7b`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`JAISLMHeadModel`
     - Jais
@@ -232,6 +237,11 @@ Text Generation
   * - :code:`OLMoForCausalLM`
     - OLMo
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
+    -
+    - ✅︎
+  * - :code:`OLMo2ForCausalLM`
+    - OLMo2
+    - :code:`allenai/OLMo2-7B-1124`, etc.
     -
     - ✅︎
   * - :code:`OLMoEForCausalLM`
@@ -304,6 +314,11 @@ Text Generation
     - :code:`upstage/solar-pro-preview-instruct`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`TeleChat2ForCausalLM`
+    - TeleChat2
+    - :code:`TeleAI/TeleChat2-3B`, :code:`TeleAI/TeleChat2-7B`, :code:`TeleAI/TeleChat2-35B`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`XverseForCausalLM`
     - XVERSE
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
@@ -325,20 +340,54 @@ Text Embedding
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`BertModel`
+    - BERT-based
+    - :code:`BAAI/bge-base-en-v1.5`, etc.
+    - 
+    - 
   * - :code:`Gemma2Model`
     - Gemma2-based
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
     - 
     - ✅︎
-  * - :code:`MistralModel`
-    - Mistral-based
+  * - :code:`LlamaModel`, :code:`LlamaForCausalLM`, :code:`MistralModel`, etc.
+    - Llama-based
     - :code:`intfloat/e5-mistral-7b-instruct`, etc.
-    - 
     - ✅︎
+    - ✅︎
+  * - :code:`Qwen2Model`, :code:`Qwen2ForCausalLM`
+    - Qwen2-based
+    - :code:`ssmits/Qwen2-7B-Instruct-embed-base` (see note), :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
+    - ✅︎
+    - ✅︎
+  * - :code:`RobertaModel`, :code:`RobertaForMaskedLM`
+    - RoBERTa-based
+    - :code:`sentence-transformers/all-roberta-large-v1`, :code:`sentence-transformers/all-roberta-large-v1`, etc.
+    - 
+    - 
+  * - :code:`XLMRobertaModel`
+    - XLM-RoBERTa-based
+    - :code:`intfloat/multilingual-e5-large`, etc.
+    - 
+    - 
 
 .. important::
   Some model architectures support both generation and embedding tasks.
   In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
+.. tip::
+  You can override the model's pooling method by passing :code:`--override-pooler-config`.
+
+.. note::
+  :code:`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
+  You should manually set mean pooling by passing :code:`--override-pooler-config '{"pooling_type": "MEAN"}'`.
+
+.. note::
+  Unlike base Qwen2, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
+  You can set :code:`--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
+
+  On the other hand, its 1.5B variant (:code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
+  despite being described otherwise on its model card.
 
 Reward Modeling
 ---------------
@@ -352,14 +401,23 @@ Reward Modeling
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`LlamaForCausalLM`
+    - Llama-based
+    - :code:`peiyi9979/math-shepherd-mistral-7b-prm`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`Qwen2ForRewardModel`
     - Qwen2-based
     - :code:`Qwen/Qwen2.5-Math-RM-72B`, etc.
-    - 
+    - ✅︎
     - ✅︎
 
+.. important::
+  For process-supervised reward models such as :code:`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
+  e.g.: :code:`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
+
 .. note::
-    As an interim measure, these models are supported via Embeddings API. See `this RFC <https://github.com/vllm-project/vllm/issues/8967>`_ for upcoming changes.
+    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
 Classification
 ---------------
@@ -376,12 +434,42 @@ Classification
   * - :code:`Qwen2ForSequenceClassification`
     - Qwen2-based
     - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.
-    - 
+    - ✅︎
     - ✅︎
 
 .. note::
-    As an interim measure, these models are supported via Embeddings API. It will be supported via Classification API in the future (no reference APIs exist now).
+    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
+Sentence Pair Scoring
+---------------------
+
+.. list-table::
+  :widths: 25 25 50 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Example HF Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`BertForSequenceClassification`
+    - BERT-based
+    - :code:`cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.
+    - 
+    - 
+  * - :code:`RobertaForSequenceClassification`
+    - RoBERTa-based
+    - :code:`cross-encoder/quora-roberta-base`, etc.
+    - 
+    - 
+  * - :code:`XLMRobertaForSequenceClassification`
+    - XLM-RoBERTa-based
+    - :code:`BAAI/bge-reranker-v2-m3`, etc.
+    - 
+    - 
+
+.. note::
+    These models are supported in both offline and online inference via Score API.
 
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -416,6 +504,12 @@ Text Generation
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`AriaForConditionalGeneration`
+    - Aria
+    - T + I
+    - :code:`rhymes-ai/Aria`
+    - 
+    - ✅︎
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
     - T + I\ :sup:`E`
@@ -438,7 +532,7 @@ Text Generation
     - GLM-4V
     - T + I
     - :code:`THUDM/glm-4v-9b` etc.
-    - 
+    - ✅︎
     - ✅︎
   * - :code:`H2OVLChatModel`
     - H2OVL
@@ -446,6 +540,12 @@ Text Generation
     - :code:`h2oai/h2ovl-mississippi-800m`, :code:`h2oai/h2ovl-mississippi-2b`, etc.
     - 
     - ✅︎
+  * - :code:`Idefics3ForConditionalGeneration`
+    - Idefics3
+    - T + I
+    - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
+    - ✅︎
+    - 
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
@@ -532,9 +632,9 @@ Text Generation
     - ✅︎
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
-    - T + I\ :sup:`E+` + V\ :sup:`+`
+    - T + I\ :sup:`E+` + V\ :sup:`E+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`UltravoxModel`
     - Ultravox
@@ -547,10 +647,10 @@ Text Generation
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
 
 .. note::
-  vLLM currently only supports adding LoRA to the language backbone of multimodal models.               
+  vLLM currently only supports adding LoRA to the language backbone of multimodal models.
 
 .. note::
-  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
+  The official :code:`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
 Multimodal Embedding
@@ -578,10 +678,19 @@ Multimodal Embedding
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
+  * - :code:`Qwen2VLForConditionalGeneration`
+    - Qwen2-VL-based
+    - T + I
+    - :code:`MrLight/dse-qwen2-2b-mrl-v1`
+    - 
+    - ✅︎
 
 .. important::
   Some model architectures support both generation and embedding tasks.
   In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
+.. tip::
+  You can override the model's pooling method by passing :code:`--override-pooler-config`.
 
 Model Support Policy
 =====================
@@ -591,6 +700,9 @@ At vLLM, we are committed to facilitating the integration and support of third-p
 1. **Community-Driven Support**: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers. **Call for contribution:** PRs coming directly from model vendors are greatly appreciated!
 
 2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
+
+.. tip::
+  When comparing the output of :code:`model.generate` from HuggingFace Transformers with the output of :code:`llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., `generation_config.json <https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945>`__) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
 
 3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
 

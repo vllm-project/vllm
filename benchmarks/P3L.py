@@ -42,13 +42,16 @@ should result in PPL ~ PPL=3.8968611189957523
 """
 
 import argparse
+import dataclasses
 import datetime
+import json
 import math
 import os
 
 from huggingface_hub import hf_hub_download
 
 from vllm import LLM, SamplingParams
+from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -69,16 +72,8 @@ def get_wikitext2_text(tokenizer):
 
 
 def vllm_init(args):
-
-    llm = LLM(model=args.model,
-              tensor_parallel_size=args.tensor_parallel_size,
-              trust_remote_code=args.trust_remote_code,
-              dtype=args.dtype,
-              quantization=args.quantization,
-              kv_cache_dtype=args.kv_cache_dtype,
-              quantization_param_path=args.kv_cache_scales_path
-              if args.kv_cache_scales_path != '' else None,
-              enforce_eager=args.enforce_eager)
+    engine_args = EngineArgs.from_cli_args(args)
+    llm = LLM(**dataclasses.asdict(engine_args))
 
     sampling_params = SamplingParams(n=1,
                                      temperature=0.0,
@@ -186,6 +181,15 @@ def main(args: argparse.Namespace):
                 f"{my_ppl/num_tokens_generated}" \
                 f"\n\tPPL={math.exp(my_ppl/num_tokens_generated)}")
 
+    if args.output_json:
+        results = {
+            "integral_cross_entropy": my_ppl,
+            "average_cross_entropy": my_ppl / num_tokens_generated,
+            "ppl": math.exp(my_ppl / num_tokens_generated),
+        }
+        with open(args.output_json, "w") as f:
+            json.dump(results, f, indent=4)
+
     logger.info(MESSAGE)
     print(MESSAGE)
     return
@@ -193,41 +197,21 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Benchmark the latency of processing a single batch of '
-        'requests till completion.')
-    parser.add_argument('--model', type=str, default='facebook/opt-125m')
+        description='Measure the PPPL (P3L) score of a given model.')
     parser.add_argument(
         '--data',
         type=str,
         default='./wikitext/wikitext-2-v1/test-00000-of-00001.parquet')
     parser.add_argument('--context-size', type=int, default=4096)
-    parser.add_argument('--kv-cache-scales-path', type=str, default='')
-    parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
-    parser.add_argument('--quantization', type=str, default=None)
-    parser.add_argument('--trust-remote-code',
-                        action='store_true',
-                        help='trust remote code from huggingface')
-    parser.add_argument(
-        '--dtype',
-        type=str,
-        default='auto',
-        choices=['auto', 'half', 'float16', 'bfloat16', 'float', 'float32'],
-        help='data type for model weights and activations. '
-        'The "auto" option will use FP16 precision '
-        'for FP32 and FP16 models, and BF16 precision '
-        'for BF16 models.')
     parser.add_argument('--sample-size', type=int, default=512)
     parser.add_argument('--patch-size', type=int, default=None)
-    parser.add_argument('--enforce-eager',
-                        action='store_true',
-                        help='enforce eager mode and disable CUDA graph')
     parser.add_argument(
-        "--kv-cache-dtype",
+        '--output-json',
         type=str,
-        choices=['auto', 'fp8_e5m2', 'fp8'],
-        default='auto',
-        help=
-        'Data type for kv cache storage. If "auto", will use model data type.')
+        default=None,
+        help='Path to save the latency results in JSON format.')
+
+    parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
     main(args)

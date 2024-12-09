@@ -51,6 +51,10 @@ def test_models(
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        # This test is for verifying whether the model's extra_repr
+        # can be printed correctly.
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
@@ -283,13 +287,35 @@ def test_state_cleanup(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
-def test_model_print(
+def test_multistep(
     vllm_runner,
     model: str,
     dtype: str,
+    example_prompts,
 ) -> None:
-    with vllm_runner(model, dtype=dtype) as vllm_model:
-        # This test is for verifying whether the model's extra_repr
-        # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
+    with vllm_runner(model, num_scheduler_steps=8,
+                     max_num_seqs=2) as vllm_model:
+        vllm_model.generate_greedy([example_prompts[0]] * 10, 1)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("max_tokens", [64])
+def test_multistep_correctness(vllm_runner, model: str, dtype: str,
+                               max_tokens: int, example_prompts) -> None:
+    with vllm_runner(model, num_scheduler_steps=8,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_multistep = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    with vllm_runner(model, num_scheduler_steps=1,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_single_step = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_outputs_multistep,
+        outputs_1_lst=vllm_outputs_single_step,
+        name_0="vllm_outputs_multistep",
+        name_1="vllm_outputs_single_step",
+    )

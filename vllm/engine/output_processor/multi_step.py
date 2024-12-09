@@ -63,7 +63,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             single_step_process_prompt_logprob(self, seq_group, output)
 
     @staticmethod
-    @functools.lru_cache()
+    @functools.lru_cache
     def _log_prompt_logprob_unsupported_warning_once():
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst
         # If the feature combo become valid
@@ -134,10 +134,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 sample for sample in samples
                 if sample.output_token != VLLM_INVALID_TOKEN_ID
             ]
-            assert valid_samples
 
-            self._process_seq_outputs(seq, valid_samples,
-                                      sequence_group.sampling_params)
+            # When both spec-decode and pre-fill chunking are enabled, we
+            # don't have guaranteed samples here (e.g. all -1s).
+            if valid_samples:
+                self._process_seq_outputs(seq, valid_samples,
+                                          sequence_group.sampling_params)
 
     def _process_decode_and_stop(self, seq: Sequence,
                                  sampling_params: SamplingParams) -> None:
