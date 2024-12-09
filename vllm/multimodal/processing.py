@@ -3,7 +3,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Generic, NamedTuple, Optional, Protocol, TypeVar, Union
+from typing import (Any, Dict, Generic, NamedTuple, Optional, Protocol,
+                    TypeVar, Union, cast)
 
 import torch
 from transformers import BatchFeature, ProcessorMixin
@@ -11,7 +12,8 @@ from typing_extensions import TypeAlias, TypedDict
 
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import flatten_2d_lists, full_groupby, is_list_of
+from vllm.utils import (flatten_2d_lists, full_groupby, is_list_of,
+                        resolve_mm_processor_kwargs)
 
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
                      MultiModalInputsV2, MultiModalKwargs, PlaceholderRange,
@@ -543,8 +545,14 @@ class BaseMultiModalProcessor(ABC):
 
         self.ctx = ctx
         self.metadata = metadata
+        self.init_mm_processor_kwargs = (ctx.model_config.mm_processor_kwargs
+                                         or {})
 
-    def _get_hf_processor(self) -> ProcessorMixin:
+    def _get_hf_processor(
+        self,
+        **mm_processor_kwargs: Mapping[str, object],
+    ) -> ProcessorMixin:
+        # by default, we won't pass any kwargs to the processor initialization
         return self.ctx.get_hf_processor()
 
     def _get_tokenizer(self) -> AnyTokenizer:
@@ -581,7 +589,13 @@ class BaseMultiModalProcessor(ABC):
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        hf_processor = self._get_hf_processor()
+        # some mm_processor_kwargs may be used in processor initialization
+        # instead of processor call
+        processor_init_kwargs = {
+            **self.init_mm_processor_kwargs,
+            **mm_processor_kwargs,
+        }
+        hf_processor = self._get_hf_processor(**processor_init_kwargs)
 
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
@@ -600,6 +614,13 @@ class BaseMultiModalProcessor(ABC):
                     processor_data[f"{k}s"] = v
             else:
                 processor_data[k] = v
+
+        # filter mm_processor_kwargs used in processor call
+        mm_processor_kwargs = resolve_mm_processor_kwargs(
+            self.init_mm_processor_kwargs,
+            cast(Dict[str, Any], mm_processor_kwargs),
+            hf_processor,
+        )
 
         try:
             hf_inputs = hf_processor(

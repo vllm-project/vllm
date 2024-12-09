@@ -69,12 +69,12 @@ class InputProcessingContext(InputContext):
     tokenizer: AnyTokenizer
     """The tokenizer used to tokenize the inputs."""
 
-    def get_hf_processor(self) -> ProcessorMixin:
+    def get_hf_processor(self, **kwargs) -> ProcessorMixin:
         return cached_get_processor(
             self.model_config.tokenizer,
             tokenizer=self.tokenizer,  # Override the tokenizer with ours
             trust_remote_code=self.model_config.trust_remote_code,
-        )
+            **kwargs)
 
 
 N = TypeVar("N", bound=Type[nn.Module])
