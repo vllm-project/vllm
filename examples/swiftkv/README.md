@@ -10,11 +10,6 @@ For more details, see:
 
 ## Quickstart
 
-Install vLLM from Snowflake-Labs:
-```console
-$ pip install git+https://github.com/snowflake-labs/vllm.git@swiftkv
-```
-
 Run an example conversation using [Snowflake/Llama-3.1-SwiftKV-8B-Instruct](https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct):
 ```console
 $ python examples/swiftkv/offline_inference_swiftkv.py
