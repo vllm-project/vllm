@@ -145,6 +145,7 @@ def _support_torch_compile(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
+        self.vllm_config = vllm_config
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = \
@@ -183,6 +184,7 @@ def _support_torch_compile(
                         raise ValueError(
                             "Unsupported dynamic dimensions"
                             f" {dims} for argument {k} with type {type(arg)}.")
+            # here, it is the starting point of the `torch.compile` process
             start_monitoring_torch_compile(self.vllm_config.compilation_config)
 
         # if we don't use custom dispatcher, we can directly call the

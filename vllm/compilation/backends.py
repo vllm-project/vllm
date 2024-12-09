@@ -265,6 +265,8 @@ class VllmBackend:
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
+        # when dynamo calls the backend, it means the bytecode
+        # transform and analysis are done
         compilation_counter.num_graphs_seen += 1
         from .monitor import time_stamp
         dynamo_time = time.time() - time_stamp
