@@ -208,10 +208,12 @@ class GritLM(LlamaForCausalLM):
 
         self._pooler = GritLMPooler(vllm_config.model_config)
 
-        assert isinstance(
-            self.model.layers[0].self_attn.attn.impl, XFormersImpl), (
-                "GritLM is only supported by XFormers backend, "
-                "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS")
+        for layer in self.model.layers:
+            if hasattr(layer, "self_attn"):
+                assert isinstance(layer.self_attn.attn.impl, XFormersImpl), (
+                    "GritLM is only supported by XFormers backend, "
+                    "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS"
+                )
 
     def forward(
         self,
