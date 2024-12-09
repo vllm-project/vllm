@@ -45,7 +45,7 @@ class PostGradPassManager:
         if pass_config.enable_reshape:
             self.passes += [RedundantReshapesPass(pass_config)]
 
-        if True:
+        if pass_config.enable_fusion:
             self.passes += [FusionPass.instance(pass_config)]
             self.passes += [ActivationQuantFusionPass.instance(pass_config)]
 

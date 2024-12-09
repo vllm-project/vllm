@@ -16,9 +16,7 @@ CUDA_DEVICES = [
 
 def ref_impl(silu_and_mul: SiluAndMul, x: torch.Tensor,
              scale: torch.Tensor) -> torch.Tensor:
-    # Norm
     silu_and_mul_out = silu_and_mul.forward_native(x)
-    # Quant
     out, scales = ops.scaled_fp8_quant(silu_and_mul_out, scale)
     return out
 
