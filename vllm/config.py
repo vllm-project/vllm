@@ -2378,7 +2378,10 @@ class CompilationConfig(BaseModel):
         for end, start in zip(self.capture_sizes,
                               self.capture_sizes[1:] + [0]):
             for bs in range(start, end):
-                self.bs_to_padded_graph_size[bs] = end
+                if bs == start:
+                    bs_to_padded_graph_size[bs] = start
+                else:
+                    bs_to_padded_graph_size[bs] = end
 
         self.max_capture_size = self.capture_sizes[0]
 
@@ -2417,7 +2420,10 @@ bs_to_padded_graph_size: Dict[int, int] = {}
 for start, end in zip([0] + _BATCH_SIZES_TO_CAPTURE[:-1],
                       _BATCH_SIZES_TO_CAPTURE):
     for bs in range(start, end):
-        bs_to_padded_graph_size[bs] = start
+        if bs == start:
+            bs_to_padded_graph_size[bs] = start
+        else:
+            bs_to_padded_graph_size[bs] = end
 
 _MAX_BATCH_SIZE_TO_CAPTURE = _BATCH_SIZES_TO_CAPTURE[-1]
 
