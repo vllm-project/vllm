@@ -5,10 +5,9 @@ import pytest
 import torch
 
 from tests.kernels.utils import override_backend_env_variable
-from tests.v1.samplers.utils import (
+from tests.v1.sample.utils import (
     assert_incr_detok_str_matches_non_incr_detok_str,
     compute_correct_cumulative_logprob, get_test_batch)
-from tests.v1.utils import assert_vllm_use_v1
 from vllm import SamplingParams
 
 from ...conftest import VllmRunner
@@ -27,7 +26,6 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     example_prompts,
     monkeypatch,
 ) -> None:
-    assert_vllm_use_v1()
     test_prompts = example_prompts
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
@@ -287,7 +285,6 @@ def test_max_logprobs(monkeypatch):
     Args:
       monkeypatch
     """
-    assert_vllm_use_v1()
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
@@ -305,12 +302,12 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
     """Engine should return `logprobs` and `prompt_logprobs` as `None`
     
     Args:
-      vllm_runner
-      model
-      example_prompts
-      monkeypatch
+      vllm_runner: vLLM engine runner fixture
+      model: model name
+      example_prompts: list of example prompts (test fixture)
+      monkeypatch: supports editing env vars and rolling back changes
+                   after the test
     """
-    assert_vllm_use_v1()
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     max_num_seqs = 256
