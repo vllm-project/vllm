@@ -107,8 +107,8 @@ class GPUModelRunner:
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = torch.zeros(self.max_num_tokens,
-                                        dtype=torch.int64,
-                                        device=self.device)
+                                     dtype=torch.int64,
+                                     device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
@@ -317,7 +317,7 @@ class GPUModelRunner:
         np.cumsum(seq_lens, out=seq_start_loc_np[1:])
 
         self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
-                                                            non_blocking=True)
+                                                          non_blocking=True)
         self.positions[:total_num_scheduled_tokens].copy_(positions,
                                                           non_blocking=True)
         query_start_loc = query_start_loc.to(self.device, non_blocking=True)
@@ -440,8 +440,7 @@ class GPUModelRunner:
                            if self.is_multimodal_model else [])
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(
-            scheduler_output)
+        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
