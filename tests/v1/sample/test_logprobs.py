@@ -1,4 +1,3 @@
-import os
 from typing import List
 
 import pytest
@@ -227,43 +226,6 @@ def test_get_logprobs_and_prompt_logprobs(
       max_num_batched_tokens: token budget for scheduling
       example_prompts
       monkeypatch
-    """
-    _test_case_get_logprobs_and_prompt_logprobs(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        model=model,
-        dtype=dtype,
-        detokenize=True,
-        batch_logprobs_composition=batch_logprobs_composition,
-        max_num_batched_tokens=max_num_batched_tokens,
-        example_prompts=example_prompts,
-        monkeypatch=monkeypatch)
-
-
-# LLM engine v1
-@pytest.mark.skipif(os.getenv("VLLM_V1_FAST_TESTS") != "1",
-                    reason="vLLM v1 fast tests not enabled by "
-                    "VLLM_V1_FAST_TESTS=\"1\" in the environment.")
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype",
-                         ["half"])  # needed for comparing logprobs with HF
-@pytest.mark.parametrize("max_num_batched_tokens", [128])
-@pytest.mark.parametrize("batch_logprobs_composition",
-                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
-def test_fast_get_logprobs_and_prompt_logprobs(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
-    batch_logprobs_composition: str,
-    max_num_batched_tokens: int,
-    example_prompts,
-    monkeypatch,
-) -> None:
-    """Fast test: V1 Engine logprobs & prompt logprobs
-    
-    Faster version of `test_get_logprobs_and_prompt_logprobs` with
-    fewer test cases.
     """
     _test_case_get_logprobs_and_prompt_logprobs(
         hf_runner=hf_runner,
