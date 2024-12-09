@@ -177,7 +177,8 @@ def test_prepare_decode_cuda_graph(batch_size):
         model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
     assert len(slot_mapping) == len(input_tokens)
 
-    expected_bs = VllmConfig.get_graph_batch_size(len(seq_group_metadata_list))
+    expected_bs = VllmConfig.static_pad_for_cudagraph(
+        len(seq_group_metadata_list))
     # Verify input metadata is correct for prompts.
     device = model_runner.device
     assert attn_metadata.num_prefills == 0
