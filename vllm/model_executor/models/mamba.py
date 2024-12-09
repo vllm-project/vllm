@@ -210,12 +210,12 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
             max_batch_size = (VllmConfig.get_graph_batch_size(
                 self.scheduler_config.max_num_seqs) if self.scheduler_config
                               else max(_BATCH_SIZES_TO_CAPTURE) + 2)
-            
+
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
             self.mamba_cache = MambaCacheManager(
-                self.lm_head.weight.dtype, num_mamba_layers,
-                max_batch_size, *self._get_mamba_cache_shape())
+                self.lm_head.weight.dtype, num_mamba_layers, max_batch_size,
+                *self._get_mamba_cache_shape())
 
         (
             mamba_cache_tensors,
