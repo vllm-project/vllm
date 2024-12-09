@@ -25,13 +25,12 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
                                              H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
-                                             LlamaSwiftKVConfig,
-                                             MedusaConfig, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
-                                             NemotronConfig, NVLM_D_Config,
-                                             Olmo2Config, RWConfig,
-                                             SolarConfig, Telechat2Config,
-                                             UltravoxConfig)
+                                             LlamaSwiftKVConfig, MedusaConfig,
+                                             MllamaConfig, MLPSpeculatorConfig,
+                                             MPTConfig, NemotronConfig,
+                                             NVLM_D_Config, Olmo2Config,
+                                             RWConfig, SolarConfig,
+                                             Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname

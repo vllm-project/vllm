@@ -6,11 +6,6 @@ from torch import nn
 
 from vllm.attention import AttentionMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.vllm_flash_attn import (
-    flash_attn_func,
-    flash_attn_varlen_func,
-    flash_attn_with_kvcache,
-)
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -38,6 +33,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import LlamaSwiftKVConfig
+from vllm.vllm_flash_attn import (flash_attn_func, flash_attn_varlen_func,
+                                  flash_attn_with_kvcache)
 
 
 @dataclass

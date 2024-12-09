@@ -1,4 +1,4 @@
-#/usr/bin/env bash
+#!/usr/bin/env bash
 
 MODEL=Snowflake/Llama-3.1-SwiftKV-405B-Instruct-FP8
 
