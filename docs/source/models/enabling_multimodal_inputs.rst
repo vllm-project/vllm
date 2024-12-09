@@ -3,7 +3,7 @@
 Enabling Multimodal Inputs
 ==========================
 
-This document walks you through the steps to extend a vLLM model so that it accepts :ref:`multi-modal <multi_modality>` inputs.
+This document walks you through the steps to extend a vLLM model so that it accepts :ref:`multi-modal inputs <multimodal_inputs>`.
 
 .. seealso::
     :ref:`adding_a_new_model`

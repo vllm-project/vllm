@@ -13,6 +13,7 @@ from torch.nn import functional as F
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.layer import MultiHeadAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -36,23 +37,25 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.platforms import _Backend
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.processor import get_processor
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
-                    is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+                    maybe_prefix, merge_multimodal_embeddings)
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
 NUM_PREFIX_TOKENS = 1
 ADDITIONAL_VOCAB_SIZE = 128
+DEFAULT_IMAGE_PATCH_TOKEN_ID = 152066
+DEFAULT_IM_START_TOKEN_ID = 152067
+DEFAULT_IM_END_TOKEN_ID = 152064
+DEFAULT_IM_COL_TOKEN_ID = 152065
 
 
 class MolmoImageInputs(TypedDict):
@@ -74,6 +77,11 @@ class MolmoImageInputs(TypedDict):
     image_masks: Optional[torch.Tensor]
     """Shape:
     `(batch_size, num_crops, num_patch)`
+    """
+
+    image_start_end: Tuple[int, int]
+    """Starting and ending index of placeholder 
+    tokens
     """
 
 
@@ -188,13 +196,11 @@ class MultiHeadDotProductAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
-        if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
-        }:
-            raise RuntimeError(
-                f"Molmo does not support {self.attn_backend} backend now.")
+        self.scale = self.head_dim**-0.5
+        self.attn = MultiHeadAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.scale,
+                                       num_kv_heads=self.num_kv_heads)
 
     def forward(self,
                 inputs_q: torch.Tensor,
@@ -210,25 +216,8 @@ class MultiHeadDotProductAttention(nn.Module):
         xq, _ = self.wq(inputs_q)
         xk, _ = self.wk(inputs_k)
         xv, _ = self.wv(inputs_v)
-        q_shape = xq.size()[:-1] + (self.num_heads, self.head_dim)
-        kv_shape = xk.size()[:-1] + (self.num_kv_heads, self.head_dim)
-        xq = xq.view(*q_shape)
-        xk = xk.view(*kv_shape)
-        xv = xv.view(*kv_shape)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            from flash_attn import flash_attn_func
-            output = flash_attn_func(xq, xk, xv, dropout_p=0.0, causal=False)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            xq, xk, xv = (rearrange(x, "b s h d -> b h s d")
-                          for x in (xq, xk, xv))
-            output = F.scaled_dot_product_attention(xq, xk, xv)
-            output = rearrange(output, "b h s d -> b s h d ")
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            output = xops.memory_efficient_attention_forward(xq, xk, xv, p=0)
-
-        output = rearrange(output, "b s h d -> b s (h d)").contiguous()
+        output = self.attn(xq, xk, xv)
         output, _ = self.wo(output)
 
         return output
@@ -938,6 +927,8 @@ def image_input_mapper_for_molmo(
     ctx: InputContext,
     data: object,
 ):
+    if isinstance(data, list):
+        data = data[0]
     return MultiModalKwargs(data)
 
 
@@ -987,7 +978,22 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     if "image_masks" in out:
         dummy_imgdata["image_masks"] = out["image_masks"]
     dummy_imgdata["seq_len"] = torch.tensor(seq_len, dtype=torch.long)
-    return DummyData(dummy_seqdata, {"image": dummy_imgdata})
+    size = 0
+    offset = -1
+    for i in range(len(token_ids)):
+        if token_ids[i] in (DEFAULT_IMAGE_PATCH_TOKEN_ID,
+                            DEFAULT_IM_START_TOKEN_ID, DEFAULT_IM_END_TOKEN_ID,
+                            DEFAULT_IM_COL_TOKEN_ID):
+            if offset < 0:
+                offset = i
+            size += 1
+    dummy_imgdata["image_start_end"] = (offset, offset + size)
+    return DummyData(seq_data=dummy_seqdata,
+                     multi_modal_data={"image": dummy_imgdata},
+                     multi_modal_placeholders={
+                         "image":
+                         [PlaceholderRange(offset=offset, length=size)]
+                     })
 
 
 def pad_images(
@@ -1075,19 +1081,34 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
     if image_masks is not None:
         image_data["image_masks"] = image_masks
 
-    image_data["seq_len"] = torch.tensor(len(out["input_ids"]),
+    new_prompt_token_ids = out["input_ids"].tolist()
+    image_data["seq_len"] = torch.tensor(len(new_prompt_token_ids),
                                          dtype=torch.long)
 
     multi_modal_data = dict(image=image_data)
+    size = 0
+    offset = -1
+    for i in range(len(new_prompt_token_ids)):
+        if new_prompt_token_ids[i] in (DEFAULT_IMAGE_PATCH_TOKEN_ID,
+                                       DEFAULT_IM_START_TOKEN_ID,
+                                       DEFAULT_IM_END_TOKEN_ID,
+                                       DEFAULT_IM_COL_TOKEN_ID):
+            if offset < 0:
+                offset = i
+            size += 1
+    image_data["image_start_end"] = (offset, offset + size)
 
     prompt = inputs.get("prompt")
     if prompt is None:
-        prompt = tokenizer.decode(out["input_ids"])
+        prompt = tokenizer.decode(new_prompt_token_ids)
 
     return token_inputs(
-        prompt_token_ids=out["input_ids"],
+        prompt_token_ids=new_prompt_token_ids,
         prompt=prompt,
         multi_modal_data=multi_modal_data,
+        multi_modal_placeholders={
+            "image": [PlaceholderRange(offset=offset, length=size)]
+        },
     )
 
 
@@ -1133,6 +1154,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[MolmoImageInputs]:
         images = kwargs.pop("images", None)
         image_masks = kwargs.pop("image_masks", None)
+        image_start_end = kwargs.pop("image_start_end", None)
         if images is None:
             return None
 
@@ -1150,6 +1172,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             image_input_idx=image_input_idx,
             seq_len=seq_len,
             image_masks=image_masks,
+            image_start_end=image_start_end,
         )
 
     def _process_image_input(
@@ -1198,9 +1221,16 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         # Note: In this original implementation from AI2, the final
         # vision_embeddings will be always be the same length
-        # of input embedddings, which is not very efficient.
-        # TODO(ywang96): see if this can be optimized.
+        # of input embeddings.
         vision_embeddings = torch.einsum('nd,nm->md', image_features, mat)
+
+        # Split by the sizes of the input sequences. For each full embedding,
+        # extract the actual vision embeddings to be merged.
+        vision_embeddings = list(vision_embeddings.split(seq_len.tolist()))
+        for i in range(len(vision_embeddings)):
+            start, end = image_input['image_start_end'][i]
+            vision_embeddings[i] = vision_embeddings[i][start:end]
+
         return vision_embeddings
 
     def get_input_embeddings(
@@ -1210,7 +1240,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = inputs_embeds + multimodal_embeddings
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings, [
+                    DEFAULT_IMAGE_PATCH_TOKEN_ID, DEFAULT_IM_START_TOKEN_ID,
+                    DEFAULT_IM_END_TOKEN_ID, DEFAULT_IM_COL_TOKEN_ID
+                ])
         return inputs_embeds
 
     def forward(
