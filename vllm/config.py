@@ -2419,6 +2419,8 @@ for start, end in zip([0] + _BATCH_SIZES_TO_CAPTURE[:-1],
     for bs in range(start, end):
         bs_to_padded_graph_size[bs] = end
 
+_MAX_BATCH_SIZE_TO_CAPTURE = _BATCH_SIZES_TO_CAPTURE[-1]
+
 
 @dataclass
 class VllmConfig:
@@ -2467,9 +2469,9 @@ class VllmConfig:
         in _BATCH_SIZES_TO_CAPTURE, return the largest size in
         _BATCH_SIZES_TO_CAPTURE.
         """
-        if batch_size in bs_to_padded_graph_size:
-            return bs_to_padded_graph_size[batch_size]
-        return _BATCH_SIZES_TO_CAPTURE[-1]
+        if batch_size > _MAX_BATCH_SIZE_TO_CAPTURE:
+            return _MAX_BATCH_SIZE_TO_CAPTURE
+        return bs_to_padded_graph_size[batch_size]
 
     @staticmethod
     def _get_quantization_config(
