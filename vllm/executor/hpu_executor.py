@@ -81,9 +81,6 @@ class HPUExecutor(ExecutorBase):
         msg = f"init_cache_engine took {cache_init_m.get_summary_string()}"
         logger.info(msg)
 
-    def finish_measurements(self):
-        self.driver_worker.finish_measurements()
-
     def execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
@@ -187,10 +184,8 @@ class HPUExecutor(ExecutorBase):
     def stop_profile(self) -> None:
         self.driver_worker.stop_profile()
 
-    def shutdown(self) -> None:
-        if hasattr(self, "driver_worker") and hasattr(self.driver_worker,
-                                                      'shutdown_inc'):
-            self.driver_worker.shutdown_inc()
+    def shutdown_inc(self) -> None:
+        self.driver_worker.shutdown_inc()
 
 
 class HPUExecutorAsync(HPUExecutor, ExecutorAsyncBase):

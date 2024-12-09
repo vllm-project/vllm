@@ -318,9 +318,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def finish_measurements(self):
-        self.model_runner.finish_measurements()
-
     @property
     def do_metadata_broadcast(self) -> bool:
         return self.parallel_config.tensor_parallel_size > 1
