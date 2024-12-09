@@ -1647,8 +1647,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method
-                != 'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method !=
+                'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
@@ -2115,8 +2115,8 @@ class KVTransferConfig(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         if all([
-                self.kv_connector is not None, self.kv_connector
-                != "PyNcclConnector"
+                self.kv_connector is not None,
+                self.kv_connector != "PyNcclConnector"
         ]):
             raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
                              f"Supported connectors are "
