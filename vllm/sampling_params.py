@@ -184,8 +184,6 @@ class SamplingParams(
     ignore_eos: bool = False
     max_tokens: Optional[int] = 16
     min_tokens: int = 0
-    # Number of sample logprobs and prompt logprobs,
-    # respectively, requested
     logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
     # NOTE: This parameter is only exposed at the engine level for now.
@@ -328,7 +326,7 @@ class SamplingParams(
         else:
             self.bad_words = list(self.bad_words)
 
-        self.logprobs = (1 if self.logprobs is True else self.logprobs)
+        self.logprobs = 1 if self.logprobs is True else self.logprobs
         self.prompt_logprobs = (1 if self.prompt_logprobs is True else
                                 self.prompt_logprobs)
 
@@ -387,10 +385,10 @@ class SamplingParams(
             raise ValueError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
-        if (self.logprobs is not None and self.logprobs < 0):
-            raise ValueError(f"logprobs must be non-negative, "
-                             f"got {self.logprobs}.")
-        if (self.prompt_logprobs is not None and self.prompt_logprobs < 0):
+        if self.logprobs is not None and self.logprobs < 0:
+            raise ValueError(
+                f"logprobs must be non-negative, got {self.logprobs}.")
+        if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
         if (self.truncate_prompt_tokens is not None
