@@ -211,8 +211,6 @@ def test_sampler_presence_penalty(device: str, batch_size: int,
         # Since all tokens initially have the same logprobs, the non-penalized
         # tokens will appear at the beginning, while the penalized tokens
         #  will appear at the end of the list.
-        print(' sampler_output.logprob_token_ids ' +
-              str(sampler_output.logprob_token_ids))
         penalized_token_id = sampler_output.logprob_token_ids[batch_idx][
             VOCAB_SIZE - 1]
         penalized_log_prod = sampler_output.logprobs[batch_idx][VOCAB_SIZE - 1]

@@ -29,7 +29,6 @@ class Sampler(nn.Module):
                              sampling_metadata.frequency_penalties,
                              sampling_metadata.repetition_penalties,
                              sampling_metadata.output_token_ids)
-        print('logits123 ' + str(logits.sort()))
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         logits = self.apply_top_k_top_p(logits, sampling_metadata)
         probs = self.get_probs(logits)

@@ -902,7 +902,6 @@ class InputBatch:
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
-            print('Hello in copy!!!')
             self.temperature[:self.num_reqs].copy_(
                 self.temperature_cpu_tensor[:self.num_reqs], non_blocking=True)
             self.top_p[:self.num_reqs].copy_(
