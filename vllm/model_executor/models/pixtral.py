@@ -1,6 +1,5 @@
 from dataclasses import dataclass, fields
 from functools import cached_property
-from itertools import tee
 from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
 
 import numpy
@@ -361,7 +360,8 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # Get references to parameters for direct loading
         vision_encoder_dict = dict(self.vision_encoder.named_parameters())
-        vision_lang_adapter_dict = dict(self.vision_language_adapter.named_parameters())
+        vision_lang_adapter_dict = dict(
+            self.vision_language_adapter.named_parameters())
 
         def llm_weights_generator():
             # Single pass over weights
@@ -379,7 +379,8 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 else:
-                    # LLM weights: yield them to be loaded by language_model.load_weights
+                    # LLM weights: yield them to be loaded
+                    # by language_model.load_weights
                     yield (name, w)
 
         # Now we call the language model load with the generator
