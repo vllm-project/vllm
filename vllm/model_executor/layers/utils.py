@@ -1,6 +1,8 @@
 """Utility methods for model layers."""
-import torch
 from typing import Tuple
+
+import torch
+
 
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
@@ -20,10 +22,10 @@ def get_token_bin_counts_and_mask(
 
 
 def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
-                     output_tokens_tensor: torch.Tensor,
-                     presence_penalties: torch.Tensor,
-                     frequency_penalties: torch.Tensor,
-                     repetition_penalties: torch.Tensor) -> torch.Tensor:
+                    output_tokens_tensor: torch.Tensor,
+                    presence_penalties: torch.Tensor,
+                    frequency_penalties: torch.Tensor,
+                    repetition_penalties: torch.Tensor) -> torch.Tensor:
     """
     Applies penalties in place to the logits tensor
     logits : The input logits tensor of shape [num_seqs, vocab_size]
@@ -41,8 +43,7 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
                                                    vocab_size, num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs)
-    repetition_penalties = repetition_penalties.repeat(
-            1, vocab_size)
+    repetition_penalties = repetition_penalties.repeat(1, vocab_size)
     logits[logits > 0] /= torch.where(prompt_mask | output_mask,
                                       repetition_penalties, 1.0)[logits > 0]
     logits[logits <= 0] *= torch.where(prompt_mask | output_mask,
