@@ -286,7 +286,7 @@ class JambaModel(nn.Module):
         )
 
         def get_layer(prefix: str):
-            layer_idx = int(prefix.split(".")[-1])
+            layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = ALL_DECODER_LAYER_TYPES[
                 config.layers_block_type[layer_idx]]
             return layer_class(

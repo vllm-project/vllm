@@ -704,10 +704,8 @@ class ModelConfig:
         # Transformers supports layers_block_type @property
         layers_block_type_value = getattr(self.hf_config, "layers_block_type",
                                           [block_type.value] * (end - start))
-        return len([
-            t for t in layers_block_type_value[start:end]
-            if t == block_type.value
-        ])
+        return sum(t == block_type.value
+                   for t in layers_block_type_value[start:end])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """

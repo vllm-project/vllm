@@ -156,11 +156,13 @@ TEXT_GENERATION_MODELS = {
     # "internlm/internlm-chat-7b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(trust_remote_code=True),
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
+    "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(trust_remote_code=True),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(trust_remote_code=True),
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
+    "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(tp_base=4),
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
@@ -178,9 +180,7 @@ TEXT_GENERATION_MODELS = {
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
-    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(tp_base=2),
-    "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
-    "state-spaces/mamba-130m-hf": PPTestSettings.fast()
+    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(tp_base=2)
     # FIXME: Cannot load tokenizer in latest transformers version.
     # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
@@ -234,6 +234,8 @@ TEST_MODELS = [
     "OpenGVLab/InternVL2-1B",
     "microsoft/Phi-3-vision-128k-instruct",
     "fixie-ai/ultravox-v0_3",
+    # [LANGUAGE GENERATION - HYBRID ARCH]
+    "ai21labs/Jamba-tiny-dev",
 ]
 
 
