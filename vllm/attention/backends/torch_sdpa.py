@@ -297,26 +297,33 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
                 dtype=torch.int32,
                 device="cpu",
             )
-            query_lens_tensor = torch.tensor(prefill_query_lens,
-                                             dtype=torch.int32,
-                                             device="cpu")
-            kv_lens_tensor = torch.tensor(prefill_seq_lens,
-                                          dtype=torch.int32,
-                                          device="cpu")
-            query_start_loc = torch.zeros(input_data.num_prefills + 1,
-                                          dtype=torch.int32,
-                                          device="cpu")
-            kv_start_loc = torch.zeros(input_data.num_prefills + 1,
-                                       dtype=torch.int32,
-                                       device="cpu")
-            torch.cumsum(query_lens_tensor,
-                         dim=0,
-                         dtype=torch.int32,
-                         out=query_start_loc[1:])
-            torch.cumsum(kv_lens_tensor,
-                         dim=0,
-                         dtype=torch.int32,
-                         out=kv_start_loc[1:])
+            query_start_loc: torch.Tensor
+            kv_start_loc: torch.Tensor
+            if input_data.seq_start_loc is not None and input_data.seq_start_loc is not None:
+                query_start_loc = input_data.query_start_loc[input_data.num_prefills + 1:]
+                kv_start_loc = input_data.seq_start_loc
+            else:
+                query_lens_tensor = torch.tensor(prefill_query_lens,
+                                                 dtype=torch.int32,
+                                                 device="cpu")
+                kv_lens_tensor = torch.tensor(prefill_seq_lens,
+                                              dtype=torch.int32,
+                                              device="cpu")
+
+                query_start_loc = torch.zeros(input_data.num_prefills + 1,
+                                              dtype=torch.int32,
+                                              device="cpu")
+                kv_start_loc = torch.zeros(input_data.num_prefills + 1,
+                                           dtype=torch.int32,
+                                           device="cpu")
+                torch.cumsum(query_lens_tensor,
+                             dim=0,
+                             dtype=torch.int32,
+                             out=query_start_loc[1:])
+                torch.cumsum(kv_lens_tensor,
+                             dim=0,
+                             dtype=torch.int32,
+                             out=kv_start_loc[1:])
             max_query_len = max(prefill_query_lens)
             max_kv_len = max(prefill_seq_lens)
         else:

@@ -250,13 +250,13 @@ class CPUModelRunner(GPUModelRunner):
         seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
                     num_scheduled_tokens)
         max_seq_len = seq_lens.max()
-        # seq_start_loc = torch.empty((num_reqs + 1, ),
-        #                             dtype=torch.int32,
-        #                             device="cpu",
-        #                             pin_memory=self.pin_memory)
-        # seq_start_loc_np = seq_start_loc.numpy()
-        # seq_start_loc_np[0] = 0
-        # np.cumsum(seq_lens, out=seq_start_loc_np[1:])
+        seq_start_loc = torch.empty((num_prefills + 1, ),
+                                    dtype=torch.int32,
+                                    device="cpu",
+                                    pin_memory=self.pin_memory)
+        seq_start_loc_np = seq_start_loc.numpy()
+        seq_start_loc_np[0] = 0
+        np.cumsum(seq_lens[:num_prefills], out=seq_start_loc_np[1:])
 
         # input_ids = input_ids.to(self.device, non_blocking=True)
         self.positions[:total_num_scheduled_tokens].copy_(positions,
@@ -274,6 +274,8 @@ class CPUModelRunner(GPUModelRunner):
         data.decode_block_tables = decode_block_tables
         data.prefill_block_tables = prefill_block_tables
         data.slot_mapping = slot_mapping
+        data.query_start_loc = query_start_loc[:num_prefills+1]
+        data.seq_start_loc = seq_start_loc
         attn_metadata = self.att_metadata_builder.build(
             data.seq_lens, data.query_lens, -1, -1)
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
