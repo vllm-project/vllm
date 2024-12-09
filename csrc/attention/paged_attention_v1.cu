@@ -140,13 +140,10 @@ void paged_attention_v1_launcher(
       blocksparse_block_size, blocksparse_head_sliding_step);
 
 #define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
-  switch (is_block_sparse) {                                               \
-    case true:                                                             \
-      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);     \
-      break;                                                               \
-    case false:                                                            \
-      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);    \
-      break;                                                               \
+  if (is_block_sparse) {                                                   \
+    CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
+  } else {                                                                 \
+    CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
