@@ -232,6 +232,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
     ) -> None:
 
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
