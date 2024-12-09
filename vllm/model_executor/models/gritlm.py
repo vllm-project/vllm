@@ -212,8 +212,7 @@ class GritLM(LlamaForCausalLM):
             if hasattr(layer, "self_attn"):
                 assert isinstance(layer.self_attn.attn.impl, XFormersImpl), (
                     "GritLM is only supported by XFormers backend, "
-                    "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS"
-                )
+                    "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS")
 
     def forward(
         self,
