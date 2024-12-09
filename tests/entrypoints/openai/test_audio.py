@@ -343,12 +343,6 @@ async def test_multi_audio_input(client: openai.AsyncOpenAI, model_name: str,
                     "url": audio_url
                 }
             },
-            # {
-            #     "type": "audio_url",
-            #     "audio_url": {
-            #         "url": audio_url
-            #     }
-            # },
             {
                 "type": "input_audio",
                 "input_audio": {
