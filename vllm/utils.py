@@ -1628,7 +1628,7 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if is_in_doc_build():
+    if is_in_doc_build() or not supports_custom_op():
         return
     import torch.library
     if hasattr(torch.library, "infer_schema"):
