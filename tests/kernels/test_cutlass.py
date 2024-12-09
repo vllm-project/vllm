@@ -484,9 +484,9 @@ def test_cutlass_fp8_group_gemm(m: int, n: int, k: int, num_groups: int,
         m = alignment * random.randint(1, 64)
         n = alignment * random.randint(1, 64)
         k = alignment * random.randint(1, 64)
-        tot_a += m * k
-        tot_b += k * n
-        tot_c += m * n
+        tot_a += m
+        tot_b += k
+        tot_c += m
         offsets_a[g] = m * k
         offsets_b[g] = k * n
         offsets_c[g] = m * n
@@ -494,21 +494,27 @@ def test_cutlass_fp8_group_gemm(m: int, n: int, k: int, num_groups: int,
         problem_sizes[g][1] = n
         problem_sizes[g][2] = k
 
-    a = to_fp8(torch.randn((tot_a), device=device))
-    b = to_fp8(torch.randn((tot_b), device=device).t())
-    c = torch.zeros((tot_c), device=device).to(out_dtype)
+    a = to_fp8(torch.randn((tot_a, k), device=device))
+    b = to_fp8(torch.randn((tot_b, n), device=device).t())
+    c = torch.zeros((tot_c, n), device=device).to(out_dtype)
 
-    m_a_scales = m if per_act_token else 1
-    n_b_scales = n if per_out_ch else 1
+    print(tot_a, tot_b, tot_c)
 
-    scale_a = (torch.randn((m_a_scales, 1), device=device,
+    print(a.stride(), b.stride(), c.stride())
+
+    # m_a_scales = m if per_act_token else 1
+    # n_b_scales = n if per_out_ch else 1
+
+    scale_a = (torch.randn((tot_a if per_act_token else num_groups),
+                           device=device,
                            dtype=torch.float32))
-    scale_b = (torch.randn((1, n_b_scales), device=device,
+    scale_b = (torch.randn((tot_b if per_act_token else num_groups),
+                            device=device,
                            dtype=torch.float32))
-    if use_bias:
-        bias = torch.rand((n, 1), device=device, dtype=out_dtype) * 10
-    else:
-        bias = None
+    # if use_bias:
+    #     bias = torch.rand((n, 1), device=device, dtype=out_dtype) * 10
+    # else:
+    #     bias = None
 
     # TODO strides we can get later the same way as in scaled_mm_c3x.cu
     torch.ops._C.cutlass_grouped_mm(c, a, b, scale_a, scale_b, problem_sizes,
