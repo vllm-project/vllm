@@ -128,6 +128,9 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         """
         self._allocated_cpu_blocks: Deque[Block] = deque()
 
+        self.num_gpu_blocks = gpu_block_allocator.get_num_total_blocks()
+        self.num_cpu_blocks = cpu_block_allocator.get_num_total_blocks()
+
     def allocate_mutable_block(self, prev_block: Optional[Block],
                                device: Device) -> Block:
         """Allocates a new mutable block on the specified device.
@@ -248,6 +251,40 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         raise NotImplementedError("CPU offloading block allocator only "
                                   "support preemption by recomputation.")
 
+    def _is_gpu_block(self, block_id: int) -> bool:
+        return block_id in self._allocators[Device.GPU].all_block_ids
+
+    def _is_gpu_block_unsafe(self, block_id: int) -> bool:
+        """Faster version of `_is_gpu_block` that doesn't check the block ID.
+        But assumes the that the block IDs are assigned contiguously, with GPU 
+        block IDs coming before the CPU block IDs.
+        """
+        return block_id < self.num_gpu_blocks
+
+    def _get_physical_block_id_unsafe(self, block_id: int) -> int:
+        """Returns the physical block ID of the given block ID.
+
+        This function avoids using the `allocator.get_physical_block_id()`
+        which is slow (O(NlogN)). Instead, this is based on the assumption
+        that the block IDs are assigned contiguously, with GPU block IDs coming
+        before CPU block IDs.
+
+        Args:
+            block_id (int): The block ID to get the physical block ID of.
+
+        Returns:
+            int: The physical block ID of the given block ID.
+
+        Note:
+            Please see the implementation of 
+            `CpuOffloadingBlockAllocator.create` for how the block IDs are
+            assigned.
+        """
+        if self._is_gpu_block_unsafe(block_id):
+            return block_id
+        else:
+            return block_id - self.num_gpu_blocks
+
     def get_and_reset_swaps(self,
                             now: float) -> Tuple[List[Tuple[int, int]], ...]:
         """Returns and clears the mapping of source to destination block IDs.
@@ -327,15 +364,16 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         blocks_to_swap_in = []
         for src, dst in self._swap_mapping.items():
             # only two possible cases: CPU -> GPU, or GPU -> CPU
-            if src in self._allocators[Device.GPU].all_block_ids:
+            #if src in self._allocators[Device.GPU].all_block_ids:
+            if self._is_gpu_block_unsafe(src):
                 # swap out
-                src = self._allocators[Device.GPU].get_physical_block_id(src)
-                dst = self._allocators[Device.CPU].get_physical_block_id(dst)
+                src = self._get_physical_block_id_unsafe(src)
+                dst = self._get_physical_block_id_unsafe(dst)
                 blocks_to_swap_out.append((src, dst))
             else:
                 # swap in
-                src = self._allocators[Device.CPU].get_physical_block_id(src)
-                dst = self._allocators[Device.GPU].get_physical_block_id(dst)
+                src = self._get_physical_block_id_unsafe(src)
+                dst = self._get_physical_block_id_unsafe(dst)
                 blocks_to_swap_in.append((src, dst))
         self._swap_mapping.clear()
         return blocks_to_swap_out, blocks_to_swap_in
