@@ -21,10 +21,9 @@ def _create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
     return fake_logits
 
 
-def _create_penalty_tensor(batch_size: int, vocab_size: int,
-                           penalty_value: float,
+def _create_penalty_tensor(batch_size: int, penalty_value: float,
                            device: torch.device) -> torch.Tensor:
-    return torch.full((batch_size, vocab_size),
+    return torch.full((batch_size, 1),
                       fill_value=penalty_value,
                       dtype=torch.float,
                       device=device)
@@ -73,12 +72,9 @@ def _create_default_sampling_metadata(
         prompt_token_ids=_create_prompt_tokens_tensor(prompt_token_ids,
                                                       vocab_size, device),
         output_token_ids=output_token_ids,
-        frequency_penalties=_create_penalty_tensor(batch_size, vocab_size, 0.0,
-                                                   device),
-        presence_penalties=_create_penalty_tensor(batch_size, vocab_size, 0.0,
-                                                  device),
-        repetition_penalties=_create_penalty_tensor(batch_size, vocab_size,
-                                                    1.0, device),
+        frequency_penalties=_create_penalty_tensor(batch_size, 0.0, device),
+        presence_penalties=_create_penalty_tensor(batch_size, 0.0, device),
+        repetition_penalties=_create_penalty_tensor(batch_size, 1.0, device),
         no_penalties=True,
         min_tokens=[],
         stop_token_ids=[],
@@ -206,7 +202,7 @@ def test_sampler_presence_penalty(device: str, batch_size: int,
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
     output_token_ids = sampling_metadata.output_token_ids
     sampling_metadata.presence_penalties = _create_penalty_tensor(
-        batch_size, VOCAB_SIZE, presence_penalty, torch.device(device))
+        batch_size, presence_penalty, torch.device(device))
     sampling_metadata.no_penalties = False
     sampler = Sampler()
     sampler_output = sampler(fake_logits, sampling_metadata)
@@ -215,6 +211,8 @@ def test_sampler_presence_penalty(device: str, batch_size: int,
         # Since all tokens initially have the same logprobs, the non-penalized
         # tokens will appear at the beginning, while the penalized tokens
         #  will appear at the end of the list.
+        print(' sampler_output.logprob_token_ids ' +
+              str(sampler_output.logprob_token_ids))
         penalized_token_id = sampler_output.logprob_token_ids[batch_idx][
             VOCAB_SIZE - 1]
         penalized_log_prod = sampler_output.logprobs[batch_idx][VOCAB_SIZE - 1]
@@ -254,7 +252,7 @@ def test_sampler_frequency_penalty(device: str, batch_size: int,
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
     sampling_metadata.frequency_penalties = _create_penalty_tensor(
-        batch_size, VOCAB_SIZE, frequency_penalty, torch.device(device))
+        batch_size, frequency_penalty, torch.device(device))
     output_token_ids, sorted_token_ids_in_output = \
         _create_weighted_output_token_list(batch_size, VOCAB_SIZE)
     sampling_metadata.output_token_ids = output_token_ids
@@ -306,7 +304,7 @@ def test_sampler_repetition_penalty(device: str, batch_size: int,
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
     sampling_metadata.repetition_penalties = _create_penalty_tensor(
-        batch_size, VOCAB_SIZE, repetition_penalty, torch.device(device))
+        batch_size, repetition_penalty, torch.device(device))
     sampling_metadata.no_penalties = False
     sampler = Sampler()
     sampler_output = sampler(fake_logits, sampling_metadata)

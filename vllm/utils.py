@@ -1652,20 +1652,3 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
-
-
-def get_token_bin_counts_and_mask(
-    tokens: torch.Tensor,
-    vocab_size: int,
-    num_seqs: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    # Compute the bin counts for the tokens.
-    # vocab_size + 1 for padding.
-    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
-                             dtype=torch.long,
-                             device=tokens.device)
-    bin_counts.scatter_add_(1, tokens, torch.ones_like(tokens))
-    bin_counts = bin_counts[:, :vocab_size]
-    mask = bin_counts > 0
-
-    return bin_counts, mask

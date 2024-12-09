@@ -4,8 +4,8 @@ from typing import Dict, List, Set, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.utils import (get_token_bin_counts_and_mask, is_pin_memory_available,
-                        make_tensor_with_pad)
+from vllm.model_executor.layers.utils import apply_penalties
+from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -29,6 +29,7 @@ class Sampler(nn.Module):
                              sampling_metadata.frequency_penalties,
                              sampling_metadata.repetition_penalties,
                              sampling_metadata.output_token_ids)
+        print('logits123 ' + str(logits.sort()))
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         logits = self.apply_top_k_top_p(logits, sampling_metadata)
         probs = self.get_probs(logits)
@@ -194,23 +195,12 @@ def _apply_penalties(logits: torch.Tensor, prompt_token_ids: torch.Tensor,
     """
     Applies presence, frequency and repetition penalties to the logits.
     """
-    num_seqs, vocab_size = logits.shape
+    _, vocab_size = logits.shape
     output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size,
                                           logits.device)
-    _, prompt_mask = get_token_bin_counts_and_mask(prompt_token_ids,
-                                                   vocab_size, num_seqs)
-    output_bin_counts, output_mask = get_token_bin_counts_and_mask(
-        output_tokens_t, vocab_size, num_seqs)
-    logits[logits > 0] /= torch.where(prompt_mask | output_mask,
-                                      repetition_penalties, 1.0)[logits > 0]
-    logits[logits <= 0] *= torch.where(prompt_mask | output_mask,
-                                       repetition_penalties, 1.0)[logits <= 0]
-    # We follow the definition in OpenAI API.
-    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits -= frequency_penalties * output_bin_counts
-    logits -= presence_penalties * output_mask
-
-    return logits
+    return apply_penalties(logits, prompt_token_ids, output_tokens_t,
+                           presence_penalties, frequency_penalties,
+                           repetition_penalties)
 
 
 def _convert_to_tensors(output_token_ids: List[List[int]], vocab_size: int,
