@@ -2385,7 +2385,8 @@ class CompilationConfig(BaseModel):
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
-        self.max_capture_size = self.capture_sizes[0]
+        self.max_capture_size = self.capture_sizes[
+            0] if self.capture_sizes else 0
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = {}
