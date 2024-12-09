@@ -2288,15 +2288,17 @@ class CompilationConfig(BaseModel):
     static_forward_context: Dict[str, Any] = PrivateAttr
 
     def __repr__(self) -> str:
-        exclude = [
+        exclude = {
             "static_forward_context",
             "enabled_custom_ops",
             "disabled_custom_ops",
             "compilation_time",
             "bs_to_padded_graph_size",
             "pass_config",
-        ]
+        }
         return self.json(exclude=exclude)
+
+    __str__ = __repr__
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
