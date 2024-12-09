@@ -20,12 +20,9 @@ timm # required for internvl test
 torch==2.5.1
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
-mistral_common[opencv] >= 1.4.4 # required for pixtral test
+mistral_common[opencv] >= 1.5.0 # required for pixtral test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.4 # required for model evaluation test
-
-# TODO: Add this after fully implementing llava(mantis)
-# git+https://github.com/TIGER-AI-Lab/Mantis.git # required for llava(mantis) test
 
 # quantization
 bitsandbytes>=0.44.0

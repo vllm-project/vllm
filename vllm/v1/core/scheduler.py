@@ -33,21 +33,22 @@ class Scheduler:
         # TODO: Support LoRA.
         assert lora_config is None, "V1 does not support LoRA yet."
 
-        num_gpu_blocks = cache_config.num_gpu_blocks
-        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
-        # Create the block space manager.
-        self.kv_cache_manager = KVCacheManager(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
-        self.block_size = self.cache_config.block_size
-
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
+
+        num_gpu_blocks = cache_config.num_gpu_blocks
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        # Create the KV cache manager.
+        self.kv_cache_manager = KVCacheManager(
+            block_size=self.cache_config.block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            max_model_len=self.max_model_len,
+            sliding_window=self.cache_config.sliding_window,
+            enable_caching=self.cache_config.enable_prefix_caching)
+        self.block_size = self.cache_config.block_size
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
@@ -72,12 +73,12 @@ class Scheduler:
         # has the Transformer architecture (e.g., ViT).
         # FIXME(woosuk): Below are placeholder values. We need to calculate the
         # actual values from the configurations.
-        self.max_num_encoder_input_tokens = 2048
+        self.max_num_encoder_input_tokens = 16384
         # NOTE(woosuk): For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized and used, regardless of
         # the cache size. This is because the memory space for the encoder cache
         # is preallocated in the profiling run.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
+        self.encoder_cache_manager = EncoderCacheManager(cache_size=16384)
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:

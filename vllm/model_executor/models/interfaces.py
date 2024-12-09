@@ -7,7 +7,7 @@ from typing_extensions import TypeIs, TypeVar
 from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
-from .interfaces_base import is_embedding_model
+from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -36,6 +36,11 @@ class SupportsMultiModal(Protocol):
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
+
+        The output embeddings must be one of the following formats:
+        - A list or tuple of 2D tensors, where each tensor corresponds to 
+          each input image.
+        - A single 3D tensor, with the batch dimension grouping the 2D tensors.
         """
         ...
 
@@ -389,4 +394,4 @@ def _supports_cross_encoding(
 def supports_cross_encoding(
     model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
-    return is_embedding_model(model) and _supports_cross_encoding(model)
+    return is_pooling_model(model) and _supports_cross_encoding(model)

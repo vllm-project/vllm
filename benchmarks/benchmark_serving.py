@@ -199,6 +199,56 @@ def sample_sonnet_requests(
     return sampled_requests
 
 
+def sample_mmmu_pro_vision_requests(
+    dataset,
+    num_requests: int,
+    tokenizer: PreTrainedTokenizerBase,
+    fixed_output_len: Optional[int] = None,
+) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
+    sampled_requests: List[Tuple[str, int, int, Dict[str,
+                                                     Collection[str]]]] = []
+    for data in dataset:
+        if len(sampled_requests) == num_requests:
+            break
+
+        # MMMU-Pro vision direct prompt
+        # Ref: https://github.com/MMMU-Benchmark/MMMU/blob/6ce42f4d8f70c1841c67867152648974415b5cac/mmmu-pro/prompts.yaml#L5
+        prompt = (
+            "Answer with the option letter from the given choices directly. "
+            "The last line of your response should be of the following "
+            "format: 'Answer: $LETTER' (without quotes) where LETTER is one of "
+            "options.")
+
+        prompt_token_ids = tokenizer(prompt).input_ids
+        if fixed_output_len is None:
+            # Default max output len is set to 128
+            print("--hf-output-len is not provided. Using default value 128.")
+            fixed_output_len = 128
+
+        prompt_len = len(prompt_token_ids)
+        output_len = fixed_output_len
+
+        assert isinstance(
+            data["image"],
+            Image), ("Input image format must be `PIL.Image.Image`, "
+                     f"given {type(data['image'])}.")
+        image: Image = data["image"]
+        image = image.convert("RGB")
+        image_data = io.BytesIO()
+        image.save(image_data, format='JPEG')
+        image_base64 = base64.b64encode(image_data.getvalue()).decode("utf-8")
+        mm_content = {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{image_base64}"
+            },
+        }
+
+        sampled_requests.append((prompt, prompt_len, output_len, mm_content))
+
+    return sampled_requests
+
+
 def sample_hf_requests(
     dataset_path: str,
     dataset_subset: str,
@@ -208,6 +258,21 @@ def sample_hf_requests(
     random_seed: int,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
+
+    # Special case for MMMU-Pro vision dataset
+    if dataset_path == 'MMMU/MMMU_Pro' and dataset_subset == 'vision':
+        assert dataset_split == "test"
+        dataset = load_dataset(dataset_path,
+                               name=dataset_subset,
+                               split=dataset_split,
+                               streaming=True)
+        assert "image" in dataset.features, (
+            "MMMU/MMMU_Pro vision dataset must have 'image' column.")
+        filter_func = lambda x: isinstance(x["image"], Image)
+        dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
+        return sample_mmmu_pro_vision_requests(dataset, num_requests,
+                                               tokenizer, fixed_output_len)
+
     dataset = load_dataset(dataset_path,
                            name=dataset_subset,
                            split=dataset_split,

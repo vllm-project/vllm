@@ -43,6 +43,7 @@ class WorkerBase(ABC):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
 
     @abstractmethod
     def init_device(self) -> None:
@@ -438,7 +439,7 @@ class WorkerWrapperBase:
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
-        enable_trace_function_call_for_thread()
+        enable_trace_function_call_for_thread(self.vllm_config)
 
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'

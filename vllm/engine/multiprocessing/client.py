@@ -9,6 +9,7 @@ import cloudpickle
 import psutil
 import zmq
 import zmq.asyncio
+from typing_extensions import deprecated
 from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
@@ -35,7 +36,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -93,8 +94,7 @@ class MQLLMEngineClient(EngineClient):
             model_config=self.model_config,
             scheduler_config=engine_config.scheduler_config,
             parallel_config=engine_config.parallel_config,
-            enable_lora=bool(engine_config.lora_config),
-        )
+            lora_config=engine_config.lora_config)
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
 
@@ -414,7 +414,8 @@ class MQLLMEngineClient(EngineClient):
     def dead_error(self) -> BaseException:
         return ENGINE_DEAD_ERROR(self._errored_with)
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def generate(
         self,
         *,
@@ -472,8 +473,8 @@ class MQLLMEngineClient(EngineClient):
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
-            priority: Priority of the request (lower means earlier handling). 
-                Any priority other than 0 will lead to an error if the 
+            priority: Priority of the request (lower means earlier handling).
+                Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
         if inputs is not None:
@@ -485,7 +486,8 @@ class MQLLMEngineClient(EngineClient):
                                      lora_request, trace_headers,
                                      prompt_adapter_request, priority)
 
-    @overload  # DEPRECATED
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def encode(
         self,
         *,
@@ -495,7 +497,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
         ...
 
     @overload
@@ -507,7 +509,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
         ...
 
     @deprecate_kwargs(
@@ -524,7 +526,7 @@ class MQLLMEngineClient(EngineClient):
         priority: int = 0,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from an embedding model.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -540,7 +542,7 @@ class MQLLMEngineClient(EngineClient):
             trace_headers: OpenTelemetry trace headers.
 
         Yields:
-            The output `EmbeddingRequestOutput` objects from the LLMEngine
+            The output `PoolingRequestOutput` objects from the LLMEngine
             for the request.
         """
         if inputs is not None:
@@ -549,7 +551,7 @@ class MQLLMEngineClient(EngineClient):
                 and request_id is not None)
 
         return cast(
-            AsyncGenerator[EmbeddingRequestOutput, None],
+            AsyncGenerator[PoolingRequestOutput, None],
             self._process_request(prompt,
                                   pooling_params,
                                   request_id,
@@ -567,7 +569,7 @@ class MQLLMEngineClient(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
-            EmbeddingRequestOutput, None]]:
+            PoolingRequestOutput, None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # If already dead, error out.
@@ -586,6 +588,7 @@ class MQLLMEngineClient(EngineClient):
                     default_guided_backend=(self.decoding_config.guided_decoding_backend
                         if self.decoding_config
                         else DecodingConfig.guided_decoding_backend),
+                    model_config=self.model_config
                 )
 
         # 1) Create output queue for this requests.

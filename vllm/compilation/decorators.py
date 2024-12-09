@@ -1,7 +1,8 @@
 import inspect
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, TypeVar, Union, overload
 
 import torch
+import torch.nn as nn
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
@@ -10,12 +11,31 @@ from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import supports_dynamo
 
+from .monitor import start_monitoring_torch_compile
+
 logger = init_logger(__name__)
+
+_T = TypeVar("_T", bound=type[nn.Module])
+
+
+@overload
+def support_torch_compile(
+    *,
+    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]],
+) -> Callable[[_T], _T]:
+    ...
+
+
+@overload
+def support_torch_compile(cls: _T) -> _T:
+    ...
 
 
 def support_torch_compile(
-        cls: Optional[type] = None,
-        dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]] = None):
+    cls: Optional[_T] = None,
+    *,
+    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]] = None,
+) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
 
@@ -66,7 +86,7 @@ def support_torch_compile(
     computation graph.
     """
 
-    def cls_decorator_helper(cls: type):
+    def cls_decorator_helper(cls: _T) -> _T:
         # helper to pass `dynamic_arg_dims`` to `_support_torch_compile``
         # to avoid too much indentation for `_support_torch_compile``
         if not hasattr(cls, 'forward'):
@@ -105,8 +125,10 @@ def support_torch_compile(
     return cls_decorator_helper
 
 
-def _support_torch_compile(cls: type,
-                           dynamic_arg_dims: Dict[str, Union[int, List[int]]]):
+def _support_torch_compile(
+    cls: _T,
+    dynamic_arg_dims: Dict[str, Union[int, List[int]]],
+) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
     """
@@ -119,10 +141,11 @@ def _support_torch_compile(cls: type,
     #  other than TorchCompileWrapperWithCustomDispatcher
     cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
-    old_init = cls.__init__  # type: ignore
+    old_init = cls.__init__
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
+        self.vllm_config = vllm_config
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = \
@@ -135,7 +158,7 @@ def _support_torch_compile(cls: type,
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)
 
-    cls.__init__ = __init__  # type: ignore
+    cls.__init__ = __init__
 
     def __call__(self, *args, **kwargs):
         # torch.compiler.is_compiling() means we are inside the compilation
@@ -161,6 +184,8 @@ def _support_torch_compile(cls: type,
                         raise ValueError(
                             "Unsupported dynamic dimensions"
                             f" {dims} for argument {k} with type {type(arg)}.")
+            # here, it is the starting point of the `torch.compile` process
+            start_monitoring_torch_compile(self.vllm_config.compilation_config)
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
@@ -180,5 +205,5 @@ def _support_torch_compile(cls: type,
             model_output = self.forward(*args, **kwargs)
             return model_output
 
-    cls.__call__ = __call__  # type: ignore
+    cls.__call__ = __call__
     return cls
