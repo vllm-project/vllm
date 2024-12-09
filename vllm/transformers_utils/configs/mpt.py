@@ -44,7 +44,7 @@ class MPTConfig(PretrainedConfig):
                  d_model: int = 2048,
                  n_heads: int = 16,
                  n_layers: int = 24,
-                 expansion_ratio: int = 4,
+                 expansion_ratio: float = 4,
                  max_seq_len: int = 2048,
                  vocab_size: int = 50368,
                  resid_pdrop: float = 0.0,
