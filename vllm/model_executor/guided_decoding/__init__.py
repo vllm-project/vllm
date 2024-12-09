@@ -22,10 +22,6 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
         if not isinstance(obj, dict):
             return False
 
-        # Check for $ref and $defs (schema references)
-        if "$ref" in obj or "$defs" in obj:
-            return True
-
         # Check for pattern restrictions
         if "pattern" in obj:
             return True
