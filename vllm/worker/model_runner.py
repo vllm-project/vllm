@@ -1673,8 +1673,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-        swiftkv_kwargs = ({"sampling_metadata": model_input.sampling_metadata}
-                          if "SwiftKV" in type(self.model).__name__ else {})
+        swiftkv_kwargs = ({
+            "sampling_metadata": model_input.sampling_metadata
+        } if "SwiftKV" in type(self.model).__name__ else {})
 
         if not bypass_model_exec:
             with set_forward_context(model_input.attn_metadata,

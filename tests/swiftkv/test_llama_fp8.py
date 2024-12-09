@@ -6,10 +6,22 @@ from vllm.sampling_params import SamplingParams
 
 MODELS = ["Snowflake/Llama-3.1-SwiftKV-8B-Instruct-FP8"]
 CONVERSATIONS = [
-    [{"role": "user", "content": "Hello!"}],
-    [{"role": "user", "content": "Who is the president of the United States?"}],
-    [{"role": "user", "content": "What is the capital of France?"}],
-    [{"role": "user", "content": "What is the future of AI?"}],
+    [{
+        "role": "user",
+        "content": "Hello!"
+    }],
+    [{
+        "role": "user",
+        "content": "Who is the president of the United States?"
+    }],
+    [{
+        "role": "user",
+        "content": "What is the capital of France?"
+    }],
+    [{
+        "role": "user",
+        "content": "What is the future of AI?"
+    }],
 ]
 EXPECTED_OUTPUTS = [
     "Hello! How can I assist you today?",

@@ -1,3 +1,5 @@
+#/usr/bin/env bash
+
 MODEL=Snowflake/Llama-3.1-SwiftKV-8B-Instruct
 
 EVAL_CMD=$(cat <<EOF

@@ -1,33 +1,10 @@
-# coding=utf-8
-# Adapted from
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
-# Copyright 2023 The vLLM team.
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights."""
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import AttentionMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.vllm_flash_attn import (
     flash_attn_func,
@@ -35,10 +12,9 @@ from vllm.vllm_flash_attn import (
     flash_attn_with_kvcache,
 )
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
+from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.distributed.parallel_state import graph_capture
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -55,8 +31,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaMLP
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader, is_pp_missing_parameter, maybe_prefix)
+from vllm.model_executor.models.utils import (AutoWeightsLoader,
+                                              is_pp_missing_parameter,
+                                              maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -316,7 +293,7 @@ def _padded_size(size: int) -> int:
     mult = (1 << (size - 1).bit_length()) // 4
     if mult < 1:
         return size
-    return (size + mult - 1) //  mult * mult
+    return (size + mult - 1) // mult * mult
 
 
 class LlamaSwiftKVModel(nn.Module):
@@ -331,9 +308,8 @@ class LlamaSwiftKVModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        self.kv_cache_dtype = (
-            cache_config.cache_dtype if cache_config is not None else "auto"
-        )
+        self.kv_cache_dtype = (cache_config.cache_dtype
+                               if cache_config is not None else "auto")
 
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -352,15 +328,16 @@ class LlamaSwiftKVModel(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config,
                               prefix=f"{prefix}.layers.{idx}")
-            if idx < config.num_key_value_layers
-            else LlamaSwiftKVDecoderLayer(config=config,
-                                          cache_config=cache_config,
-                                          quant_config=quant_config,
-                                          prefix=f"{prefix}.layers.{idx}")
+            if idx < config.num_key_value_layers else LlamaSwiftKVDecoderLayer(
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.layers.{idx}")
             for idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.norm_swiftkv = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm_swiftkv = RMSNorm(config.hidden_size,
+                                    eps=config.rms_norm_eps)
 
         # Cuda graph inputs/output tensors
         if not vllm_config.model_config.enforce_eager:
@@ -373,31 +350,34 @@ class LlamaSwiftKVModel(nn.Module):
                 vllm_config.scheduler_config.max_num_seqs)
             max_seq_len = vllm_config.model_config.max_seq_len_to_capture
             block_size = vllm_config.cache_config.block_size
-            self.cuda_graph_max_num_blocks = (
-                (max_seq_len + block_size - 1) // block_size)
+            self.cuda_graph_max_num_blocks = ((max_seq_len + block_size - 1) //
+                                              block_size)
             self.cuda_graph_tensors = {
-                "positions": torch.empty(self.cuda_graph_max_batch_size,
-                                        dtype=torch.long),
-                "hidden_states": torch.empty(self.cuda_graph_max_batch_size,
-                                            config.hidden_size),
-                "residual": torch.empty(self.cuda_graph_max_batch_size,
-                                        config.hidden_size),
+                "positions":
+                torch.empty(self.cuda_graph_max_batch_size, dtype=torch.long),
+                "hidden_states":
+                torch.empty(self.cuda_graph_max_batch_size,
+                            config.hidden_size),
+                "residual":
+                torch.empty(self.cuda_graph_max_batch_size,
+                            config.hidden_size),
                 "kv_states": {
                     layer_idx: (
                         torch.empty(self.cuda_graph_max_batch_size, kv_size),
                         torch.empty(self.cuda_graph_max_batch_size, kv_size),
                     )
                     for layer_idx in range(config.num_key_value_layers,
-                                        config.num_hidden_layers)
+                                           config.num_hidden_layers)
                 },
-                "metadata": SwiftKVMetadata(
+                "metadata":
+                SwiftKVMetadata(
                     use_varlen=False,
                     indices=None,
                     seq_lens=torch.empty(self.cuda_graph_max_batch_size,
-                                        dtype=torch.int32),
+                                         dtype=torch.int32),
                     block_tables=torch.empty(self.cuda_graph_max_batch_size,
-                                            self.cuda_graph_max_num_blocks,
-                                            dtype=torch.int32),
+                                             self.cuda_graph_max_num_blocks,
+                                             dtype=torch.int32),
                 ),
             }
             self.cuda_graph_pool = None
@@ -422,8 +402,8 @@ class LlamaSwiftKVModel(nn.Module):
         for seq_id in range(len(query_start_loc) - 1):
             seq_begin = query_start_loc[seq_id]
             seq_end = query_start_loc[seq_id + 1]
-            while (idx < len(sampling_indices) and 
-                sampling_indices[idx] < seq_begin):
+            while (idx < len(sampling_indices)
+                   and sampling_indices[idx] < seq_begin):
                 idx += 1
             if idx >= len(sampling_indices):
                 break
@@ -442,8 +422,9 @@ class LlamaSwiftKVModel(nn.Module):
                 use_varlen=False,
                 indices=torch.tensor(swiftkv_indices, device=device),
                 block_tables=attn_metadata.block_tables[swiftkv_seq_ids],
-                seq_lens=torch.tensor(swiftkv_seq_lens, device=device,
-                                             dtype=torch.int32),
+                seq_lens=torch.tensor(swiftkv_seq_lens,
+                                      device=device,
+                                      dtype=torch.int32),
             )
         else:
             return SwiftKVMetadata(
@@ -451,10 +432,12 @@ class LlamaSwiftKVModel(nn.Module):
                 indices=torch.tensor(swiftkv_indices, device=device),
                 block_tables=attn_metadata.block_tables[swiftkv_seq_ids],
                 query_start_loc=torch.tensor(
-                    [0] + swiftkv_query_lens, device=device,
+                    [0] + swiftkv_query_lens,
+                    device=device,
                 ).cumsum(dim=0).to(torch.int32),
                 seq_start_loc=torch.tensor(
-                    [0] + swiftkv_seq_lens, device=device,
+                    [0] + swiftkv_seq_lens,
+                    device=device,
                 ).cumsum(dim=0).to(torch.int32),
                 max_query_len=max_query_len,
                 max_seq_len=max_seq_len,
@@ -464,8 +447,8 @@ class LlamaSwiftKVModel(nn.Module):
         self,
         attn_metadata: FlashAttentionMetadata,
     ) -> SwiftKVMetadata:
-        assert (attn_metadata.num_prefills == 0 and
-                attn_metadata.max_decode_query_len == 1)
+        assert (attn_metadata.num_prefills == 0
+                and attn_metadata.max_decode_query_len == 1)
         return SwiftKVMetadata(
             use_varlen=False,
             indices=None,
@@ -552,8 +535,7 @@ class LlamaSwiftKVModel(nn.Module):
                 residual,
                 kv_states,
                 swiftkv_metadata,
-            )
-        )
+            ))
         padded_size = _padded_size(hidden_states.size(0))
         cuda_graph_hidden_states = self.cuda_graph_tensors["hidden_states"]
         with graph_capture() as ctx, torch.cuda.stream(ctx.stream):
@@ -570,8 +552,7 @@ class LlamaSwiftKVModel(nn.Module):
                         kv_states,
                         kv_caches,
                         swiftkv_metadata,
-                    )
-                )
+                    ))
             ctx.stream.synchronize()
             with torch.cuda.graph(graph, stream=ctx.stream):
                 cuda_graph_hidden_states[:padded_size].copy_(
@@ -582,8 +563,7 @@ class LlamaSwiftKVModel(nn.Module):
                         kv_states,
                         kv_caches,
                         swiftkv_metadata,
-                    )
-                )
+                    ))
         self.cuda_graph_pool = graph.pool()
         return graph
 
@@ -599,9 +579,8 @@ class LlamaSwiftKVModel(nn.Module):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         swiftkv_metadata = (
             self._get_swiftkv_metadata(attn_metadata, sampling_metadata)
-            if not attn_metadata.use_cuda_graph
-            else self._get_swiftkv_metadata_for_cuda_graph(attn_metadata)
-        )
+            if not attn_metadata.use_cuda_graph else
+            self._get_swiftkv_metadata_for_cuda_graph(attn_metadata))
 
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -638,7 +617,8 @@ class LlamaSwiftKVModel(nn.Module):
                     kv_caches[layer_idx][1],
                     attn_metadata.slot_mapping.flatten(),
                     self.kv_cache_dtype,
-                    1.0, 1.0,
+                    1.0,
+                    1.0,
                 )
 
         if swiftkv_metadata.indices is not None:
@@ -649,19 +629,18 @@ class LlamaSwiftKVModel(nn.Module):
             residual = residual[swiftkv_metadata.indices]
             positions = positions[swiftkv_metadata.indices]
             kv_states = {
-                layer_idx: (k[swiftkv_metadata.indices],
-                            v[swiftkv_metadata.indices])
+                layer_idx:
+                (k[swiftkv_metadata.indices], v[swiftkv_metadata.indices])
                 for layer_idx, (k, v) in kv_states.items()
             }
 
         size = hidden_states.size(0)
         if (self.use_inner_cuda_graph and not attn_metadata.use_cuda_graph
-            and not swiftkv_metadata.use_varlen and kv_caches[0].numel()
-            and size <= self.cuda_graph_max_batch_size
-            and swiftkv_metadata.block_tables.numel()
-            and swiftkv_metadata.block_tables.size(1) <=
-                self.cuda_graph_max_num_blocks
-        ):
+                and not swiftkv_metadata.use_varlen and kv_caches[0].numel()
+                and size <= self.cuda_graph_max_batch_size
+                and swiftkv_metadata.block_tables.numel()
+                and swiftkv_metadata.block_tables.size(1) <=
+                self.cuda_graph_max_num_blocks):
             # We implement our own (just-in-time) cuda graph for the second
             # half of the model (layers skipped for prefill tokens).
             padded_size = _padded_size(size)
@@ -683,7 +662,8 @@ class LlamaSwiftKVModel(nn.Module):
                 swiftkv_metadata,
             )
             self.cuda_graphs[padded_size].replay()
-            hidden_states.copy_(self.cuda_graph_tensors["hidden_states"][:size])
+            hidden_states.copy_(
+                self.cuda_graph_tensors["hidden_states"][:size])
         else:
             hidden_states = self._run_swiftkv_layers(
                 positions,
@@ -871,8 +851,7 @@ class LlamaSwiftKVForCausalLM(nn.Module):
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size,
-                                                logit_scale)
+                                                config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
     def forward(
@@ -884,8 +863,11 @@ class LlamaSwiftKVForCausalLM(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         sampling_metadata: Optional[SamplingMetadata] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, kv_caches,
-                                  attn_metadata, intermediate_tensors,
+        model_output = self.model(input_ids,
+                                  positions,
+                                  kv_caches,
+                                  attn_metadata,
+                                  intermediate_tensors,
                                   sampling_metadata=sampling_metadata)
         return model_output
 
