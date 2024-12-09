@@ -21,7 +21,7 @@ from .counter import compilation_counter
 from .inductor_pass import InductorPass, pass_context
 from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
-from .utils import dump_graph
+from .dump_graph import dump_graph
 from .shape_prop import ShapeProp
 
 logger = init_logger(__name__)
@@ -58,7 +58,7 @@ def add_dummy_pass(fn):
 
 def wrap_inductor(graph: fx.GraphModule,
                   example_inputs: Sequence[Any],
-                  additional_inductor_config: Optional[Dict] = None,
+                  additional_inductor_config: Optional[Dict],
                   compilation_config: CompilationConfig,
                   graph_index: int = 0,
                   num_graphs: int = 1,
@@ -68,6 +68,10 @@ def wrap_inductor(graph: fx.GraphModule,
         # before compiling the first graph, record the start time
         global compilation_start_time
         compilation_start_time = time.time()
+        if runtime_shape is None:
+            logger.info("Compiling a graph for general shape")
+        else:
+            logger.info("Compiling a graph for shape %s", runtime_shape)
 
     if not use_inductor:
         return graph
@@ -79,10 +83,10 @@ def wrap_inductor(graph: fx.GraphModule,
     from torch._inductor import config
     from torch._inductor.compile_fx import compile_fx
 
-    current_config = config.get_config_copy()
-
     # Enable support for symmetric memory ops in the inductor.
-    current_config._micro_pipeline_tp = True
+    torch._inductor.config._micro_pipeline_tp = True
+
+    current_config = config.get_config_copy()
 
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
@@ -199,7 +203,6 @@ def wrap_inductor(graph: fx.GraphModule,
         else:
             logger.info("Compiling a graph for shape %s takes %.2f s",
                         runtime_shape, elapsed)
-
 
     return compiled_graph
 
@@ -463,7 +466,6 @@ class VllmBackend:
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
-
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
         compilation_counter.num_graphs_seen += 1

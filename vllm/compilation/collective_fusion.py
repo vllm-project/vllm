@@ -97,66 +97,71 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
     rank = group.rank_in_group
 
     if use_flux:
-        gemm_rs_op = flux.GemmRS(
-            device_group,
-            1,  # One node
-            max_m,  # max M
-            gemm_1_weights[0],  # N
-            # TODO: It would be nicer to modify flux to dispatch based on dtype
-            # at run time, but I don't know what the downside would be.
-            # Similar comment for max m.
-            gemm_1_type,
-            # Note: transpose_weight=False means that B is transposed
-            transpose_weight=False,
-            # Note: bfloat16 requires fuse_reduction=False.
-            fuse_reduction=False,
-        )
-
-        ag_gemm_op = flux.AGKernel(
-            device_group,
-            1,  # One node
-            max_m,  # max M
-            gemm_2_weights[0],  # N
-            gemm_2_weights[1],  # K
-            # TODO: It would be nicer to modify flux to dispatch based on dtype
-            # at run time, but I don't know what the downside would be.
-            # Similar comment for max m.
-            gemm_2_type,
-            gemm_2_type,
-            # Note: transpose_weight=False means that B is transposed
-            transpose_weight=False,
-            # Note: if local_copy=True, I hit the following runtime error:
-            # /flux/src/all_gather/ths_op/all_gather_gemm_kernel.cc:648
-            #   Check failed: 33554432((input.numel() * input.element_size()))
-            #                 == 139836453421056((this->chunk_size))
-            local_copy=False,
-        )
-
-        def gemm_rs(act, wt):
-            return gemm_rs_op.forward(act, wt).squeeze(0)
-
-        def ag_gemm(act, wt):
-            return ag_gemm_op.forward(act, wt)
-
         gemm_1_str = str(gemm_1_type).removeprefix("torch.")
         gemm_2_str = str(gemm_2_type).removeprefix("torch.")
         group_str = tp_group_name.replace(":", "_")
         name = (f"gemm_rs_ag_gemm_{max_m}_{gemm_1_str}_{gemm_1_weights[0]}_"
                 f"{gemm_2_str}_{gemm_2_weights[0]}_{gemm_2_weights[1]}_"
                 f"{group_str}")
+
+        if not hasattr(torch.ops.vllm, name):
+            logger.info("constructing torch.ops.vllm.%s", name)
+
+            gemm_rs_op = flux.GemmRS(
+                device_group,
+                1,  # One node
+                max_m,  # max M
+                gemm_1_weights[0],  # N
+                # TODO: It would be nicer to modify flux to dispatch based on dtype
+                # at run time, but I don't know what the downside would be.
+                # Similar comment for max m.
+                gemm_1_type,
+                # Note: transpose_weight=False means that B is transposed
+                transpose_weight=False,
+                # Note: bfloat16 requires fuse_reduction=False.
+                fuse_reduction=False,
+            )
+
+            ag_gemm_op = flux.AGKernel(
+                device_group,
+                1,  # One node
+                max_m,  # max M
+                gemm_2_weights[0],  # N
+                gemm_2_weights[1],  # K
+                # TODO: It would be nicer to modify flux to dispatch based on dtype
+                # at run time, but I don't know what the downside would be.
+                # Similar comment for max m.
+                gemm_2_type,
+                gemm_2_type,
+                # Note: transpose_weight=False means that B is transposed
+                transpose_weight=False,
+                # Note: if local_copy=True, I hit the following runtime error:
+                # /flux/src/all_gather/ths_op/all_gather_gemm_kernel.cc:648
+                #   Check failed: 33554432((input.numel() * input.element_size()))
+                #                 == 139836453421056((this->chunk_size))
+                local_copy=False,
+            )
+
+            def gemm_rs(act, wt):
+                return gemm_rs_op.forward(act, wt).squeeze(0)
+
+            def ag_gemm(act, wt):
+                return ag_gemm_op.forward(act, wt)
+
     else:
-        world_group_name = get_world_name()
-
-        def gemm_rs(act, wt):
-            return torch.ops.symm_mem.fused_matmul_reduce_scatter.default(
-                act, wt.transpose(1, 0), 'avg', 0, world_group_name)
-
-        def ag_gemm(act, wt):
-            return torch.ops.symm_mem.fused_all_gather_matmul.default(
-                act, [wt.transpose(1, 0)], 0, world_group_name)[1]
-
         group_str = tp_group_name.replace(":", "_")
         name = f"gemm_rs_ag_gemm_{group_str}"
+
+        if not hasattr(torch.ops.vllm, name):
+            world_group_name = get_world_name()
+
+            def gemm_rs(act, wt):
+                return torch.ops.symm_mem.fused_matmul_reduce_scatter.default(
+                    act, wt.transpose(1, 0), 'avg', 0, world_group_name)
+
+            def ag_gemm(act, wt):
+                return torch.ops.symm_mem.fused_all_gather_matmul.default(
+                    act, [wt.transpose(1, 0)], 0, world_group_name)[1]
 
     def gemm_rs_ag_gemm(
             residual: torch.Tensor, old_my_residual: torch.Tensor,
@@ -164,8 +169,6 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             rms_norm_weights: torch.Tensor, gemm_2_weights: torch.Tensor,
             first_layer: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
-        print(f"RES SHAPE={residual.shape}")
 
         if first_layer and use_cc_kernels(residual.shape[0]):
             slice_shape = residual_slice_shape(residual, rank)
@@ -176,6 +179,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             slice_shape = residual.shape[0]
 
         if not use_cc_kernels(residual.shape[0]):
+            #print(f"NAIVE RES SHAPE={residual.shape}")
             output = torch.ops.aten.mm.default(gemm_1_activations,
                                                gemm_1_weights.transpose(1, 0))
             reduced_output = tensor_model_parallel_all_reduce(output)
@@ -190,6 +194,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
 
             return mm_2, my_residual, my_residual.clone()
         else:
+            #print(f"FLUX RES SHAPE={residual.shape}")
             output = gemm_rs(gemm_1_activations, gemm_1_weights)
 
             torch.ops._C.fused_add_rms_norm.default(input=output,

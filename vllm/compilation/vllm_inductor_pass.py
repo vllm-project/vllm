@@ -6,7 +6,7 @@ from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
 from .inductor_pass import InductorPass
-from .utils import dump_graph as utils_dump_graph
+from .dump_graph import dump_graph as utils_dump_graph
 
 logger = init_logger(__name__)
 
