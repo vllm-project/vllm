@@ -139,7 +139,8 @@ class MultiprocExecutor:
         return model_output
 
     def profile(self, is_start=True):
-        raise NotImplementedError
+        self.collective_rpc(RPCParams(method="profile"), is_start)
+        return
 
     def _ensure_worker_termination(self):
         """Ensure that all worker processes are terminated. Assumes workers have
