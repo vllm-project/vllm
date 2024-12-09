@@ -165,6 +165,8 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             first_layer: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
+        print(f"RES SHAPE={residual.shape}")
+
         if first_layer and use_cc_kernels(residual.shape[0]):
             slice_shape = residual_slice_shape(residual, rank)
             residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
@@ -512,7 +514,7 @@ class CollectiveFusionPass(VllmInductorPass):
     def __call__(self, graph: fx.Graph):
         pass_context = get_pass_context()
 
-        logger.info("CollectiveFusionPass %s", pass_context.runtime_shape)
+        logger.info("CollectiveFusionPass shape=%s", pass_context.runtime_shape)
 
         # TODO: disable if chunk prefill size is too small
         # or when doing decode.
