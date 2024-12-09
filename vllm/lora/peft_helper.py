@@ -1,26 +1,49 @@
 # Adapted from: https://github.com/huggingface/peft/blob/main/src/peft/tuners/lora/config.py
 
+import math
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Literal, Optional, Union
 
 
-@dataclass(frozen=True)
+@dataclass
 class PEFTHelper:
     # Required fields
     r: int
     lora_alpha: int
     target_modules: Union[list[str], str]
 
-    # Optional fields
     bias: Literal["none", "all", "lora_only"] = field(default="none")
     modules_to_save: Optional[list[str]] = field(default=None)
     use_rslora: bool = field(default=False)
     use_dora: bool = field(default=False)
     # long lora field
     context_length: int = field(default=0)
+    # Extra vllm field, start with 'vllm_' to avoid conflict
+    vllm_max_position_embeddings: Optional[int] = field(default=False)
+    vllm_scaling_factor: Optional[float] = field(default=None)
 
-    # vllm extra filed
-    max_position_embeddings: Optional[int] = field(default=False)
+    def _validate_features(self):
+        unsupported_features = []
+
+        if self.use_rslora:
+            unsupported_features.append("RSLoRA")
+
+        if self.use_dora:
+            unsupported_features.append("DoRA")
+
+        if unsupported_features:
+            raise ValueError(
+                f"The following features are not currently supported:"
+                f"{', '.join(unsupported_features)}")
+
+    def __post_init__(self):
+        self._validate_features()
+        if self.context_length:
+            if self.vllm_max_position_embeddings is None:
+                self.vllm_max_position_embeddings = self.context_length
+            self.vllm_scaling_factor = float(
+                math.ceil(self.context_length /
+                          self.vllm_max_position_embeddings))
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PEFTHelper":

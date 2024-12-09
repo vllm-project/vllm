@@ -103,19 +103,17 @@ class LoRAModel(AdapterModel):
     # (yard1): TODO see if we can derive target_embedding_padding automatically
     @classmethod
     def from_lora_tensors(
-            cls,
-            lora_model_id: int,
-            rank: int,
-            lora_alpha: int,
-            tensors: Dict[str, torch.Tensor],
-            device: str = "cuda",
-            dtype: Optional[torch.dtype] = None,
-            embeddings: Optional[Dict[str, torch.Tensor]] = None,
-            target_embedding_padding: Optional[int] = None,
-            scaling_factor: Optional[float] = None,
-            embedding_modules: Optional[Dict[str, str]] = None,
-            embedding_padding_modules: Optional[List[str]] = None,
-            peft_helper: Optional[PEFTHelper] = None) -> "LoRAModel":
+        cls,
+        lora_model_id: int,
+        tensors: Dict[str, torch.Tensor],
+        peft_helper: PEFTHelper,
+        device: str = "cuda",
+        dtype: Optional[torch.dtype] = None,
+        embeddings: Optional[Dict[str, torch.Tensor]] = None,
+        target_embedding_padding: Optional[int] = None,
+        embedding_modules: Optional[Dict[str, str]] = None,
+        embedding_padding_modules: Optional[List[str]] = None,
+    ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
@@ -170,10 +168,20 @@ class LoRAModel(AdapterModel):
 
         for lora in loras.values():
             lora.optimize()
+        # rank = config["r"]
+        # lora_alpha = config["lora_alpha"]
+        # context_length = config.get("context_length", None)
+        # scaling_factor = None
+        # if context_length:
+        #     if max_position_embeddings is None:
+        #         max_position_embeddings = context_length
+        #     scaling_factor = float(
+        #         math.ceil(context_length / max_position_embeddings))
+
         return cls(lora_model_id,
                    peft_helper.r,
                    loras,
-                   scaling_factor=scaling_factor)
+                   scaling_factor=peft_helper.vllm_scaling_factor)
 
     @classmethod
     def from_local_checkpoint(
@@ -277,30 +285,19 @@ class LoRAModel(AdapterModel):
             embeddings = torch.load(new_embeddings_bin_file_path,
                                     map_location=device)
 
-        rank = config["r"]
-        lora_alpha = config["lora_alpha"]
-        context_length = config.get("context_length", None)
-        scaling_factor = None
-        if context_length:
-            if max_position_embeddings is None:
-                max_position_embeddings = context_length
-            scaling_factor = float(
-                math.ceil(context_length / max_position_embeddings))
+        config["vllm_max_position_embeddings"] = max_position_embeddings
         peft_helper = PEFTHelper.from_dict(config)
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
             if lora_model_id is None else lora_model_id,
-            rank=rank,
-            lora_alpha=lora_alpha,
             tensors=tensors,
+            peft_helper=peft_helper,
             device=device,
             dtype=dtype,
             embeddings=embeddings,
             target_embedding_padding=target_embedding_padding,
-            scaling_factor=scaling_factor,
             embedding_modules=embedding_modules,
-            embedding_padding_modules=embedding_padding_modules,
-            peft_helper=peft_helper)
+            embedding_padding_modules=embedding_padding_modules)
 
 
 class LoRAModelManager(AdapterModelManager):
