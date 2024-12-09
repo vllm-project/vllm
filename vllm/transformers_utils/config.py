@@ -79,8 +79,8 @@ class ConfigFormat(str, enum.Enum):
     MISTRAL = "mistral"
 
 
-def file_or_path_exists(model: Union[str, Path], config_name,
-                        revision) -> bool:
+def file_or_path_exists(model: Union[str, Path], config_name: str,
+                        revision: Optional[str]) -> bool:
     if Path(model).exists():
         return (Path(model) / config_name).is_file()
 
@@ -94,7 +94,6 @@ def file_or_path_exists(model: Union[str, Path], config_name,
 
     # NB: file_exists will only check for the existence of the config file on
     # hf_hub. This will fail in offline mode.
-    
     try:
         return file_exists(model,
                            config_name,
