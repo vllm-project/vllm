@@ -2287,7 +2287,7 @@ class CompilationConfig(BaseModel):
     # Map from layer name to the attention cls
     static_forward_context: Dict[str, Any] = PrivateAttr
 
-    def __str__(self) -> str:
+    def __repr__(self) -> str:
         exclude = [
             "static_forward_context",
             "enabled_custom_ops",
@@ -2297,6 +2297,8 @@ class CompilationConfig(BaseModel):
             "pass_config",
         ]
         return self.json(exclude=exclude)
+
+    __str__ = __repr__
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
