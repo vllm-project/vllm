@@ -699,6 +699,8 @@ class ModelConfig:
         parallel_config: "ParallelConfig",
         block_type: LayerBlockType = LayerBlockType.attention,
     ) -> int:
+        if self.is_attention_free and block_type == LayerBlockType.attention:
+            return 0
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         # Transformers supports layers_block_type @property
