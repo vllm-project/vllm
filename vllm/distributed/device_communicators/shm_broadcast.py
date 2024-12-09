@@ -332,7 +332,7 @@ class MessageQueue:
             assert recv == b"READY"
 
     @contextmanager
-    def acquire_write(self, timeout: Optional[float] = None):
+    def acquire_write(self, deadline: Optional[float] = None):
         assert self._is_writer, "Only writers can acquire write"
         start_time = time.monotonic()
         n_warning = 1
@@ -357,8 +357,7 @@ class MessageQueue:
                         n_warning += 1
 
                     # if we time out, raise an exception
-                    if (timeout is not None
-                            and time.monotonic() - start_time > timeout):
+                    if (deadline is not None and time.monotonic() > deadline):
                         raise TimeoutError
 
                     continue
@@ -387,7 +386,7 @@ class MessageQueue:
                 break
 
     @contextmanager
-    def acquire_read(self, timeout: Optional[float] = None):
+    def acquire_read(self, deadline: Optional[float] = None):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -415,8 +414,7 @@ class MessageQueue:
                         n_warning += 1
 
                     # if we time out, raise an exception
-                    if (timeout is not None
-                            and time.monotonic() - start_time > timeout):
+                    if (deadline is not None and time.monotonic() > deadline):
                         raise TimeoutError
 
                     continue
@@ -432,26 +430,26 @@ class MessageQueue:
                                     1) % self.buffer.max_chunks
                 break
 
-    def enqueue(self, obj, timeout: Optional[float] = None):
-        """ Write to message queue with optional timeout (in seconds) """
+    def enqueue(self, obj, deadline: Optional[float] = None):
+        """ Write to message queue with optional deadline for timeout """
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
         if self.n_local_reader > 0:
             if len(serialized_obj) >= self.buffer.max_chunk_bytes:
-                with self.acquire_write(timeout) as buf:
+                with self.acquire_write(deadline) as buf:
                     buf[0] = 1  # overflow
                 self.local_socket.send(serialized_obj)
             else:
-                with self.acquire_write(timeout) as buf:
+                with self.acquire_write(deadline) as buf:
                     buf[0] = 0  # not overflow
                     buf[1:len(serialized_obj) + 1] = serialized_obj
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self, timeout: Optional[float] = None):
-        """ Read from message queue with optional timeout (in seconds) """
+    def dequeue(self, deadline: Optional[float] = None):
+        """ Read from message queue with optional deadline for timeout """
         if self._is_local_reader:
-            with self.acquire_read(timeout) as buf:
+            with self.acquire_read(deadline) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     # no need to know the size of serialized object

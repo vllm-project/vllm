@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Set, Tuple
+from typing import Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -10,7 +10,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 class RPCParams:
     """Arguments for a collective RPC to run on workers"""
     method: str  # Which Worker method should be executed?
-    output_ranks: Set[int]  # Which output ranks should return to the executor?
     timeout: Optional[float] = None
 
 

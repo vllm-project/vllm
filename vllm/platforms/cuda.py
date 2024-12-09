@@ -12,6 +12,7 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -101,17 +102,15 @@ class CudaPlatformBase(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
 
-        from vllm.envs import VLLM_USE_V1
-
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                if VLLM_USE_V1:
+                if envs.VLLM_USE_V1:
                     raise NotImplementedError
                 else:
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
-                if VLLM_USE_V1:
+                if envs.VLLM_USE_V1:
                     raise NotImplementedError
                 else:
                     parallel_config.worker_cls = \
@@ -119,7 +118,7 @@ class CudaPlatformBase(Platform):
                     parallel_config.sd_worker_cls = \
                         "vllm.worker.worker.Worker"
             else:
-                if VLLM_USE_V1:
+                if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:
