@@ -2417,7 +2417,7 @@ bs_to_padded_graph_size: Dict[int, int] = {}
 for start, end in zip([0] + _BATCH_SIZES_TO_CAPTURE[:-1],
                       _BATCH_SIZES_TO_CAPTURE):
     for bs in range(start, end):
-        bs_to_padded_graph_size[bs] = end
+        bs_to_padded_graph_size[bs] = start
 
 _MAX_BATCH_SIZE_TO_CAPTURE = _BATCH_SIZES_TO_CAPTURE[-1]
 
