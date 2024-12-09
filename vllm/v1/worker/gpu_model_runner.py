@@ -472,7 +472,7 @@ class GPUModelRunner:
             # For text-only models, we use token ids as input.
             # While it is possible to use embeddings as input just like the
             # multimodal models, it is not desirable for performance since
-            # them the embedding layer is included in the CUDA graph.
+            # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
