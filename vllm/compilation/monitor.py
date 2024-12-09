@@ -5,12 +5,12 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-time_stamp: float = 0.0
+torch_compile_start_time: float = 0.0
 
 
 def start_monitoring_torch_compile(compilation_config: CompilationConfig):
-    global time_stamp
-    time_stamp = time.time()
+    global torch_compile_start_time
+    torch_compile_start_time = time.time()
 
 
 def end_monitoring_torch_compile(compilation_config: CompilationConfig):
