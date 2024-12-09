@@ -53,8 +53,6 @@ class ActivationQuantFusionPass(VllmInductorPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
-    It also manually processes multi-output matches, as those are broken in
-    the torch pattern matcher.
 
     Because patterns can only be registered once, the pass is a singleton.
     This will be addressed in a future version of PyTorch:
