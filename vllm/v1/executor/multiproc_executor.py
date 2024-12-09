@@ -21,7 +21,6 @@ from vllm.executor.multiproc_worker_utils import (
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_open_port,
                         get_open_zmq_ipc_path)
-from vllm.v1.executor.abstract import RPCParams
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import make_zmq_socket
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -82,17 +81,15 @@ class MultiprocExecutor:
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc(RPCParams(method="initialize_cache"),
-                            num_gpu_blocks)
-        self.collective_rpc(RPCParams(method="compile_or_warm_up_model"))
+        self.collective_rpc("initialize_cache", num_gpu_blocks)
+        self.collective_rpc("compile_or_warm_up_model")
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """
         Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        num_blocks = self.collective_rpc(
-            RPCParams(method="determine_num_available_blocks"))
+        num_blocks = self.collective_rpc("determine_num_available_blocks")
 
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
@@ -102,18 +99,29 @@ class MultiprocExecutor:
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def collective_rpc(self, rpc: RPCParams, *args, **kwargs) -> [Optional]:
-        """Execute a collective remote procedure call on workers"""
-        self.rpc_broadcast_mq.enqueue((rpc.method, args, kwargs))
+    def collective_rpc(self, method: str, *args, **kwargs) -> [Optional]:
+        """
+        Execute an RPC call on workers.
+        
+        Args:
+            method: Name of the Worker method to execute
+            *args: Arguments to pass to the method
+            **kwargs: Keyword arguments to pass to the method
+                     Special kwargs:
+                     - timeout: Optional[float] - Max time to wait for execution
+                                                  Not passed into worker method
+        """
+        self.rpc_broadcast_mq.enqueue((method, args, kwargs))
 
-        response_deadline = (time.monotonic() +
-                             rpc.timeout if rpc.timeout is not None else None)
-
+        timeout = kwargs.pop('timeout', None)  # Default None if not present
+        start_time = time.monotonic()
         try:
             responses = [None] * self.world_size
             for w in self.workers:
+                dequeue_timeout = timeout - (time.monotonic() - start_time()
+                                             ) if timeout is not None else None
                 status, result = w.worker_response_mq.dequeue(
-                    deadline=response_deadline)
+                    timeout=dequeue_timeout)
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     if isinstance(result, Exception):
@@ -125,7 +133,7 @@ class MultiprocExecutor:
 
             return responses
         except TimeoutError as e:
-            raise TimeoutError(f"RPC call to {rpc.method} timed out.") from e
+            raise TimeoutError(f"RPC call to {method} timed out.") from e
         except Exception as e:
             # Re-raise any other exceptions
             raise e
@@ -134,12 +142,12 @@ class MultiprocExecutor:
         self,
         scheduler_output,
     ) -> ModelRunnerOutput:
-        model_output = self.collective_rpc(RPCParams(method="execute_model"),
+        model_output = self.collective_rpc("execute_model",
                                            scheduler_output)[0]
         return model_output
 
     def profile(self, is_start=True):
-        self.collective_rpc(RPCParams(method="profile"), is_start)
+        self.collective_rpc("profile", is_start)
         return
 
     def _ensure_worker_termination(self):
@@ -178,7 +186,7 @@ class MultiprocExecutor:
         self.rpc_broadcast_mq = None
 
     def check_health(self) -> None:
-        self.collective_rpc(RPCParams(method="check_health", timeout=10))
+        self.collective_rpc("check_health", timeout=10)
         return
 
 

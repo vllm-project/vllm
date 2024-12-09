@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -42,10 +43,6 @@ class LogitsProcessor(nn.Module):
         # Soft cap the logits. Used in Gemma 2.
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
-
-        # Import vllm.envs here in order to to work with the
-        # run_with_both_engines pytest fixture
-        import vllm.envs as envs
 
         self.use_gather = not current_platform.is_tpu(
         ) and not envs.VLLM_USE_V1
