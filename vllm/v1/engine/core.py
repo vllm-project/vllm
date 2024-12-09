@@ -1,4 +1,5 @@
 import multiprocessing
+import pickle
 import queue
 import threading
 import time
@@ -16,7 +17,8 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreRequest, EngineCoreRequestType)
+                            EngineCoreProfile, EngineCoreRequest,
+                            EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapper
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
@@ -39,19 +41,6 @@ class EngineCore:
         executor_class: Type[GPUExecutor],
         usage_context: UsageContext,
     ):
-        # Override the configs for V1.
-        # FIXME
-        if usage_context == UsageContext.LLM_CLASS:
-            vllm_config.scheduler_config.max_num_seqs = 1024
-            vllm_config.scheduler_config.max_num_batched_tokens = 8192
-        elif usage_context == UsageContext.OPENAI_API_SERVER:
-            vllm_config.scheduler_config.max_num_seqs = 1024
-            vllm_config.scheduler_config.max_num_batched_tokens = 2048
-
-        # TODO (ywang96): Enable APC by default when VLM supports it.
-        if not vllm_config.model_config.is_multimodal_model:
-            vllm_config.cache_config.enable_prefix_caching = True
-
         assert vllm_config.model_config.task != "embedding"
 
         logger.info("Initializing an LLM engine (v%s) with config: %s",
@@ -78,6 +67,7 @@ class EngineCore:
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
+        start = time.time()
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
         )
 
@@ -91,18 +81,14 @@ class EngineCore:
 
         num_cpu_blocks = 0
         self.model_executor.initialize_cache(num_gpu_blocks)
+        elapsed = time.time() - start
+        logger.info(("init engine (profile, create kv cache, "
+                     "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
-
         req = Request.from_engine_core_request(request)
-        # FIXME(woosuk): The input mapping (e.g., PIL images to tensors) may
-        # take 10-50 ms, which can cause a spike in the latency. We should
-        # consider moving this to a separate thread.
-        if req.mm_data:
-            req.mm_inputs = self.mm_input_mapper.process_inputs(
-                req.mm_data, req.mm_processor_kwargs)
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
@@ -125,6 +111,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs
+
+    def profile(self, is_start=True):
+        self.model_executor.worker.profile(is_start)
 
 
 class EngineCoreProc(EngineCore):
@@ -312,11 +301,14 @@ class EngineCoreProc(EngineCore):
             self._last_logging_time = now
 
     def _handle_client_request(
-            self, request: Union[EngineCoreRequest, List[str]]) -> None:
+        self, request: Union[EngineCoreRequest, EngineCoreProfile,
+                             List[str]]) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""
 
         if isinstance(request, EngineCoreRequest):
             self.add_request(request)
+        elif isinstance(request, EngineCoreProfile):
+            self.model_executor.worker.profile(request.is_start)
         else:
             # TODO: make an EngineCoreAbort wrapper
             assert isinstance(request, list)
@@ -341,6 +333,8 @@ class EngineCoreProc(EngineCore):
                     request = decoder_add_req.decode(request_data)
                 elif request_type == EngineCoreRequestType.ABORT.value:
                     request = decoder_abort_req.decode(request_data)
+                elif request_type == EngineCoreRequestType.PROFILE.value:
+                    request = pickle.loads(request_data)
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
 

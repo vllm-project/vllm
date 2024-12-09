@@ -35,10 +35,12 @@ class Florence2LanguageModel(nn.Module):
         self.shared = BartScaledWordEmbedding(self.vocab_size, config.d_model)
         self.encoder = BartEncoder(config,
                                    cache_config=cache_config,
-                                   quant_config=quant_config)
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.encoder")
         self.decoder = BartDecoder(config,
                                    cache_config=cache_config,
-                                   quant_config=quant_config)
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.decoder")
 
         if self.config.tie_word_embeddings:
             self.encoder.embed_tokens.weight = self.shared.weight
@@ -99,7 +101,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
 
         self.config = config
         self.model = Florence2LanguageModel(vllm_config=vllm_config,
-                                            prefix=prefix)
+                                            prefix=f"{prefix}.model")
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
@@ -198,7 +200,7 @@ class Florence2ForConditionalGeneration(nn.Module):
         # TODO(Isotr0py): Add vision backbone
         self.language_model = Florence2LanguageForConditionalGeneration(
             vllm_config=vllm_config.with_hf_config(config.text_config),
-            prefix=prefix,
+            prefix=f"{prefix}.language_model",
         )
 
     @property

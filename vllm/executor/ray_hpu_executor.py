@@ -130,7 +130,6 @@ class RayHPUExecutor(DistributedGPUExecutor):
 
         # Create the workers.
         driver_ip = get_ip()
-        worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             resource_name = "HPU" if not is_fake_hpu() else "CPU"
             if not bundle.get(resource_name, 0):
@@ -148,7 +147,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
                 resources=resources,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
 
             if self.use_ray_spmd_worker:
                 self.workers.append(worker)
@@ -159,7 +158,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
-                        **worker_wrapper_kwargs)
+                        vllm_config=self.vllm_config)
                 else:
                     # Else, added to the list of workers.
                     self.workers.append(worker)
@@ -226,8 +225,8 @@ class RayHPUExecutor(DistributedGPUExecutor):
                 f"Every node should have a unique IP address. Got {n_nodes}"
                 f" nodes with node ids {list(node_workers.keys())} and "
                 f"{n_ips} unique IP addresses {all_ips}. Please check your"
-                " network configuration. If you set `VLLM_HOST_IP` or "
-                "`HOST_IP` environment variable, make sure it is unique for"
+                " network configuration. If you set `VLLM_HOST_IP` "
+                "environment variable, make sure it is unique for"
                 " each node.")
 
         VLLM_INSTANCE_ID = get_vllm_instance_id()

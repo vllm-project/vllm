@@ -62,6 +62,16 @@ test_settings = [
         method="encode",
         fullgraph=True,
     ),
+    # encoder-based embedding model (BERT)
+    TestSetting(
+        model="BAAI/bge-base-en-v1.5",
+        model_args=["--task", "embedding"],
+        pp_size=1,
+        tp_size=1,
+        attn_backend="XFORMERS",
+        method="encode",
+        fullgraph=True,
+    ),
     # vision language model
     TestSetting(
         model="microsoft/Phi-3.5-vision-instruct",
@@ -96,31 +106,36 @@ def test_compile_correctness(test_setting: TestSetting):
     final_args = ["--enforce-eager"] + model_args + ["-pp", str(pp_size)] + \
                 ["-tp", str(tp_size)]
 
+    all_args: List[List[str]] = []
     all_envs: List[Optional[Dict[str, str]]] = []
 
     for level in [
             CompilationLevel.NO_COMPILATION,
             CompilationLevel.PIECEWISE,
     ]:
-        all_envs.append({"VLLM_TORCH_COMPILE_LEVEL": str(level)})
+        all_args.append(final_args + [f"-O{level}"])
+        all_envs.append({})
 
     # inductor will change the output, so we only compare if the output
     # is close, not exactly the same.
     compare_all_settings(
-        model, [final_args] * 2,
+        model,
+        all_args,
         all_envs,
         method=method if method != "generate" else "generate_close")
     all_envs.clear()
+    all_args.clear()
 
     for level in [
             CompilationLevel.NO_COMPILATION,
             CompilationLevel.DYNAMO_AS_IS,
             CompilationLevel.DYNAMO_ONCE,
     ]:
-        all_envs.append({"VLLM_TORCH_COMPILE_LEVEL": str(level)})
+        all_args.append(final_args + [f"-O{level}"])
+        all_envs.append({})
         if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
             # "DYNAMO_ONCE" will always use fullgraph
             all_envs[-1][
                 "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"  # type: ignore
 
-    compare_all_settings(model, [final_args] * 3, all_envs, method=method)
+    compare_all_settings(model, all_args * 3, all_envs, method=method)

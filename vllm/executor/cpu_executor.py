@@ -23,7 +23,7 @@ class CPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "cpu"
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
         assert self.lora_config is None, "cpu backend doesn't support LoRA"
 
@@ -115,13 +115,8 @@ class CPUExecutor(ExecutorBase):
         local_rank: int = 0,
         rank: int = 0,
     ):
-        worker_module_name = "vllm.worker.cpu_worker"
-        worker_class_name = "CPUWorker"
 
-        wrapper = WorkerWrapperBase(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-        )
+        wrapper = WorkerWrapperBase(vllm_config=self.vllm_config)
 
         assert self.distributed_init_method is not None
 

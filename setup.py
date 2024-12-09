@@ -249,6 +249,74 @@ class cmake_build_ext(build_ext):
             self.copy_file(file, dst_file)
 
 
+class repackage_wheel(build_ext):
+    """Extracts libraries and other files from an existing wheel."""
+    default_wheel = "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+
+    def run(self) -> None:
+        wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",
+                                   self.default_wheel)
+
+        assert _is_cuda(
+        ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+
+        import zipfile
+
+        if os.path.isfile(wheel_location):
+            wheel_path = wheel_location
+            print(f"Using existing wheel={wheel_path}")
+        else:
+            # Download the wheel from a given URL, assume
+            # the filename is the last part of the URL
+            wheel_filename = wheel_location.split("/")[-1]
+
+            import tempfile
+
+            # create a temporary directory to store the wheel
+            temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
+            wheel_path = os.path.join(temp_dir, wheel_filename)
+
+            print(f"Downloading wheel from {wheel_location} to {wheel_path}")
+
+            from urllib.request import urlretrieve
+
+            try:
+                urlretrieve(wheel_location, filename=wheel_path)
+            except Exception as e:
+                from setuptools.errors import SetupError
+
+                raise SetupError(
+                    f"Failed to get vLLM wheel from {wheel_location}") from e
+
+        with zipfile.ZipFile(wheel_path) as wheel:
+            files_to_copy = [
+                "vllm/_C.abi3.so",
+                "vllm/_moe_C.abi3.so",
+                "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
+                "vllm/vllm_flash_attn/flash_attn_interface.py",
+                "vllm/vllm_flash_attn/__init__.py",
+                # "vllm/_version.py", # not available in nightly wheels yet
+            ]
+            file_members = filter(lambda x: x.filename in files_to_copy,
+                                  wheel.filelist)
+
+            for file in file_members:
+                print(f"Extracting and including {file.filename} "
+                      "from existing wheel")
+                package_name = os.path.dirname(file.filename).replace("/", ".")
+                file_name = os.path.basename(file.filename)
+
+                if package_name not in package_data:
+                    package_data[package_name] = []
+
+                wheel.extract(file)
+                if file_name.endswith(".py"):
+                    # python files shouldn't be added to package_data
+                    continue
+
+                package_data[package_name].append(file_name)
+
+
 def _is_hpu() -> bool:
     is_hpu_available = True
     try:
@@ -397,12 +465,15 @@ def get_vllm_version() -> str:
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
     elif _is_cuda():
-        cuda_version = str(get_nvcc_cuda_version())
-        if cuda_version != MAIN_CUDA_VERSION:
-            cuda_version_str = cuda_version.replace(".", "")[:3]
-            # skip this for source tarball, required for pypi
-            if "sdist" not in sys.argv:
-                version += f"{sep}cu{cuda_version_str}"
+        if envs.VLLM_USE_PRECOMPILED:
+            version += ".precompiled"
+        else:
+            cuda_version = str(get_nvcc_cuda_version())
+            if cuda_version != MAIN_CUDA_VERSION:
+                cuda_version_str = cuda_version.replace(".", "")[:3]
+                # skip this for source tarball, required for pypi
+                if "sdist" not in sys.argv:
+                    version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
@@ -514,12 +585,17 @@ if _build_custom_ops():
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
-if envs.VLLM_USE_PRECOMPILED:
-    ext_modules = []
-    package_data["vllm"].append("*.so")
 
 if _no_device():
     ext_modules = []
+
+if not ext_modules:
+    cmdclass = {}
+else:
+    cmdclass = {
+        "build_ext":
+        repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+    }
 
 setup(
     name="vllm",
@@ -557,7 +633,7 @@ setup(
         "audio": ["librosa", "soundfile"],  # Required for audio processing
         "video": ["decord"]  # Required for video processing
     },
-    cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
+    cmdclass=cmdclass,
     package_data=package_data,
     entry_points={
         "console_scripts": [

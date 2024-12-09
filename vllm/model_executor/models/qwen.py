@@ -442,6 +442,7 @@ class QWenAttention(nn.Module):
         rope_scaling: Optional[Dict[str, Any]] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -478,7 +479,8 @@ class QWenAttention(nn.Module):
                               self.head_dim,
                               self.scaling,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -502,6 +504,7 @@ class QWenBlock(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -514,7 +517,8 @@ class QWenBlock(nn.Module):
                                   rope_theta=rope_theta,
                                   rope_scaling=rope_scaling,
                                   cache_config=cache_config,
-                                  quant_config=quant_config)
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.attn")
 
         self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
@@ -568,7 +572,8 @@ class QWenModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: QWenBlock(config, cache_config, quant_config),
+            lambda prefix: QWenBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
         self.make_empty_intermediate_tensors = (
@@ -870,7 +875,7 @@ def dummy_data_for_qwen(
     return DummyData(seq_data, mm_data)
 
 
-class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+class QWenBaseModel(nn.Module, SupportsPP, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1023,8 +1028,15 @@ class QWenLLM(QWenBaseModel):
     embedding_modules = {}
     embedding_padding_modules = []
 
+    # BitandBytes specific attributes
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "w2": ("gate_up_proj", 0),
+        "w1": ("gate_up_proj", 1),
+    }
 
-class QWenVL(QWenBaseModel):
+
+class QWenVL(QWenBaseModel, SupportsMultiModal):
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [
@@ -1062,7 +1074,7 @@ class QWenVL(QWenBaseModel):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen)
-class QWenLMHeadModel(QWenBaseModel, SupportsLoRA):
+class QWenLMHeadModel(QWenBaseModel, SupportsMultiModal, SupportsLoRA):
     """
     QWenLMHeadModel is not only applicable to LLM  but also to VL, which is not 
     conducive to the current integration logic of LoRA in vLLM. Therefore, it 
@@ -1083,7 +1095,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsLoRA):
         config = vllm_config.model_config.hf_config
         # Initialize VL
         if hasattr(config, "visual"):
-            return QWenVL(vllm_config=vllm_config)
+            return QWenVL(vllm_config=vllm_config, prefix=prefix)
         # Initialize LLM
         else:
-            return QWenLLM(vllm_config=vllm_config)
+            return QWenLLM(vllm_config=vllm_config, prefix=prefix)

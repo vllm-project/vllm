@@ -118,7 +118,7 @@ configuration for the root vLLM logger and for the logger you wish to silence:
 {
   "formatters": {
     "vllm": {
-      "class": "vllm.logging.NewLineFormatter",
+      "class": "vllm.logging_utils.NewLineFormatter",
       "datefmt": "%m-%d %H:%M:%S",
       "format": "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
     }

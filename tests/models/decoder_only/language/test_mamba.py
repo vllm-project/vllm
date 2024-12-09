@@ -5,8 +5,8 @@ Run `pytest tests/models/test_mamba.py`.
 import pytest
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.worker.model_runner import _get_graph_batch_size
 
 from ...utils import check_outputs_equal
 
@@ -200,7 +200,8 @@ def test_mamba_cache_cg_padding(
     # This test is for verifying that mamba cache is padded to CG captured
     # batch size. If it's not, a torch RuntimeError will be raised because
     # tensor dimensions aren't compatible
-    while len(example_prompts) == _get_graph_batch_size(len(example_prompts)):
+    while len(example_prompts) == VllmConfig.get_graph_batch_size(
+            len(example_prompts)):
         example_prompts.append(example_prompts[0])
 
     try:
@@ -283,3 +284,39 @@ def test_state_cleanup(
     except ValueError:
         pytest.fail("Mamba inner state wasn't cleaned up between states, "
                     "could be related to finished_requests_ids")
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+def test_multistep(
+    vllm_runner,
+    model: str,
+    dtype: str,
+    example_prompts,
+) -> None:
+    with vllm_runner(model, num_scheduler_steps=8,
+                     max_num_seqs=2) as vllm_model:
+        vllm_model.generate_greedy([example_prompts[0]] * 10, 1)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("max_tokens", [64])
+def test_multistep_correctness(vllm_runner, model: str, dtype: str,
+                               max_tokens: int, example_prompts) -> None:
+    with vllm_runner(model, num_scheduler_steps=8,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_multistep = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    with vllm_runner(model, num_scheduler_steps=1,
+                     max_num_seqs=2) as vllm_model:
+        vllm_outputs_single_step = vllm_model.generate_greedy(
+            example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_outputs_multistep,
+        outputs_1_lst=vllm_outputs_single_step,
+        name_0="vllm_outputs_multistep",
+        name_1="vllm_outputs_single_step",
+    )
