@@ -200,7 +200,6 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
                 assert torch.equal(results[j][i], results[0][i])
 
 
-# @pytest.mark.parametrize("frac_seeded", [0.0, 0.25, 0.5, 1.0])
 @pytest.mark.parametrize("k", [1, 3, 6])
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
 @pytest.mark.parametrize("batch_size", [3, 8, 32, 128])
