@@ -1433,7 +1433,10 @@ class LLMEngine:
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                swap_in_offsets=scheduler_outputs.swap_in_offsets,
                 blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                swap_out_offsets=scheduler_outputs.swap_out_offsets,
+                swap_sequence_ids=scheduler_outputs.swap_sequence_ids,
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,

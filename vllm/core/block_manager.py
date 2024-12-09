@@ -113,6 +113,11 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
 
+        # request_id -> (blocks_to_swap_out, blocks_to_swap_in)
+        self.blocks_to_swap_of_request_id: List[
+            Tuple[int, Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]]] = \
+                []
+
     def can_allocate(self,
                      seq_group: SequenceGroup,
                      num_lookahead_slots: int = 0) -> AllocStatus:
@@ -169,6 +174,11 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 self.block_allocator.will_swap_in_cpu_blocks():
             self._computed_blocks_tracker.on_swap_in_cpu_blocks(seq.seq_id)
 
+        blocks_to_swap_out, blocks_to_swap_in = \
+            self.block_allocator.get_and_reset_swaps()
+        if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
+            self.blocks_to_swap_of_request_id.append((
+                seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
@@ -256,6 +266,11 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
+        blocks_to_swap_out, blocks_to_swap_in = \
+            self.block_allocator.get_and_reset_swaps()
+        if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
+            self.blocks_to_swap_of_request_id.append((
+                seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
         return new_cows
 
     def free(self, seq: Sequence) -> None:
@@ -525,7 +540,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         return self._computed_blocks_tracker.get_num_cached_tokens(seq)
 
     def get_and_reset_swaps(self,
-                            now: float) -> Tuple[List[Tuple[int, int]], ...]:
+                            now: float) -> \
+            List[Tuple[int, Tuple[List[Tuple[int, int]], ...]]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default. 
@@ -539,4 +555,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             source to destination block IDs. The block IDs are physical block
             IDs and it's expected to be used by the cache engine directly.
         """
-        return self.block_allocator.get_and_reset_swaps(now)
+        ret = self.blocks_to_swap_of_request_id
+        self.block_allocator.access_cpu_hit_blocks(now)
+        self.blocks_to_swap_of_request_id = []
+        return ret

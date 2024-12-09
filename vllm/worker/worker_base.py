@@ -144,7 +144,10 @@ class WorkerInput:
 
     num_seq_groups: Optional[int] = None
     blocks_to_swap_in: Optional[torch.Tensor] = None
+    swap_in_offsets: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
+    swap_out_offsets: Optional[torch.Tensor] = None
+    swap_sequence_ids: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
     num_steps: int = 1
@@ -161,7 +164,10 @@ class WorkerInput:
         return cls(
             num_seq_groups=tensor_dict.pop("num_seq_groups"),
             blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
+            swap_in_offsets=tensor_dict.pop("swap_in_offsets"),
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
+            swap_out_offsets=tensor_dict.pop("swap_out_offsets"),
+            swap_sequence_ids=tensor_dict.pop("swap_sequence_ids"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
             num_steps=tensor_dict.pop("num_steps"),
@@ -175,7 +181,10 @@ class WorkerInput:
         tensor_dict = {
             "num_seq_groups": self.num_seq_groups,
             "blocks_to_swap_in": self.blocks_to_swap_in,
+            "swap_in_offsets": self.swap_in_offsets,
             "blocks_to_swap_out": self.blocks_to_swap_out,
+            "swap_out_offsets": self.swap_out_offsets,
+            "swap_sequence_ids": self.swap_sequence_ids,
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
             "num_steps": self.num_steps,

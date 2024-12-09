@@ -322,8 +322,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         assert device in self._allocators
         return self._allocators[device].get_prefix_cache_hit_rate()
 
-    def get_and_reset_swaps(self,
-                            now: float) -> Tuple[List[Tuple[int, int]], ...]:
+    def get_and_reset_swaps(self) -> Tuple[List[Tuple[int, int]], ...]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default. Currently not useful.
@@ -340,6 +339,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         self._swap_mapping.clear()
         # return an empty list, to keep compatibility with previous behavior
         return [], []
+
+    def access_cpu_hit_blocks(self, now: float) -> None:
+        pass
 
     def find_cached_blocks_prefix(
         self,

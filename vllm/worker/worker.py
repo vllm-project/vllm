@@ -324,9 +324,18 @@ class Worker(LocalOrDistributedWorkerBase):
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
                                          device="cuda",
                                          dtype=torch.int64).view(-1, 2)
+        swap_in_offsets = torch.tensor(execute_model_req.swap_in_offsets,
+                                       device="cuda",
+                                       dtype=torch.int64).view(-1)
         blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
                                           device="cuda",
                                           dtype=torch.int64).view(-1, 2)
+        swap_out_offsets = torch.tensor(execute_model_req.swap_out_offsets,
+                                        device="cuda",
+                                        dtype=torch.int64).view(-1)
+        swap_sequence_ids = torch.tensor(execute_model_req.swap_sequence_ids,
+                                         device="cuda",
+                                         dtype=torch.int64).view(-1)
         # `blocks_to_copy` is a gpu tensor. The src and tgt of
         # blocks to copy are in the same device, and `blocks_to_copy`
         # can be used directly within cuda kernels.
@@ -337,7 +346,10 @@ class Worker(LocalOrDistributedWorkerBase):
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
+            swap_in_offsets=swap_in_offsets,
             blocks_to_swap_out=blocks_to_swap_out,
+            swap_out_offsets=swap_out_offsets,
+            swap_sequence_ids=swap_sequence_ids,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,

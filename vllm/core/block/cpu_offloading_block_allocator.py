@@ -285,8 +285,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         else:
             return block_id - self.num_gpu_blocks
 
-    def get_and_reset_swaps(self,
-                            now: float) -> Tuple[List[Tuple[int, int]], ...]:
+    def get_and_reset_swaps(self) -> Tuple[List[Tuple[int, int]], ...]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called right before scheduler step finishes.
         
@@ -296,10 +295,6 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             3. Free CPU blocks
             4. Return and clear all swapping status
             
-        Args:
-            now (float): The time stamp used to update CPU access time, so 
-            that CPU evictor can work.
-        
         Returns:
             A tuple of two lists: (blocks_to_swap_out, blocks_to_swap_in).
             Each list is a List[Tuple[int, int]], containing the mapping of 
@@ -312,6 +307,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
 
         new_uncached_blocks: Deque[Block] = deque()
 
+        # XXX(lixiaobai09): may slow for each request to iterate over all?
         while self._uncached_blocks:
             block = self._uncached_blocks.pop()
             block_id = block.block_id
@@ -326,7 +322,9 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
 
             # check if this block is computed
             computed = allocator.block_is_computed(block_id)
-            if computed:  # This block is computed, copy it to CPU
+            # This block is computed or immutable, copy it to CPU
+            if computed or \
+                    (block.content_hash is not None):
                 # allocate a block on CPU
                 cpu_block = cpu_allocator.allocate_immutable_block(
                     prev_block=block.prev_block, token_ids=block.token_ids)
@@ -349,16 +347,6 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         # update uncached blocks
         self._uncached_blocks = new_uncached_blocks
 
-        # iterate over allocated CPU blocks, update access time and free them
-        # need to update access time so that CPU evictor can work
-        while self._allocated_cpu_blocks:
-            cpu_block = self._allocated_cpu_blocks.pop()
-            assert cpu_block.block_id is not None
-            # update the access time
-            cpu_allocator.mark_blocks_as_accessed([cpu_block.block_id], now)
-            # free the block
-            cpu_allocator.free(cpu_block)
-
         # populate the swap_out list and swap_in list
         blocks_to_swap_out = []
         blocks_to_swap_in = []
@@ -377,6 +365,25 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 blocks_to_swap_in.append((src, dst))
         self._swap_mapping.clear()
         return blocks_to_swap_out, blocks_to_swap_in
+
+    def access_cpu_hit_blocks(self, now: float) -> None:
+        '''
+        Args:
+            now (float): The time stamp used to update CPU access time, so 
+            that CPU evictor can work.
+        '''
+
+        # iterate over allocated CPU blocks, update access time and free them
+        # need to update access time so that CPU evictor can work
+        cpu_allocator = self._allocators[Device.CPU]
+        while self._allocated_cpu_blocks:
+            cpu_block = self._allocated_cpu_blocks.pop()
+            assert cpu_block.block_id is not None
+            # update the access time
+            cpu_allocator.mark_blocks_as_accessed([cpu_block.block_id], now)
+            # free the block
+            cpu_allocator.free(cpu_block)
+
 
     def will_swap_in_cpu_blocks(self):
         """Check if there are CPU blocks that will be swapped in
