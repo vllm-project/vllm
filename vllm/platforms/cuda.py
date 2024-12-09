@@ -12,7 +12,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -111,6 +110,10 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
+
+        # Import vllm.envs here in order to to work with the
+        # run_with_both_engines pytest fixture
+        import vllm.envs as envs
 
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
