@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -19,6 +19,10 @@ class HpuPlatform(Platform):
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
         return _Backend.HPU_ATTN
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return True
 
     @staticmethod
     def inference_mode():

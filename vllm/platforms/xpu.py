@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -40,6 +40,10 @@ class XPUPlatform(Platform):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         device_props = torch.xpu.get_device_properties(device_id)
         return device_props.total_memory
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return True
 
     @staticmethod
     def inference_mode():
