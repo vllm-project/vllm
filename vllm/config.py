@@ -2296,7 +2296,7 @@ class CompilationConfig(BaseModel):
             "bs_to_padded_graph_size",
             "pass_config",
         }
-        return self.json(exclude=exclude)
+        return self.model_dump_json(exclude=exclude, exclude_unset=True)
 
     __str__ = __repr__
 
