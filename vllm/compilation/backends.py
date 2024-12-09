@@ -265,7 +265,13 @@ class VllmBackend:
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
+        # when dynamo calls the backend, it means the bytecode
+        # transform and analysis are done
         compilation_counter.num_graphs_seen += 1
+        from .monitor import torch_compile_start_time
+        dynamo_time = time.time() - torch_compile_start_time
+        logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        self.compilation_configs.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
         # called once
