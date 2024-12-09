@@ -781,9 +781,11 @@ class AsyncLLMEngine(EngineClient):
         their resources).
         """
         if self._background_loop_unshielded is not None:
+            logger.info("Cancelling the background loop.")
             self._background_loop_unshielded.cancel()
             self._background_loop_unshielded = None
         self.background_loop = None
+        logger.info("Background loop has been shut down.")
 
     async def engine_step(self, virtual_engine: int) -> bool:
         """Kick the engine to process the waiting requests.
