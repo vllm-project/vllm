@@ -43,7 +43,7 @@ def get_dummy_pass(id: int):
 
 def add_dummy_pass(fn):
     # Disable for now
-    if True or fn is None:
+    if fn is None:
         return fn
     else:
         global ID
@@ -183,9 +183,10 @@ def wrap_inductor(graph: fx.GraphModule,
             patch(# for forcing the graph to be cached
                 "torch._inductor.codecache.FxGraphCache._check_can_cache",
                 _check_can_cache):
-            compiled_graph = compile_fx(graph,
-                                        example_inputs,
-                                        config_patches=current_config)
+            with pass_context(runtime_shape):
+                compiled_graph = compile_fx(graph,
+                                            example_inputs,
+                                            config_patches=current_config)
 
     # after compiling the last graph, record the end time
     if graph_index == num_graphs - 1:
@@ -199,8 +200,8 @@ def wrap_inductor(graph: fx.GraphModule,
             logger.info("Compiling a graph for shape %s takes %.2f s",
                         runtime_shape, elapsed)
 
-    with pass_context(runtime_shape):
-        return compiled_graph
+
+    return compiled_graph
 
 
 @dataclasses.dataclass
@@ -366,10 +367,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     args: Tuple[torch.fx.node.Argument,
                                 ...], kwargs: Dict[str, Any]) -> Any:
         assert isinstance(target, str)
-
-        #print(f"ARGS = {'\n'.join([str(x) for x in args])}")
-        #print(f"ARGS = {len(args)} {len(kwargs)}")
-
         output = super().call_module(target, args, kwargs)
 
         if target in self.compile_submod_names:
@@ -388,10 +385,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
                 use_inductor=self.compilation_config.use_inductor)
-
-            #self.module.recompile()
-            #with self.fake_mode:
-            #    ShapeProp(self.module).propagate(*self.fake_args)
 
             self.module.__dict__[target] = PiecewiseBackend(
                 submod, self.vllm_config, self.graph_pool, index,

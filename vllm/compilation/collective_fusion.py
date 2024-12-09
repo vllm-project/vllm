@@ -23,8 +23,6 @@ from .vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
-# TODO: add static version of replacement
-
 use_flux = False
 if envs.VLLM_USE_FLUX:
     try:
@@ -91,7 +89,8 @@ def match_gemm_rs_ag_gemm(
 def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
                         gemm_1_weights: torch.Size, gemm_2_type: torch.dtype,
                         gemm_2_weights: torch.Size,
-                        tp_group_name: str) -> Callable:
+                        tp_group_name: str,
+                        is_static_shape: bool) -> Callable:
 
     group = get_group_from_group_name(tp_group_name)
     device_group = group.device_group
@@ -206,6 +205,38 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
 
             return mm_2[0], new_residual, slice_scatter
 
+    def gemm_rs_ag_gemm_static(
+            residual: torch.Tensor, old_my_residual: torch.Tensor,
+            gemm_1_weights: torch.Tensor, gemm_1_activations: torch.Tensor,
+            rms_norm_weights: torch.Tensor, gemm_2_weights: torch.Tensor,
+            first_layer: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        if first_layer:
+            slice_shape = residual_slice_shape(residual, rank)
+            residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
+            my_residual = residual_chunk[0]
+        else:
+            my_residual = residual
+            slice_shape = residual.shape[0]
+
+        output = gemm_rs(gemm_1_activations, gemm_1_weights)
+
+        torch.ops._C.fused_add_rms_norm.default(input=output,
+                                                residual=my_residual,
+                                                weight=rms_norm_weights,
+                                                epsilon=1e-05)
+
+        residual_1 = residual if first_layer else old_my_residual
+        slice_scatter = torch.ops.aten.slice_scatter.default(
+            residual_1, my_residual, 0, 0, slice_shape)
+        split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_shape)
+        new_residual = split_2[0]
+
+        mm_2 = ag_gemm(output, gemm_2_weights)
+
+        return mm_2[0], new_residual, slice_scatter
+
     def gemm_rs_ag_gemm_fake(
         residual: torch.Tensor,
         my_residual: torch.Tensor,
@@ -232,8 +263,9 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
 
     if not hasattr(torch.ops.vllm, name):
         logger.info("registering torch.ops.vllm.%s", name)
+        grag = gemm_rs_ag_gemm_static if is_static_shape else gemm_rs_ag_gemm
         direct_register_custom_op(name,
-                                  gemm_rs_ag_gemm,
+                                  grag,
                                   mutates_args=[],
                                   fake_impl=gemm_rs_ag_gemm_fake)
         assert getattr(torch.ops.vllm, name)
@@ -267,6 +299,7 @@ def match_final(
 def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                   gemm_1_activations: torch.Tensor,
                   rms_norm_weights: torch.Tensor) -> torch.Tensor:
+    # TODO: use ag gemm here?
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations,
                                      gemm_1_weights.transpose(1, 0))
 
@@ -276,6 +309,25 @@ def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
         wait_tensor = tensor_model_parallel_all_gather(my_residual)
     else:
         wait_tensor = my_residual
+
+    torch.ops._C.fused_add_rms_norm.default(input=reduced,
+                                            residual=wait_tensor,
+                                            weight=rms_norm_weights,
+                                            epsilon=1e-05)
+
+    return reduced
+
+
+def gemm_ag_final_static(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
+                         gemm_1_activations: torch.Tensor,
+                         rms_norm_weights: torch.Tensor) -> torch.Tensor:
+    # TODO: use ag gemm here?
+    mm_1 = torch.ops.aten.mm.default(gemm_1_activations,
+                                     gemm_1_weights.transpose(1, 0))
+
+    reduced = tensor_model_parallel_all_reduce(mm_1)
+
+    wait_tensor = tensor_model_parallel_all_gather(my_residual)
 
     torch.ops._C.fused_add_rms_norm.default(input=reduced,
                                             residual=wait_tensor,
@@ -295,6 +347,11 @@ def gemm_ag_final_fake(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
 
 direct_register_custom_op("gemm_ag_final",
                           gemm_ag_final,
+                          mutates_args=[],
+                          fake_impl=gemm_ag_final_fake)
+
+direct_register_custom_op("gemm_ag_final_static",
+                          gemm_ag_final_static,
                           mutates_args=[],
                           fake_impl=gemm_ag_final_fake)
 
@@ -342,10 +399,15 @@ class CollectiveFusionPass(VllmInductorPass):
                                  fwd_only, [self.gemm_rs_ag_gemm_pattern],
                                  extra_check=lambda m: self.record_match(m))
 
+            # TODO: handle static shape
             register_replacement(match_final,
                                  #gemm_ag_final,
                                  torch.ops.vllm.gemm_ag_final,
                                  final_inputs, fwd_only, [self.final_pattern])
+
+    def is_static_shape(self):
+        pass_context = get_pass_context()
+        return pass_context.runtime_shape is not None
 
     # TODO: put logic here to disable for bad sizes
     def should_rewrite(self, match: Match) -> bool:
@@ -373,10 +435,10 @@ class CollectiveFusionPass(VllmInductorPass):
         return max_m
 
     def process_matches(self, graph: fx.Graph) -> None:
-        nodes = list(graph.nodes)
-
         def find_min_index(match: Match) -> int:
             return min(match.nodes, key=lambda x: nodes.index(x))
+
+        nodes = list(graph.nodes)
 
         # "sort" matches in topo order.
         matches = sorted(self.matches, key=lambda x: find_min_index(x))
@@ -412,7 +474,7 @@ class CollectiveFusionPass(VllmInductorPass):
 
                 fused_gemm_func = get_gemm_rs_ag_gemm(
                     use_flux, max_m, gemm_1.dtype, gemm_1.shape, gemm_2.dtype,
-                    gemm_2.shape, tp_group_name)
+                    gemm_2.shape, tp_group_name, self.is_static_shape())
 
                 fused_node = graph.call_function(fused_gemm_func,
                                                  kwargs=kwargs)
@@ -448,7 +510,6 @@ class CollectiveFusionPass(VllmInductorPass):
                    for node in match.nodes)
 
     def __call__(self, graph: fx.Graph):
-        return
         pass_context = get_pass_context()
 
         logger.info("CollectiveFusionPass %s", pass_context.runtime_shape)
