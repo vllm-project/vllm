@@ -16,6 +16,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &paged_attention_v2,
     "PagedAttention V2.");
 
+  ops.def("context_attention_forward_v1", &context_attention_forward_v1,
+          "Context attention forward_v1");
+
+  ops.def("context_attention_forward_v2", &context_attention_forward_v2,
+          "Context attention forward_v2");
+
+  ops.def(
+    "paged_attention_gqa",
+    &paged_attention_gqa,
+    "PagedAttention GQA.");
+    
   // Activation ops
   ops.def(
     "silu_and_mul",
@@ -69,15 +80,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "reshape_and_cache",
     &reshape_and_cache,
     "Reshape the key and value tensors and cache them");
+  cache_ops.def(
+    "reshape_and_cache_ipexllm",
+    &reshape_and_cache_ipexllm,
+    "Reshape the key and value tensors and cache them for ipex_llm");
 
   // Quant
   ops.def(
     "awq_dequantize",
     &awq_dequantize,
     "dequant method for awq");
-  ops.def("context_attention_forward_v1", &context_attention_forward_v1,
-          "Context attention forward_v1");
 
-  ops.def("context_attention_forward_v2", &context_attention_forward_v2,
-          "Context attention forward_v2");
 }

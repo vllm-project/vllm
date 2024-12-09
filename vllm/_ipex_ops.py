@@ -249,6 +249,19 @@ class ipex_ops:
         # ipex.llm.modules.PagedAttention.reshape_and_cache(
         #     key, value, key_cache, value_cache, slot_mapping)
         vllm._C.cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, k_scale)
+    
+    @staticmethod
+    def reshape_and_cache_ipexllm(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: float,
+        v_scale: float,
+    ) -> None:
+        vllm._C.cache_ops.reshape_and_cache_ipexllm(key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, k_scale)
 
     @staticmethod
     def copy_blocks(key_caches: List[torch.Tensor],
