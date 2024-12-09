@@ -1,3 +1,4 @@
+import ast
 import copy
 import enum
 import hashlib
@@ -27,7 +28,8 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once, resolve_obj_by_qualname)
+                        print_warning_once, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -2082,7 +2084,7 @@ class KVTransferConfig(BaseModel):
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
-        """Parse the CLI value for the compilation config."""
+        """Parse the CLI value for the kv cache transfer config."""
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
@@ -2175,8 +2177,8 @@ class CompilationConfig(BaseModel):
             TODO: move outside cudagraph logic into compilation.
             torch.compile will handle cudagraph capture logic in the future.
         - cudagraph_capture_sizes: sizes to capture cudagraph.
-            - None: capture sizes are inferred from compilation context.
-            - List[int]: capture sizes are specified.
+            - None (default): capture sizes are inferred from vllm config.
+            - List[int]: capture sizes are specified as given.
         - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
             It means the first several runs will be treated as warmup runs.
             Only after that, the execution will be recorded, and the recorded
@@ -2190,14 +2192,10 @@ class CompilationConfig(BaseModel):
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
             - True: inductor compilation is used. one graph for symbolic shape
-                is compiled. In addition, compile for different sizes specified
-                in inductor_compile_sizes, using configurations
+                is compiled. In addition, compile for cudagraph sizes that are
+                in candidate_compile_sizes, using configurations
                 in inductor_compile_config.
-        - inductor_compile_sizes: sizes to compile for inductor.
-        - inductor_specialize_for_cudagraph_no_more_than: an optional integer
-            to specialize inductor for cudagraph sizes no more than the
-            specified size. It is useful when we want to specialize inductor
-            with a subset of cudagraph sizes.
+        - candidate_compile_sizes: sizes to compile for inductor.
         - inductor_compile_config: additional configurations for inductor.
             - None: use default configurations.
         - inductor_passes: additional passes for inductor. It is a dictionary
@@ -2226,8 +2224,7 @@ class CompilationConfig(BaseModel):
     ])
 
     use_inductor: bool = True
-    inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
-    inductor_compile_sizes: Optional[List[int]] = Field(default=None)
+    candidate_compile_sizes: Optional[List[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2281,6 +2278,7 @@ class CompilationConfig(BaseModel):
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
+    compilation_time: float = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
@@ -2292,7 +2290,9 @@ class CompilationConfig(BaseModel):
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
-        return CompilationConfig.model_validate_json(cli_value)
+        # do not use `eval`, it is dangerous and can execute arbitrary code
+        dict_value = ast.literal_eval(cli_value)
+        return CompilationConfig.model_validate(dict_value)
 
     def model_post_init(self, __context: Any) -> None:
 
@@ -2319,6 +2319,7 @@ class CompilationConfig(BaseModel):
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
         self.static_forward_context = {}
+        self.compilation_time = 0.0
 
     def init_backend(self) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
@@ -2352,18 +2353,20 @@ class CompilationConfig(BaseModel):
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
                         sizes_to_specialize, self.cudagraph_capture_sizes)
-        if self.inductor_specialize_for_cudagraph_no_more_than is not None:
-            assert self.inductor_compile_sizes is None, (
-                "inductor_compile_sizes should be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is not None")
-            self.compile_sizes = [
-                x for x in self.capture_sizes
-                if x <= self.inductor_specialize_for_cudagraph_no_more_than
-            ]
-        else:
-            if self.inductor_compile_sizes is None:
-                self.inductor_compile_sizes = []
-            self.compile_sizes = self.inductor_compile_sizes
+
+        if self.candidate_compile_sizes is None:
+            self.candidate_compile_sizes = []
+        self.compile_sizes = [
+            x for x in self.candidate_compile_sizes if x in self.capture_sizes
+        ]
+        ignored_sizes = [
+            x for x in self.candidate_compile_sizes
+            if x not in self.capture_sizes
+        ]
+        if ignored_sizes:
+            logger.warning(("candidate_compile_sizes %s are ignored "
+                            "because they are not cudagraph capture sizes."),
+                           ignored_sizes)
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
@@ -2406,6 +2409,7 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    instance_id: str = ""
 
     @staticmethod
     def get_graph_batch_size(batch_size: int) -> int:
@@ -2470,7 +2474,15 @@ class VllmConfig:
             return quant_config
         return None
 
-    def with_hf_config(self, hf_config: PretrainedConfig) -> "VllmConfig":
+    def with_hf_config(
+        self,
+        hf_config: PretrainedConfig,
+        architectures: Optional[list[str]] = None,
+    ) -> "VllmConfig":
+        if architectures is not None:
+            hf_config = copy.deepcopy(hf_config)
+            hf_config.architectures = architectures
+
         model_config = copy.deepcopy(self.model_config)
         model_config.hf_config = hf_config
 
@@ -2563,46 +2575,44 @@ class VllmConfig:
 
         current_platform.check_and_update_config(self)
 
+        if not self.instance_id:
+            self.instance_id = random_uuid()[:5]
+
     def __str__(self):
-        return ("model=%r, speculative_config=%r, tokenizer=%r, "
-        "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-        "override_neuron_config=%s, tokenizer_revision=%s, "
-        "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
-        "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
-        "pipeline_parallel_size=%d, "
-        "disable_custom_all_reduce=%s, quantization=%s, "
-        "enforce_eager=%s, kv_cache_dtype=%s, "
-        "quantization_param_path=%s, device_config=%s, "
-        "decoding_config=%r, observability_config=%r, "
-        "seed=%d, served_model_name=%s, "
-        "num_scheduler_steps=%d, enable_prefix_caching=%s, "
-        "use_async_output_proc=%s, mm_processor_kwargs=%s") % \
-        (self.model_config.model, self.speculative_config,
-        self.model_config.tokenizer,
-        self.model_config.skip_tokenizer_init,
-        self.model_config.tokenizer_mode,
-        self.model_config.revision,
-        self.model_config.override_neuron_config,
-        self.model_config.tokenizer_revision,
-        self.model_config.trust_remote_code,
-        self.model_config.dtype,
-        self.model_config.max_model_len,
-        self.load_config.download_dir,
-        self.load_config.load_format,
-        self.parallel_config.tensor_parallel_size,
-        self.parallel_config.pipeline_parallel_size,
-        self.parallel_config.disable_custom_all_reduce,
-        self.model_config.quantization,
-        self.model_config.enforce_eager,
-        self.cache_config.cache_dtype,
-        self.model_config.quantization_param_path,
-        self.device_config.device, self.decoding_config,
-        self.observability_config, self.model_config.seed,
-        self.model_config.served_model_name,
-        self.scheduler_config.num_scheduler_steps,
-        self.cache_config.enable_prefix_caching,
-        self.model_config.use_async_output_proc,
-        self.model_config.mm_processor_kwargs)
+        return (
+            f"model={self.model_config.model!r},"
+            f" speculative_config={self.speculative_config!r},"
+            f" tokenizer={self.model_config.tokenizer!r}, "
+            f"skip_tokenizer_init={self.model_config.skip_tokenizer_init},"
+            f" tokenizer_mode={self.model_config.tokenizer_mode}, "
+            f"revision={self.model_config.revision}, "
+            f"override_neuron_config={self.model_config.override_neuron_config},"
+            f" tokenizer_revision={self.model_config.tokenizer_revision}, "
+            f"trust_remote_code={self.model_config.trust_remote_code}, "
+            f"dtype={self.model_config.dtype}, "
+            f"max_seq_len={self.model_config.max_model_len},"
+            f" download_dir={self.load_config.download_dir!r}, "
+            f"load_format={self.load_config.load_format}, "
+            f"tensor_parallel_size={self.parallel_config.tensor_parallel_size},"
+            f" pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
+            f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
+            f"quantization={self.model_config.quantization}, "
+            f"enforce_eager={self.model_config.enforce_eager}, "
+            f"kv_cache_dtype={self.cache_config.cache_dtype}, "
+            f"quantization_param_path={self.model_config.quantization_param_path},"
+            f" device_config={self.device_config.device}, "
+            f"decoding_config={self.decoding_config!r}, "
+            f"observability_config={self.observability_config!r}, "
+            f"seed={self.model_config.seed}, "
+            f"served_model_name={self.model_config.served_model_name}, "
+            f"num_scheduler_steps={self.scheduler_config.num_scheduler_steps}, "
+            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, "  # noqa
+            f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
+            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
+            f"use_async_output_proc={self.model_config.use_async_output_proc}, "
+            f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
+            f"pooler_config={self.model_config.pooler_config!r},"
+            f" compilation_config={self.compilation_config!r}")
 
 
 _current_vllm_config: Optional[VllmConfig] = None

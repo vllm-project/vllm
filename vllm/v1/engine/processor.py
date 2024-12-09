@@ -7,7 +7,8 @@ from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
 from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
+                             MultiModalRegistry)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -101,10 +102,15 @@ class Processor:
             self.generation_config_fields, eos_token_id)
 
         # Preprocess multi-modal data
-        mm_inputs = self.mm_input_mapper.process_inputs(
-            decoder_inputs.multi_modal_data,
-            decoder_inputs.mm_processor_kwargs) if len(
-                decoder_inputs.multi_modal_data) > 0 else None
+        if len(decoder_inputs.multi_modal_data) == 0:
+            mm_inputs = None
+        elif isinstance(decoder_inputs.multi_modal_data, MultiModalKwargs):
+            mm_inputs = [decoder_inputs.multi_modal_data]
+        else:
+            mm_inputs = self.mm_input_mapper.process_inputs(
+                decoder_inputs.multi_modal_data,
+                decoder_inputs.mm_processor_kwargs,
+            )
 
         # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
