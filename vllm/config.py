@@ -284,6 +284,7 @@ class ModelConfig:
             self._verify_tokenizer_mode()
 
         self.is_attention_free = self._init_attention_free()
+        self.is_hybrid = self._init_is_hybrid()
         self.has_inner_state = self._init_has_inner_state()
 
         if current_platform.is_neuron():
@@ -339,6 +340,10 @@ class ModelConfig:
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_attention_free_model(architectures)
+
+    def _init_is_hybrid(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_hybrid_model(architectures)
 
     def _init_has_inner_state(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
@@ -704,11 +709,17 @@ class ModelConfig:
         # we will need to have workarounds like so
         if self.is_attention_free and block_type == LayerBlockType.attention:
             return 0
+        if not self.is_hybrid and block_type != LayerBlockType.attention:
+            return 0
+
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         # Transformers supports layers_block_type @property
         layers_block_type_value = getattr(self.hf_config, "layers_block_type",
-                                          [block_type.value] * (end - start))
+                                          None)
+        if layers_block_type_value is None:
+            return end - start
+
         return sum(t == block_type.value
                    for t in layers_block_type_value[start:end])
 
