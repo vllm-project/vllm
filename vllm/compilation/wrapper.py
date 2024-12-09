@@ -32,8 +32,8 @@ class TorchCompileWrapperWithCustomDispatcher:
             # default compilation settings
             # compiling the forward method
 
-            backend = get_current_vllm_config(
-            ).compilation_config.init_backend()
+            vllm_config = get_current_vllm_config()
+            backend = vllm_config.compilation_config.init_backend(vllm_config)
 
             compiled_callable = torch.compile(
                 self.forward,
