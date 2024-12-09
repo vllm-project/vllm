@@ -21,5 +21,5 @@ class LlamaSwiftKVConfig(LlamaConfig):
     ):
         super().__init__(**kwargs)
         self.swiftkv = swiftkv
-        self.num_key_value_layers = (num_key_value_layers or
-                                     self.num_hidden_layers)
+        self.num_key_value_layers = (num_key_value_layers
+                                     or self.num_hidden_layers)
