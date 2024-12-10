@@ -52,9 +52,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Activation ops
   // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
+  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 
+  ops.def(
+      "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
+  ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_and_mul", torch::kCUDA, &gelu_and_mul);
