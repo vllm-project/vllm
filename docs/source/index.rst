@@ -112,6 +112,7 @@ Documentation
    usage/engine_args
    usage/env_vars
    usage/usage_stats
+   usage/torch_compile
 
 .. toctree::
    :maxdepth: 1
