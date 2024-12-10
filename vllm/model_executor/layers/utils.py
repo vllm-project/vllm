@@ -35,9 +35,9 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
         for padding because it does not correspond to any valid token ID 
         in the vocabulary.
     output_tokens_tensor: The output tokens tensor.
-    presence_penalties: The presence penalties of shape [num_seqs, 1]
-    frequency_penalties: The frequency penalties of shape [num_seqs, 1]
-    repetition_penalties: The repetition penalties of shape [num_seqs, 1]
+    presence_penalties: The presence penalties of shape (num_seqs, )
+    frequency_penalties: The frequency penalties of shape (num_seqs, )
+    repetition_penalties: The repetition penalties of shape (num_seqs, )
     """
     num_seqs, vocab_size = logits.shape
     _, prompt_mask = get_token_bin_counts_and_mask(prompt_tokens_tensor,
