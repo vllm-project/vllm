@@ -149,9 +149,10 @@ def _support_torch_compile(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
-        self.track_batchsize = envs.VLLM_TRACK_BATCHSIZE
+        self.track_batchsize = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
         self.batchsize_counter = Counter()
-        self.last_logging_time = time.monotonic()
+        self.last_logging_time = 0
+        self.batchsize_logging_interval = envs.VLLM_LOG_BATCHSIZE_INTERVAL
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = \
@@ -186,10 +187,14 @@ def _support_torch_compile(
             for b in bs:
                 assert b == bs[0]
             self.batchsize_counter[bs[0]] += 1
-            if time.monotonic() - self.last_logging_time > 10:
+            if time.monotonic(
+            ) - self.last_logging_time > self.batchsize_logging_interval:
                 self.last_logging_time = time.monotonic()
-                logger.info("Batchsize distribution: %s",
-                            self.batchsize_counter)
+                sorted_data = sorted(list(self.batchsize_counter.items()),
+                                     key=lambda x: x[1],
+                                     reverse=True)
+                logger.info("Batchsize distribution (batchsize, count): %s",
+                            sorted_data)
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
