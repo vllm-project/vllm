@@ -2008,9 +2008,7 @@ class LLMEngine:
                 self.decoding_config.guided_decoding_backend
 
             processor = get_local_guided_decoding_logits_processor(
-                guided_params=guided_decoding,
-                tokenizer=tokenizer,
-                model_config=self.model_config)
+                guided_params=guided_decoding, tokenizer=tokenizer)
             if processor:
                 logits_processors.append(processor)
 
