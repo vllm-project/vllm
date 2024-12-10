@@ -6,7 +6,8 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Any, Callable, DefaultDict, Dict, List, Mapping, Optional
+from typing import (TYPE_CHECKING, Any, Callable, DefaultDict, Dict, List,
+                    Mapping, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union
 
@@ -19,6 +20,9 @@ from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+if TYPE_CHECKING:
+    from vllm.store.kv_store import BlockMappingFromCPU
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -1265,6 +1269,9 @@ class ExecuteModelRequest(
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback
     async_callback: Optional[Callable] = None
+
+    # for kv store
+    kv_store_block_mapping_from_cpu: Optional["BlockMappingFromCPU"] = None
 
     @property
     def is_first_multi_step(self) -> bool:

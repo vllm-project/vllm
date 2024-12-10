@@ -4,6 +4,7 @@ from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
+from vllm.store.kv_store import KVBlockStoreManager
 
 Refcount = int
 
@@ -32,6 +33,7 @@ class NaiveBlockAllocator(BlockAllocator):
         block_size: int,
         block_ids: Optional[Iterable[int]] = None,
         block_pool: Optional[BlockPool] = None,
+        kv_store_manager: Optional[KVBlockStoreManager] = None,
     ):
         if block_ids is None:
             block_ids = range(num_blocks)
@@ -46,6 +48,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
         self._cow_tracker = CopyOnWriteTracker(
             refcounter=self._refcounter.as_readonly())
+        self.kv_store_manager = kv_store_manager
 
         if block_pool is None:
             extra_factor = 4
@@ -101,6 +104,8 @@ class NaiveBlockAllocator(BlockAllocator):
                 block_size=self._block_size,
                 physical_block_id=block_ids[i])
             blocks.append(prev_block)
+            if (self.kv_store_manager is not None):
+                self.kv_store_manager.allocate_block(-1, block_ids[i])
 
         return blocks
 
@@ -123,6 +128,8 @@ class NaiveBlockAllocator(BlockAllocator):
                                             token_ids=[],
                                             block_size=self._block_size,
                                             physical_block_id=block_id)
+        if (self.kv_store_manager is not None):
+            self.kv_store_manager.allocate_block(-1, block_id)
         return block
 
     def _allocate_block_id(self) -> BlockId:

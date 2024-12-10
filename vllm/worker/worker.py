@@ -49,12 +49,12 @@ class Worker(LocalOrDistributedWorkerBase):
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
-        WorkerBase.__init__(self, vllm_config)
+        WorkerBase.__init__(self, vllm_config, local_rank)
         self.parallel_config.rank = rank
-        self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
+
         if is_driver_worker:
             assert rank % self.parallel_config.tensor_parallel_size == 0, \
                    "Driver worker should be rank 0 of tensor parallel group."
@@ -144,6 +144,11 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
+
+        # use higher priority stream for forward step
+        compute_stream = torch.cuda.Stream(priority=-10)
+        torch.cuda.set_stream(compute_stream)
+
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
@@ -341,6 +346,12 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
+            kv_store_block_mapping=\
+                execute_model_req.kv_store_block_mapping_from_cpu.block_mapping,
+            kv_store_block_offsets=\
+                execute_model_req.kv_store_block_mapping_from_cpu.block_offset,
+            kv_store_block_req_ids=\
+                execute_model_req.kv_store_block_mapping_from_cpu.request_ids,
         )
 
     @torch.inference_mode()

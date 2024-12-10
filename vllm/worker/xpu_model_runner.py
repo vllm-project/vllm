@@ -22,6 +22,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.store.kv_store import KVStoreMeta
 from vllm.utils import DeviceMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
@@ -270,6 +271,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
             block_tables=torch.tensor([], device=self.device, dtype=torch.int),
+            kv_store_meta=KVStoreMeta.null(),
         )
 
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
@@ -354,6 +356,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
             block_tables=block_tables,
+            kv_store_meta=KVStoreMeta.null(),
         )
         return (
             input_tokens,
