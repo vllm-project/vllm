@@ -102,6 +102,8 @@ class InputBatch:
         self.top_k_reqs: Set[str] = set()
 
         # req_index -> generator
+        # NOTE(woosuk): The indices of the requests that do not have their own
+        # generator should not be included in the dictionary.
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
@@ -148,7 +150,10 @@ class InputBatch:
         if sampling_params.top_k > 0:
             self.top_k_reqs.add(req_id)
 
-        self.generators[req_index] = request.generator
+        # NOTE(woosuk): self.generators should not include the requests that
+        # do not have their own generator.
+        if request.generator is not None:
+            self.generators[req_index] = request.generator
 
         num_logprobs = sampling_params.logprobs
         num_prompt_logprobs = sampling_params.prompt_logprobs
