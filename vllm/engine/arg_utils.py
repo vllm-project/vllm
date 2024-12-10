@@ -122,7 +122,7 @@ class EngineArgs:
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
-    max_num_seqs: int = 256
+    max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
     revision: Optional[str] = None
@@ -205,6 +205,9 @@ class EngineArgs:
         # by user.
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = bool(envs.VLLM_USE_V1)
+        # Override max_num_seqs if it's not set by user.
+        if self.max_num_seqs is None:
+            self.max_num_seqs = 256 if not envs.VLLM_USE_V1 else 1024
 
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -1238,11 +1241,6 @@ class EngineArgs:
             logger.warning(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, usage_context.value)
-        # NOTE(woosuk): Increase max_num_seqs since the default value (256) is
-        # too small to achieve the best performance in V1.
-        self.max_num_seqs = 1024
-        logger.warning("Setting max_num_seqs to %d for %s usage context.",
-                       self.max_num_seqs, usage_context.value)
 
     def _override_v1_engine_config(self, engine_config: VllmConfig) -> None:
         """
