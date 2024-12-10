@@ -69,6 +69,7 @@ def test_minicpmv_tp2(minicpmv_lora_files, fully_sharded):
         tensor_parallel_size=2,
         trust_remote_code=True,
         fully_sharded_loras=fully_sharded,
+        enable_chunked_prefill=True,
     )
 
     output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
@@ -89,6 +90,7 @@ def test_minicpmv_tp4(minicpmv_lora_files, fully_sharded):
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=fully_sharded,
+        enable_chunked_prefill=True,
     )
     output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):

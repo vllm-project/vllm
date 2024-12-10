@@ -67,7 +67,8 @@ def test_minicpmv_lora(minicpmv_lora_files):
         max_loras=4,
         max_lora_rank=64,
         trust_remote_code=True,
-        gpu_memory_utilization=0.97  # This model is pretty big for CI gpus
+        gpu_memory_utilization=0.97,  # This model is pretty big for CI gpus
+        enable_chunked_prefill=True,
     )
     output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
