@@ -3,7 +3,9 @@ from typing import List, Optional, Tuple, Union
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.config import CompilationLevel
 from vllm.platforms import current_platform
+from vllm.plugins import get_current_vllm_config
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
@@ -122,10 +124,14 @@ def apply_fp8_linear(
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
+        # We also don't pad when using torch.compile,
+        # as it breaks with dynamic shapes.
+        config = get_current_vllm_config().compilation_config
+        do_pad = config.level < CompilationLevel.PIECEWISE
         qinput, x_scale = ops.scaled_fp8_quant(
             input_2d,
             input_scale,
-            num_token_padding=17,
+            num_token_padding=17 if do_pad else None,
             use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         per_tensor_weights = (weight_scale.numel() == 1)
