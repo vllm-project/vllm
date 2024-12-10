@@ -40,7 +40,7 @@ def test_peft_helper(sql_lora_files):
     assert peft_helper.r == 8
     assert peft_helper.lora_alpha == 16
     assert peft_helper.target_modules == [
-        "ste.q_proj",
+        "q_proj",
         "v_proj",
         "k_proj",
         "o_proj",
