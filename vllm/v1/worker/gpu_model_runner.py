@@ -453,6 +453,7 @@ class GPUModelRunner:
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
+        attn_metadata.num_input_tokens = num_input_tokens
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -478,7 +479,6 @@ class GPUModelRunner:
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        attn_metadata.num_input_tokens = num_input_tokens
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
                 input_ids=input_ids,
