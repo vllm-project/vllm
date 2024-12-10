@@ -694,8 +694,7 @@ class ModelConfig:
         block_type: LayerBlockType = LayerBlockType.attention,
     ) -> int:
         # This function relies on 'layers_block_type' in hf_config,
-        # for hybrid/attention-free models w/o this attribute,
-        # we will need to have workarounds like so
+        # for w/o this attribute, we will need to have workarounds like so
         attn_block_type = block_type == LayerBlockType.attention
         is_transformer = not self.is_hybrid and not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
