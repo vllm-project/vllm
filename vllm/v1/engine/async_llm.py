@@ -152,7 +152,7 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
 
         if self.detokenizer.is_request_active(request_id):
-            raise KeyError(f"Request {request_id} already exists.")
+            raise ValueError(f"Request {request_id} already exists.")
 
         # 1) Create a new AsyncStream for the request.
         stream = self._add_request_to_streams(request_id)

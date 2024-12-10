@@ -576,6 +576,10 @@ class MQLLMEngineClient(EngineClient):
         if self._errored_with is not None:
             raise ENGINE_DEAD_ERROR(self._errored_with)
 
+        # Ensure the request id is unique among running requests
+        if request_id in self.output_queues:
+            raise ValueError(f"Request {request_id} already exists")
+
         # Constructing guided decoding logits processors is expensive, so we do
         # it here to avoid contending with cpu resources and the GIL on the
         # backend process.
