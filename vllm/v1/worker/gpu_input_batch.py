@@ -8,6 +8,7 @@ import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.utils import make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
 
 if TYPE_CHECKING:
@@ -43,12 +44,14 @@ class InputBatch:
         max_num_blocks_per_req: int,
         device: torch.device,
         pin_memory: bool,
+        vocab_size: int,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.device = device
         self.pin_memory = pin_memory
+        self.vocab_size = vocab_size
 
         self.req_ids: List[Optional[str]] = [None] * max_num_reqs
         self.req_id_to_index: Dict[str, int] = {}
@@ -101,6 +104,50 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
 
+        # Frequency penalty related data structures
+        self.frequency_penalties = torch.empty((max_num_reqs, 1),
+                                               dtype=torch.float,
+                                               device=device)
+        self.frequency_penalties_cpu_tensor = torch.empty(
+            (max_num_reqs, 1),
+            dtype=torch.float,
+            device="cpu",
+            pin_memory=pin_memory)
+        self.frequency_penalties_cpu = \
+            self.frequency_penalties_cpu_tensor.numpy()
+        self.frequency_penalties_reqs: Set[str] = set()
+
+        # Presence penalty related data structures
+        self.presence_penalties = torch.empty((max_num_reqs, 1),
+                                              dtype=torch.float,
+                                              device=device)
+        self.presence_penalties_cpu_tensor = torch.empty((max_num_reqs, 1),
+                                                         dtype=torch.float,
+                                                         device="cpu",
+                                                         pin_memory=pin_memory)
+        self.presence_penalties_cpu = \
+            self.presence_penalties_cpu_tensor.numpy()
+        self.presence_penalties_reqs: Set[str] = set()
+
+        # Repetition penalty related data structures
+        self.repetition_penalties = torch.empty((max_num_reqs, 1),
+                                                dtype=torch.float,
+                                                device=device)
+        self.repetition_penalties_cpu_tensor = torch.empty(
+            (max_num_reqs, 1),
+            dtype=torch.float,
+            device="cpu",
+            pin_memory=pin_memory)
+        self.repetition_penalties_cpu =\
+            self.repetition_penalties_cpu_tensor.numpy()
+        self.repetition_penalties_reqs: Set[str] = set()
+
+        self.prompt_tokens_tensor: Optional[torch.Tensor] = None
+        self.min_tokens: List[int] = [0] * max_num_reqs
+        self.stop_token_ids: List[Set[int]] = [
+            set() for _ in range(max_num_reqs)
+        ]
+
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
@@ -148,6 +195,20 @@ class InputBatch:
         self.top_k_cpu[req_index] = sampling_params.top_k
         if sampling_params.top_k > 0:
             self.top_k_reqs.add(req_id)
+        self.frequency_penalties_cpu[req_index][:] =\
+            sampling_params.frequency_penalty
+        if sampling_params.frequency_penalty != 0.0:
+            self.frequency_penalties_reqs.add(req_id)
+        self.presence_penalties_cpu[req_index][:] = \
+            sampling_params.presence_penalty
+        if sampling_params.presence_penalty != 0.0:
+            self.presence_penalties_reqs.add(req_id)
+        self.repetition_penalties_cpu[req_index][:] = \
+            sampling_params.repetition_penalty
+        if sampling_params.repetition_penalty != 1.0:
+            self.repetition_penalties_reqs.add(req_id)
+        self.min_tokens[req_index] = sampling_params.min_tokens
+        self.stop_token_ids[req_index] = sampling_params.all_stop_token_ids
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -170,6 +231,9 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
+        self.frequency_penalties_reqs.discard(req_id)
+        self.presence_penalties_reqs.discard(req_id)
+        self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
@@ -182,6 +246,9 @@ class InputBatch:
         self.random_reqs.clear()
         self.top_p_reqs.clear()
         self.top_k_reqs.clear()
+        self.frequency_penalties_reqs.clear()
+        self.presence_penalties_reqs.clear()
+        self.repetition_penalties_reqs.clear()
         self.generators.clear()
         self.num_logprobs.clear()
         self.prompt_logprob_reqs.clear()
@@ -222,6 +289,15 @@ class InputBatch:
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
             self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
+            self.frequency_penalties_cpu[empty_index][:] = \
+                self.frequency_penalties_cpu[last_req_index][:]
+            self.presence_penalties_cpu[empty_index][:] = \
+                self.presence_penalties_cpu[last_req_index][:]
+            self.repetition_penalties_cpu[empty_index][:] = \
+                self.repetition_penalties_cpu[last_req_index][:]
+            self.min_tokens[empty_index] = self.min_tokens[last_req_index]
+            self.stop_token_ids[empty_index] = \
+                self.stop_token_ids[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -231,6 +307,7 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
+        requests: Dict[str, CachedRequestState],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -240,6 +317,40 @@ class InputBatch:
                 self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
             self.top_k[:self.num_reqs].copy_(
                 self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
+            if not self.no_penalties:
+                # Since syncing these tensors is expensive only copy them
+                # if necessary i.e. if there are requests which require
+                # penalties to be applied during sampling.
+                self.frequency_penalties[:self.num_reqs].copy_(
+                    self.frequency_penalties_cpu_tensor[:self.num_reqs],
+                    non_blocking=True)
+                self.presence_penalties[:self.num_reqs].copy_(
+                    self.presence_penalties_cpu_tensor[:self.num_reqs],
+                    non_blocking=True)
+                self.repetition_penalties[:self.num_reqs].copy_(
+                    self.repetition_penalties_cpu_tensor[:self.num_reqs],
+                    non_blocking=True)
+                # The prompt tokens are used only for applying penalties during
+                # the sampling process. Hence copy these tensors only when
+                # there are requests which need penalties to be applied.
+                self.prompt_tokens_tensor = \
+                    self._construct_prompt_tokens_tensor(
+                        requests, self.vocab_size, device=self.device)
+
+        output_token_ids: List[List[int]] = []
+
+        for req_id in self.req_ids[:self.num_reqs]:
+            assert req_id is not None
+            request = requests[req_id]
+            # Currently we create a tensor for output_token_ids from scratch
+            # at each step. However, for the penalties computation what we
+            # need is stats about the token ids present in the output. This
+            # stats can be maintained incrementally instead of computing it
+            # from scratch at each step.
+            # TODO - Replace this with incremental update to output token
+            # statistics.
+            output_token_ids.append(request.output_token_ids)
+
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],
             all_greedy=self.all_greedy,
@@ -250,7 +361,40 @@ class InputBatch:
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
+            prompt_token_ids=self.prompt_tokens_tensor[:self.num_reqs] \
+                if self.prompt_tokens_tensor is not None else None,
+            frequency_penalties=self.frequency_penalties[:self.num_reqs],
+            presence_penalties=self.presence_penalties[:self.num_reqs],
+            repetition_penalties=self.repetition_penalties[:self.num_reqs],
+            output_token_ids=output_token_ids,
+            min_tokens=self.min_tokens[:self.num_reqs],
+            stop_token_ids=self.stop_token_ids[:self.num_reqs],
+            no_penalties=self.no_penalties
         )
+
+    def _construct_prompt_tokens_tensor(
+        self,
+        requests,
+        vocab_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        prompt_token_ids: List[List[int]] = []
+        for req_id in self.req_ids[:self.num_reqs]:
+            assert req_id is not None
+            request = requests[req_id]
+            prompt_token_ids.append(request.prompt_token_ids)
+        prompt_tokens_cpu_tensor = make_tensor_with_pad(
+            prompt_token_ids,
+            # use the value of vocab_size as a pad since we don't have a
+            # token_id of this value.
+            pad=vocab_size,
+            device="cpu",
+            dtype=torch.int64,
+            pin_memory=self.pin_memory,
+        )
+        prompt_tokens_tensor = prompt_tokens_cpu_tensor.to(device=device,
+                                                           non_blocking=True)
+        return prompt_tokens_tensor
 
     @property
     def num_reqs(self) -> int:
@@ -271,6 +415,12 @@ class InputBatch:
     @property
     def no_top_k(self) -> bool:
         return len(self.top_k_reqs) == 0
+
+    @property
+    def no_penalties(self) -> bool:
+        return len(self.presence_penalties_reqs) == 0 and \
+            len(self.frequency_penalties_reqs) == 0 and \
+                len(self.repetition_penalties_reqs) == 0
 
     @property
     def max_num_logprobs(self) -> int:
