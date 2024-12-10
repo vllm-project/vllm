@@ -35,11 +35,13 @@ class GraniteToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
+        self.bot_token = "<|tool_call|>"
 
     def extract_tool_calls(
             self, model_output: str,
             request: ChatCompletionRequest) -> ExtractedToolCallInformation:
-        stripped = model_output.strip()
+        # remove whitespace and the BOT token if it exists
+        stripped = model_output.strip().removeprefix(self.bot_token).lstrip()
         if not stripped or stripped[0] != '[':
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
