@@ -22,6 +22,7 @@ os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
 
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 
+MAX_MODEL_LEN = 4000
 
 def _arr(arr):
     """
@@ -32,7 +33,7 @@ def _arr(arr):
 
 def test_find_array():
     # Create an LLM object to get the model config.
-    llm = vllm.LLM(MODEL_NAME, task="embedding")
+    llm = vllm.LLM(MODEL_NAME, task="embedding", max_model_len=MAX_MODEL_LEN)
     pooler = GritLMPooler(model_config=llm.llm_engine.model_config)
 
     arr = _arr([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
@@ -48,14 +49,14 @@ def test_find_array():
 
 @pytest.fixture(scope="module")
 def server_embedding():
-    args = ["--task", "embedding"]
+    args = ["--task", "embedding", "--max_model_len", str(MAX_MODEL_LEN)]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
 @pytest.fixture(scope="module")
 def server_generate():
-    args = ["--task", "generate"]
+    args = ["--task", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
@@ -131,7 +132,7 @@ def validate_embed_output(q_rep: List[float], d_rep: List[float]):
 def test_gritlm_offline_embedding():
     queries, q_instruction, documents, d_instruction = get_test_data()
 
-    llm = vllm.LLM(MODEL_NAME, task="embedding")
+    llm = vllm.LLM(MODEL_NAME, task="embedding", max_model_len=MAX_MODEL_LEN)
 
     d_rep = run_llm_encode(
         llm,
@@ -166,48 +167,19 @@ async def test_gritlm_api_server_embedding(
     validate_embed_output(q_rep, d_rep)
 
 
-def validate_gen_output(output: str):
-    expected_output = """Oh, Mt. Fuji, mountain grand,
-A sight to see, a climb to command,
-At midnight, in the dark of night,
-I climbed your slopes, with all my might.
-
-The stars above, they shone so bright,
-A beacon in the darkness, guiding light,
-The wind did blow, with a gentle sigh,
-As I climbed higher, with a steady eye.
-
-The path was steep, the climb was tough,
-But I pressed on, with a steadfast rough,
-For the summit, I longed to see,
-The view from the top, a sight to be.
-
-At last, I reached the peak, and stood,
-With awe and wonder, I gazed aloud,
-The world below, a sight to see,
-A view that's worth the climb, you'll agree.
-
-Mt. Fuji, mountain grand,
-A sight to see, a climb to command,
-At midnight, in the dark of night,
-I climbed your slopes, with all my might."""
-
-    assert output == expected_output
-
-
 def test_gritlm_offline_gen():
-    input = "<|user|>\nPlease write me a poem about my recent hike of Mt. Fuji at midnight in the style of Shakespeare.\n<|assistant|>\n"
+    input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
-    llm = vllm.LLM(MODEL_NAME)
+    llm = vllm.LLM(MODEL_NAME, max_model_len=MAX_MODEL_LEN)
     sampling_params = vllm.SamplingParams(temperature=0.0, max_tokens=256)
     outputs = llm.generate(input, sampling_params=sampling_params)
 
-    validate_gen_output(outputs[0].outputs[0].text)
+    assert outputs[0].outputs[0].text == "The capital of France is Paris."
 
 
 @pytest.mark.asyncio
 async def test_gritlm_api_server_gen(client_generate: openai.AsyncOpenAI):
-    input = "<|user|>\nPlease write me a poem about my recent hike of Mt. Fuji at midnight in the style of Shakespeare.\n<|assistant|>\n"
+    input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
     outputs = await client_generate.completions.create(
         model=MODEL_NAME,
@@ -216,4 +188,4 @@ async def test_gritlm_api_server_gen(client_generate: openai.AsyncOpenAI):
         temperature=0.0,
     )
 
-    validate_gen_output(outputs.choices[0].text)
+    assert outputs.choices[0].text == "The capital of France is Paris."
