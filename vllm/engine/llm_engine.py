@@ -677,12 +677,10 @@ class LLMEngine:
         self.model_executor.stop_remote_worker_execution_loop()
 
     @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
-        *,
-        inputs: PromptType,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -693,10 +691,12 @@ class LLMEngine:
         ...
 
     @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
-        prompt: PromptType,
+        *,
+        inputs: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
