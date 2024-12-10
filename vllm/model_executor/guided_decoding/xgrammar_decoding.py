@@ -237,31 +237,30 @@ class XGrammarLogitsProcessor:
             self.token_bitmask = xgr.allocate_token_bitmask(
                 self.batch_size, self.config.vocab_size)
 
-        print("input_ids", input_ids)
-        # if len(input_ids) < 1:
-        #     # Have not sampled a token yet
-        #     self.prefilled = True
-        # else:
-        #     for i, matcher in enumerate(self.matchers):
-        #         if not matcher.is_terminated():
-        #             sampled_token = input_ids[-1]
-        #             assert self.matchers[i].accept_token(sampled_token)
+        if len(input_ids) < 1:
+            # Have not sampled a token yet
+            self.prefilled = True
+        else:
+            for i, matcher in enumerate(self.matchers):
+                if not matcher.is_terminated():
+                    sampled_token = input_ids[-1]
+                    assert self.matchers[i].accept_token(sampled_token)
 
-        # for i, matcher in enumerate(self.matchers):
-        #     if not matcher.is_terminated():
-        #         # @ubospica: ideally, fill_next_token_bitmask should be
-        #         # parallelized with model decoding
-        #         # See https://github.com/vllm-project/vllm/pull/10785/files#r1864278303
-        #         matcher.fill_next_token_bitmask(self.token_bitmask, i)
+        for i, matcher in enumerate(self.matchers):
+            if not matcher.is_terminated():
+                # @ubospica: ideally, fill_next_token_bitmask should be
+                # parallelized with model decoding
+                # See https://github.com/vllm-project/vllm/pull/10785/files#r1864278303
+                matcher.fill_next_token_bitmask(self.token_bitmask, i)
 
-        # # token_bitmask is a CPU tensor for use with accept_token and
-        # # fill_next_token_bitmask so we move it to the device of scores
-        # device_type = scores.device.type
-        # if device_type != "cuda":
-        #     scores = scores.to("cpu")
-        # xgr.apply_token_bitmask_inplace(scores,
-        #                                 self.token_bitmask.to(scores.device))
-        # if device_type != "cuda":
-        #     scores = scores.to(device_type)
+        # token_bitmask is a CPU tensor for use with accept_token and
+        # fill_next_token_bitmask so we move it to the device of scores
+        device_type = scores.device.type
+        if device_type != "cuda":
+            scores = scores.to("cpu")
+        xgr.apply_token_bitmask_inplace(scores,
+                                        self.token_bitmask.to(scores.device))
+        if device_type != "cuda":
+            scores = scores.to(device_type)
 
         return scores
