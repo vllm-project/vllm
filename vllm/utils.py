@@ -1660,11 +1660,11 @@ class MemoryProfilingResult:
 
     Illustration:
 
-                                |              cuda memory          |
-                                |            | torch memory |       |
-    Before profiling:            | --------- | +++++++++ |  |
-    During profiling (peak):     | --------- | +++++++++++++ | *** |
-    After profiling:             | --------- | +++++++++++ | *** |
+                                |              cuda memory         |
+                                |            | torch memory  |     |
+    Before profiling:           | ---------- | +++++++++     |     |
+    During profiling (peak):    | ---------- | +++++++++++++ | *** |
+    After profiling:            | ---------- | +++++++++++   | *** |
     """ # noqa
     memory_used_by_other_process_in_bytes: int = 0
     torch_peak_memory_in_bytes: int = 0
