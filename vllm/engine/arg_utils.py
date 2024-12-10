@@ -1225,19 +1225,24 @@ class EngineArgs:
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
 
+        # V1 always uses chunked prefills.
+        self.enable_chunked_prefill = True
+        # When no user override, set the default values based on the usage
+        # context.
+        # TODO(woosuk): Tune the default values for different hardware.
         if self.max_num_batched_tokens is None:
-            # When no user override, set the default values based on the
-            # usage context.
             if usage_context == UsageContext.LLM_CLASS:
-                logger.warning("Setting max_num_batched_tokens to 8192 "
-                               "for LLM_CLASS usage context.")
-                self.max_num_seqs = 1024
                 self.max_num_batched_tokens = 8192
             elif usage_context == UsageContext.OPENAI_API_SERVER:
-                logger.warning("Setting max_num_batched_tokens to 2048 "
-                               "for OPENAI_API_SERVER usage context.")
-                self.max_num_seqs = 1024
                 self.max_num_batched_tokens = 2048
+            logger.warning(
+                "Setting max_num_batched_tokens to %d for %s usage context.",
+                self.max_num_batched_tokens, usage_context.value)
+        # NOTE(woosuk): Increase max_num_seqs since the default value (256) is
+        # too small to achieve the best performance in V1.
+        self.max_num_seqs = 1024
+        logger.warning("Setting max_num_seqs to %d for %s usage context.",
+                        self.max_num_seqs, usage_context.value)
 
     def _override_v1_engine_config(self, engine_config: VllmConfig) -> None:
         """
