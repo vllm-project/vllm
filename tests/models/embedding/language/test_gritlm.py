@@ -24,6 +24,7 @@ MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 
 MAX_MODEL_LEN = 4000
 
+
 def _arr(arr):
     """
     Convert a list of integers to an array of integers.
