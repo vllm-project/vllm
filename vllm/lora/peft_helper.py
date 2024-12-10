@@ -23,18 +23,20 @@ class PEFTHelper:
     vllm_scaling_factor: Optional[float] = field(default=None)
 
     def _validate_features(self):
-        unsupported_features = []
+        error_msg = []
 
+        if self.modules_to_save:
+            error_msg.append(
+                "vLLM only supports modules_to_save being None."
+            )
         if self.use_rslora:
-            unsupported_features.append("RSLoRA")
+            error_msg.append("vLLM does not yet support RSLoRA.")
 
         if self.use_dora:
-            unsupported_features.append("DoRA")
+            error_msg.append("vLLM does not yet support DoRA.")
 
-        if unsupported_features:
-            raise ValueError(
-                f"The following features are not currently supported:"
-                f"{', '.join(unsupported_features)}")
+        if error_msg:
+            raise ValueError(f"{', '.join(error_msg)}")
 
     def __post_init__(self):
         self._validate_features()

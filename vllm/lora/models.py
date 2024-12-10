@@ -168,15 +168,6 @@ class LoRAModel(AdapterModel):
 
         for lora in loras.values():
             lora.optimize()
-        # rank = config["r"]
-        # lora_alpha = config["lora_alpha"]
-        # context_length = config.get("context_length", None)
-        # scaling_factor = None
-        # if context_length:
-        #     if max_position_embeddings is None:
-        #         max_position_embeddings = context_length
-        #     scaling_factor = float(
-        #         math.ceil(context_length / max_position_embeddings))
 
         return cls(lora_model_id,
                    peft_helper.r,
@@ -223,6 +214,9 @@ class LoRAModel(AdapterModel):
                                                     "new_embeddings.bin")
         with open(lora_config_path) as f:
             config = json.load(f)
+        
+        config["vllm_max_position_embeddings"] = max_position_embeddings
+        peft_helper = PEFTHelper.from_dict(config)
         if os.path.isfile(lora_tensor_path):
             tensors: Dict[str, torch.Tensor] = {}
             # Find unexpected modules.
@@ -253,7 +247,7 @@ class LoRAModel(AdapterModel):
             # When a bin file is provided, we rely on config to find unexpected
             # modules.
             unexpected_modules = []
-            target_modules = config["target_modules"]
+            target_modules = peft_helper.target_modules
             if not isinstance(target_modules, list):
                 target_modules = [target_modules]
             for module in target_modules:
@@ -267,7 +261,7 @@ class LoRAModel(AdapterModel):
             # https://github.com/vllm-project/vllm/pull/5909. But there's no
             # other better mechanism.
             if unexpected_modules and not is_regex_target_modules(
-                    config["target_modules"], expected_lora_modules):
+                    peft_helper.target_modules, expected_lora_modules):
                 raise ValueError(
                     f"While loading {lora_dir}, expected"
                     f" target modules in {expected_lora_modules}"
@@ -285,8 +279,7 @@ class LoRAModel(AdapterModel):
             embeddings = torch.load(new_embeddings_bin_file_path,
                                     map_location=device)
 
-        config["vllm_max_position_embeddings"] = max_position_embeddings
-        peft_helper = PEFTHelper.from_dict(config)
+     
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
             if lora_model_id is None else lora_model_id,
