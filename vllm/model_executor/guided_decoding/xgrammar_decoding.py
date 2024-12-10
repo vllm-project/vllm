@@ -21,6 +21,7 @@ from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
+    from vllm.config import ModelConfig
     from vllm.sampling_params import GuidedDecodingParams
 
 
@@ -28,8 +29,10 @@ if TYPE_CHECKING:
 def get_local_xgrammar_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer: PreTrainedTokenizer,
+        model_config: ModelConfig,
         max_threads: int = 8):
     config = GrammarConfig.from_guided_params(guided_params=guided_params,
+                                              model_config=model_config,
                                               tokenizer=tokenizer,
                                               max_threads=max_threads)
     return XGrammarLogitsProcessor(config)
@@ -142,6 +145,7 @@ class GrammarConfig:
     @classmethod
     def from_guided_params(cls,
                            guided_params: GuidedDecodingParams,
+                           model_config: ModelConfig,
                            tokenizer: PreTrainedTokenizer,
                            max_threads: int = 8) -> GrammarConfig:
 

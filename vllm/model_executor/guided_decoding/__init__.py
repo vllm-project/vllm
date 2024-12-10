@@ -9,6 +9,7 @@ from vllm.platforms import CpuArchEnum, current_platform
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
+    from vllm.config import ModelConfig
     from vllm.logits_process import LogitsProcessor
     from vllm.sampling_params import GuidedDecodingParams
 
@@ -87,7 +88,8 @@ def maybe_backend_fallback(
 
 async def get_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
-        tokenizer: PreTrainedTokenizer) -> LogitsProcessor | None:
+        tokenizer: PreTrainedTokenizer,
+        model_config: ModelConfig) -> LogitsProcessor | None:
     guided_params = maybe_backend_fallback(guided_params)
     # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend == 'outlines':
