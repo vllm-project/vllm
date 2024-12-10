@@ -445,6 +445,8 @@ class GPUModelRunner:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
 
+        attn_metadata.num_input_tokens = num_input_tokens
+
         # Get the inputs embeds.
         if encoder_outputs:
             inputs_embeds = self.model.get_input_embeddings(
