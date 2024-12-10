@@ -1,6 +1,5 @@
 from dataclasses import dataclass, fields
 from functools import cached_property
-from itertools import tee
 from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
 
 import numpy
@@ -48,6 +47,9 @@ try:
 except ImportError:
     USE_XFORMERS_OPS = False
 
+PIXTRAL_IMAGE_BREAK_ID = 12
+PIXTRAL_IMAGE_END_ID = 13
+
 
 def get_max_pixtral_image_tokens(ctx: InputContext):
     tokenizer = cached_get_tokenizer(
@@ -68,7 +70,6 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
         tokenizer_mode=ctx.model_config.tokenizer_mode)
 
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
-    patch_size = mm_encoder.mm_config.image_patch_size
     image_token_id = mm_encoder.special_ids.img
 
     mm_config = ctx.model_config.multimodal_config
@@ -78,8 +79,8 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     size = 256
     image = Image.new("RGB", (size, size), color=0)
 
-    image_feature_size = (size**2) // (patch_size**2)
-
+    encoding = tokenizer.instruct.mm_encoder(ImageChunk(image=image))
+    image_feature_size = len(encoding.tokens)
     num_image_tokens = image_feature_size * num_images
     seq_data = SequenceData.from_prompt_token_counts(
         (image_token_id, num_image_tokens),
@@ -101,14 +102,13 @@ def input_mapper_for_pixtral(ctx: InputContext,
 
     Args:
         ctx: Context of the loaded model.
-        data: data potentially containing image/image embeddings to be mapped
-            to pixel_values in .forward() for a visual QWenLMHeadModel model.
+        data: data potentially containing PIL images to be processed
+            and mapped to `images`.
 
     Returns:
         MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
-    # Early exit if we have provided an image to a language only Qwen model
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
         model_config.tokenizer, tokenizer_mode=model_config.tokenizer_mode)
@@ -116,35 +116,67 @@ def input_mapper_for_pixtral(ctx: InputContext,
     data_list = data if isinstance(data, list) else [data]
 
     images = []
+    image_tokens_list = []
     for image_data in data_list:
         image = ImageChunk(image=image_data)
         encoding = tokenizer.instruct.mm_encoder(image)
         image = torch.from_numpy(encoding.image).to(device="cuda",
                                                     dtype=torch.float16)
         images.append(image)
+        image_tokens_list.append(encoding.tokens)
 
-    return MultiModalKwargs({"images": images})
+    image_tokens = torch.tensor([
+        token_id for image_tokens in image_tokens_list
+        for token_id in image_tokens
+    ])
+    return MultiModalKwargs({"images": images, "image_tokens": image_tokens})
 
 
 def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
     multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is not None and "image" in multi_modal_data:
-        tokenizer = cached_get_tokenizer(
-            ctx.model_config.tokenizer,
-            tokenizer_mode=ctx.model_config.tokenizer_mode)
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return inputs
 
-        mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
-        image_token_id = mm_encoder.special_ids.img
+    prompt_token_ids = inputs.get("prompt_token_ids")
+    prompt = inputs.get("prompt")
+    tokenizer = cached_get_tokenizer(
+        ctx.model_config.tokenizer,
+        tokenizer_mode=ctx.model_config.tokenizer_mode)
 
-        if image_token_id not in inputs['prompt_token_ids']:
-            raise ValueError(
-                f"You've passed {inputs=} without {image_token_id=}"
-                " Make sure to process your input via mistral_common's"
-                " tokenizer or pass a chat completion request. For more"
-                " For more info, see: "
-                "https://github.com/vllm-project/vllm/issues/8411.")
+    mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
+    image_token_id = mm_encoder.special_ids.img
+    image_break_id = mm_encoder.special_ids.img_break
+    image_end_id = mm_encoder.special_ids.img_end
 
-    return inputs
+    if image_token_id not in inputs['prompt_token_ids']:
+        raise ValueError(
+            f"You've passed {inputs=} without {image_token_id=}"
+            " Make sure to process your input via mistral_common's"
+            " tokenizer or pass a chat completion request. For more"
+            " For more info, see: "
+            "https://github.com/vllm-project/vllm/issues/8411.")
+
+    # Get precise tracking of placeholder positions
+    placeholder_ranges = []
+    curr_offset = -1
+    curr_length = 0
+    for i in range(len(prompt_token_ids)):
+        if prompt_token_ids[i] in (image_token_id, image_break_id):
+            if curr_offset < 0:
+                curr_offset = i
+            curr_length += 1
+        elif prompt_token_ids[i] == image_end_id:
+            curr_length += 1
+            placeholder_ranges.append(
+                PlaceholderRange(offset=curr_offset, length=curr_length))
+            curr_offset = -1
+            curr_length = 0
+        else:
+            pass
+    return token_inputs(prompt=prompt,
+                        prompt_token_ids=prompt_token_ids,
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": placeholder_ranges})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_pixtral)
@@ -192,11 +224,29 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return get_sampler()
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
-        image_input = self._parse_and_validate_image_input(**kwargs)
+        image_input, image_tokens = self._parse_and_validate_image_input(
+            **kwargs)
         if image_input is None:
             return None
+
         vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+
+        # NOTE: We patch the outputs of the vision encoder with embeddings
+        # from `[IMG_BREAK]` and `[IMG_END]` tokens.
+        image_embeds = self.language_model.get_input_embeddings(image_tokens)
+        image_token_mask = image_tokens == self.vision_args.image_token_id
+        image_embeds[image_token_mask] = vision_embeddings
+
+        # NOTE: Image embeddings are split into separate tensors for each image
+        # by the indices of `[IMG_END]` token.
+        split_indices = torch.where(
+            image_tokens == PIXTRAL_IMAGE_END_ID)[0] + 1
+        if len(split_indices) <= 1:
+            # Do not split, return as tensor of shape [1, fs, hs]
+            return image_embeds.unsqueeze(0)
+
+        image_embeds = image_embeds.tensor_split(split_indices.cpu())
+        return image_embeds
 
     def get_input_embeddings(
         self,
@@ -206,8 +256,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.vision_args.image_token_id)
+                input_ids, inputs_embeds, multimodal_embeddings, [
+                    self.vision_args.image_token_id, PIXTRAL_IMAGE_END_ID,
+                    PIXTRAL_IMAGE_BREAK_ID
+                ])
         return inputs_embeds
 
     def forward(
@@ -245,10 +297,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _parse_and_validate_image_input(
         self,
         images: Optional[Union[List[List[torch.Tensor]], List[torch.Tensor],
-                               torch.Tensor]] = None
+                               torch.Tensor]] = None,
+        image_tokens: Optional[torch.Tensor] = None,
     ) -> Optional[List[torch.Tensor]]:
         if images is None:
-            return None
+            return None, None
 
         if isinstance(images, torch.Tensor):
             # if passed as batch take all images
@@ -267,7 +320,16 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             images = flatten_images
 
-        return images
+        if isinstance(image_tokens, torch.Tensor):
+            # image_tokens are batched
+            image_tokens = image_tokens.flatten()
+        elif isinstance(image_tokens, list):
+            # image_tokens are of different lengths thus passed as a list
+            image_tokens = torch.cat(image_tokens)
+
+        assert image_tokens.dim() == 1
+
+        return images, image_tokens
 
     def _process_image_input(self,
                              image_input: List[torch.Tensor]) -> torch.Tensor:
@@ -296,38 +358,33 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         def is_vision_lang_adapter_weights(weight: Tuple[str, torch.Tensor]):
             return weight[0].startswith("vision_language_adapter")
 
-        def is_vision_weights(weight: Tuple[str, torch.Tensor]):
-            return is_vision_encoder_weights(
-                weight) or is_vision_lang_adapter_weights(weight)
-
-        llm_weights, vision_encoder_weights, vision_lang_adapter_weights = tee(
-            weights, 3)
-
-        # llm
-        llm_weights = filter(lambda x: not is_vision_weights(x), llm_weights)
-        self.language_model.load_weights(llm_weights)
-
-        # vision encoder
-        vision_encoder_weights = filter(is_vision_encoder_weights,
-                                        vision_encoder_weights)
+        # Get references to parameters for direct loading
         vision_encoder_dict = dict(self.vision_encoder.named_parameters())
-        for name, loaded_weight in vision_encoder_weights:
-            # cut 'vision_encoder.'
-            name = '.'.join(name.split(".")[1:])
-            param = vision_encoder_dict[name]
-
-            default_weight_loader(param, loaded_weight)
-
-        # adapter
-        vision_lang_adapter_weights = filter(is_vision_lang_adapter_weights,
-                                             vision_lang_adapter_weights)
-        vision_lang_adpter_dict = dict(
+        vision_lang_adapter_dict = dict(
             self.vision_language_adapter.named_parameters())
-        for name, loaded_weight in vision_lang_adapter_weights:
-            # cut 'vision_language_adapter.'
-            name = '.'.join(name.split(".")[1:])
-            param = vision_lang_adpter_dict[name]
-            default_weight_loader(param, loaded_weight)
+
+        def llm_weights_generator():
+            # Single pass over weights
+            for name, w in weights:
+                if is_vision_encoder_weights((name, w)):
+                    # Load vision encoder weights directly
+                    trimmed_name = '.'.join(name.split(".")[1:])
+                    param = vision_encoder_dict[trimmed_name]
+                    with torch.no_grad():
+                        default_weight_loader(param, w)
+                elif is_vision_lang_adapter_weights((name, w)):
+                    # Load vision-language adapter weights directly
+                    trimmed_name = '.'.join(name.split(".")[1:])
+                    param = vision_lang_adapter_dict[trimmed_name]
+                    with torch.no_grad():
+                        default_weight_loader(param, w)
+                else:
+                    # LLM weights: yield them to be loaded
+                    # by language_model.load_weights
+                    yield (name, w)
+
+        # Now we call the language model load with the generator
+        self.language_model.load_weights(llm_weights_generator())
 
 
 # Vision encoder

@@ -233,6 +233,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
     ) -> None:
 
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -248,61 +249,12 @@ class LLMEngine:
         )
 
         logger.info(
-            "Initializing an LLM engine (v%s) with config: "
-            "model=%r, speculative_config=%r, tokenizer=%r, "
-            "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "override_neuron_config=%s, tokenizer_revision=%s, "
-            "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
-            "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
-            "pipeline_parallel_size=%d, "
-            "disable_custom_all_reduce=%s, quantization=%s, "
-            "weights_load_device=%s, enforce_eager=%s, kv_cache_dtype=%s, "
-            "quantization_param_path=%s, device_config=%s, "
-            "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s, "
-            "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
-            "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
-            "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "mm_processor_kwargs=%s, pooler_config=%r,"
-            "compilation_config=%r",
+            "Initializing an LLM engine (v%s) with config: %r,"
+            "use_cached_outputs=%s, ",
             VLLM_VERSION,
-            self.model_config.model,
-            self.speculative_config,
-            self.model_config.tokenizer,
-            self.model_config.skip_tokenizer_init,
-            self.model_config.tokenizer_mode,
-            self.model_config.revision,
-            self.model_config.override_neuron_config,
-            self.model_config.tokenizer_revision,
-            self.model_config.trust_remote_code,
-            self.model_config.dtype,
-            self.model_config.max_model_len,
-            self.load_config.download_dir,
-            self.load_config.load_format,
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size,
-            self.parallel_config.disable_custom_all_reduce,
-            self.model_config.quantization,
-            self.load_config.device,
-            self.model_config.enforce_eager,
-            self.cache_config.cache_dtype,
-            self.model_config.quantization_param_path,
-            self.device_config.device,
-            self.decoding_config,
-            self.observability_config,
-            self.model_config.seed,
-            self.model_config.served_model_name,
-            self.scheduler_config.num_scheduler_steps,
-            self.scheduler_config.chunked_prefill_enabled,
-            self.scheduler_config.multi_step_stream_outputs,
-            self.cache_config.enable_prefix_caching,
-            self.model_config.use_async_output_proc,
+            vllm_config,
             use_cached_outputs,
-            self.model_config.mm_processor_kwargs,
-            self.model_config.pooler_config,
-            vllm_config.compilation_config,
         )
-        # TODO(woosuk): Print more configs in debug mode.
 
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
@@ -435,13 +387,14 @@ class LLMEngine:
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(
-                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
+                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                        vllm_config=vllm_config),
                     "prometheus":
                     PrometheusStatLogger(
                         local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                         labels=dict(
                             model_name=self.model_config.served_model_name),
-                        max_model_len=self.model_config.max_model_len),
+                        vllm_config=vllm_config),
                 }
                 self.stat_loggers["prometheus"].info("cache_config",
                                                      self.cache_config)
@@ -731,12 +684,10 @@ class LLMEngine:
         self.model_executor.stop_remote_worker_execution_loop()
 
     @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
-        *,
-        inputs: PromptType,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -747,10 +698,12 @@ class LLMEngine:
         ...
 
     @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
-        prompt: PromptType,
+        *,
+        inputs: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
