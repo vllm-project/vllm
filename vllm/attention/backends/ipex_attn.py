@@ -463,8 +463,13 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     value = value.repeat_interleave(self.num_queries_per_kv,
                                                     dim=1)
                 import vllm._C.ops
+                assert self.head_size == 128 or self.head_size == 64
                 value = os.environ.get('USE_CONTEXT_V1')
-                if self.head_size == 128 and value is None:
+                if using_gqa_kernel:
+                    # if using_gqa_kernel, then only the v1 kernel can be used
+                    out = vllm._C.ops.context_attention_forward_v1(query, key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens_tensor, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
+                elif value is None:
+                    # Otherwise, by default use v2 attention forward kernel...
                     out = vllm._C.ops.context_attention_forward_v2(query, key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens_tensor, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
                 else:
                     out = vllm._C.ops.context_attention_forward_v1(query, key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens_tensor, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
