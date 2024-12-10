@@ -27,7 +27,7 @@ TEST_IMAGE_URLS = [
 def server():
     args = [
         "--task",
-        "embedding",
+        "embed",
         "--dtype",
         "bfloat16",
         "--max-model-len",

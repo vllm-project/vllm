@@ -35,7 +35,7 @@ def get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
-    if model_config.task == "embedding":
+    if model_config.runner_type == "pooling":
         model_cls = as_embedding_model(model_cls)
 
     return model_cls, arch
