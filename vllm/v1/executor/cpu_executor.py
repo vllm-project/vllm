@@ -11,8 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (get_distributed_init_method, get_open_port,
-                        get_vllm_instance_id, make_async,
-                        enable_trace_function_call_for_thread,
+                        make_async, enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, update_environment_variables)
 
 from vllm.v1.executor.abstract import Executor
@@ -44,10 +43,6 @@ class CPUExecutor(Executor):
         #
         # Environment variables for CPU executor
         #
-
-        # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
-        os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
-
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
@@ -191,7 +186,7 @@ class CPUExecutor(Executor):
         return self.driver_method_invoker(self.driver_worker,
                                           "determine_num_available_blocks")
 
-    def initialize_cache(self, num_gpu_blocks: int,
+    def initialize(self, num_gpu_blocks: int,
                          num_cpu_blocks: int = 0) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
@@ -245,6 +240,16 @@ class CPUExecutor(Executor):
         async_run_remote_workers_only to complete."""
         for result in parallel_worker_tasks:
             result.get()
+
+    def profile(self, is_start=True):
+        raise NotImplementedError
+
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> []:
+        raise NotImplementedError
 
 
 class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
@@ -301,7 +306,7 @@ class WorkerWrapperBaseV1:
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
-        enable_trace_function_call_for_thread()
+        enable_trace_function_call_for_thread(self.vllm_config)
 
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'

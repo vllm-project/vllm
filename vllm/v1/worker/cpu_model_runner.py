@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 class CPUModelRunner(GPUModelRunner):
     #
     def __init__(self, vllm_config):
-        super().__init__(vllm_config)
+        super().__init__(vllm_config, vllm_config.device_config.device)
         self.use_cuda_graph = False
         num_attn_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
@@ -85,8 +85,7 @@ class CPUModelRunner(GPUModelRunner):
         )
 
         # NOTE: CPU-GPU synchronization happens here.
-        sampled_token_ids = sampler_output.sampled_token_ids.cpu()
-        sampled_token_ids_list = sampled_token_ids.tolist()
+        sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
@@ -97,7 +96,7 @@ class CPUModelRunner(GPUModelRunner):
             assert seq_len <= req_state.num_tokens
             if seq_len == req_state.num_tokens:
                 # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids_list[i]
+                token_id = sampled_token_ids[i]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
             else:
@@ -119,7 +118,7 @@ class CPUModelRunner(GPUModelRunner):
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids_cpu=sampled_token_ids,
+            sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
         )
@@ -129,30 +128,6 @@ class CPUModelRunner(GPUModelRunner):
         self.model = get_model(vllm_config=self.vllm_config)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
-        # build input_data
-        '''
-            self.use_mrope = use_mrope
-            self.input_tokens: List[int] = []
-            self.input_positions: Optional[
-                List[int]] = [] if not self.use_mrope else None
-            self.token_type_ids: Optional[List[int]] = []
-            self.seq_lens: List[int] = []
-            self.query_lens: List[int] = []
-            self.prefill_block_tables: List[List[int]] = []
-            self.decode_block_tables: List[List[int]] = []
-            self.max_decode_seq_len: int = 0
-            self.num_prefills: int = 0
-            self.num_prefill_tokens: int = 0
-            self.num_decode_tokens: int = 0
-            self.slot_mapping: List[int] = []
-            self.multi_modal_inputs_list: List[MultiModalKwargs] = []
-            self.multi_modal_placeholder_maps: Dict[
-                str, MultiModalPlaceholderMap] = defaultdict(
-                    MultiModalPlaceholderMap)
-            self.input_mrope_positions: Optional[List[List[int]]] = [
-                [] for _ in range(3)
-            ] if self.use_mrope else None
-        '''
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
