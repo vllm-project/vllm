@@ -116,6 +116,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: Tuple[torch.Tensor, ...],
+        offset_start: int,
         add_input: bool,
     ):
         #No LoRA request, so return directly
@@ -126,6 +127,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             w_t_all,
             y,
             *self.prefill_metadata,
+            offset_start,
             add_input,
         )
 
@@ -235,24 +237,28 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        offset_left = offset_start
+        # offset_ = offset_start
         if lora_bias_stacked is not None:
             self._apply_bias(self.token_lora_indices, y, output_slices,
                              lora_bias_stacked)
         if self.is_prefill:
             # NOTE fused kernel
-            self._expand_nslices_prefill(y, x, lora_b_stacked, add_input=True)
+            self._expand_nslices_prefill(y,
+                                         x,
+                                         lora_b_stacked,
+                                         offset_start,
+                                         add_input=True)
         else:
             for slice_idx in range(len(lora_b_stacked)):
                 self._apply_expand(
                     y,
                     x[slice_idx],
                     lora_b_stacked[slice_idx],
-                    offset_left,
+                    offset_start,
                     output_slices[slice_idx],
                     add_input=add_input,
                 )
-                offset_left += output_slices[slice_idx]
+                offset_start += output_slices[slice_idx]
         y = y.view_as(y_org)
 
     def add_lora_embedding(self,
@@ -323,11 +329,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default ,refer to:
             # https://github.com/triton-lang/triton/issues/1387
-            # buffer = tuple(
-            #     torch.zeros(
-            #         (x.size(0), r), dtype=torch.float32, device=x.device)
-            #     for _ in range(len(output_slices)))
-
             buffer = torch.zeros(
                 (len(output_slices), x.size(0), r),
                 dtype=torch.float32,
@@ -341,6 +342,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                         output_slices,
                         add_input=True,
                         **kwargs)
+        pass
 
     def add_lora_logits(self,
                         y: torch.Tensor,

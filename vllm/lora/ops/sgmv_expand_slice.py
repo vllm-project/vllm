@@ -25,8 +25,9 @@ def _sgmv_expand_slice_kernel(
     seq_lens,
     lora_indices,
     slice_start_loc,
-    xm_stride,
-    xk_stride,  # 1
+    input_d0_stride,
+    input_d1_stride,
+    input_d2_stride,  # 1
     ls_d0_ptr,  # lora stride(0)
     ls_d1_ptr,
     ls_d2_ptr,
@@ -67,23 +68,18 @@ def _sgmv_expand_slice_kernel(
     ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
 
-    # if CAST_TYPE:
-    #     # fp32
-    #     cur_input_ptr=tl.load(input_ptr + slice_id).to(
-    #         tl.pointer_type(tl.float32))
-    # else:
-    #     cur_input_ptr=tl.load(input_ptr + slice_id).to(
-    #        out_ptr.dtype.element_ty)
-    # cur_input_ptr = tl.load(input_ptr + slice_id * xm_stride * xk_stride)
+    # input
+    cur_input_ptr = input_ptr + slice_id * input_d0_stride
+    a_ptr = (cur_input_ptr + cur_seq_start * input_d1_stride +
+             ram[:, None] * input_d1_stride +
+             offset_k[None, :] * input_d2_stride, )
+    # lora
     cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
         tl.pointer_type(out_ptr.dtype.element_ty))
     cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
     cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
     cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
-    a_ptr = (input_ptr + slice_id * xm_stride * xk_stride +
-             cur_seq_start * xm_stride + ram[:, None] * xm_stride +
-             offset_k[None, :] * xk_stride, )
-    # lora
+
     b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
              offset_k[:, None] * cur_lora_d2_stride +
              rbn[None, :] * cur_lora_d1_stride)
@@ -105,15 +101,13 @@ def _sgmv_expand_slice_kernel(
             tiled_a,
             tiled_b,
         )
-        a_ptr += BLOCK_K * xk_stride
+        a_ptr += BLOCK_K * input_d2_stride
         b_ptr += BLOCK_K * cur_lora_d2_stride
 
     tiled_c = accumulator.to(cur_lora_ptr.dtype.element_ty)
-    # 获取每个slice的偏移地址
-    if slice_start_loc is not None:
-        cur_slice_start = tl.load(slice_start_loc + slice_id)
-    else:
-        cur_slice_start = 0
+
+    cur_slice_start = tl.load(slice_start_loc + slice_id)
+
     offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N + cur_slice_start
     c_ptr = (out_ptr + offset_cm[:, None] * cm_stride +
@@ -139,6 +133,7 @@ def _sgmv_expand_slice(
     batches: int,
     max_seq_length: int,
     token_nums: int,
+    offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
@@ -153,12 +148,13 @@ def _sgmv_expand_slice(
     assert b_seq_start_loc.size(0) == batches
     assert lora_indices_tensor.size(0) == batches
     assert output_tensor.is_contiguous()
+    # TODO Optimize the following code
     slice_offset_lst = []
     tensor_ptrs = []
     lora_strides_d0 = []
     lora_strides_d1 = []
     lora_strides_d2 = []
-    slice_offset = 0
+    slice_offset = offset_start
     for lora_b_weight in lora_b_stacked:
         if lora_b_weight.ndim == 4:  # shape:(lora_num,1,size,rank)
             assert lora_b_weight.size(1) == 1
@@ -214,6 +210,7 @@ def _sgmv_expand_slice(
         seq_len_tensor,
         lora_indices_tensor,
         slice_start_tensor,
+        inputs.stride(0),
         inputs.stride(1),
         inputs.stride(2),
         lora_strides_d0_tensor,
