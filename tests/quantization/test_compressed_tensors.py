@@ -78,8 +78,10 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
 @pytest.mark.parametrize(
     "model_path",
     [
-        "neuralmagic/Llama-3.2-1B-quantized.w8a8"
-        # TODO static & asymmetric
+        "neuralmagic/Llama-3.2-1B-quantized.w8a8",
+        "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Asym",
+        "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Sym",
+
     ])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [10])
