@@ -17,6 +17,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
                         get_ip, get_open_port, is_fake_hpu, make_async)
+from vllm.worker.worker_base import WorkerBase
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
