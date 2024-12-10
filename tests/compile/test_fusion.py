@@ -3,8 +3,9 @@ import torch
 from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
-from vllm.compilation.fusion import (FusionPass, find_auto_fn,
-                                     find_auto_fn_maybe)
+from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,
+                                     FusionPass, QuantKey)
+from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
 from vllm.compilation.reshapes import RedundantReshapesPass
 from vllm.config import CompilationConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -95,14 +96,14 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
     pre_nodes = backend.graph_pre_pass.nodes
     post_nodes = backend.graph_post_pass.nodes
 
-    if static:
-        rms_quant = torch.ops._C.rms_norm_static_fp8_quant.default
-        add_rms_quant = torch.ops._C.fused_add_rms_norm_static_fp8_quant.default  # noqa: E501
-        fp8_quant = torch.ops._C.static_scaled_fp8_quant.default
-    else:
-        rms_quant = torch.ops._C.rms_norm_dynamic_per_token_quant.default
-        add_rms_quant = torch.ops._C.rms_norm_dynamic_per_token_quant.default  # noqa: E501
-        fp8_quant = torch.ops._C.dynamic_per_token_scaled_fp8_quant.default
+    # static is per-tensor, dynamic is per-token
+    key = QuantKey(dtype=FP8_DTYPE,
+                   static=static,
+                   per_tensor=static,
+                   symmetric=True)
+    rms_quant = FUSED_OPS[FusedRMSQuantKey(key, False)]
+    add_rms_quant = FUSED_OPS[FusedRMSQuantKey(key, True)]
+    fp8_quant = QUANT_OPS[key]
 
     # In pre-nodes, fp8 quant should be present and fused kernels should not
     assert find_auto_fn_maybe(pre_nodes, rms_quant) is None

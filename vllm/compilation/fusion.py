@@ -1,7 +1,4 @@
-import abc
-import operator
-from abc import abstractmethod
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -10,11 +7,14 @@ from compressed_tensors.quantization import FP8_DTYPE
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
+from torch._ops import OpOverload
 
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
-from .vllm_inductor_pass import VllmInductorPass, is_func
+from .fx_utils import find_getitem_maybe
+from .multi_output_match import MultiOutputMatch
+from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
@@ -27,157 +27,66 @@ def empty_fp32(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.float32, device="cuda")
 
 
-# Utilities for post-processing multi-output matches
-
-
-# Returns the first auto_functionalized node with the given op (if it exists)
-def find_auto_fn_maybe(nodes: Iterable[fx.Node], op) -> Optional[fx.Node]:
-    for node in nodes:
-        if is_func(node, auto_functionalized) and node.args[0] == op:  # noqa
-            return node
-    return None
-
-
-# Returns the first auto_functionalized node with the given op
-def find_auto_fn(nodes: Iterable[fx.Node], op) -> fx.Node:
-    node = find_auto_fn_maybe(nodes, op)
-    assert node is not None, f"Could not find {op} in nodes {nodes}"
-    return node
-
-
-# Returns the getitem node that extracts the idx-th element from node
-# (if it exists)
-def find_getitem_maybe(node: fx.Node, idx: int) -> Optional[fx.Node]:
-    for user in node.users:
-        if is_func(user, operator.getitem) and user.args[1] == idx:
-            return user
-    return None
-
-
-# Returns the getitem node that extracts the idx-th element from node
-def find_getitem(node: fx.Node, idx: int) -> fx.Node:
-    ret = find_getitem_maybe(node, idx)
-    assert ret is not None, f"Could not find getitem {idx} in node {node}"
-    return ret
-
-
-class MultiOutputMatch(abc.ABC):
-    """
-    This class provides utilities to process multi-output matches and
-    manually insert replacements.
-
-    This is necessary because the automatic replacement for multi-output
-    matches is broken: https://github.com/pytorch/pytorch/issues/137280
-    """
-
-    def __init__(self, match: pm.Match):
-        self.match = match
-
-    @abstractmethod
-    def process(self):
-        """
-        Process a multi-output match and manually insert the replacement.
-
-        This method should:
-        1. Insert the replacement nodes after the last node in the match.
-        2. Rebind the users of nodes in the match to use the new nodes.
-        3. Set meta["val"] for de-functionalization.
-
-        The result of an auto-functionalized node is a tuple of tensors.
-        The first element is the return value of the function, usually None.
-        The remaining elements are the mutated args of the function.
-
-        All auto-functionalized nodes must contain a proper meta["val"],
-        as it is used by de-functionalization. meta["val"] has to contain the
-        value of the node (tuple of tensors) that would be returned by the
-        functionalized node during tracing.
-
-        Existing nodes in the graph all have this property set, but we have
-        to set it manually for new nodes we insert.
-
-        Example:
-        # op schema: foo(a: Tensor!, b: Tensor, c: Tensor!) -> None
-        at = auto_functionalized(torch.ops._C.foo.default, a, b, c)
-        # at.meta["val"] = (None, a, c)
-        """
-        raise NotImplementedError
-
-    @property
-    def nodes(self) -> List[fx.Node]:
-        return self.match.nodes
-
-    @property
-    def graph(self) -> fx.Graph:
-        return self.match.graph
-
-    def find_auto_fn(self, op) -> fx.Node:
-        """
-        Find the first auto_functionalized node with the given op in the match.
-        """
-        return find_auto_fn(self.nodes, op)
-
-    def inserting_after_match(self):
-        """
-        Insert nodes after the last node in the match.
-        This is done to avoid use-before-definition errors after inserting
-        replacement nodes.
-        """
-
-        # match.nodes is not guaranteed to be sorted.
-        # Find the last node in the match.
-        for last_node_in_match in reversed(self.graph.nodes):
-            if last_node_in_match in self.match.nodes:
-                break
-        else:
-            raise ValueError("No nodes in graph")
-
-        return self.graph.inserting_after(last_node_in_match)
-
-    def insert_getitems(self, tuple_node: fx.Node,
-                        indices: Iterable[int]) -> Tuple[fx.Node, ...]:
-        """
-        Insert operator.getitem nodes to extract elements from a tuple node.
-
-        :param tuple_node: The tuple node to extract elements from.
-        :param indices: The indices of the elements to extract.
-        :return: Tuple of the new getitem nodes, corresponding to the indices.
-        """
-        with self.graph.inserting_after(tuple_node):
-            return tuple(
-                self.graph.call_function(operator.getitem, (tuple_node, idx))
-                for idx in indices)
-
-    def insert_auto_fn(self, op, kwargs):
-        """
-        Insert an auto_functionalized node with the given op and kwargs.
-        """
-        return self.graph.call_function(auto_functionalized, (op, ),
-                                        kwargs=kwargs)
-
-
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
-# Key: (fp8/int8, static/dynamic, per-tensor/per-token, symmetric/asymmetric)
-QUANT_OPS = {
-    (FP8_DTYPE, True, True, True):
-    torch.ops._C.static_scaled_fp8_quant.default,
-    (FP8_DTYPE, False, True, True):
-    torch.ops._C.dynamic_scaled_fp8_quant.default,
-    (FP8_DTYPE, False, False, True):
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,
+
+class QuantKey(NamedTuple):
+    """
+    Named tuple for identifying the type of quantization.
+    dtype: quantized data type
+    static: static quantization if True, dynamic if False
+    per_tensor: per-tensor quantization if True, per-token if False
+    symmetric: symmetric if True, asymmetric if False
+    """
+    dtype: torch.dtype
+    static: bool
+    per_tensor: bool = True
+    symmetric: bool = True
+
+    def __str__(self):
+        return (f"QuantKey({'static' if self.static else 'dynamic'},"
+                f"{fx.graph.dtype_abbrs[self.dtype]},"
+                f"{'per_tensor' if self.per_tensor else 'per_token'},"
+                f"{'a' if not self.symmetric else ''}symmetric)")
+
+
+kFp8StaticTensorSym = QuantKey(FP8_DTYPE, True, True, True)
+kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, False, True, True)
+kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, False, False, True)
+
+QUANT_OPS: Dict[QuantKey, OpOverload] = {
+    kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa
+    kFp8DynamicTensorSym:
+    torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa
+    kFp8DynamicTokenSym:
+    torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa
 }
 
-# Key: (quant_key, fused_add)
-FUSED_OPS = {
-    ((FP8_DTYPE, True, True, True), False):
-    torch.ops._C.rms_norm_static_fp8_quant.default,
-    ((FP8_DTYPE, True, True, True), True):
-    torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,
-    ((FP8_DTYPE, False, False, True), False):
-    torch.ops._C.rms_norm_dynamic_per_token_quant.default,
-    ((FP8_DTYPE, False, False, True), True):
-    torch.ops._C.rms_norm_dynamic_per_token_quant.default,
+
+class FusedRMSQuantKey(NamedTuple):
+    """
+    Named tuple for identifying the type of RMSNorm + quant fusion.
+    quant: type of quantization
+    fused_add: does the op also perform the residual add
+    """
+    quant: QuantKey
+    fused_add: bool
+
+    def __str__(self):
+        return (f"FusedQuantKey({self.quant}, with"
+                f"{'' if self.fused_add else 'out'} residual)")
+
+
+FUSED_OPS: Dict[FusedRMSQuantKey, OpOverload] = {
+    FusedRMSQuantKey(kFp8StaticTensorSym, False):
+    torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa
+    FusedRMSQuantKey(kFp8StaticTensorSym, True):
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa
+    FusedRMSQuantKey(kFp8DynamicTokenSym, False):
+    torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa
+    FusedRMSQuantKey(kFp8DynamicTokenSym, True):
+    torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa
 }
 
 
@@ -185,8 +94,10 @@ class QuantMultiOutputMatch(MultiOutputMatch):
 
     def __init__(self, match: pm.Match, quant_op, fused_op):
         super().__init__(match)
-        self.QUANT_OP = quant_op
-        self.FUSED_OP = fused_op
+        assert isinstance(quant_op, OpOverload)
+        assert isinstance(fused_op, OpOverload)
+        self.QUANT_OP = quant_op  # in-place quant op
+        self.FUSED_OP = fused_op  # in-place fused quant op
 
     def insert_fused_node(self, fused_return_mapping: Dict[int, Tuple[fx.Node,
                                                                       int]],
@@ -212,7 +123,7 @@ class QuantMultiOutputMatch(MultiOutputMatch):
         insert_fused_node({1: (op1_node, 1), 2: (op2_node, 2), 3: (op1_node, 2)}
 
         Note that the 0th element is None for auto-functionalized in-place ops.
-        Hence others appear 1-indexed.
+        Hence, others appear 1-indexed.
         """
         fused_node = self.insert_auto_fn(self.FUSED_OP, kwargs)
         indices = fused_return_mapping.keys()
@@ -243,32 +154,17 @@ class QuantMultiOutputMatch(MultiOutputMatch):
 
 class RMSNormQuantPattern:
 
-    def __init__(self,
-                 epsilon: float,
-                 fused_add: bool,
-                 quant_dtype: torch.dtype,
-                 static: bool,
-                 per_tensor: bool = True,
-                 symmetric=True):
+    def __init__(self, epsilon: float, key: FusedRMSQuantKey):
         self.epsilon = epsilon
-        self.quant_dtype = quant_dtype
+        self.quant_dtype = key.quant.dtype
 
-        # nicer assert
-        keystr = lambda: (
-            f"({'static' if static else 'dynamic'}, {quant_dtype}, "
-            f"{'per_tensor' if per_tensor else 'per_token'}, "
-            f"{'a' if not symmetric else ''}symmetric)")
+        assert key.quant in QUANT_OPS, \
+            f"unsupported quantization scheme {key.quant}"
+        self.QUANT_OP = QUANT_OPS[key.quant]
 
-        key = (quant_dtype, static, per_tensor, symmetric)
-        assert key in QUANT_OPS, f"unsupported quantization scheme {keystr()}"
-        self.QUANT_OP = QUANT_OPS[key]
-
-        key2 = (key, fused_add)
-        assert key2 in FUSED_OPS, (
-            f"unsupported fused rmsnorm+quant op with"
-            f"{'out' if not fused_add else ''} residual)"
-            f" for quant scheme {keystr()})")
-        self.FUSED_OP = FUSED_OPS[key2]
+        assert key in FUSED_OPS, \
+            f"unsupported fused rmsnorm+quant op for {key}"
+        self.FUSED_OP = FUSED_OPS[key]
 
 
 class RMSNormStaticQuantPattern(RMSNormQuantPattern):
@@ -277,12 +173,12 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
                  epsilon: float,
                  quant_dtype: torch.dtype,
                  symmetric=True):
-        super().__init__(epsilon,
-                         fused_add=False,
-                         quant_dtype=quant_dtype,
-                         static=True,
-                         per_tensor=True,
-                         symmetric=symmetric)
+        fused_key = FusedRMSQuantKey(fused_add=False,
+                                     quant=QuantKey(dtype=quant_dtype,
+                                                    static=True,
+                                                    per_tensor=True,
+                                                    symmetric=symmetric))
+        super().__init__(epsilon, fused_key)
 
     def register(self, pm_pass: PatternMatcherPass):
         # Cannot use methods, as the self argument affects tracing
@@ -333,12 +229,12 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                  epsilon: float,
                  quant_dtype: torch.dtype,
                  symmetric=True):
-        super().__init__(epsilon,
-                         fused_add=True,
-                         quant_dtype=quant_dtype,
-                         static=True,
-                         per_tensor=True,
-                         symmetric=symmetric)
+        key = FusedRMSQuantKey(fused_add=True,
+                               quant=QuantKey(dtype=quant_dtype,
+                                              static=True,
+                                              per_tensor=True,
+                                              symmetric=symmetric))
+        super().__init__(epsilon, key)
 
     def register(self, pm_pass: PatternMatcherPass,
                  record_match: Callable[[MultiOutputMatch], bool]):
@@ -426,12 +322,12 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
                  quant_dtype: torch.dtype,
                  per_tensor: bool,
                  symmetric=True):
-        super().__init__(epsilon,
-                         fused_add=False,
-                         quant_dtype=quant_dtype,
-                         static=False,
-                         per_tensor=per_tensor,
-                         symmetric=symmetric)
+        key = FusedRMSQuantKey(fused_add=False,
+                               quant=QuantKey(dtype=quant_dtype,
+                                              static=False,
+                                              per_tensor=per_tensor,
+                                              symmetric=symmetric))
+        super().__init__(epsilon, key)
 
     def register(self, pm_pass: PatternMatcherPass,
                  record_match: Callable[[MultiOutputMatch], bool]):
@@ -524,12 +420,12 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
                  quant_dtype: torch.dtype,
                  per_tensor: bool = True,
                  symmetric=True):
-        super().__init__(epsilon,
-                         fused_add=True,
-                         quant_dtype=quant_dtype,
-                         static=False,
-                         per_tensor=per_tensor,
-                         symmetric=symmetric)
+        key = FusedRMSQuantKey(fused_add=True,
+                               quant=QuantKey(dtype=quant_dtype,
+                                              static=False,
+                                              per_tensor=per_tensor,
+                                              symmetric=symmetric))
+        super().__init__(epsilon, key)
 
     def register(self, pm_pass: PatternMatcherPass,
                  record_match: Callable[[MultiOutputMatch], bool]):
