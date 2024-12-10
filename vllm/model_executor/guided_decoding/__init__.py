@@ -87,8 +87,7 @@ def maybe_backend_fallback(
 
 
 async def get_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
-        tokenizer: PreTrainedTokenizer,
+        guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig) -> LogitsProcessor | None:
     guided_params = maybe_backend_fallback(guided_params)
     # CFG grammar not supported by LMFE, so we use outlines instead
@@ -119,6 +118,7 @@ def get_local_guided_decoding_logits_processor(
         model_config: ModelConfig) -> LogitsProcessor | None:
 
     loop = asyncio.get_event_loop()
-    f = get_guided_decoding_logits_processor(guided_params, tokenizer, model_config)
+    f = get_guided_decoding_logits_processor(guided_params, tokenizer,
+                                             model_config)
     res = loop.run_until_complete(f)
     return res

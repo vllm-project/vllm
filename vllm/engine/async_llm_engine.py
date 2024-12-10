@@ -551,7 +551,7 @@ async def build_guided_decoding_logits_processor_async(
     guided_decoding.backend = guided_decoding.backend or default_guided_backend
 
     processor = await get_guided_decoding_logits_processor(
-        guided_params=guided_decoding, 
+        guided_params=guided_decoding,
         tokenizer=tokenizer,
         model_config=model_config)
 

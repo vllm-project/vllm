@@ -10,6 +10,8 @@ from vllm.model_executor.guided_decoding.outlines_logits_processors import (
 from vllm.sampling_params import GuidedDecodingParams
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
+
+
 def test_guided_logits_processors(sample_regex, sample_json_schema):
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
@@ -41,7 +43,7 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
                          ["outlines", "lm-format-enforcer", "xgrammar"])
 async def test_guided_logits_processor_black_box(backend: str, sample_regex,
                                                  sample_json_schema):
-    
+
     config = ModelConfig(
         MODEL_NAME,
         task="generate",
