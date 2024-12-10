@@ -8,6 +8,8 @@ from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
 from vllm.sampling_params import GuidedDecodingParams
 
+GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+
 
 def test_guided_logits_processors(sample_regex, sample_json_schema):
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
@@ -36,14 +38,15 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend",
-                         ["outlines", "lm-format-enforcer", "xgrammar"])
-async def test_guided_logits_processor_black_box(backend: str, sample_regex,
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+async def test_guided_logits_processor_black_box(guided_decoding_backend: str,
+                                                 sample_regex,
                                                  sample_json_schema):
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
     token_ids = tokenizer.encode(
         f"Give an example IPv4 address with this regex: {sample_regex}")
-    regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
+    regex_request = GuidedDecodingParams(regex=sample_regex,
+                                         backend=guided_decoding_backend)
     regex_lp = await get_guided_decoding_logits_processor(
         regex_request, tokenizer)
     assert regex_lp is not None
@@ -57,7 +60,7 @@ async def test_guided_logits_processor_black_box(backend: str, sample_regex,
         f"Give an employee profile that fits this schema: {sample_json_schema}"
     )
     json_request = GuidedDecodingParams(json=sample_json_schema,
-                                        backend=backend)
+                                        backend=guided_decoding_backend)
     json_lp = await get_guided_decoding_logits_processor(
         json_request, tokenizer)
     assert json_lp is not None
