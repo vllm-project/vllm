@@ -1,5 +1,4 @@
 import multiprocessing
-import time
 from typing import List, Union
 
 import msgspec
@@ -7,7 +6,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.logger import init_logger
-from vllm.utils import get_open_zmq_ipc_path
+from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
@@ -99,6 +98,12 @@ class InprocClient(EngineCoreClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self.engine_core.abort_requests(request_ids)
 
+    def shutdown(self):
+        self.engine_core.shutdown()
+
+    def __del__(self):
+        self.shutdown()
+
     async def profile(self, is_start=True) -> None:
         self.engine_core.profile(is_start)
 
@@ -163,10 +168,10 @@ class MPClient(EngineCoreClient):
         # Shutdown the process if needed.
         if hasattr(self, "proc") and self.proc.is_alive():
             self.proc.terminate()
+            self.proc.join(5)
 
-            time.sleep(5)
             if self.proc.is_alive():
-                self.proc.kill()
+                kill_process_tree(self.proc.pid)
 
     def __del__(self):
         self.shutdown()
