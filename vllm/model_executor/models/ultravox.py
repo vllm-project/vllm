@@ -4,7 +4,7 @@
 import math
 from functools import cached_property, lru_cache
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union, cast)
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -16,8 +16,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.inputs import InputContext
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -25,12 +24,13 @@ from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              NestedTensors)
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges,
-                                   repeat_and_pad_placeholder_tokens)
-from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        InputProcessingContext,
+                                        ModalityProcessingMetadata,
+                                        MultiModalProcessingMetadata,
+                                        PromptReplacement)
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
-from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
@@ -72,23 +72,6 @@ def get_ultravox_max_audio_tokens(ctx: InputContext):
     return math.ceil(feature_extractor.chunk_length * _AUDIO_TOKENS_PER_SECOND)
 
 
-def dummy_seq_data_for_ultravox(
-    ctx: InputContext,
-    seq_len: int,
-    audio_count: int,
-):
-    audio_length = min(get_ultravox_max_audio_tokens(ctx),
-                       seq_len // audio_count)
-
-    return SequenceData.from_prompt_token_counts(
-        (_AUDIO_PLACEHOLDER_TOKEN, audio_length * audio_count),
-        (0, seq_len - audio_length * audio_count)), {
-            "audio":
-            consecutive_placeholder_ranges(num_items=audio_count,
-                                           item_size=audio_length)
-        }
-
-
 def dummy_audio_for_ultravox(
     ctx: InputContext,
     audio_count: int,
@@ -98,120 +81,43 @@ def dummy_audio_for_ultravox(
     return {"audio": [audio_and_sr] * audio_count}
 
 
-def dummy_data_for_ultravox(
-    ctx: InputContext,
-    seq_len: int,
-    mm_counts: Mapping[str, int],
-):
-    audio_count = mm_counts["audio"]
-    seq_data, ranges = dummy_seq_data_for_ultravox(ctx, seq_len, audio_count)
-    mm_dict = dummy_audio_for_ultravox(ctx, audio_count)
+def dummy_mm_kwargs_for_ultravox(ctx: InputProcessingContext,
+                                 mm_counts: Mapping[str, int]):
 
-    return DummyData(seq_data, mm_dict, ranges)
+    data = dummy_audio_for_ultravox(ctx=ctx, audio_count=mm_counts["audio"])
 
+    hf_processor = ctx.get_hf_processor()
+    audio_processor = hf_processor.audio_processor  # type: ignore
+    hf_inputs = audio_processor(audio=data['audio'], return_tensors="pt")
 
-def input_mapper_for_ultravox(ctx: InputContext, data: object):
-    if not isinstance(data, list):
-        data = [data]
-
-    if len(data) == 0:
-        return MultiModalKwargs()
-
-    # If the audio inputs are embeddings, no need for preprocessing
-    if is_list_of(data, torch.Tensor, check="all"):
-        return MultiModalKwargs({"audio_embeds": data})
-
-    audio_features = []
-    for audio_input in data:
-        if not isinstance(audio_input, tuple):
-            raise NotImplementedError(
-                f"Unsupported data type: {type(audio_input)}")
-
-        (audio, sr) = cast(Tuple[np.ndarray, Union[float, int]], audio_input)
-        feature_extractor = whisper_feature_extractor(ctx)
-
-        if sr != feature_extractor.sampling_rate:
-            try:
-                import librosa
-            except ImportError as exc:
-                raise ImportError(
-                    "Please install vllm[audio] for audio support.") from exc
-            audio = librosa.resample(audio,
-                                     orig_sr=sr,
-                                     target_sr=feature_extractor.sampling_rate)
-            sr = feature_extractor.sampling_rate
-
-        minimum_audio_length = feature_extractor.n_fft // 2 + 1
-        if len(audio) < minimum_audio_length:
-            # Not enough audio; pad it.
-            audio = np.pad(audio, (0, minimum_audio_length - len(audio)))
-
-        single_audio_features = feature_extractor(
-            audio, sampling_rate=sr, padding="longest",
-            return_tensors="pt")["input_features"]
-
-        # Remove the batch dimension because we're wrapping it in a list.
-        audio_features.append(single_audio_features.squeeze(0))
-
-    return MultiModalKwargs({"audio_features": audio_features})
+    return MultiModalKwargs(**hf_inputs)
 
 
-def input_processor_for_ultravox(ctx: InputContext, inputs: DecoderOnlyInputs):
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "audio" not in multi_modal_data:
-        return inputs
+def create_metadata_for_ultravox(
+        ctx: InputProcessingContext) -> MultiModalProcessingMetadata:
+    return {
+        "audio":
+        ModalityProcessingMetadata(prompt_repls=[
+            PromptReplacement(target=[_AUDIO_PLACEHOLDER_TOKEN],
+                              repl_unit=[_AUDIO_PLACEHOLDER_TOKEN],
+                              repl_count=get_ultravox_max_audio_tokens(ctx)),
+        ]),
+    }
 
-    if "multi_modal_placeholders" in inputs and "audio" in inputs[
-            "multi_modal_placeholders"]:
-        # The inputs already have placeholders.
-        return inputs
 
-    feature_extractor = whisper_feature_extractor(ctx)
-    audios = multi_modal_data["audio"]
-    if not isinstance(audios, list):
-        audios = [audios]
+class UltravoxProcessor(BaseMultiModalProcessor):
 
-    audio_token_counts = []
-    for audio in audios:
-        if isinstance(audio, torch.Tensor):
-            audio_num_tokens = audio.shape[1]
-            audio_token_counts.append(audio_num_tokens)
-        else:
-            audio_data, sample_rate = audio
-            audio_length = audio_data.shape[0]
-            if sample_rate != feature_extractor.sampling_rate:
-                # Account for resampling.
-                adjustment = feature_extractor.sampling_rate / sample_rate
-                audio_length = math.ceil(adjustment * audio_length)
+    def __init__(self, ctx: InputProcessingContext) -> None:
+        super().__init__(
+            ctx=ctx,
+            metadata=create_metadata_for_ultravox(ctx),
+        )
 
-            feature_extractor_output_length = math.ceil(
-                (audio_length - (feature_extractor.hop_length - 1)) /
-                feature_extractor.hop_length)
-
-            uv_config = ctx.get_hf_config(UltravoxConfig)
-            audio_num_tokens = min(
-                max(
-                    1,
-                    math.ceil(feature_extractor_output_length /
-                              (uv_config.stack_factor * 2))),
-                get_ultravox_max_audio_tokens(ctx))
-            audio_token_counts.append(audio_num_tokens)
-
-    tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
-
-    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
-        tokenizer,
-        inputs.get("prompt"),
-        inputs["prompt_token_ids"],
-        placeholder_token_id=_AUDIO_PLACEHOLDER_TOKEN,
-        repeat_count=audio_token_counts,
-    )
-
-    # NOTE: Create a defensive copy of the original inputs
-    return token_inputs(prompt_token_ids=new_token_ids,
-                        prompt=new_prompt,
-                        multi_modal_data=multi_modal_data,
-                        multi_modal_placeholders={"audio": ranges})
+    def _get_dummy_mm_kwargs(
+        self,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalKwargs:
+        return dummy_mm_kwargs_for_ultravox(self.ctx, mm_counts)
 
 
 class StackAudioFrames(nn.Module):
@@ -332,11 +238,9 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_ultravox)
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "audio", get_ultravox_max_audio_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_ultravox)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_ultravox)
+@MULTIMODAL_REGISTRY.register_processor(UltravoxProcessor)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
