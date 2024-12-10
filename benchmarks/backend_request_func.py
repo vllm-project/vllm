@@ -405,6 +405,12 @@ async def async_request_openai_chat_completions(
 
 def get_model(pretrained_model_name_or_path: str) -> str:
     if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
+        if os.getenv('MODELSCOPE_ACCESS_TOKEN', ''):
+            from modelscope.hub.api import HubApi
+            access_token = os.getenv('MODELSCOPE_ACCESS_TOKEN')
+            api = HubApi()
+            api.login(access_token)
+
         from modelscope import snapshot_download
 
         model_path = snapshot_download(
