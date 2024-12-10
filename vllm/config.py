@@ -697,28 +697,29 @@ class ModelConfig:
         # for hybrid/attention-free models w/o this attribute,
         # we will need to have workarounds like so
         attn_block_type = block_type == LayerBlockType.attention
-        is_full_attn_model = not self.is_hybrid and not self.is_attention_free
-
-        if self.is_attention_free and attn_block_type:
-            return 0
-        if is_full_attn_model and not attn_block_type:
-            return 0
-
+        is_transformer = not self.is_hybrid and not self.is_attention_free
         start, end = self.get_layers_start_end_indices(parallel_config)
 
-        # Transformers supports layers_block_type @property
-        layers_block_type_value = getattr(self.hf_config, "layers_block_type",
-                                          None)
-        if layers_block_type_value is None:
-            if not self.is_hybrid:
-                return end - start
-            raise ValueError("The model is an hybrid without a"
-                             "layers_block_type in the hf_config,"
-                             "cannot determine the num of "
-                             f"{block_type.value} layers")
+        if is_transformer:
+            # Handle the basic case first
+            return end - start if attn_block_type else 0
+        elif self.is_attention_free:
+            # Attention free
+            # Note that this code assumes there 
+            # is only one type of attention-free block type.
+            return 0 if attn_block_type else end - start
+        else:
+            # Hybrid model
+            layers_block_type_value = getattr(self.hf_config, "layers_block_type",
+                                                  None)
+            if layers_block_type_value is None:
+                raise ValueError("The model is an hybrid without a"
+                                 "layers_block_type in the hf_config,"
+                                 "cannot determine the num of "
+                                 f"{block_type.value} layers")
 
-        return sum(t == block_type.value
-                   for t in layers_block_type_value[start:end])
+            return sum(t == block_type.value
+                       for t in layers_block_type_value[start:end])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
