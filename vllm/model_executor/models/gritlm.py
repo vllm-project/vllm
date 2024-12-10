@@ -202,9 +202,7 @@ class GritLM(LlamaForCausalLM):
     ) -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-        if vllm_config.model_config.task != "embedding":
-            raise ValueError(f"Task must be 'embedding' for GritLM, but got "
-                             f"'{vllm_config.model_config.task}'")
+        self.task = vllm_config.model_config.task
 
         self._pooler = GritLMPooler(vllm_config.model_config)
 
@@ -222,11 +220,13 @@ class GritLM(LlamaForCausalLM):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # Change attention to non-causal.
-        assert attn_metadata.prefill_metadata.attn_bias is None
-        attn_metadata.prefill_metadata.attn_bias = [
-            BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens)
-        ]
+
+        # Change attention to non-causal for embedding task.
+        if self.task == "embedding":
+            assert attn_metadata.prefill_metadata.attn_bias is None
+            attn_metadata.prefill_metadata.attn_bias = [
+                BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens)
+            ]
 
         return super().forward(
             input_ids=input_ids,

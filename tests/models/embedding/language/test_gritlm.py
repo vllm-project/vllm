@@ -9,6 +9,7 @@ import pytest_asyncio
 from scipy.spatial.distance import cosine
 
 import vllm
+import vllm.config
 from vllm.model_executor.models.gritlm import GritLMPooler
 
 from ....utils import RemoteOpenAIServer
@@ -43,18 +44,28 @@ def test_find_array():
 
 
 @pytest.fixture(scope="module")
-def server():
-    args = [
-        "--task",
-        "embedding",
-    ]
+def server_embedding():
+    args = ["--task", "embedding"]
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def server_generate():
+    args = ["--task", "generate"]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
 @pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
+async def client_embedding(server_embedding: RemoteOpenAIServer):
+    async with server_embedding.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest_asyncio.fixture
+async def client_generate(server_generate: RemoteOpenAIServer):
+    async with server_generate.get_async_client() as async_client:
         yield async_client
 
 
@@ -100,7 +111,7 @@ def get_test_data():
     return queries, q_instruction, documents, d_instruction
 
 
-def validate_output(q_rep: List[float], d_rep: List[float]):
+def validate_embed_output(q_rep: List[float], d_rep: List[float]):
     cosine_sim_q0_d0 = 1 - cosine(q_rep[0], d_rep[0])
     assert math.isclose(cosine_sim_q0_d0, 0.609, abs_tol=0.001)
 
@@ -114,7 +125,7 @@ def validate_output(q_rep: List[float], d_rep: List[float]):
     assert math.isclose(cosine_sim_q1_d1, 0.532, abs_tol=0.001)
 
 
-def test_gritlm_offline():
+def test_gritlm_offline_embedding():
     queries, q_instruction, documents, d_instruction = get_test_data()
 
     llm = vllm.LLM(MODEL_NAME, task="embedding")
@@ -130,22 +141,76 @@ def test_gritlm_offline():
         q_instruction,
     )
 
-    validate_output(q_rep, d_rep)
+    validate_embed_output(q_rep, d_rep)
 
 
 @pytest.mark.asyncio
-async def test_gritlm_api_server(client: openai.AsyncOpenAI):
+async def test_gritlm_api_server_embedding(
+        client_embedding: openai.AsyncOpenAI):
     queries, q_instruction, documents, d_instruction = get_test_data()
 
     d_rep = await run_client_embeddings(
-        client,
+        client_embedding,
         documents,
         d_instruction,
     )
     q_rep = await run_client_embeddings(
-        client,
+        client_embedding,
         queries,
         q_instruction,
     )
 
-    validate_output(q_rep, d_rep)
+    validate_embed_output(q_rep, d_rep)
+
+
+def validate_gen_output(output: str):
+    expected_output = """Oh, Mt. Fuji, mountain grand,
+A sight to see, a climb to command,
+At midnight, in the dark of night,
+I climbed your slopes, with all my might.
+
+The stars above, they shone so bright,
+A beacon in the darkness, guiding light,
+The wind did blow, with a gentle sigh,
+As I climbed higher, with a steady eye.
+
+The path was steep, the climb was tough,
+But I pressed on, with a steadfast rough,
+For the summit, I longed to see,
+The view from the top, a sight to be.
+
+At last, I reached the peak, and stood,
+With awe and wonder, I gazed aloud,
+The world below, a sight to see,
+A view that's worth the climb, you'll agree.
+
+Mt. Fuji, mountain grand,
+A sight to see, a climb to command,
+At midnight, in the dark of night,
+I climbed your slopes, with all my might."""
+
+    assert output == expected_output
+
+
+def test_gritlm_offline_gen():
+    input = "<|user|>\nPlease write me a poem about my recent hike of Mt. Fuji at midnight in the style of Shakespeare.\n<|assistant|>\n"
+
+    llm = vllm.LLM(MODEL_NAME)
+    sampling_params = vllm.SamplingParams(temperature=0.0, max_tokens=256)
+    outputs = llm.generate(input, sampling_params=sampling_params)
+
+    validate_gen_output(outputs[0].outputs[0].text)
+
+
+@pytest.mark.asyncio
+async def test_gritlm_api_server_gen(client_generate: openai.AsyncOpenAI):
+    input = "<|user|>\nPlease write me a poem about my recent hike of Mt. Fuji at midnight in the style of Shakespeare.\n<|assistant|>\n"
+
+    outputs = await client_generate.completions.create(
+        model=MODEL_NAME,
+        prompt=input,
+        max_tokens=256,
+        temperature=0.0,
+    )
+
+    validate_gen_output(outputs.choices[0].text)
