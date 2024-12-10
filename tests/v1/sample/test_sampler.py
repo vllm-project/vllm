@@ -23,7 +23,7 @@ def _create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
 
 def _create_penalty_tensor(batch_size: int, penalty_value: float,
                            device: torch.device) -> torch.Tensor:
-    return torch.full((batch_size, 1),
+    return torch.full((batch_size, ),
                       fill_value=penalty_value,
                       dtype=torch.float,
                       device=device)

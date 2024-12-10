@@ -259,11 +259,11 @@ class Sampler(nn.Module):
 
         # Apply presence and frequency penalties.
         if do_penalties:
-            logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
-                                      sampling_tensors.output_tokens,
-                                      sampling_tensors.presence_penalties,
-                                      sampling_tensors.frequency_penalties,
-                                      sampling_tensors.repetition_penalties)
+            logits = apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                     sampling_tensors.output_tokens,
+                                     sampling_tensors.presence_penalties,
+                                     sampling_tensors.frequency_penalties,
+                                     sampling_tensors.repetition_penalties)
 
         # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
@@ -382,19 +382,6 @@ def _apply_min_tokens_penalty(
     # verifies that no rows in logits were missed unexpectedly
     assert logits_applied == logits.shape[0]
     return logits
-
-
-def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
-                     output_tokens_tensor: torch.Tensor,
-                     presence_penalties: torch.Tensor,
-                     frequency_penalties: torch.Tensor,
-                     repetition_penalties: torch.Tensor) -> torch.Tensor:
-    repetition_penalties.unsqueeze_(dim=1)
-    frequency_penalties.unsqueeze_(dim=1)
-    presence_penalties.unsqueeze_(dim=1)
-    return apply_penalties(logits, prompt_tokens_tensor, output_tokens_tensor,
-                           presence_penalties, frequency_penalties,
-                           repetition_penalties)
 
 
 def _apply_top_k_top_p(

@@ -105,11 +105,11 @@ class InputBatch:
         self.top_k_reqs: Set[str] = set()
 
         # Frequency penalty related data structures
-        self.frequency_penalties = torch.empty((max_num_reqs, 1),
+        self.frequency_penalties = torch.empty((max_num_reqs, ),
                                                dtype=torch.float,
                                                device=device)
         self.frequency_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs, 1),
+            (max_num_reqs, ),
             dtype=torch.float,
             device="cpu",
             pin_memory=pin_memory)
@@ -118,10 +118,10 @@ class InputBatch:
         self.frequency_penalties_reqs: Set[str] = set()
 
         # Presence penalty related data structures
-        self.presence_penalties = torch.empty((max_num_reqs, 1),
+        self.presence_penalties = torch.empty((max_num_reqs, ),
                                               dtype=torch.float,
                                               device=device)
-        self.presence_penalties_cpu_tensor = torch.empty((max_num_reqs, 1),
+        self.presence_penalties_cpu_tensor = torch.empty((max_num_reqs, ),
                                                          dtype=torch.float,
                                                          device="cpu",
                                                          pin_memory=pin_memory)
@@ -130,11 +130,11 @@ class InputBatch:
         self.presence_penalties_reqs: Set[str] = set()
 
         # Repetition penalty related data structures
-        self.repetition_penalties = torch.empty((max_num_reqs, 1),
+        self.repetition_penalties = torch.empty((max_num_reqs, ),
                                                 dtype=torch.float,
                                                 device=device)
         self.repetition_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs, 1),
+            (max_num_reqs, ),
             dtype=torch.float,
             device="cpu",
             pin_memory=pin_memory)
@@ -195,15 +195,15 @@ class InputBatch:
         self.top_k_cpu[req_index] = sampling_params.top_k
         if sampling_params.top_k > 0:
             self.top_k_reqs.add(req_id)
-        self.frequency_penalties_cpu[req_index][:] =\
+        self.frequency_penalties_cpu[req_index] =\
             sampling_params.frequency_penalty
         if sampling_params.frequency_penalty != 0.0:
             self.frequency_penalties_reqs.add(req_id)
-        self.presence_penalties_cpu[req_index][:] = \
+        self.presence_penalties_cpu[req_index] = \
             sampling_params.presence_penalty
         if sampling_params.presence_penalty != 0.0:
             self.presence_penalties_reqs.add(req_id)
-        self.repetition_penalties_cpu[req_index][:] = \
+        self.repetition_penalties_cpu[req_index] = \
             sampling_params.repetition_penalty
         if sampling_params.repetition_penalty != 1.0:
             self.repetition_penalties_reqs.add(req_id)
@@ -289,12 +289,12 @@ class InputBatch:
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
             self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
-            self.frequency_penalties_cpu[empty_index][:] = \
-                self.frequency_penalties_cpu[last_req_index][:]
-            self.presence_penalties_cpu[empty_index][:] = \
-                self.presence_penalties_cpu[last_req_index][:]
-            self.repetition_penalties_cpu[empty_index][:] = \
-                self.repetition_penalties_cpu[last_req_index][:]
+            self.frequency_penalties_cpu[empty_index] = \
+                self.frequency_penalties_cpu[last_req_index]
+            self.presence_penalties_cpu[empty_index] = \
+                self.presence_penalties_cpu[last_req_index]
+            self.repetition_penalties_cpu[empty_index] = \
+                self.repetition_penalties_cpu[last_req_index]
             self.min_tokens[empty_index] = self.min_tokens[last_req_index]
             self.stop_token_ids[empty_index] = \
                 self.stop_token_ids[last_req_index]
@@ -369,7 +369,7 @@ class InputBatch:
             output_token_ids=output_token_ids,
             min_tokens=self.min_tokens[:self.num_reqs],
             stop_token_ids=self.stop_token_ids[:self.num_reqs],
-            no_penalties=self.no_penalties
+            no_penalties=self.no_penalties,
         )
 
     def _construct_prompt_tokens_tensor(

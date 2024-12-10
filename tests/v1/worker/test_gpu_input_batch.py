@@ -99,13 +99,13 @@ def _construct_expected_sampling_metadata(
         ),
         frequency_penalties=torch.tensor(
             frequency_penalties, dtype=torch.float,
-            device=device).unsqueeze(dim=1),
+            device=device),
         presence_penalties=torch.tensor(
             presence_penalties, dtype=torch.float,
-            device=device).unsqueeze(dim=1),
+            device=device),
         repetition_penalties=torch.tensor(
             repetition_penalties, dtype=torch.float,
-            device=device).unsqueeze(dim=1),
+            device=device),
         output_token_ids=output_token_ids,
         min_tokens=min_tokens,
         stop_token_ids=stop_token_ids,
@@ -194,6 +194,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         req_ids_retained,
         input_batch.req_id_to_index,
         device=torch.device(device))
+
     # Assert the actual and expected output.
     assert torch.allclose(expected_sampling_metadata.temperature,
                           sampling_metadata.temperature)
