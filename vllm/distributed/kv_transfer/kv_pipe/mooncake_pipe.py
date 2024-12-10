@@ -3,7 +3,7 @@ import os
 import pickle
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import zmq
@@ -20,6 +20,7 @@ NONE_INT = -150886311
 class MooncakeTransferEngineConfig:
     prefill_url: str
     decode_url: str
+    metadata_backend: Union[str, None]
     metadata_server: str
     protocol: str
     device_name: str
@@ -32,6 +33,7 @@ class MooncakeTransferEngineConfig:
         return MooncakeTransferEngineConfig(
             prefill_url=config.get("prefill_url"),
             decode_url=config.get("decode_url"),
+            metadata_backend=config.get("metadata_backend", None),
             metadata_server=config.get("metadata_server"),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
@@ -64,7 +66,7 @@ class MooncakeTransferEngine:
 
         try:
             self.config = MooncakeTransferEngineConfig.load_from_env()
-            logger.info("Configuration loaded successfully.")
+            logger.info("Mooncake Configuration loaded successfully.")
         except ValueError as e:
             logger.error(e)
             raise
@@ -84,9 +86,10 @@ class MooncakeTransferEngine:
         decode_port = int(base_decode_port) + self.local_rank
         self.prefill_url = ':'.join([prefill_host, str(prefill_port)])
         self.decode_url = ':'.join([decode_host, str(decode_port)])
+
         self.initialize(self.prefill_url if kv_rank == 0 else self.decode_url,
                         self.config.metadata_server, self.config.protocol,
-                        self.config.device_name)
+                        self.config.device_name, self.config.metadata_backend)
 
         self.remote_url = (self.decode_url
                            if kv_rank == 0 else self.prefill_url)
@@ -120,10 +123,22 @@ class MooncakeTransferEngine:
             self.sender_ack.connect(f"tcp://{p_host}:{p_rank_offset + 2}")
 
     def initialize(self, local_hostname: str, metadata_server: str,
-                   protocol: str, device_name: str) -> None:
+                   protocol: str, device_name: str,
+                   metadata_backend: Union[str, None]) -> None:
         """Initialize the mooncake instance."""
-        self.engine.initialize(local_hostname, metadata_server, protocol,
-                               device_name)
+        if metadata_backend is None:
+            self.engine.initialize(local_hostname, metadata_server, protocol,
+                                   device_name)
+        else:
+            supported_backend = ["etcd", "redis"]
+            metadata_backend = metadata_backend.lower()
+            if metadata_backend not in supported_backend:
+                raise ValueError(
+                    "Mooncake Configuration error. `metadata_backend`"
+                    f"should be one of {supported_backend}.")
+
+            self.engine.initializeExt(local_hostname, metadata_server,
+                                      protocol, device_name, metadata_backend)
 
     def allocate_managed_buffer(self, length: int) -> int:
         """Allocate a managed buffer of the specified length."""
