@@ -43,7 +43,7 @@ def get_dummy_pass(id: int):
 
 def add_dummy_pass(fn):
     # Disable for now
-    if fn is None:
+    if True or fn is None:
         return fn
     else:
         global ID
@@ -493,13 +493,6 @@ class VllmBackend:
                 in self.compilation_configs.pass_config.dump_graph_stages):
             dump_graph(self.compilation_configs.pass_config,
                        self.split_gm.graph, "after_split_graph")
-
-        from torch._dynamo.utils import lazy_format_graph_code
-
-        # depyf will hook lazy_format_graph_code and dump the graph
-        # for debugging, no need to print the graph here
-        lazy_format_graph_code("before split", self.graph)
-        lazy_format_graph_code("after split", self.split_gm)
 
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)

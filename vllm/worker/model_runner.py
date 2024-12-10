@@ -1504,6 +1504,74 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         kv_caches[virtual_engine],
                         "attn_metadata":
                         attn_metadata,
+                        "memory_pool": None,
+                        "stream": None,
+                    }
+                    if previous_hidden_states is not None:
+                        capture_inputs[
+                            "previous_hidden_states"] = previous_hidden_states[:
+                                                                               batch_size]
+
+                    if self.has_inner_state:
+                        # Only used by Mamba-based models CUDA graph atm (Jamba)
+                        capture_inputs.update({
+                            "seqlen_agnostic_capture_inputs":
+                            self.model.get_seqlen_agnostic_capture_inputs(
+                                batch_size)
+                        })
+                    if self.model_config.is_encoder_decoder:
+                        # add the additional inputs to capture for
+                        # encoder-decoder models.
+                        self._update_inputs_to_capture_for_enc_dec_model(
+                            capture_inputs)
+
+                    with set_forward_context(attn_metadata, self.vllm_config):
+                        graph_runner.capture(**capture_inputs, warmup=True)
+                    self.graph_runners[virtual_engine][batch_size] = (
+                        graph_runner)
+
+        with self.attn_state.graph_capture(
+                max_batch_size), graph_capture() as graph_capture_context:
+            # NOTE: Capturing the largest batch size first may help reduce the
+            # memory usage of CUDA graph.
+            for virtual_engine in range(
+                    self.parallel_config.pipeline_parallel_size):
+                for batch_size in \
+                    self.vllm_config.compilation_config.capture_sizes:
+                    attn_metadata = (
+                        self.attn_state.graph_capture_get_metadata_for_batch(
+                            batch_size,
+                            is_encoder_decoder_model=self.model_config.
+                            is_encoder_decoder))
+
+                    if self.lora_config:
+                        lora_mapping = LoRAMapping(
+                            **dict(index_mapping=[0] * batch_size,
+                                   prompt_mapping=[0] * batch_size,
+                                   is_prefill=False))
+                        self.set_active_loras(set(), lora_mapping)
+
+                    if self.prompt_adapter_config:
+                        prompt_adapter_mapping = PromptAdapterMapping(
+                            [-1] * batch_size,
+                            [-1] * batch_size,
+                        )
+                        self.set_active_prompt_adapters(
+                            set(), prompt_adapter_mapping)
+                    graph_runner = self.graph_runners[virtual_engine][batch_size]
+
+                    capture_inputs = {
+                        "input_ids":
+                        input_tokens[:batch_size],
+                        "positions":
+                        input_positions[..., :batch_size],
+                        "intermediate_inputs":
+                        intermediate_inputs[:batch_size]
+                        if intermediate_inputs is not None else None,
+                        "kv_caches":
+                        kv_caches[virtual_engine],
+                        "attn_metadata":
+                        attn_metadata,
                         "memory_pool":
                         self.graph_memory_pool,
                         "stream":
@@ -1530,8 +1598,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     with set_forward_context(attn_metadata, self.vllm_config):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
-                    self.graph_runners[virtual_engine][batch_size] = (
-                        graph_runner)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -1821,7 +1887,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             1. current vLLM instance is KV cache producer/prefill vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
-            
+
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
@@ -1872,6 +1938,7 @@ class CUDAGraphRunner(nn.Module):
         attn_metadata: AttentionMetadata,
         memory_pool: Optional[Tuple[int, int]],
         stream: torch.cuda.Stream,
+        warmup: bool = False,
         **kwargs,
     ):
         assert self._graph is None
@@ -1879,15 +1946,23 @@ class CUDAGraphRunner(nn.Module):
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
         # Note one iteration is not enough for torch.compile
-        for _ in range(_NUM_WARMUP_ITERS):
-            self.model(
-                input_ids=input_ids,
-                positions=positions,
-                kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
-                intermediate_tensors=intermediate_inputs,
-                **kwargs,
-            )
+
+        if warmup:
+            # memory_pool and stream will be None here, use instead of warmup flag
+            for i in range(_NUM_WARMUP_ITERS):
+                print(f"WARMUP {i}")
+                self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=attn_metadata,
+                    intermediate_tensors=intermediate_inputs,
+                    **kwargs,
+                )
+            return
+
+        print(f"CAPTURE")
+
         # Wait for the warm up operations to finish before proceeding with
         # Graph Capture.
         torch.cuda.synchronize()

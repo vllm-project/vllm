@@ -106,7 +106,6 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
 
         if not hasattr(torch.ops.vllm, name):
             logger.info("constructing torch.ops.vllm.%s", name)
-
             gemm_rs_op = flux.GemmRS(
                 device_group,
                 1,  # One node
@@ -169,6 +168,10 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             rms_norm_weights: torch.Tensor, gemm_2_weights: torch.Tensor,
             first_layer: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        #logger.info("CALLING GEMM_RS_AG_GEMM %s", residual)
+        #import traceback
+        #traceback.print_exc()
 
         if first_layer and use_cc_kernels(residual.shape[0]):
             slice_shape = residual_slice_shape(residual, rank)
@@ -420,8 +423,7 @@ class CollectiveFusionPass(VllmInductorPass):
     def should_rewrite(self, match: Match) -> bool:
         pass_context = get_pass_context()
         if pass_context.runtime_shape is None:
-            # extract shape from match
-            return True
+            return False
         return use_cc_kernels(pass_context.runtime_shape)
 
     def record_match(self, match: Match) -> bool:
@@ -483,6 +485,17 @@ class CollectiveFusionPass(VllmInductorPass):
                     use_flux, max_m, gemm_1.dtype, gemm_1.shape, gemm_2.dtype,
                     gemm_2.shape, tp_group_name, self.is_static_shape())
 
+
+                ####
+                pass_context = get_pass_context()
+                if False and pass_context.runtime_shape is None:
+                    logger.info("skip dynamic match")
+                    #with torch._dynamo.utils.detect_fake_mode():
+                    #    node_args, args = self.collect_args(kwargs)
+                    #    fused_gemm_func(**kwargs)
+                    continue
+                ####
+
                 fused_node = graph.call_function(fused_gemm_func,
                                                  kwargs=kwargs)
 
@@ -513,16 +526,25 @@ class CollectiveFusionPass(VllmInductorPass):
 
         # Finally, remove matched nodes
         graph.eliminate_dead_code()
-        assert all(node not in graph.nodes for match in matches
-                   for node in match.nodes)
+        #assert all(node not in graph.nodes for match in matches
+        #           for node in match.nodes)
 
     def __call__(self, graph: fx.Graph):
         pass_context = get_pass_context()
 
         logger.info("CollectiveFusionPass shape=%s", pass_context.runtime_shape)
 
+        if False and pass_context.runtime_shape is not None:
+            logger.info("fix func")
+            from .fix_functionalization import FixFunctionalizationPass
+            ff = FixFunctionalizationPass(self.config)
+            ff(graph)
+
+        #
         # TODO: disable if chunk prefill size is too small
-        # or when doing decode.
+        # or when runtime_shape is None (if dynamic not allowed)
+        #
+
         self.dump_graph(graph, "before_collective_fusion")
         self.gemm_rs_ag_gemm_pattern.apply(graph)
         logger.info("fused gemm match count = %d", len(self.matches))
