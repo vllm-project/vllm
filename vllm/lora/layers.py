@@ -17,7 +17,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
-from vllm.lora.punica import PunicaWrapper
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -33,7 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
 if TYPE_CHECKING:
-    pass
+    from vllm.lora.punica_wrapper import PunicaWrapperBase
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
@@ -115,9 +114,9 @@ class BaseLayerWithLoRA(nn.Module):
 
     def set_mapping(
         self,
-        punica_wrapper: PunicaWrapper,
+        punica_wrapper,
     ):
-        self.punica_wrapper: PunicaWrapper = punica_wrapper
+        self.punica_wrapper: PunicaWrapperBase = punica_wrapper
 
     @classmethod
     def can_replace_layer(

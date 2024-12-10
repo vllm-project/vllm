@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -56,7 +57,6 @@ class Worker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = GPUModelRunner(vllm_config)
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -102,6 +102,9 @@ class Worker:
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
+
+        # Construct the model runner
+        self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
     def load_model(self) -> None:
         self.model_runner.load_model()
@@ -198,7 +201,7 @@ class Worker:
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         output = self.model_runner.execute_model(scheduler_output)
-        # TODO(woosuk): Send the output to the engine process.
+        return output if self.rank == 0 else None
         return output
 
     def profile(self, is_start=True):
@@ -208,6 +211,10 @@ class Worker:
             self.profiler.start()
         else:
             self.profiler.stop()
+
+    def check_health(self) -> None:
+        # worker will always be healthy as long as it's running.
+        return
 
 
 def init_worker_distributed_environment(
