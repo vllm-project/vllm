@@ -12,15 +12,12 @@ from scipy.spatial.distance import cosine
 import vllm
 import vllm.config
 
-# GritLM embedding implementation is only supported by XFormers backend.
-pytest.mark.skipif(
-    not importlib.util.find_spec("xformers"), reason="GritLM requires XFormers"
-)
-os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
-from vllm.model_executor.models.gritlm import GritLMPooler
-
 from ....utils import RemoteOpenAIServer
 
+# GritLM embedding implementation is only supported by XFormers backend.
+pytest.mark.skipif(not importlib.util.find_spec("xformers"),
+                   reason="GritLM requires XFormers")
+os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
 
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 
@@ -35,6 +32,8 @@ def _arr(arr):
 
 
 def test_find_array():
+    from vllm.model_executor.models.gritlm import GritLMPooler
+
     # Create an LLM object to get the model config.
     llm = vllm.LLM(MODEL_NAME, task="embedding", max_model_len=MAX_MODEL_LEN)
     pooler = GritLMPooler(model_config=llm.llm_engine.model_config)

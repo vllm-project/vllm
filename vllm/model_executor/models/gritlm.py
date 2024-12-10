@@ -207,13 +207,11 @@ class GritLM(LlamaForCausalLM):
 
         self._pooler = GritLMPooler(vllm_config.model_config)
 
-        if self.task == "embedding":
-            for layer in self.model.layers:
-                if hasattr(layer, "self_attn"):
-                    assert isinstance(layer.self_attn.attn.impl, XFormersImpl), (
-                        "GritLM embedding is only supported by XFormers backend, "
-                        "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS"
-                    )
+        for layer in self.model.layers:
+            if self.task == "embedding" and hasattr(layer, "self_attn"):
+                assert isinstance(layer.self_attn.attn.impl, XFormersImpl), (
+                    "GritLM embedding is only supported by XFormers backend, "
+                    "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS")
 
     def forward(
         self,
