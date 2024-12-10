@@ -52,7 +52,6 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.utils import FlexibleArgumentParser
-
 """
 HELPER FUNCTIONS FOR PROFILING
 """
