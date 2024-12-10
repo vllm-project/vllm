@@ -52,7 +52,7 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
         batchsize_counter[batchsize] += 1
         if time.monotonic() - last_logging_time > batchsize_logging_interval:
             last_logging_time = time.monotonic()
-            sorted_data = sorted(list(batchsize_counter.items()),
+            sorted_data = sorted(batchsize_counter.items(),
                                  key=lambda x: x[1],
                                  reverse=True)
             logger.info("Batchsize distribution (batchsize, count): %s",
