@@ -35,8 +35,6 @@ class XPUWorker(Worker):
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
 
-        self.model_runner = XPUModelRunner(  # type: ignore
-            vllm_config=vllm_config, )
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -106,6 +104,8 @@ class XPUWorker(Worker):
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
+        self.model_runner = XPUModelRunner(  # type: ignore
+            self.vllm_config, self.device)
 
 
 def init_worker_distributed_environment(

@@ -2,6 +2,8 @@ import torch
 import numpy as np
 from typing import TYPE_CHECKING
 
+from vllm.config import VllmConfig
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.attention.backends.ipex_attn import (IPEXAttentionBackend)
 if TYPE_CHECKING:
@@ -11,8 +13,11 @@ if TYPE_CHECKING:
 class XPUModelRunner(GPUModelRunner):
     """A model runner for XPU devices."""
 
-    def __init__(self, vllm_config):
-        super().__init__(vllm_config)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 device: torch.device,
+                 input_registry: InputRegistry = INPUT_REGISTRY,):
+        super().__init__(vllm_config, device, input_registry)
         self.use_cuda_graph = False
 
     @torch.inference_mode()

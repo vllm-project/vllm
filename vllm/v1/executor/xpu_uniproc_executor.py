@@ -29,6 +29,16 @@ class XPUUniprocExecutor:
         self.worker.initialize()
         self.worker.load_model()
 
+    def initialize(self, num_gpu_blocks: int) -> None:
+        """Initialize the KV cache by invoking the underlying worker.
+        """
+        # NOTE: This is logged in the executor because there can be >1 worker
+        # with other executors. We could log in the engine level, but work
+        # remains to abstract away the device for non-GPU configurations.
+        logger.info("# GPU blocks: %d", num_gpu_blocks)
+        self.worker.initialize_cache(num_gpu_blocks)
+        self.worker.compile_or_warm_up_model()
+
     def _create_worker(
             self,
             local_rank: int = 0,
