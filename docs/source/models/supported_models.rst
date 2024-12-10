@@ -174,6 +174,11 @@ Text Generation
     - :code:`ibm-granite/granite-3.0-1b-a400m-base`, :code:`ibm-granite/granite-3.0-3b-a800m-instruct`, :code:`ibm/PowerMoE-3b`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`GritLM`
+    - GritLM
+    - :code:`parasail-ai/GritLM-7B-vllm`.
+    - ✅︎
+    - ✅︎
   * - :code:`InternLMForCausalLM`
     - InternLM
     - :code:`internlm/internlm-7b`, :code:`internlm/internlm-chat-7b`, etc.
