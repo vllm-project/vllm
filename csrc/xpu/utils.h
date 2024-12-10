@@ -5,6 +5,7 @@
 #include <memory>
 #include <ipex.h>
 #include <ATen/ATen.h>
+#include <torch/torch.h>
 
 #if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
 #include <c10/xpu/XPUStream.h>
@@ -19,8 +20,11 @@ static inline sycl::queue& vllmGetQueue() {
   auto device_type = c10::DeviceType::XPU;
   c10::impl::VirtualGuardImpl impl(device_type);
   c10::Stream c10_stream = impl.getStream(c10::Device(device_type));
-  auto& queue = ::xpu::get_queue_from_stream(c10_stream);
-  return queue;
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+  return at::xpu::XPUStream(c10_stream).queue();
+#else
+  return ::xpu::get_queue_from_stream(c10_stream);
+#endif
 }
 template <typename T>
 struct SyclTypeTrait{

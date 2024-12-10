@@ -15,6 +15,9 @@
 // #include "dtype_bfloat16.dp.hpp"
 #include "dtype_float16.h"
 #include "dtype_float32.h"
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+#include <c10/xpu/XPUStream.h>
+#endif
 
 #include <functional>
 #include <ipex.h>
@@ -1450,8 +1453,7 @@ void paged_attention_v1_kernel(
               q_vecs_acc_ct1.get_pointer(),                                 \
               red_smem_acc_ct1.get_pointer());                              \
         });                                                                 \
-  });                                                                       \
-  ::xpu::profiler_record("paged attn v1", event);
+  });
 
 template <typename T, int BLOCK_SIZE, int NUM_THREADS = 512>
 void paged_attention_xpu_v1_impl_launcher(
@@ -1514,21 +1516,51 @@ void paged_attention_xpu_v1_impl_launcher(
     // to support any head size which is a multiple of 16.
     case 64:
       LAUNCH_PAGED_ATTENTION_V1(64);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v1", event);
+#endif
       break;
     case 80:
       LAUNCH_PAGED_ATTENTION_V1(80);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v1", event);
+#endif
       break;
     case 96:
       LAUNCH_PAGED_ATTENTION_V1(96);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v1", event);
+#endif
       break;
     case 112:
       LAUNCH_PAGED_ATTENTION_V1(112);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v1", event);
+#endif
       break;
     case 128:
       LAUNCH_PAGED_ATTENTION_V1(128);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v1", event);
+#endif
       break;
     case 256:
       LAUNCH_PAGED_ATTENTION_V1(256);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v1", event);
+#endif
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
@@ -1775,7 +1807,7 @@ void paged_attention_v2_kernel(
       red_smem);
 }
 
-#define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                \
+#define LAUNCH_PAGED_ATTENTION_V2_FIRST_HALF(HEAD_SIZE)                     \
   event = queue.submit([&](sycl::handler& cgh) {                            \
     sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(shared_mem_size), cgh);                              \
@@ -1830,8 +1862,9 @@ void paged_attention_v2_kernel(
               q_vecs_acc_ct1.get_pointer(),                                 \
               red_smem_acc_ct1.get_pointer());                              \
         });                                                                 \
-  });                                                                       \
-  ::xpu::profiler_record("paged attn v2", event);                           \
+  });
+
+#define LAUNCH_PAGED_ATTENTION_V2_SECOND_HALF(HEAD_SIZE)                    \
   event2 = queue.submit([&](sycl::handler& cgh) {                           \
     sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(reduce_shared_mem_size), cgh);                       \
@@ -1863,8 +1896,7 @@ void paged_attention_v2_kernel(
               dpct_local_acc_ct1.get_pointer(),                             \
               red_smem_acc_ct1.get_pointer());                              \
         });                                                                 \
-  });                                                                       \
-  ::xpu::profiler_record("paged attn v2", event2);
+  });
 
 template <
     typename T,
@@ -1940,22 +1972,88 @@ void paged_attention_v2_launcher(
     // head sizes that we use in the model. However, we can easily extend this
     // to support any head size which is a multiple of 16.
     case 64:
-      LAUNCH_PAGED_ATTENTION_V2(64);
+      LAUNCH_PAGED_ATTENTION_V2_FIRST_HALF(64);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event);
+#endif
+      LAUNCH_PAGED_ATTENTION_V2_SECOND_HALF(64);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event2);
+#endif
       break;
     case 80:
-      LAUNCH_PAGED_ATTENTION_V2(80);
+      LAUNCH_PAGED_ATTENTION_V2_FIRST_HALF(80);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event);
+#endif
+      LAUNCH_PAGED_ATTENTION_V2_SECOND_HALF(80);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event2);
+#endif
       break;
     case 96:
-      LAUNCH_PAGED_ATTENTION_V2(96);
+      LAUNCH_PAGED_ATTENTION_V2_FIRST_HALF(96);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event);
+#endif
+      LAUNCH_PAGED_ATTENTION_V2_SECOND_HALF(96);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event2);
+#endif
       break;
     case 112:
-      LAUNCH_PAGED_ATTENTION_V2(112);
+      LAUNCH_PAGED_ATTENTION_V2_FIRST_HALF(112);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event);
+#endif
+      LAUNCH_PAGED_ATTENTION_V2_SECOND_HALF(112);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event2);
+#endif
       break;
     case 128:
-      LAUNCH_PAGED_ATTENTION_V2(128);
+      LAUNCH_PAGED_ATTENTION_V2_FIRST_HALF(128);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event);
+#endif
+      LAUNCH_PAGED_ATTENTION_V2_SECOND_HALF(128);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event2);
+#endif
       break;
     case 256:
-      LAUNCH_PAGED_ATTENTION_V2(256);
+      LAUNCH_PAGED_ATTENTION_V2_FIRST_HALF(256);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event);
+#endif
+      LAUNCH_PAGED_ATTENTION_V2_SECOND_HALF(256);
+#if TORCH_VERSION_MAJOR >= 2 && TORCH_VERSION_MINOR >= 3
+    // xpu::profiler_record(event_desc, event);  // Uncomment when needed
+#else
+    ::xpu::profiler_record("paged attn v2", event2);
+#endif
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
