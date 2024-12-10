@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ .Release.Name }}-service"
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: {{ include "chart.service-port-name" . }}
+      port: {{ include "chart.service-port" . }}
+      targetPort: {{ include "chart.container-port-name" . }}
+      protocol: TCP
+  selector:
+  {{- include "chart.labels" . | nindent 4 }}
