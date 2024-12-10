@@ -118,7 +118,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_mm", torch::kCPU, &int8_scaled_mm);
-// CUTLASS w8a8 grouped GEMM // TODO complete this
+  // CUTLASS w8a8 grouped GEMM // TODO complete this
   ops.def(
       "cutlass_grouped_mm(Tensor! out, Tensor a, Tensor b, Tensor a_scales, "
       "                   Tensor b_scales, Tensor problem_sizes, "

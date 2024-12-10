@@ -28,13 +28,11 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b_scales,
                             c10::optional<torch::Tensor> const& bias);
 
-void cutlass_grouped_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
-                            torch::Tensor const& b, torch::Tensor const& a_scales,
-                            torch::Tensor const& b_scales,
-                            torch::Tensor const& problem_sizes,
-                            torch::Tensor const& out_offsets,
-                            torch::Tensor const& a_offsets,
-                            torch::Tensor const& b_offsets);
+void cutlass_grouped_mm_sm90(
+    torch::Tensor& out, torch::Tensor const& a, torch::Tensor const& b,
+    torch::Tensor const& a_scales, torch::Tensor const& b_scales,
+    torch::Tensor const& problem_sizes, torch::Tensor const& out_offsets,
+    torch::Tensor const& a_offsets, torch::Tensor const& b_offsets);
 
 #endif
 
