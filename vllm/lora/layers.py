@@ -32,9 +32,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
 
-if current_platform.is_hpu():
-    from vllm_hpu_extension.punica_hpu import GaudiPunicaWrapper
-
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
 
@@ -259,7 +256,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                                                full_lora_a_embeddings,
                                                self.lora_b_stacked,
                                                add_input=True)
-
         return full_output.view_as(full_output_org)
 
     @classmethod
