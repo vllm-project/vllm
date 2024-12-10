@@ -225,5 +225,3 @@ def ipex_attn_chunked_prefill(
         False,
         None,
     )
-
-

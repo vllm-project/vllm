@@ -12,7 +12,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.utils import cdiv
 
 
-
 class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod

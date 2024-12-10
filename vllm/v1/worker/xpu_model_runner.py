@@ -13,10 +13,12 @@ if TYPE_CHECKING:
 class XPUModelRunner(GPUModelRunner):
     """A model runner for XPU devices."""
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 device: torch.device,
-                 input_registry: InputRegistry = INPUT_REGISTRY,):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+    ):
         super().__init__(vllm_config, device, input_registry)
         self.use_cuda_graph = False
 
