@@ -4,6 +4,7 @@ from typing import Sequence as GenericSequence
 import torch
 import torch.types
 
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.utils import is_pin_memory_available
 
 
@@ -58,6 +59,23 @@ class LoRALayerWeights:
     def extra_vocab_size(self) -> int:
         return self.embeddings_tensor.shape[
             0] if self.embeddings_tensor is not None else 0
+
+    @classmethod
+    def from_config(
+        cls,
+        module_name: str,
+        peft_helper: PEFTHelper,
+        embeddings_tensor: Optional[torch.Tensor] = None,
+    ) -> "LoRALayerWeights":
+        return cls(
+            module_name,
+            peft_helper.r,
+            peft_helper.lora_alpha,
+            None,
+            None,
+            None,
+            embeddings_tensor,
+        )
 
     @classmethod
     def create_dummy_lora_weights(
