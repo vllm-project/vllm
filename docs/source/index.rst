@@ -104,6 +104,7 @@ Documentation
 
    usage/lora
    usage/multimodal_inputs
+   usage/tool_calling
    usage/structured_outputs
    usage/spec_decode
    usage/compatibility_matrix
