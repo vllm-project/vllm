@@ -17,11 +17,11 @@ DURATION_MS = int(os.getenv("VLLM_TPU_PROFILE_DURATION_MS", 3000))
 DELAY_MS = int(os.getenv("VLLM_TPU_PROFILE_DELAY_MS", 0))
 
 def main(args: argparse.Namespace):
-    server = xp.start_server(9012)
     print(args)
 
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))
+    server = xp.start_server(9012)
 
     sampling_params = SamplingParams(
         temperature=0.0,
@@ -44,13 +44,10 @@ def main(args: argparse.Namespace):
                               duration_ms=DURATION_MS)
             if DELAY_MS == 0:
                 time.sleep(1.0)
-            # NOTE: for prefill, you could run this in a loop
-            # so that you get a trace of multiple prefill steps
-            # NOTE: for decode, you will get traces of multiple
-            # steps because we generae for 128 tokens.
-            llm.generate(dummy_prompts,
-                         sampling_params=sampling_params,
-                         use_tqdm=False)
+            for _ in range(5):
+                llm.generate(dummy_prompts,
+                            sampling_params=sampling_params,
+                            use_tqdm=False)
         else:
             start_time = time.perf_counter()
             llm.generate(dummy_prompts,

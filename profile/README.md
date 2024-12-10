@@ -8,7 +8,7 @@ This guide explains how to profile the TPU performance on VLLM for specific shap
 
 ```bash
 export XLA_HLO_DEBUG=1
-export MODEL=meta-llama/Llama-3.1-8B-Instruct
+export MODEL=meta-llama/Llama-3.1-70B-Instruct
 export VLLM_TPU_PROFILE_DURATION_MS=2000
 export VLLM_TPU_PROFILE_DELAY_MS=1000
 
@@ -20,7 +20,7 @@ python3 profile_tpu.py \
     --batch-size 32 \
     --enforce-eager \
     --profile-result-dir profiles \
-    --max-model-len 2048
+    --max-model-len 2048 --tensor-parallel-size 8
 ```
 
 ### Generate Prefill Trace
@@ -39,5 +39,5 @@ python3 profile_tpu.py \
     --batch-size 1 \
     --enforce-eager \
     --profile-result-dir profiles \
-    --max-model-len 2048
+    --max-model-len 2048 --tensor-parallel-size 8
 ```
