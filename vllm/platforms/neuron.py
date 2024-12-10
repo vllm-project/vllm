@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from .interface import Platform, PlatformEnum
 
@@ -17,6 +17,10 @@ class NeuronPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return "neuron"
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return False
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
