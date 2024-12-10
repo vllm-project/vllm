@@ -14,14 +14,14 @@ Prerequisites
 Before you begin, ensure that you have the following:
 
 - A running Kubernetes cluster
-- NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
+- NVIDIA Kubernetes Device Plugin (``k8s-device-plugin``): This can be found at `https://github.com/NVIDIA/k8s-device-plugin <https://github.com/NVIDIA/k8s-device-plugin>`__
 - Available GPU resources in your cluster
 - S3 with the model which will be deployed
 
 Installing the chart
 --------------------
 
-To install the chart with the release name `test-vllm`
+To install the chart with the release name ``test-vllm``:
 
 .. code-block:: console
 
@@ -30,7 +30,7 @@ To install the chart with the release name `test-vllm`
 Uninstalling the Chart
 ----------------------
 
-To uninstall the `test-vllm` deployment
+To uninstall the ``test-vllm`` deployment:
 
 .. code-block:: console
 
