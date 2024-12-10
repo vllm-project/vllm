@@ -1,8 +1,19 @@
+import time
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+track_batchsize = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
+batchsize_counter = Counter()
+last_logging_time: float = 0
+batchsize_logging_interval = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 
 
 @dataclass
@@ -27,6 +38,18 @@ def get_forward_context() -> ForwardContext:
 def set_forward_context(context: Any, vllm_config: VllmConfig):
     """A context manager that stores the current forward context,
     can be attention metadata, etc."""
+    global track_batchsize, batchsize_counter
+    global last_logging_time, batchsize_logging_interval
+    if track_batchsize and context is not None:
+        batchsize = context.num_prefill_tokens + context.num_decode_tokens
+        batchsize_counter[batchsize] += 1
+        if time.monotonic() - last_logging_time > batchsize_logging_interval:
+            last_logging_time = time.monotonic()
+            sorted_data = sorted(list(batchsize_counter.items()),
+                                 key=lambda x: x[1],
+                                 reverse=True)
+            logger.info("Batchsize distribution (batchsize, count): %s",
+                        sorted_data)
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
