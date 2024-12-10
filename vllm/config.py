@@ -374,7 +374,7 @@ class ModelConfig:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
-        if model_id.startswith("cross-encoder/") or "-reranker" in model_id:
+        if ModelRegistry.is_cross_encoder_model(architectures):
             return "score"
 
         suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
