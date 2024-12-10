@@ -3,7 +3,6 @@ from typing import Optional
 
 import pytest
 import torch
-import transformers
 from transformers import AutoImageProcessor, AutoTokenizer
 
 from vllm.inputs import InputContext, token_inputs
@@ -36,8 +35,6 @@ def get_max_idefics3_image_tokens():
     return get_max_idefics3_image_tokens
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.46.0",
-                    reason="Model introduced in HF >= 4.46.0")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("longest_edge", [None, 168, 336, 400, 2 * 336])
 def test_input_mapper_override(model: str, image_assets: _ImageAssets,
@@ -77,8 +74,6 @@ def test_input_mapper_override(model: str, image_assets: _ImageAssets,
     assert torch.all(hf_result["pixel_values"] == vllm_result["pixel_values"])
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.46.0",
-                    reason="Model introduced in HF >= 4.46.0")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("longest_edge, expected_max_tokens", [
     (None, 2873),
@@ -107,8 +102,6 @@ def test_max_tokens_override(get_max_idefics3_image_tokens, model: str,
     assert expected_max_tokens == actual_max_tokens
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.46.0",
-                    reason="Model introduced in HF >= 4.46.0")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("longest_edge, toks_per_img, num_imgs", [
     (168, 169, 1),
@@ -143,8 +136,6 @@ def test_dummy_data_override(dummy_data_for_idefics3, model: str,
     assert img_tok_count == toks_per_img * num_imgs
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.46.0",
-                    reason="Model introduced in HF >= 4.46.0")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("longest_edge,expected_toks_per_img,num_imgs", [
     (336, 169 * (1**2 + 1), 1),
