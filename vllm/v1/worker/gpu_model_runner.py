@@ -1,7 +1,6 @@
 import gc
 import time
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -15,16 +14,16 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MultiModalKwargs
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available, make_tensor_with_pad)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
-    from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
@@ -585,6 +584,9 @@ class GPUModelRunner:
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture():
             for num_tokens in reversed(self.cudagraph_batch_sizes):
+                for _ in range(self.vllm_config.compilation_config.
+                               cudagraph_num_of_warmups):
+                    self._dummy_run(self.model, num_tokens, self.kv_caches)
                 self._dummy_run(self.model, num_tokens, self.kv_caches)
 
         end_time = time.perf_counter()

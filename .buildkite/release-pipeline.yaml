@@ -39,3 +39,19 @@ steps:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.1.0 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT --target vllm-openai --progress plain ."
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
+
+  - label: "Build and publish TPU release image"
+    depends_on: ~
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: tpu_queue_postmerge
+    commands:
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --tag vllm/vllm-tpu:nightly --tag vllm/vllm-tpu:$BUILDKITE_COMMIT --progress plain -f Dockerfile.tpu ."
+      - "docker push vllm/vllm-tpu:nightly"
+      - "docker push vllm/vllm-tpu:$BUILDKITE_COMMIT"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllm
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
