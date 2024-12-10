@@ -3,80 +3,41 @@
 namespace {
 
 template <typename scalar_t>
-struct KernelVecType {
-  using q_load_vec_type = void;
-  using q_vec_type = void;
-  using k_load_vec_type = void;
-  using k_vec_type = void;
-  using qk_acc_vec_type = void;
-  using v_load_vec_type = void;
-};
+struct KernelVecType;
 
 template <>
 struct KernelVecType<float> {
-  using q_load_vec_type = vec_op::FP32Vec4;
-  using q_vec_type = vec_op::FP32Vec16;
-  using k_load_vec_type = vec_op::FP32Vec16;
-  using k_vec_type = vec_op::FP32Vec16;
-  using qk_acc_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::FP32Vec16;
+  using q_load_vec_type = vec_op::AttnVecTypeISA<float>::q_load_vec_type;
+  using q_vec_type = vec_op::AttnVecTypeISA<float>::q_vec_type;
+  using k_load_vec_type = vec_op::AttnVecTypeISA<float>::k_load_vec_type;
+  using k_vec_type = vec_op::AttnVecTypeISA<float>::k_vec_type;
+  using qk_acc_vec_type = vec_op::AttnVecTypeISA<float>::qk_acc_vec_type;
+  using v_load_vec_type = vec_op::AttnVecTypeISA<float>::v_load_vec_type;
 };
 
 template <>
 struct KernelVecType<c10::Half> {
-#ifdef __powerpc64__
-  // Power architecture-specific vector types
-  using q_load_vec_type = vec_op::FP32Vec8;
-  using k_load_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::FP32Vec16;
-#else
-  // Fallback for other architectures, including x86
-  using q_load_vec_type = vec_op::FP16Vec8;
-  using k_load_vec_type = vec_op::FP16Vec16;
-  using v_load_vec_type = vec_op::FP16Vec16;
-#endif
-  using q_vec_type = vec_op::FP32Vec16;
-  using k_vec_type = vec_op::FP32Vec16;
-  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using q_load_vec_type = vec_op::AttnVecTypeISA<c10::Half>::q_load_vec_type;
+  using q_vec_type = vec_op::AttnVecTypeISA<c10::Half>::q_vec_type;
+  using k_load_vec_type = vec_op::AttnVecTypeISA<c10::Half>::k_load_vec_type;
+  using k_vec_type = vec_op::AttnVecTypeISA<c10::Half>::k_vec_type;
+  using qk_acc_vec_type = vec_op::AttnVecTypeISA<c10::Half>::qk_acc_vec_type;
+  using v_load_vec_type = vec_op::AttnVecTypeISA<c10::Half>::v_load_vec_type;
 };
 
-#ifdef __AVX512BF16__
 template <>
 struct KernelVecType<c10::BFloat16> {
-  using q_load_vec_type = vec_op::BF16Vec8;
-  using q_vec_type = vec_op::BF16Vec32;
-  using k_load_vec_type = vec_op::BF16Vec32;
-  using k_vec_type = vec_op::BF16Vec32;
-  using qk_acc_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::BF16Vec16;
+  using q_load_vec_type =
+      vec_op::AttnVecTypeISA<c10::BFloat16>::q_load_vec_type;
+  using q_vec_type = vec_op::AttnVecTypeISA<c10::BFloat16>::q_vec_type;
+  using k_load_vec_type =
+      vec_op::AttnVecTypeISA<c10::BFloat16>::k_load_vec_type;
+  using k_vec_type = vec_op::AttnVecTypeISA<c10::BFloat16>::k_vec_type;
+  using qk_acc_vec_type =
+      vec_op::AttnVecTypeISA<c10::BFloat16>::qk_acc_vec_type;
+  using v_load_vec_type =
+      vec_op::AttnVecTypeISA<c10::BFloat16>::v_load_vec_type;
 };
-#else
-  #ifdef __aarch64__
-    #ifndef ARM_BF16_SUPPORT
-    // pass
-    #else
-template <>
-struct KernelVecType<c10::BFloat16> {
-  using q_load_vec_type = vec_op::BF16Vec8;
-  using q_vec_type = vec_op::FP32Vec16;
-  using k_load_vec_type = vec_op::BF16Vec16;
-  using k_vec_type = vec_op::FP32Vec16;
-  using qk_acc_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::BF16Vec16;
-};
-    #endif
-  #else
-template <>
-struct KernelVecType<c10::BFloat16> {
-  using q_load_vec_type = vec_op::BF16Vec8;
-  using q_vec_type = vec_op::FP32Vec16;
-  using k_load_vec_type = vec_op::BF16Vec16;
-  using k_vec_type = vec_op::FP32Vec16;
-  using qk_acc_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::BF16Vec16;
-};
-  #endif
-#endif
 
 template <typename T>
 FORCE_INLINE std::pair<T, T> reduceSoftmax(T* data, const int size,
