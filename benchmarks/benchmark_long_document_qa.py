@@ -52,9 +52,7 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.utils import FlexibleArgumentParser
-"""
-HELPER FUNCTIONS FOR PROFILING
-"""
+
 execution_times = {}
 
 
@@ -110,11 +108,6 @@ def process_timing_results():
             count = len_to_count[swap_len]
             print(f"{key} on {swap_len} pages: "
                   f"{(count * swap_len) / total_time} pages per second")
-
-
-"""
-MAIN FUNCTIONS FOR BENCHMARKING
-"""
 
 
 def test_long_document_qa(llm=None, sampling_params=None, prompts=None):
