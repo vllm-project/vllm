@@ -51,6 +51,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import SequenceData
 from vllm.utils import is_list_of
 
@@ -62,6 +63,8 @@ from .utils import maybe_prefix
 logger = init_logger(__name__)
 MLLAMA_IMAGE_TOKEN_ID = 128256
 MLLAMA_IMAGE_TOKEN = "<|image|>"
+
+is_hpu = current_platform.is_hpu()
 
 
 class MllamaImagePixelInputs(TypedDict):
@@ -947,6 +950,14 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
+        # the rank of full_text_row_masked_out_mask is 2, not match with
+        # the hidden_states, so expand its rank to 3.
+        # TODO: Change input_tokens tensor at the beginning of model execution
+        # to 2D tensor to align with public vllm input_tokens shape. But this
+        # will face the graph building failure issue, still need to investigate.
+        if len(hidden_states.shape) == 3:
+            full_text_row_masked_out_mask = full_text_row_masked_out_mask.view(
+                hidden_states.size(0), -1, 1)
         hidden_states = full_text_row_masked_out_mask * hidden_states
         hidden_states = residual + self.cross_attn_attn_gate.tanh(
         ) * hidden_states
@@ -1016,6 +1027,11 @@ class MllamaTextModel(nn.Module):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
+        if is_hpu:
+            for idx, decoder_layer in enumerate(self.layers):
+                if isinstance(decoder_layer, LlamaDecoderLayer):
+                    self.layers[idx].self_attn.rotary_emb.prepare_cos_sin(
+                        positions)
         for idx, decoder_layer in enumerate(self.layers):
             if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
                 if not skip_cross_attention:
