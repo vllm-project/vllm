@@ -4,7 +4,7 @@ from vllm.executor.executor_base import ExecutorBase, ExecutorAsyncBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, SequenceGroup
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
@@ -99,6 +99,12 @@ class TTExecutor(ExecutorBase):
     def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError(
             "Soft prompt is currently not supported by the TT backend.")
+        
+    def validate_seq_group(self, seq_group: SequenceGroup) -> None:
+        '''
+        Validate the sequence group before it is scheduled for execution in LLMEngine::_add_processed_request.
+        '''
+        self.driver_worker.model_runner.validate_seq_group(seq_group)
    
 class TTExecutorAsync(TTExecutor, ExecutorAsyncBase):
 

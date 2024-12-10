@@ -694,6 +694,9 @@ class LLMEngine:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
 
+        # Validate that the sequence group is compatible with the device's model executor.
+        self._validate_device_inputs(seq_group)
+
         # Add the sequence group to the scheduler with least unfinished seqs.
         costs = [
             scheduler.get_num_unfinished_seq_groups()
@@ -1905,6 +1908,19 @@ class LLMEngine:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+    
+    def _validate_device_inputs(self, seq_group: SequenceGroup):
+        '''
+        Device-specific validations for model inputs and params. This is in
+        contrast to the device-agnostic validations in _validate_model_inputs.
+        These validations must be performed when adding a request (prior to step 
+        execution) so that server instances can reject requests that are not
+        compatible with the device they are running on (instead of crashing).
+        '''
+        
+        # Currently only supported for TT devices
+        if self.device_config.device_type == "tt":
+            self.model_executor.validate_seq_group(seq_group)
 
     def _build_logits_processors(
             self, sampling_params: SamplingParams,

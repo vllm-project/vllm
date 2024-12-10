@@ -1,7 +1,7 @@
 import dataclasses
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import torch
 import torch.nn.functional as F
@@ -13,11 +13,9 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tt_loader import TTModelLoader
-from vllm.sequence import IntermediateTensors, SequenceGroupMetadata, Logprob, SequenceOutput, CompletionSequenceGroupOutput
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata, Logprob, SequenceOutput, CompletionSequenceGroupOutput, SequenceGroup
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 from vllm.utils import make_tensor_with_pad
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -136,6 +134,26 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             tensor_dict,
         )
 
+    def validate_seq_group(self, seq_group: SequenceGroup) -> None:
+        '''
+        Validate a sequence group before it is scheduled for execution.
+        Called by TTExecutor::validate_seq_group before the sequence group 
+        is scheduled for execution in LLMEngine::_add_processed_request.
+        '''
+        
+        sampling_params = seq_group.sampling_params
+        
+        if seq_group.num_seqs() != 1:
+            raise ValueError("Currently only supporting one sequence per request group")
+        if sampling_params.n != 1:
+            raise ValueError("Currently only supporting n=1")
+        if sampling_params.best_of is not None:
+            raise ValueError("Currently not supporting best_of")
+        if sampling_params.logprobs is not None:
+            raise ValueError("Currently not supporting logprobs")
+        if sampling_params.prompt_logprobs is not None:
+            raise ValueError("Currently not supporting prompt_logprobs")
+
     def prepare_model_input(
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -160,7 +178,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
-            assert len(seq_ids) == 1   # Only support one sequence per request group
+            assert len(seq_ids) == 1, "Currently only supporting one sequence per request group"
             seq_id = seq_ids[0]
             seq_groups.append(seq_id)
 
@@ -189,15 +207,17 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             # Sampling params
             # TODO: Add support for different sampling params in the same batch
             sampling_params = seq_group_metadata.sampling_params
-            self._validate_sampling_params(sampling_params)
             if len(top_pk_sampling_params) == 0:
                 top_pk_sampling_params["temperature"] = sampling_params.temperature
                 top_pk_sampling_params["top_k"] = sampling_params.top_k
                 top_pk_sampling_params["top_p"] = sampling_params.top_p
             else:
-                assert top_pk_sampling_params["temperature"] == sampling_params.temperature, "Currently only supporting same temperature for all sequences in batch"
-                assert top_pk_sampling_params["top_k"] == sampling_params.top_k, "Currently only supporting same top_k for all sequences in batch"
-                assert top_pk_sampling_params["top_p"] == sampling_params.top_p, "Currently only supporting same top_p for all sequences in batch"
+                if top_pk_sampling_params["temperature"] != sampling_params.temperature:
+                    logger.warning(f"Currently only supporting same temperature for all sequences in batch, falling back to first sequence's temperature ({top_pk_sampling_params['temperature']})")
+                if top_pk_sampling_params["top_k"] != sampling_params.top_k:
+                    logger.warning(f"Currently only supporting same top_k for all sequences in batch, falling back to first sequence's top_k ({top_pk_sampling_params['top_k']})")
+                if top_pk_sampling_params["top_p"] != sampling_params.top_p:
+                    logger.warning(f"Currently only supporting same top_p for all sequences in batch, falling back to first sequence's top_p ({top_pk_sampling_params['top_p']})")
         
         tt_sampling_params = TTSamplingParams(
             temperature=top_pk_sampling_params["temperature"],
@@ -423,12 +443,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 k=tt_sampling_params.top_k,
                 temperature=tt_sampling_params.temperature
             )
-    
-    def _validate_sampling_params(self, sampling_params):
-        assert sampling_params.n == 1, "Currently only supporting n=1"
-        assert sampling_params.best_of is None, "Currently not supporting best_of"
-        assert sampling_params.logprobs is None, "Currently not supporting logprobs"
-        assert sampling_params.prompt_logprobs is None, "Currently not supporting prompt_logprobs"
 
     ## Destructor (used to delete ttnn trace if using trace mode)
     

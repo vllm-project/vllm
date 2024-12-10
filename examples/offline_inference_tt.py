@@ -16,8 +16,8 @@ from vllm.inputs.data import TokensPrompt
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
 # Import and register model from tt-metal
-from models.demos.t3000.llama2_70b.tt.llama_generation import TtLlamaModelForGeneration
-ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)
+from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM
+ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaForCausalLM)
 
 
 def run_inference(
