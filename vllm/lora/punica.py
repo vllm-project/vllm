@@ -438,6 +438,24 @@ class PunicaWrapper:
             add_input,
         )
 
+    def _expand_nslices_prefill(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: Tuple[torch.Tensor, ...],
+        add_input: bool,
+    ):
+        #No LoRA request, so return directly
+        if self.no_lora:
+            return
+        sgmv_expand_slice(
+            x,
+            w_t_all,
+            y,
+            *self.prefill_metadata,
+            add_input,
+        )
+
     def _expand_slice_decode(
         self,
         y: torch.Tensor,
@@ -588,16 +606,20 @@ class PunicaWrapper:
         if lora_bias_stacked is not None:
             self._apply_bias(self.token_lora_indices, y, output_slices,
                              lora_bias_stacked)
-        for slice_idx in range(len(lora_b_stacked)):
-            self._apply_expand(
-                y,
-                x[slice_idx],
-                lora_b_stacked[slice_idx],
-                offset_left,
-                output_slices[slice_idx],
-                add_input=add_input,
-            )
-            offset_left += output_slices[slice_idx]
+        if self.is_prefill:
+            # NOTE fused kernel
+            self._expand_nslices_prefill(y, x, lora_b_stacked, add_input=True)
+        else:
+            for slice_idx in range(len(lora_b_stacked)):
+                self._apply_expand(
+                    y,
+                    x[slice_idx],
+                    lora_b_stacked[slice_idx],
+                    offset_left,
+                    output_slices[slice_idx],
+                    add_input=add_input,
+                )
+                offset_left += output_slices[slice_idx]
         y = y.view_as(y_org)
 
     def add_lora_embedding(
@@ -670,10 +692,17 @@ class PunicaWrapper:
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default ,refer to:
             # https://github.com/triton-lang/triton/issues/1387
-            buffer = tuple(
-                torch.zeros(
-                    (x.size(0), r), dtype=torch.float32, device=x.device)
-                for _ in range(len(output_slices)))
+            # buffer = tuple(
+            #     torch.zeros(
+            #         (x.size(0), r), dtype=torch.float32, device=x.device)
+            #     for _ in range(len(output_slices)))
+
+            buffer = torch.zeros(
+                (len(output_slices), x.size(0), r),
+                dtype=torch.float32,
+                device=x.device,
+            )
+
         self.add_shrink(buffer, x, lora_a_stacked, scale)
         self.add_expand(y,
                         buffer,
