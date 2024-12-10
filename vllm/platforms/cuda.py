@@ -4,7 +4,8 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import lru_cache, wraps
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar, Union
+from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
+                    Union)
 
 import pynvml
 import torch
@@ -77,7 +78,9 @@ class CudaPlatformBase(Platform):
     dispatch_key: str = "CUDA"
 
     @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+    def get_device_capability(cls,
+                              device_id: int = 0
+                              ) -> Optional[DeviceCapability]:
         raise NotImplementedError
 
     @classmethod
@@ -132,7 +135,9 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @lru_cache(maxsize=8)
     @with_nvml_context
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls,
+                              device_id: int = 0
+                              ) -> Optional[DeviceCapability]:
         try:
             physical_device_id = device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
