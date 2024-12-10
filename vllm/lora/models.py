@@ -21,7 +21,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLora,
                               LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
-from vllm.lora.punica import PunicaWrapper
+from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
@@ -331,9 +331,9 @@ class LoRAModelManager(AdapterModelManager):
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
-        self.punica_wrapper = PunicaWrapper(max_num_batched_tokens,
-                                            max_batches=self.max_num_seqs,
-                                            device=self.device)
+        self.punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
+                                                 max_batches=self.max_num_seqs,
+                                                 device=self.device)
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
@@ -555,17 +555,17 @@ class LoRAModelManager(AdapterModelManager):
                         input_dim,
                         output_dim,
                         rank,
-                        module.lora_a_stacked.dtype,
+                        module.lora_a_stacked[0].dtype,
                         "cpu",
                         embeddings_tensor_dim=embeddings_tensor_dim,
                         bias_enabled=bias_enabled)
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
-                        module.lora_a_stacked.shape[-1],
-                        module.lora_b_stacked.shape[-2],
+                        module.lora_a_stacked[0].shape[-1],
+                        module.lora_b_stacked[0].shape[-2],
                         rank,
-                        module.lora_a_stacked.dtype,
+                        module.lora_a_stacked[0].dtype,
                         "cpu",
                         bias_enabled=bias_enabled,
                     )
