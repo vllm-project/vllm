@@ -13,11 +13,16 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
+import inspect
 
 logger = init_logger(__name__)
 
+if "do_not_specialize_on_alignment" in inspect.getfullargspec(triton.jit).kwonlyargs:
+    moe_triton_jit = functools.partial(triton.jit, do_not_specialize_on_alignment=["EM", "num_valid_tokens"])
+else:
+    moe_triton_jit = functools.partial(triton.jit, do_not_specialize=["EM", "num_valid_tokens"])
 
-@triton.jit
+@moe_triton_jit
 def fused_moe_kernel(
         # Pointers to matrices
         a_ptr,
