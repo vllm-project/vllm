@@ -1,3 +1,4 @@
+import importlib.util
 import math
 import os
 from array import array
@@ -14,10 +15,12 @@ from vllm.model_executor.models.gritlm import GritLMPooler
 
 from ....utils import RemoteOpenAIServer
 
-MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
-
 # GritLM implementation is only supported by XFormers backend.
+pytest.mark.skipif(not importlib.util.find_spec("xformers"),
+                   reason="GritLM requires XFormers")
 os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
+
+MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 
 
 def _arr(arr):
