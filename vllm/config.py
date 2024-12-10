@@ -705,13 +705,13 @@ class ModelConfig:
             return end - start if attn_block_type else 0
         elif self.is_attention_free:
             # Attention free
-            # Note that this code assumes there 
+            # Note that this code assumes there
             # is only one type of attention-free block type.
             return 0 if attn_block_type else end - start
         else:
             # Hybrid model
-            layers_block_type_value = getattr(self.hf_config, "layers_block_type",
-                                                  None)
+            layers_block_type_value = getattr(self.hf_config,
+                                              "layers_block_type", None)
             if layers_block_type_value is None:
                 raise ValueError("The model is an hybrid without a"
                                  "layers_block_type in the hf_config,"
