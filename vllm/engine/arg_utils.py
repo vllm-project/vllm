@@ -1242,7 +1242,7 @@ class EngineArgs:
         # too small to achieve the best performance in V1.
         self.max_num_seqs = 1024
         logger.warning("Setting max_num_seqs to %d for %s usage context.",
-                        self.max_num_seqs, usage_context.value)
+                       self.max_num_seqs, usage_context.value)
 
     def _override_v1_engine_config(self, engine_config: VllmConfig) -> None:
         """
