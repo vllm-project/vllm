@@ -114,8 +114,8 @@ class MooncakeConnector(KVConnectorBase):
         end_layer = model_executable.model.end_layer
 
         model_config = model_executable.model.config
-        hidden_size = model_config.hidden_size
         num_heads = model_config.num_key_value_heads
+        hidden_size = model_config.hidden_size
         num_hidden_layers = model_config.num_attention_heads
         head_size = int(hidden_size / num_hidden_layers)
 
