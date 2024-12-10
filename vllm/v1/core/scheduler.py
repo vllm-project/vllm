@@ -8,8 +8,6 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.engine import EngineCoreOutput
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
 if TYPE_CHECKING:
@@ -274,10 +272,22 @@ class Scheduler:
                 req.num_computed_tokens) for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
+
+        partial_req_indices = [
+            idx for idx, request in enumerate(self.running)
+            if request.num_computed_tokens +
+            num_scheduled_tokens[request.request_id] < request.num_tokens
+        ]
+        num_partial_reqs = len(partial_req_indices)
+        assert num_partial_reqs < 2
+        partial_req_index = (partial_req_indices[0]
+                             if num_partial_reqs > 0 else -1)
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_resumed_reqs=resumed_reqs_data,
             scheduled_running_reqs=running_reqs_data,
+            partial_req_index=partial_req_index,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
@@ -376,64 +386,6 @@ class Scheduler:
             encoder_budget -= num_encoder_tokens
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
-
-    def update_from_output(
-        self,
-        scheduler_output: "SchedulerOutput",
-        model_runner_output: "ModelRunnerOutput",
-    ) -> List[EngineCoreOutput]:
-        # NOTE(woosuk): This method doesn't consider speculative decoding.
-        sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        new_running: List[Request] = []
-        engine_core_outputs: List[EngineCoreOutput] = []
-        for request in self.running:
-            req_id = request.request_id
-            request.num_computed_tokens += num_scheduled_tokens[req_id]
-            # When the request's num_computed_tokens catches up its num_tokens,
-            # the request generates output tokens. Otherwise, we ignore the
-            # sampler output for the request.
-            assert request.num_computed_tokens <= request.num_tokens
-
-            cached_encoder_input_ids = (
-                self.encoder_cache_manager.get_cached_input_ids(request))
-            for input_id in list(cached_encoder_input_ids):
-                start_pos = request.mm_positions[input_id]["offset"]
-                num_tokens = request.mm_positions[input_id]["length"]
-                if start_pos + num_tokens <= request.num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    self.encoder_cache_manager.free(request, input_id)
-
-            if request.num_computed_tokens == request.num_tokens:
-                req_index = model_runner_output.req_id_to_index[req_id]
-                # NOTE(woosuk): Currently, we assume that each request
-                # generates at most one token at each step.
-                token_id = sampled_token_ids[req_index]
-                request.append_output_token_ids(token_id)
-                num_new_tokens = 1
-                # TODO: Update the KV cache manager for prefix caching.
-
-                # Check for stop and update request state.
-                # This must be called before me make the EngineCoreOutput.
-                stopped = self._check_stop(request)
-
-                # Add EngineCoreOutput for this Request.
-                output = EngineCoreOutput(
-                    request_id=req_id,
-                    new_token_ids=request.output_token_ids[-num_new_tokens:],
-                    finished=request.is_finished(),
-                    finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason)
-                engine_core_outputs.append(output)
-
-                # Breakout of the loop.
-                if stopped:
-                    continue
-
-            new_running.append(request)
-        self.running = new_running
-        return engine_core_outputs
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
@@ -582,6 +534,7 @@ class SchedulerOutput:
     scheduled_new_reqs: List[NewRequestData]
     scheduled_resumed_reqs: List[ResumedRequestData]
     scheduled_running_reqs: List[RunningRequestData]
+    partial_req_index: int  # >0 if running req is partial, -1 o/w
 
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int

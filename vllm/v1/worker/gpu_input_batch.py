@@ -107,6 +107,7 @@ class InputBatch:
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
+        self.num_prompt_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
 
     def add_request(
@@ -155,8 +156,11 @@ class InputBatch:
             self.generators[req_index] = request.generator
 
         num_logprobs = sampling_params.logprobs
+        num_prompt_logprobs = sampling_params.prompt_logprobs
         if num_logprobs is not None and num_logprobs > 0:
             self.num_logprobs[req_id] = num_logprobs
+        if num_prompt_logprobs is not None and num_prompt_logprobs > 0:
+            self.num_prompt_logprobs[req_id] = num_prompt_logprobs
         if sampling_params.prompt_logprobs:
             self.prompt_logprob_reqs.add(req_id)
 
@@ -172,6 +176,7 @@ class InputBatch:
         self.top_k_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.num_prompt_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
         return req_index
 
@@ -184,6 +189,7 @@ class InputBatch:
         self.top_k_reqs.clear()
         self.generators.clear()
         self.num_logprobs.clear()
+        self.num_prompt_logprobs.clear()
         self.prompt_logprob_reqs.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
@@ -231,6 +237,9 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
+        partial_req_index: int,
+        num_input_tokens: int,
+        query_start_loc: torch.Tensor,
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -240,8 +249,11 @@ class InputBatch:
                 self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
             self.top_k[:self.num_reqs].copy_(
                 self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
+
+        num_reqs = self.num_reqs
+
         return SamplingMetadata(
-            temperature=self.temperature[:self.num_reqs],
+            temperature=self.temperature[:num_reqs],
             all_greedy=self.all_greedy,
             all_random=self.all_random,
             top_p=self.top_p[:self.num_reqs],
@@ -249,8 +261,17 @@ class InputBatch:
             no_top_p=self.no_top_p,
             no_top_k=self.no_top_k,
             generators=self.generators,
-            max_num_logprobs=self.max_num_logprobs,
-        )
+            max_num_batch_sample_logprobs=self.max_num_logprobs,
+            max_num_batch_prompt_logprobs=self.max_num_prompt_logprobs,
+            # Required for sampling indices computation
+            query_start_loc=query_start_loc,
+            num_input_tokens=num_input_tokens,
+            partial_req_index=partial_req_index,
+            # Required for prompt logprobs temperature computation.
+            # If prompt logprobs is not required for this batch, then
+            # avoid storing num_query_tokens
+            num_query_tokens=(torch.diff(query_start_loc)
+                              if self.max_num_prompt_logprobs > 0 else None))
 
     @property
     def num_reqs(self) -> int:
@@ -275,6 +296,11 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> int:
         return max(self.num_logprobs.values()) if self.num_logprobs else 0
+
+    @property
+    def max_num_prompt_logprobs(self) -> int:
+        return (max(self.num_prompt_logprobs.values())
+                if self.num_prompt_logprobs else 0)
 
     @property
     def no_logprob(self) -> bool:

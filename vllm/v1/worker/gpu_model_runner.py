@@ -19,7 +19,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -209,7 +209,11 @@ class GPUModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+    def _prepare_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Tuple[torch.Tensor, FlashAttentionMetadata]:
+
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -242,8 +246,9 @@ class GPUModelRunner:
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         arange_matrix = np.tile(np.arange(max_num_scheduled_tokens),
                                 (num_reqs, 1))
-        mask = arange_matrix < num_scheduled_tokens[:, np.newaxis]
-        arange = arange_matrix[mask]
+        prompt_logits_mask = arange_matrix < num_scheduled_tokens[:,
+                                                                  np.newaxis]
+        arange = arange_matrix[prompt_logits_mask]
 
         # Get positions.
         positions = torch.empty((total_num_scheduled_tokens, ),
@@ -329,13 +334,13 @@ class GPUModelRunner:
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
-        # TODO: Support prompt logprobs.
-        logits_indices = query_start_loc[1:] - 1
-        return input_ids, attn_metadata, logits_indices
+        return (input_ids, attn_metadata)
 
     def _prepare_sampling(
         self,
         scheduler_output: "SchedulerOutput",
+        num_input_tokens: int,
+        query_start_loc: torch.Tensor,
     ) -> SamplingMetadata:
         skip_copy = True
         if (scheduler_output.finished_req_ids
@@ -345,7 +350,12 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        sampling_metadata = self.input_batch.make_sampling_metadata(
+            scheduler_output.partial_req_index,
+            num_input_tokens,
+            query_start_loc,
+            skip_copy,
+        )
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -432,8 +442,10 @@ class GPUModelRunner:
         encoder_outputs = self._gather_encoder_outputs(scheduler_output)
 
         # Prepare the decoder inputs.
-        input_ids, attn_metadata, logits_indices = self._prepare_inputs(
-            scheduler_output)
+        (
+            input_ids,
+            attn_metadata,
+        ) = self._prepare_inputs(scheduler_output=scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -444,6 +456,15 @@ class GPUModelRunner:
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
+
+        sampling_metadata = self._prepare_sampling(
+            scheduler_output, num_input_tokens, attn_metadata.query_start_loc)
+        # Indicate whether one or more requests in the batch require sample
+        # logprobs or prompt logprobs to be computed, respectively
+        do_batch_sample_logprobs = (
+            sampling_metadata.max_num_batch_sample_logprobs > 0)
+        do_batch_prompt_logprobs = (
+            sampling_metadata.max_num_batch_prompt_logprobs > 0)
 
         # Get the inputs embeds.
         if encoder_outputs:
@@ -466,18 +487,16 @@ class GPUModelRunner:
                 attn_metadata=None,
                 inputs_embeds=self.inputs_embeds[:num_input_tokens],
             )
+
         hidden_states = hidden_states[:num_scheduled_tokens]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self._prepare_sampling(scheduler_output)
-        sampler_output = self.model.sample(
-            logits=logits,
+        sampler_output: SamplerOutput = self.model.sample(
+            logits=self.model.compute_logits(hidden_states, None),
             sampling_metadata=sampling_metadata,
         )
 
-        # NOTE: CPU-GPU synchronization happens here.
+        # NOTE: sampled token id CPU-GPU synchronization happens here.
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
         sampled_token_ids_list = sampled_token_ids.tolist()
         # TODO(woosuk): The following loop can be slow since it iterates over
@@ -501,21 +520,24 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        if sampler_output.logprob_token_ids is None:
-            logprob_token_ids = None
-        else:
-            logprob_token_ids = sampler_output.logprob_token_ids.cpu()
-        if sampler_output.logprobs is None:
-            logprobs = None
-        else:
-            logprobs = sampler_output.logprobs.cpu()
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids_cpu=sampled_token_ids,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
-        )
+            # NOTE: sample and prompt logprob CPU-GPU synchronization happens
+            # here
+            batch_logprob_token_ids_cpu=(
+                sampler_output.batch_sample_logprob_token_ids.cpu().numpy()
+                if do_batch_sample_logprobs else None),
+            batch_logprobs_cpu=(
+                sampler_output.batch_sample_logprobs.cpu().numpy()
+                if do_batch_sample_logprobs else None),
+            batch_prompt_logprob_token_ids_cpu=(
+                sampler_output.batch_prompt_logprob_token_ids.cpu().numpy()
+                if do_batch_prompt_logprobs else None),
+            batch_prompt_logprobs_cpu=(
+                sampler_output.batch_prompt_logprobs.cpu().numpy()
+                if do_batch_prompt_logprobs else None))
         return model_runner_output
 
     def load_model(self) -> None:
