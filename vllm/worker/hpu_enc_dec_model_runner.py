@@ -168,6 +168,7 @@ class EncoderDecoderModelInputForHPU(ModelInputForHPUWithSamplingMetadata):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
             "encoder_input_tokens": self.encoder_input_tokens,
             "encoder_input_positions": self.encoder_input_positions,
         }
