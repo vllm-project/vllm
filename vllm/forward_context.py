@@ -10,10 +10,10 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-track_batchsize = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
-batchsize_counter = Counter()
+track_batchsize: bool = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
+batchsize_counter: Counter = Counter()
 last_logging_time: float = 0
-batchsize_logging_interval = envs.VLLM_LOG_BATCHSIZE_INTERVAL
+batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 
 
 @dataclass
