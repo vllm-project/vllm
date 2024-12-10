@@ -42,6 +42,9 @@ class MultiprocessingHPUExecutor(MultiprocessingGPUExecutor):
             f"please ensure that world_size ({world_size}) "
             f"is less than than max local hpu count ({hpu_device_count})")
 
+    def __del__(self):
+        self.shutdown()
+
 
 class MultiprocessingHPUExecutorAsync(MultiprocessingHPUExecutor,
                                       MultiprocessingGPUExecutorAsync):
