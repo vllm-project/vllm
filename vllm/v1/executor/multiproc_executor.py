@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import zmq
 
@@ -81,7 +81,7 @@ class MultiprocExecutor:
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_cache", num_gpu_blocks)
+        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
         self.collective_rpc("compile_or_warm_up_model")
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -99,23 +99,30 @@ class MultiprocExecutor:
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def collective_rpc(self, method: str, *args, **kwargs) -> [Optional]:
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> []:
         """
         Execute an RPC call on workers.
         
         Args:
-            method: Name of the Worker method to execute
-            *args: Arguments to pass to the method
-            **kwargs: Keyword arguments to pass to the method
-                     Special kwargs:
-                     - timeout: Optional[float] - Max time to wait for execution
-                                                  Not passed into worker method
-        """
-        self.rpc_broadcast_mq.enqueue((method, args, kwargs))
+            method: Name of the worker method to execute
+            timeout: Maximum time in seconds to wait for execution. Rases a
+                     TimeoutError on timeout. None means wait indefinitely.
+            args: Positional arguments to pass to the worker method
+            kwargs: Keyword arguments to pass to the worker method
 
-        timeout = kwargs.pop('timeout', None)  # Default None if not present
+        Returns:
+            List of results from each worker
+        """
         start_time = time.monotonic()
+        kwargs = kwargs or {}
+
         try:
+            self.rpc_broadcast_mq.enqueue((method, args, kwargs))
+
             responses = [None] * self.world_size
             for w in self.workers:
                 dequeue_timeout = timeout - (time.monotonic() - start_time()
@@ -143,11 +150,11 @@ class MultiprocExecutor:
         scheduler_output,
     ) -> ModelRunnerOutput:
         model_output = self.collective_rpc("execute_model",
-                                           scheduler_output)[0]
+                                           args=(scheduler_output, ))[0]
         return model_output
 
     def profile(self, is_start=True):
-        self.collective_rpc("profile", is_start)
+        self.collective_rpc("profile", args=(is_start, ))
         return
 
     def _ensure_worker_termination(self):

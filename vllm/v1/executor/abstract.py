@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -40,5 +40,9 @@ class Executor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def collective_rpc(self, method: str, *args, **kwargs) -> [Optional]:
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> []:
         raise NotImplementedError
