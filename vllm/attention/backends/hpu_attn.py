@@ -83,6 +83,18 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
     context_lens_tensor: Optional[torch.Tensor]
+    seq_lens: Optional[List[int]] = None
+    encoder_seq_lens: Optional[List[int]] = None
+    encoder_seq_lens_tensor: Optional[torch.Tensor] = None
+    cross_block_indices: Optional[torch.Tensor] = None
+    cross_block_offsets: Optional[torch.Tensor] = None
+    cross_block_list: Optional[torch.Tensor] = None
+    cross_slot_mapping: Optional[torch.Tensor] = None
+    cross_block_mapping: Optional[torch.Tensor] = None
+    cross_block_groups: Optional[torch.Tensor] = None
+    cross_block_scales: Optional[torch.Tensor] = None
+    cross_block_usage: Optional[torch.Tensor] = None
+    cross_attn_bias: Optional[torch.Tensor] = None
 
 
 class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
@@ -174,11 +186,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
+        if (attn_type != AttentionType.DECODER
+                and attn_type != AttentionType.ENCODER_DECODER):
+            raise NotImplementedError("Encoder self-attention "
+                                      "is not implemented for "
                                       "HPUAttentionImpl")
+        if attn_type == AttentionType.ENCODER_DECODER:
+            return self.forward_encoder_decoder(
+                query=query,
+                key=key,
+                value=value,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                k_scale=k_scale,
+                v_scale=v_scale,
+            )
+
         batch_size, seq_len, hidden_size = query.shape
         _, seq_len_kv, _ = key.shape
 
@@ -273,6 +296,117 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 values_fetch_func=self.v_cache.fetch_from_cache)
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
+
+    def forward_encoder_decoder(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: HPUAttentionMetadata,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Forward pass with xFormers and PagedAttention.
+
+        Args:
+            query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
+            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+            attn_metadata: Metadata for attention.
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+        batch_size, hidden_size = query.shape
+
+        if attn_metadata.is_prompt:
+            batch_size = attn_metadata.num_prefills
+            batched_tokens, _ = query.shape
+            batched_kv_tokens, _, _ = key.shape
+            assert batch_size > 0, (
+                "In prefill stage the num_prefills should be > 0")
+            assert batched_tokens % batch_size == 0
+            assert batched_kv_tokens % batch_size == 0
+            seq_len = batched_tokens // batch_size
+
+        query = query.view(-1, self.num_heads, self.head_size)
+        if key is not None:
+            assert value is not None
+            key = key.view(-1, self.num_kv_heads, self.head_size)
+            value = value.view(-1, self.num_kv_heads, self.head_size)
+        else:
+            assert value is None
+
+        block_indices = attn_metadata.cross_block_indices
+        block_offsets = attn_metadata.cross_block_offsets
+        if kv_cache is not None:
+            key_cache, value_cache = HPUPagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size)
+
+            # Reshape the input keys and values and store them in the cache.
+            # If kv_cache is not provided, the new key and value tensors are
+            # not cached. This happens during the initial memory profiling run.
+            if (key is not None) and (value is not None):
+                # During cross-attention decode, key & value will be None,
+                # we don't need to cache them.
+                key_cache = self.k_cache(key, key_cache, block_indices,
+                                         block_offsets)
+                value_cache = self.v_cache(value, value_cache, block_indices,
+                                           block_offsets)
+
+        if attn_metadata.is_prompt:
+            # Prompt run.
+            batch_size = attn_metadata.num_prefills
+
+            query_shape = (batch_size, -1, self.num_heads, self.head_size)
+            kv_shape = (batch_size, -1, self.num_kv_heads, self.head_size)
+            # Just a workaround, to make ops.prompt_attention go into the
+            # torch ops assembly path.
+            # TODO: add new prompt_attention op in vllm_hpu_extension
+            # which calls FusedSDPA with causal = False.
+            attn_bias = torch.zeros((batch_size, 1, 1, 1),
+                                    device=query.device,
+                                    dtype=torch.bool)
+            out = ops.prompt_attention(
+                query.view(query_shape),
+                key.view(kv_shape),
+                value.view(kv_shape),
+                attn_bias=attn_bias,
+                p=0.0,
+                scale=self.scale,
+                matmul_qk_op=self.matmul_qk,
+                softmax_op=self.softmax,
+                matmul_av_op=self.matmul_av,
+            )
+            output = out.reshape(batch_size, seq_len, hidden_size)
+        else:
+            # Enc/dec cross-attention KVs match encoder sequence length;
+            # cross-attention utilizes special "cross" block tables
+            block_list = attn_metadata.cross_block_list
+            block_mapping = attn_metadata.cross_block_mapping
+            block_scales = attn_metadata.cross_block_scales
+            block_groups = attn_metadata.cross_block_groups
+            attn_bias = attn_metadata.cross_attn_bias
+            # Decoding run.
+            output = HPUPagedAttention.forward_decode(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_list=block_list,
+                block_mapping=block_mapping,
+                block_bias=attn_bias,
+                block_scales=block_scales,
+                block_groups=block_groups,
+                scale=self.scale,
+                matmul_qk_op=self.matmul_qk,
+                matmul_av_op=self.matmul_av,
+                batch2block_matmul_op=self.batch2block_matmul,
+                block2batch_matmul_op=self.block2batch_matmul,
+                keys_fetch_func=self.k_cache.fetch_from_cache,
+                values_fetch_func=self.v_cache.fetch_from_cache)
+        # Reshape the output tensor.
+        return output.view(batch_size, -1, hidden_size)
 
 
 def _make_alibi_bias(

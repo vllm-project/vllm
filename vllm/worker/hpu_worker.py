@@ -26,7 +26,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import hpu_backend_string, hpu_device_string, is_fake_hpu
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.hpu_model_runner import HPUModelRunner
+from vllm.worker.hpu_enc_dec_model_runner import HPUEncoderDecoderModelRunner
+from vllm.worker.hpu_model_runner import HPUModelRunner, HPUModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
@@ -75,8 +76,13 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
 
-        ModelRunnerClass: Type[HPUModelRunner] = HPUModelRunner
-        self.model_runner: HPUModelRunner = ModelRunnerClass(
+        is_encoder_decoder_model = self._is_encoder_decoder_model()
+        ModelRunnerClass: Type[HPUModelRunnerBase] = HPUModelRunner
+        if model_runner_cls is not None:
+            ModelRunnerClass = model_runner_cls
+        elif is_encoder_decoder_model:
+            ModelRunnerClass = HPUEncoderDecoderModelRunner
+        self.model_runner: HPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
@@ -158,6 +164,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             logger.info("Saved full profiling to %s", file_path)
 
         return handler_fn
+
+    def _is_encoder_decoder_model(self):
+        return self.model_config.is_encoder_decoder
 
     def start_profile(self):
         if self.profiler is None:

@@ -29,6 +29,7 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import get_world_group
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -42,7 +43,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs)
+                             MultiModalKwargs, MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceData, SequenceGroupMetadata,
@@ -563,6 +564,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         return_hidden_states: bool = False,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         self.is_driver_worker = is_driver_worker
@@ -600,6 +603,14 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.block_size,
             self.model_config.is_attention_free,
         ) if needs_attn_backend else None
+
+        # Multi-modal data support
+        self.input_registry = input_registry
+        self.mm_registry = mm_registry
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.multi_modal_input_mapper = self.mm_registry \
+            .create_input_mapper(self.model_config)
+        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization
         self.lora_manager: LRUCacheWorkerLoRAManager = None
@@ -724,15 +735,17 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
             hidden_layer_markstep_interval = int(
                 os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
+            model_config = getattr(self.model, "config", None)
             modify_decoder_layer(
                 self.model,
-                get_decoder_layer_suffix(self.model.config.model_type),
+                get_decoder_layer_suffix(model_config.model_type if
+                                         model_config is not None else None),
                 hidden_layer_markstep_interval)
             names_for_rope = get_names_for_rope(self.model)
             torch.hpu.synchronize()
 
             with HabanaMemoryProfiler() as m_wrap:
-                self.model = _maybe_wrap_in_hpu_graph(
+                self.model = self._maybe_wrap_in_hpu_graph(
                     self.model,
                     self.block_size,
                     dtype=self.model_config.dtype,
@@ -744,6 +757,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.model_memory_usage = m.consumed_device_memory
         msg = f"Loading model weights took in total {m.get_summary_string()}"
         logger.info(msg)
+
+    def _maybe_wrap_in_hpu_graph(self, *args, **kwargs):
+        return htorch.hpu.wrap_in_hpu_graph(
+            HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
+        ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(
+            *args, **kwargs)
 
     def _use_graphs(self, batch_size, seq_len, is_prompt):
         if self.enforce_eager:
@@ -865,7 +884,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 slot_mapping[-1].append(slot)
 
         max_query_len = max(query_lens)
-        sum_query_len = sum(query_lens)
         real_num_seqs = len(query_lens)
         assert max_query_len > 0
 
@@ -910,11 +928,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         else:
             prefix_block_list_tensor = None
 
-        input_tokens = make_tensor_with_pad(input_tokens,
-                                            max_len=max_prompt_len,
-                                            pad=0,
-                                            dtype=torch.long,
-                                            device='cpu')
+        input_tokens_tensor = make_tensor_with_pad(input_tokens,
+                                                   max_len=max_prompt_len,
+                                                   pad=0,
+                                                   dtype=torch.long,
+                                                   device='cpu')
 
         input_positions = make_tensor_with_pad(input_positions,
                                                max_len=max_prompt_len,
@@ -936,10 +954,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                            dtype=torch.long,
                                            device='cpu')
 
+        # Note: num_prefill_tokens is calculated using the length of
+        # input_tokens after padding.
+        num_prefill_tokens = input_tokens_tensor.numel()
         if prefix_block_list_tensor:
             prefix_block_list_tensor = prefix_block_list_tensor.to(
                 self.device, non_blocking=True)
-        input_tokens = input_tokens.to(  # type: ignore
+        input_tokens_tensor = input_tokens_tensor.to(  # type: ignore
             self.device, non_blocking=True)
         input_positions = input_positions.to(  # type: ignore
             self.device, non_blocking=True)
@@ -959,18 +980,23 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_scales=None,
             block_groups=None,
             attn_bias=None,
+            seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             context_lens_tensor=context_lens_tensor,
             num_prefills=real_num_seqs,
-            num_prefill_tokens=sum_query_len,
+            num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=
             None  # FIXME(kzawora): mutli-modality will not work here
         )
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+        for t in multi_modal_kwargs:
+            if torch.is_tensor(multi_modal_kwargs[t]):
+                multi_modal_kwargs[t] = multi_modal_kwargs[t].to(
+                    self.device, non_blocking=True)
 
-        return PreparePromptMetadata(input_tokens=input_tokens,
+        return PreparePromptMetadata(input_tokens=input_tokens_tensor,
                                      input_positions=input_positions,
                                      attn_metadata=attn_metadata,
                                      seq_lens=seq_lens,
@@ -1063,7 +1089,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                        dtype=torch.long,
                                        device='cpu')
 
-        num_decode_tokens = sum(seq_lens)
+        num_decode_tokens = len(seq_lens)
 
         last_block_usage = [
             slot[0] % self.block_size + 1 for slot in slot_mapping
@@ -1343,10 +1369,18 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # input_hash(123) != input_hash(321)
         # input_hash("abc") != input_hash("cba")
         attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
-            'attn_bias', 'seq_lens_tensor', 'context_lens_tensor',
-            'block_list', 'block_mapping', 'block_usage', 'slot_mapping',
-            'is_prompt', 'block_indices', 'block_offsets', 'block_scales',
-            'block_groups'
+            'attn_bias',
+            'seq_lens_tensor',
+            'context_lens_tensor',
+            'block_list',
+            'block_mapping',
+            'block_usage',
+            'slot_mapping',
+            'is_prompt',
+            'block_indices',
+            'block_offsets',
+            'block_scales',
+            'block_groups',
         ])
         return attention_metadata
 
@@ -1729,6 +1763,21 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         logger.info(msg)
         self.profiler.end()
 
+    def finish_measurements(self):
+        from neural_compressor.torch.quantization import finalize_calibration
+        finalize_calibration(self.model.model)
+
+    def shutdown_inc(self):
+        can_finalize_inc = (self.model_config.quantization == 'inc') and \
+            (self.model.model is not None) and \
+            self.inc_initialized_successfully and \
+            not getattr(self, "_is_inc_finalized", False)
+        if can_finalize_inc:
+            from neural_compressor.torch.quantization import (
+                finalize_calibration)
+            finalize_calibration(self.model.model)
+            self._is_inc_finalized = True
+
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
@@ -1740,12 +1789,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     @mem_margin.setter
     def mem_margin(self, value):
         self._mem_margin = value
-
-
-def _maybe_wrap_in_hpu_graph(*args, **kwargs):
-    return htorch.hpu.wrap_in_hpu_graph(
-        HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
-    ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(*args, **kwargs)
 
 
 class HabanaProfilerCounterHelper:
@@ -2259,14 +2302,3 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             sampler_outputs.append(
                 CompletionSequenceGroupOutput(seq_outputs, None))
         return SamplerOutput(sampler_outputs)
-
-    def shutdown_inc(self):
-        can_finalize_inc = (self.model_config.quantization == 'inc') and \
-            (self.model.model is not None) and \
-            self.inc_initialized_successfully and \
-            not getattr(self, "_is_inc_finalized", False)
-        if can_finalize_inc:
-            from neural_compressor.torch.quantization import (
-                finalize_calibration)
-            finalize_calibration(self.model.model)
-            self._is_inc_finalized = True
