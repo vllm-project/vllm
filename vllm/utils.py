@@ -152,6 +152,10 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.int64: np.int64,
 }
 
+# If rocm, use float8_e4m3fnuz for float8.
+FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_rocm(
+) else torch.float8_e4m3fn
+
 P = ParamSpec('P')
 K = TypeVar("K")
 T = TypeVar("T")

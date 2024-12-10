@@ -3,12 +3,11 @@ from typing import Optional, Tuple, Union
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils import FP8_DTYPE
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for rocm.
 ROCM_FP8_MAX = 224.0
-FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_rocm() \
-                else torch.float8_e4m3fn
 
 
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
