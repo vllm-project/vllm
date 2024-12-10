@@ -107,7 +107,7 @@ async def get_guided_decoding_logits_processor(
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (  # noqa
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
-            guided_params, tokenizer)
+            guided_params, tokenizer, model_config)
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
@@ -115,10 +115,10 @@ async def get_guided_decoding_logits_processor(
 
 
 def get_local_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
-        tokenizer: PreTrainedTokenizer) -> LogitsProcessor | None:
+        guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
+        model_config: ModelConfig) -> LogitsProcessor | None:
 
     loop = asyncio.get_event_loop()
-    f = get_guided_decoding_logits_processor(guided_params, tokenizer)
+    f = get_guided_decoding_logits_processor(guided_params, tokenizer, model_config)
     res = loop.run_until_complete(f)
     return res

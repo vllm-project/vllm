@@ -303,7 +303,9 @@ def test_mistral_guided_decoding(
     model: str,
     guided_backend: str,
 ) -> None:
-    with vllm_runner(model, tokenizer_mode="mistral") as vllm_model:
+    with vllm_runner(model, 
+                     dtype='bfloat16', 
+                     tokenizer_mode="mistral") as vllm_model:
 
         guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA,
                                                backend=guided_backend)

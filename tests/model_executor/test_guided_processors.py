@@ -2,13 +2,14 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
+from vllm.config import ModelConfig
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
 from vllm.sampling_params import GuidedDecodingParams
 
-
+MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
 def test_guided_logits_processors(sample_regex, sample_json_schema):
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
@@ -40,12 +41,22 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
                          ["outlines", "lm-format-enforcer", "xgrammar"])
 async def test_guided_logits_processor_black_box(backend: str, sample_regex,
                                                  sample_json_schema):
-    tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
+    
+    config = ModelConfig(
+        MODEL_NAME,
+        task="generate",
+        tokenizer=MODEL_NAME,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="bfloat16",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     token_ids = tokenizer.encode(
         f"Give an example IPv4 address with this regex: {sample_regex}")
     regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
     regex_lp = await get_guided_decoding_logits_processor(
-        regex_request, tokenizer)
+        regex_request, tokenizer, config)
     assert regex_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
@@ -59,7 +70,7 @@ async def test_guided_logits_processor_black_box(backend: str, sample_regex,
     json_request = GuidedDecodingParams(json=sample_json_schema,
                                         backend=backend)
     json_lp = await get_guided_decoding_logits_processor(
-        json_request, tokenizer)
+        json_request, tokenizer, config)
     assert json_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
