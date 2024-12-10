@@ -701,7 +701,7 @@ class ModelConfig:
 
         if self.is_attention_free and attn_block_type:
             return 0
-        if is_full_attn_model and attn_block_type:
+        if is_full_attn_model and not attn_block_type:
             return 0
 
         start, end = self.get_layers_start_end_indices(parallel_config)
