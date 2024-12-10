@@ -37,11 +37,18 @@ def get_forward_context() -> ForwardContext:
 @contextmanager
 def set_forward_context(context: Any, vllm_config: VllmConfig):
     """A context manager that stores the current forward context,
-    can be attention metadata, etc."""
+    can be attention metadata, etc.
+    Here we can inject common logic for every model forward pass.
+    """
     global track_batchsize, batchsize_counter
     global last_logging_time, batchsize_logging_interval
     if track_batchsize and context is not None:
-        batchsize = context.num_prefill_tokens + context.num_decode_tokens
+        if hasattr(context, "num_prefill_tokens"):
+            # for v0 attention backends
+            batchsize = context.num_prefill_tokens + context.num_decode_tokens
+        else:
+            # for v1 attention backends
+            batchsize = context.num_input_tokens
         batchsize_counter[batchsize] += 1
         if time.monotonic() - last_logging_time > batchsize_logging_interval:
             last_logging_time = time.monotonic()
