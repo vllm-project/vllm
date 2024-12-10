@@ -183,15 +183,16 @@ class GritLM(LlamaForCausalLM):
     The class inherits from LlamaForCausalLM and provides a custom pooling
     layer.
 
-    The task "embedding" must be specified in the server arguments.
-
     The main difference between the pooling layer in GritLM and the one in
     LlamaForCausalLM is that GritLM ignores the query instruction in the prompt
     when pooling the hidden states.
 
-    Prompt must be in the following format:
+    Embedding prompts should be in the following format:
     - With instruction: "<|user|>\nINSTRUCTION\n<|embed|>\nPROMPT".
     - Without instruction: "<|embed|>\nPROMPT".
+
+    Generation prompts should be in the following format:
+    - "<|user|>\nPROMPT\n<|assistant|>\n"
     """
 
     def __init__(
@@ -206,11 +207,13 @@ class GritLM(LlamaForCausalLM):
 
         self._pooler = GritLMPooler(vllm_config.model_config)
 
-        for layer in self.model.layers:
-            if hasattr(layer, "self_attn"):
-                assert isinstance(layer.self_attn.attn.impl, XFormersImpl), (
-                    "GritLM is only supported by XFormers backend, "
-                    "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS")
+        if self.task == "embedding":
+            for layer in self.model.layers:
+                if hasattr(layer, "self_attn"):
+                    assert isinstance(layer.self_attn.attn.impl, XFormersImpl), (
+                        "GritLM embedding is only supported by XFormers backend, "
+                        "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS"
+                    )
 
     def forward(
         self,
