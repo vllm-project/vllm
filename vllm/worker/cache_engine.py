@@ -109,6 +109,10 @@ class CacheEngine:
             parallel_config)
 
         key_cache_block = cache_config.block_size * num_heads * head_size
+        # if model_config._is_deepseek_v2: # MLA share the K and V cache in one latent vector.
+        #     value_cache_block = 0
+        # else:
+        # TODO(simon): for MLA, this is repurpose for rope cache (64) but it is smaller than key cache (512).
         value_cache_block = key_cache_block
         total = num_attention_layers * (key_cache_block + value_cache_block)
         if cache_config.cache_dtype == "auto":
