@@ -1,9 +1,12 @@
 import inspect
+import time
+from collections import Counter
 from typing import Callable, Dict, List, Optional, TypeVar, Union, overload
 
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import CompilationLevel, VllmConfig
@@ -146,6 +149,9 @@ def _support_torch_compile(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
+        self.track_batchsize = envs.VLLM_TRACK_BATCHSIZE
+        self.batchsize_counter = Counter()
+        self.last_logging_time = time.monotonic()
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = \
@@ -164,6 +170,26 @@ def _support_torch_compile(
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
+        if self.track_batchsize:
+            tensors = []
+            for arg in args + tuple(kwargs.values()):
+                if isinstance(arg, torch.Tensor):
+                    tensors.append(arg)
+                elif isinstance(arg, IntermediateTensors):
+                    for tensor in arg.tensors.values():
+                        tensors.append(tensor)
+            # ignore kv cache tensors and empty tensors
+            bs = [
+                tensor.shape[0] for tensor in tensors
+                if len(tensor.shape) <= 2 and tensor.shape[0] > 1
+            ]
+            for b in bs:
+                assert b == bs[0]
+            self.batchsize_counter[bs[0]] += 1
+            if time.monotonic() - self.last_logging_time > 10:
+                self.last_logging_time = time.monotonic()
+                logger.info("Batchsize distribution: %s",
+                            self.batchsize_counter)
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
