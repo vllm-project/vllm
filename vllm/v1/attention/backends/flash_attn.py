@@ -50,13 +50,13 @@ class FlashAttentionMetadata:
     #                                   |-- query_len ---|
 
     num_actual_tokens: int  # Number of tokens excluding padding.
-    num_input_tokens: int = 0  # Number of tokens including padding.
     max_query_len: int
     query_start_loc: torch.Tensor
     max_seq_len: int
     seq_start_loc: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    num_input_tokens: int = 0  # Number of tokens including padding.
 
 
 class FlashAttentionImpl(AttentionImpl):
