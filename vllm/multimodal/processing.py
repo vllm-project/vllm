@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import (Any, Dict, Generic, NamedTuple, Optional, Protocol,
+from typing import (Any, Dict, Generic, NamedTuple, Optional, Protocol, Tuple,
                     TypeVar, Union, cast)
 
 import torch
@@ -583,20 +583,10 @@ class BaseMultiModalProcessor(ABC):
                 min_unit_count=min_unit_count,
             ))
 
-    def _apply_hf_processor(
+    def _get_processor_data(
         self,
-        prompt: str,
         mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # some mm_processor_kwargs may be used in processor initialization
-        # instead of processor call
-        processor_init_kwargs = {
-            **self.init_mm_processor_kwargs,
-            **mm_processor_kwargs,
-        }
-        hf_processor = self._get_hf_processor(**processor_init_kwargs)
-
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
         for k, v in mm_data.items():
@@ -614,6 +604,25 @@ class BaseMultiModalProcessor(ABC):
                     processor_data[f"{k}s"] = v
             else:
                 processor_data[k] = v
+        return processor_data, passthrough_data
+
+    def _apply_hf_processor(
+        self,
+        prompt: str,
+        mm_data: MultiModalDataDict,
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # some mm_processor_kwargs may be used in processor initialization
+        # instead of processor call
+        processor_init_kwargs = {
+            **self.init_mm_processor_kwargs,
+            **mm_processor_kwargs,
+        }
+        hf_processor = self._get_hf_processor(**processor_init_kwargs)
+
+        processor_data = dict[str, Any]()
+        passthrough_data = dict[str, Any]()
+        processor_data, passthrough_data = self._get_processor_data(mm_data)
 
         # filter mm_processor_kwargs used in processor call
         mm_processor_kwargs = resolve_mm_processor_kwargs(

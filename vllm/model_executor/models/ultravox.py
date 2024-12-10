@@ -77,8 +77,8 @@ def dummy_audio_for_ultravox(
     audio_count: int,
 ):
     feature_extractor = whisper_feature_extractor(ctx)
-    audio_and_sr = (np.array([0.0] * feature_extractor.chunk_length), 1)
-    return {"audio": [audio_and_sr] * audio_count}
+    audio = np.array([0.0] * feature_extractor.chunk_length)
+    return {"audio": [audio] * audio_count}
 
 
 def dummy_mm_kwargs_for_ultravox(ctx: InputProcessingContext,
@@ -88,7 +88,7 @@ def dummy_mm_kwargs_for_ultravox(ctx: InputProcessingContext,
 
     hf_processor = ctx.get_hf_processor()
     audio_processor = hf_processor.audio_processor  # type: ignore
-    hf_inputs = audio_processor(audio=data['audio'], return_tensors="pt")
+    hf_inputs = audio_processor(data['audio'], return_tensors="pt")
 
     return MultiModalKwargs(**hf_inputs)
 
@@ -112,6 +112,12 @@ class UltravoxProcessor(BaseMultiModalProcessor):
             ctx=ctx,
             metadata=create_metadata_for_ultravox(ctx),
         )
+
+    def _get_processor_data(self, mm_data):
+        processor_data, passthrough_data = super()._get_processor_data(mm_data)
+        if "audios" in processor_data:
+            processor_data["audio"] = processor_data.pop("audios")
+        return processor_data, passthrough_data
 
     def _get_dummy_mm_kwargs(
         self,
