@@ -6,6 +6,7 @@ from http import HTTPStatus
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
                     Optional, Sequence, Tuple, TypedDict, Union)
 
+from fastapi import Request
 from pydantic import Field
 from starlette.datastructures import Headers
 from typing_extensions import Annotated
@@ -47,7 +48,7 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import AtomicCounter, is_list_of, make_async
+from vllm.utils import AtomicCounter, is_list_of, make_async, random_uuid
 
 logger = init_logger(__name__)
 
@@ -564,6 +565,14 @@ class OpenAIServing:
             log_tracing_disabled_warning()
 
         return None
+
+    @staticmethod
+    def _base_request_id(raw_request: Request,
+                         default: Optional[str] = None) -> Optional[str]:
+        """Pulls the request id to use from a header, if provided"""
+        default = default or random_uuid()
+        return raw_request.headers.get(
+            "X-Request-Id", default) if raw_request is not None else default
 
     @staticmethod
     def _get_decoded_token(logprob: Logprob,
