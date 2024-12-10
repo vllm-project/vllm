@@ -710,7 +710,12 @@ class ModelConfig:
         layers_block_type_value = getattr(self.hf_config, "layers_block_type",
                                           None)
         if layers_block_type_value is None:
-            return end - start
+            if not self.is_hybrid:
+                return end - start
+            raise ValueError("The model is an hybrid without a"
+                             "layers_block_type in the hf_config,"
+                             "cannot determine the num of "
+                             f"{block_type.value} layers")
 
         return sum(t == block_type.value
                    for t in layers_block_type_value[start:end])
