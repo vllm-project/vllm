@@ -181,7 +181,7 @@ def _support_torch_compile(
             # ignore kv cache tensors and empty tensors
             bs = [
                 tensor.shape[0] for tensor in tensors
-                if len(tensor.shape) <= 2 and tensor.shape[0] > 1
+                if len(tensor.shape) <= 2 and tensor.shape[0] >= 1
             ]
             for b in bs:
                 assert b == bs[0]
