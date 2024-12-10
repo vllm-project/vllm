@@ -4,7 +4,7 @@
  * __device__ layernorm utilities.
  */
 
-#include "vectorization.cuh"
+#include "quantization/vectorization.cuh"
 #include "quant_conversions.cuh"
 
 #ifndef USE_ROCM
@@ -279,6 +279,8 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 
   int32_t const num_vec_elems = hidden_size >> 2;
 
+// TODO(luka/varun) extract into type-agnostic vectorized quant function to
+//  replace scaled_fp8_conversion_vec
 #pragma unroll 4
   for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> const in = vec_input[i];

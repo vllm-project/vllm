@@ -150,6 +150,7 @@ void rms_norm_dynamic_per_token_quant(
   if (scale_ub.has_value()) {
     TORCH_CHECK(out.dtype() == torch::kFloat8_e4m3fn);
   }
+  TORCH_CHECK(scales.dtype() == torch::kFloat32);
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
