@@ -214,7 +214,7 @@ class LoRAModel(AdapterModel):
                                                     "new_embeddings.bin")
         with open(lora_config_path) as f:
             config = json.load(f)
-        
+
         config["vllm_max_position_embeddings"] = max_position_embeddings
         peft_helper = PEFTHelper.from_dict(config)
         if os.path.isfile(lora_tensor_path):
@@ -279,7 +279,6 @@ class LoRAModel(AdapterModel):
             embeddings = torch.load(new_embeddings_bin_file_path,
                                     map_location=device)
 
-     
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
             if lora_model_id is None else lora_model_id,

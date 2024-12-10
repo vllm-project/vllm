@@ -149,8 +149,7 @@ def sql_lora_huggingface_id():
 
 @pytest.fixture(scope="session")
 def sql_lora_files(sql_lora_huggingface_id):
-    # return snapshot_download(repo_id=sql_lora_huggingface_id)
-    return "/home/sobey/Models/llm_test_ckpts/lora_model/llama-2-7b-sql-lora-test-yard1"
+    return snapshot_download(repo_id=sql_lora_huggingface_id)
 
 
 @pytest.fixture(scope="session")
@@ -260,7 +259,7 @@ def llama_2_7b_engine_extra_embeddings():
         return get_model_old(**kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
-        engine = vllm.LLM("/home/sobey/Models/llm_models/BaseModel/llama/Llama-2-7B-fp16-hf", enable_lora=False)
+        engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
     yield engine.llm_engine
     del engine
     cleanup_dist_env_and_memory(shutdown_ray=True)

@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Dict, List
 
@@ -5,7 +6,7 @@ import pytest
 import torch
 from safetensors.torch import load_file
 from torch import nn
-import json
+
 from vllm.config import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -13,11 +14,12 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.models import (LoRAMapping, LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager)
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.lora.peft_helper import PEFTHelper
+
 EMBEDDING_MODULES = {
     "embed_tokens": "input_embeddings",
     "lm_head": "output_embeddings",
@@ -60,16 +62,18 @@ def test_peft_helper(sql_lora_files):
         PEFTHelper.from_dict(config)
     expected_error = "vLLM does not yet support RSLoRA."
     with pytest.raises(ValueError, match=expected_error):
-        config = dict(
-            r=8, lora_alpha=16, target_modules=["gate_proj"], use_rslora=True
-        )
+        config = dict(r=8,
+                      lora_alpha=16,
+                      target_modules=["gate_proj"],
+                      use_rslora=True)
         PEFTHelper.from_dict(config)
 
     expected_error = "vLLM does not yet support DoRA."
     with pytest.raises(ValueError, match=expected_error):
-        config = dict(
-            r=8, lora_alpha=16, target_modules=["gate_proj"], use_dora=True
-        )
+        config = dict(r=8,
+                      lora_alpha=16,
+                      target_modules=["gate_proj"],
+                      use_dora=True)
         PEFTHelper.from_dict(config)
 
 
@@ -84,7 +88,7 @@ def test_from_lora_tensors(sql_lora_files, device):
     with open(lora_config_path) as f:
         config = json.load(f)
 
-    peft_helper=PEFTHelper.from_dict(config)
+    peft_helper = PEFTHelper.from_dict(config)
     lora_model = LoRAModel.from_lora_tensors(
         1,
         tensors,
