@@ -186,6 +186,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_k: int = -1
     min_p: float = 0.0
     repetition_penalty: float = 1.0
+    repetition_penalty_range: int = 0
     length_penalty: float = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
@@ -293,6 +294,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."))
+    sampler_priority: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default priority of the sampler "
+            "(penalties,temperature,top_k_top_p,min_p). "
+            "With this, custom orders like:"
+            "penalties->temperature->top_k top_p->min_p will be applied. "))
 
     # doc: end-chat-completion-extra-params
 
@@ -350,6 +358,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=self.repetition_penalty,
+            repetition_penalty_range=self.repetition_penalty_range,
             temperature=self.temperature,
             top_p=self.top_p,
             top_k=self.top_k,
@@ -369,6 +378,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
+            sampler_priority=self.sampler_priority,
             logit_bias=self.logit_bias)
 
     def _get_guided_json_from_tool(
@@ -537,6 +547,7 @@ class CompletionRequest(OpenAIBaseModel):
     top_k: int = -1
     min_p: float = 0.0
     repetition_penalty: float = 1.0
+    repetition_penalty_range: int = 0
     length_penalty: float = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
@@ -599,6 +610,13 @@ class CompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
+    sampler_priority: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default priority of the sampler "
+            "(penalties,temperature,top_k_top_p,min_p). "
+            "With this, custom orders like:"
+            "penalties->temperature->top_k top_p->min_p will be applied. "))
 
     # doc: end-completion-extra-params
 
@@ -650,6 +668,7 @@ class CompletionRequest(OpenAIBaseModel):
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=self.repetition_penalty,
+            repetition_penalty_range=self.repetition_penalty_range,
             temperature=self.temperature,
             top_p=self.top_p,
             top_k=self.top_k,
@@ -669,6 +688,7 @@ class CompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
+            sampler_priority=self.sampler_priority,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids)
 
