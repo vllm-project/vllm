@@ -4,10 +4,14 @@
  * __device__ helper functions to deal with float -> quant datatype conversion
  */
 
-#include "vectorization.cuh"
+#include "quantization/vectorization.cuh"
+// TODO(luka/varun):refactor common.cuh to use this file instead
+#include "quantization/fp8/common.cuh"
 
 namespace vllm {
 
+// TODO(luka/varun): combine into common utilities for int8
+//  (with int8_quant_kernels.cu)
 static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
 #ifdef USE_ROCM
   static const float i8_min =
@@ -27,11 +31,9 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
 #endif
 }
 
-#define FP8_E4M3_MAX std::numeric_limits<c10::Float8_e4m3fn>::max()
-static __device__ __forceinline__ c10::Float8_e4m3fn float_to_fp8(
-    float const x) {
+static __device__ __forceinline__ FP8_TYPE float_to_fp8(float const x) {
   float const r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
-  return static_cast<c10::Float8_e4m3fn>(r);
+  return static_cast<FP8_TYPE>(r);
 }
 
 template <typename quant_type_t, bool is_scale_inverted, typename enable = void>
@@ -52,9 +54,9 @@ struct ScaledQuant<
 };
 
 template <typename quant_type_t, bool is_scale_inverted>
-struct ScaledQuant<quant_type_t, is_scale_inverted,
-                   typename std::enable_if_t<
-                       std::is_same_v<quant_type_t, c10::Float8_e4m3fn>>> {
+struct ScaledQuant<
+    quant_type_t, is_scale_inverted,
+    typename std::enable_if_t<std::is_same_v<quant_type_t, FP8_TYPE>>> {
   static __device__ __forceinline__ quant_type_t quant_fn(float const x,
                                                           float const scale) {
     if constexpr (is_scale_inverted) {
