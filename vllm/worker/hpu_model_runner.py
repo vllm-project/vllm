@@ -687,7 +687,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 assert hasattr(
                     self.model, "embedding_padding_modules"
                 ), "Model does not have embedding_padding_modules"
-
+                assert not self.lora_config.bias_enabled, \
+                    "Bias support in LoRA is not enabled in HPU yet."
+                assert not self.lora_config.fully_sharded_loras, \
+                    "Fully sharded LoRAs is not enabled in HPU yet."
                 if supports_multimodal(self.model):
                     logger.warning(
                         "Regarding multimodal models, vLLM currently "
