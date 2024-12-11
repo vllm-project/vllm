@@ -62,6 +62,7 @@ def baseline_scaled_mm(a: torch.Tensor,
                        scale_b: torch.Tensor,
                        out_dtype: Type[torch.dtype],
                        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    print(a.shape, b.shape, scale_a.shape, scale_b.shape)
     output = (scale_a * (scale_b * (torch.mm(
         a.to(dtype=torch.float32), b.to(dtype=torch.float32))))).to(out_dtype)
     if bias is not None:
@@ -458,9 +459,9 @@ def test_cutlass_support_opcheck():
 
 # TODO fix scales
 @pytest.mark.parametrize("m,n,k", [(2048, 2048, 2048)])
-@pytest.mark.parametrize("num_groups", [10])
-@pytest.mark.parametrize("per_act_token", [False])  # [True, False])
-@pytest.mark.parametrize("per_out_ch", [True])  # [True, False])
+@pytest.mark.parametrize("num_groups", [1, 4, 10])
+@pytest.mark.parametrize("per_act_token", [True, False])  # [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])  # [True, False])
 @pytest.mark.parametrize("use_bias", [False])  # [True, False])
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
@@ -486,7 +487,7 @@ def test_cutlass_fp8_group_gemm(m: int, n: int, k: int, num_groups: int,
     k = alignment * random.randint(1, 64)
     for g in range(num_groups):
         tot_a += m
-        tot_b += k
+        tot_b += n
         tot_c += m
         print(m, n, k)
         offsets_a[g] = g * m * k
@@ -497,7 +498,13 @@ def test_cutlass_fp8_group_gemm(m: int, n: int, k: int, num_groups: int,
         problem_sizes[g][2] = k
 
     a = to_fp8(torch.randn((tot_a, k), device=device))
-    b = to_fp8(torch.randn((tot_b, n), device=device).t())
+
+    b_float = torch.randn((tot_b, k), device=device)
+    # for g in range(num_groups):
+    #     b_float[g * k:(g + 1) * k] = torch.full((k, n), g + 1)
+    # print(b_float)
+
+    b = to_fp8(b_float.t())
     c = torch.zeros((tot_c, n), device=device).to(out_dtype)
     baseline = torch.zeros((tot_c, n), device=device).to(out_dtype)
 
@@ -511,29 +518,19 @@ def test_cutlass_fp8_group_gemm(m: int, n: int, k: int, num_groups: int,
 
     # print(a.stride(), b.stride(), c.stride())
 
-    # m_a_scales = m if per_act_token else 1
-    # n_b_scales = n if per_out_ch else 1
-
-    # scale_a = (torch.randn((tot_a if per_act_token else num_groups),
-    #                        device=device,
-    #                        dtype=torch.float32))
-    # scale_b = (torch.randn((tot_b if per_act_token else num_groups),
-    #                         device=device,
-    #                        dtype=torch.float32))
-
-    scale_a = (torch.ones((tot_a if per_act_token else num_groups),
-                          device=device,
-                          dtype=torch.float32))
-    scale_b = (torch.ones((tot_b if per_act_token else num_groups),
-                          device=device,
-                          dtype=torch.float32))
+    scale_a = (torch.randn(((m, 1) if per_act_token else (1, 1)),
+                           device=device,
+                           dtype=torch.float32))
+    scale_b = (torch.randn(((1, n) if per_out_ch else (1, 1)),
+                           device=device,
+                           dtype=torch.float32))
 
     # if use_bias:
     #     bias = torch.rand((n, 1), device=device, dtype=out_dtype) * 10
     # else:
     #     bias = None
 
-    print(a)
+    # print(a)
 
     # TODO strides we can get later the same way as in scaled_mm_c3x.cu
     torch.ops._C.cutlass_grouped_mm(c, a, b, scale_a, scale_b, problem_sizes,
@@ -547,20 +544,29 @@ def test_cutlass_fp8_group_gemm(m: int, n: int, k: int, num_groups: int,
     # # print(c[2*m:3*m])
     # print(torch.max(c, dim=1))
     # print(torch.max(c, dim=0))
-    print(c)
+    # print(c)
 
     for g in range(num_groups):
+        print(a[g * m:(g + 1) * m].shape, b[:, g * n:(g + 1) * n].shape)
         baseline[g * m:(g + 1) * m] = baseline_scaled_mm(
             a[g * m:(g + 1) * m],
-            b.t()[g * k:(g + 1) * k],
-            scale_a[g * m:(g + 1) * m] if per_act_token else scale_a[g],
-            scale_b[g * k:(g + 1) * k] if per_act_token else scale_b[g],
-            out_dtype, None)
+            b[:, g * n:(g + 1) * n],
+            # scale_a[g * m:(g + 1) * m] if per_act_token else scale_a[g],
+            # # scale_b[:, g * n:(g + 1) * n] if per_out_ch else scale_b[:, g],
+            # scale_b[g],
+            scale_a,
+            scale_b,
+            out_dtype,
+            None)
         print(baseline[g * m:(g + 1) * m])
         print(c[g * m:(g + 1) * m])
         print("*")
 
-    # torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-2)
+    # baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, None)
+    # print(baseline)
+    # print(c)
+
+    torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-2)
 
     # opcheck(torch.ops._C.cutlass_scaled_mm,
     #         (out, a, b, scale_a, scale_b, bias))
