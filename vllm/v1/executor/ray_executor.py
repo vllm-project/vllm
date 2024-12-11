@@ -7,8 +7,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port)
-from vllm.v1.core.scheduler import SchedulerOutput
+from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerBase
@@ -20,6 +19,7 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
+
 
 class RayExecutor:
 
@@ -144,22 +144,25 @@ class RayExecutor:
                 "`HOST_IP` environment variable, make sure it is unique for"
                 " each node.")
 
-        VLLM_INSTANCE_ID = get_vllm_instance_id()
+        # VLLM_INSTANCE_ID = get_vllm_instance_id()
 
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = [({
-            "CUDA_VISIBLE_DEVICES":
-            ",".join(map(str, node_gpus[node_id])),
-            "VLLM_INSTANCE_ID":
-            VLLM_INSTANCE_ID,
-            "VLLM_TRACE_FUNCTION":
-            str(envs.VLLM_TRACE_FUNCTION),
-            "VLLM_USE_V1":
-            str(int(envs.VLLM_USE_V1)),
-            **({
-                "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
-            } if envs.VLLM_ATTENTION_BACKEND is not None else {})
-        }, ) for (node_id, _) in worker_node_and_gpu_ids]
+        all_args_to_update_environment_variables = [
+            (
+                {
+                    "CUDA_VISIBLE_DEVICES":
+                    ",".join(map(str, node_gpus[node_id])),
+                    # "VLLM_INSTANCE_ID":
+                    # VLLM_INSTANCE_ID,
+                    "VLLM_TRACE_FUNCTION":
+                    str(envs.VLLM_TRACE_FUNCTION),
+                    "VLLM_USE_V1":
+                    str(int(envs.VLLM_USE_V1)),
+                    **({
+                        "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
+                    } if envs.VLLM_ATTENTION_BACKEND is not None else {})
+                }, ) for (node_id, _) in worker_node_and_gpu_ids
+        ]
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
@@ -192,11 +195,30 @@ class RayExecutor:
         self._run_workers("initialize")
         self._run_workers("load_model")
 
+    def _get_env_vars_to_be_updated(self):
+        return self._env_vars_for_all_workers
+
     def _get_worker_module_and_class(
             self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
         worker_module_name = "vllm.v1.worker.gpu_worker"
         worker_class_name = "Worker"
         return worker_module_name, worker_class_name
+
+    def _get_worker_kwargs(
+            self,
+            local_rank: int = 0,
+            rank: int = 0,
+            distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
+        """Return worker init args for a given rank."""
+        if distributed_init_method is None:
+            distributed_init_method = get_distributed_init_method(
+                get_ip(), get_open_port())
+        return dict(
+            vllm_config=self.vllm_config,
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+        )
 
     def _get_worker_wrapper_args(self) -> Dict[str, Any]:
         worker_module_name, worker_class_name = (
@@ -207,6 +229,44 @@ class RayExecutor:
             worker_class_name=worker_class_name,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        """Determine the number of available KV blocks.
+        This invokes `determine_num_available_blocks` on each worker and takes
+        the min of the results, guaranteeing that the selected cache sizes are
+        compatible with all workers.
+        Returns:
+            - tuple[num_gpu_blocks, num_cpu_blocks]
+        """
+        # Get the maximum number of blocks that can be allocated on GPU and CPU.
+        num_blocks = self._run_workers("determine_num_available_blocks")
+
+        # Since we use a shared centralized controller, we take the minimum
+        # number of blocks across all workers to make sure all the memory
+        # operators can be applied to all workers.
+        num_gpu_blocks = min(b[0] for b in num_blocks)
+        return num_gpu_blocks, 0
+
+    def initialize(self, num_gpu_blocks: int) -> None:
+        """Initialize the KV cache in all workers.
+        """
+        # NOTE: This is logged in the executor because there can be >1 worker
+        # with other executors. We could log in the engine level, but work
+        # remains to abstract away the device for non-GPU configurations.
+        logger.info("# GPU blocks: %d", num_gpu_blocks)
+        self._run_workers("initialize_cache", num_gpu_blocks)
+        self._run_workers("compile_or_warm_up_model")
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self._run_workers("save_sharded_state",
+                          path=path,
+                          pattern=pattern,
+                          max_size=max_size)
 
     def _run_workers(
         self,
@@ -246,12 +306,6 @@ class RayExecutor:
             ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return ray_worker_outputs
-
-    def initialize(self, num_gpu_blocks: int) -> None:
-        raise NotImplementedError
-
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        raise NotImplementedError
 
     def execute_model(
         self,
@@ -302,7 +356,6 @@ class RayExecutor:
             forward_dag = MultiOutputNode(outputs)
 
         return forward_dag.experimental_compile()
-
 
     def __del__(self):
         self.shutdown()
