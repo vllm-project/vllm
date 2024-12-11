@@ -85,7 +85,8 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
                     medium = round(medium, 2)
                     forward_stats.append((bs, len(times), medium))
                 forward_stats.sort(key=lambda x: x[1], reverse=True)
-                logger.info(("Batchsize forward time stats "
-                             "(batchsize, count, median_time(ms)): %s"),
-                            forward_stats)
+                if forward_stats:
+                    logger.info(("Batchsize forward time stats "
+                                 "(batchsize, count, median_time(ms)): %s"),
+                                forward_stats)
         _forward_context = prev_context
