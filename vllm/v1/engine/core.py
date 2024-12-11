@@ -42,7 +42,7 @@ class EngineCore:
         executor_class: Type[Executor],
         usage_context: UsageContext,
     ):
-        assert vllm_config.model_config.task != "embedding"
+        assert vllm_config.model_config.runner_type != "pooling"
 
         logger.info("Initializing an LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)

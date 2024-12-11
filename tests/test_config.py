@@ -7,11 +7,17 @@ from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
 
-@pytest.mark.parametrize(("model_id", "expected_task"), [
-    ("facebook/opt-125m", "generate"),
-    ("intfloat/e5-mistral-7b-instruct", "embedding"),
-])
-def test_auto_task(model_id, expected_task):
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_task"),
+    [
+        ("facebook/opt-125m", "generate", "generate"),
+        ("intfloat/e5-mistral-7b-instruct", "pooling", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
+    ],
+)
+def test_auto_task(model_id, expected_runner_type, expected_task):
     config = ModelConfig(
         model_id,
         task="auto",
@@ -22,6 +28,7 @@ def test_auto_task(model_id, expected_task):
         dtype="float16",
     )
 
+    assert config.runner_type == expected_runner_type
     assert config.task == expected_task
 
 

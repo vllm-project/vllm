@@ -163,7 +163,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
         ModelRunnerClass: Type[CPUModelRunnerBase] = CPUModelRunner
-        if self.model_config.task == "embedding":
+        if self.model_config.runner_type == "pooling":
             ModelRunnerClass = CPUPoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
