@@ -119,7 +119,7 @@ class OpenAIServingScores(OpenAIServing):
 
             if prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
-                                          "for embedding models")
+                                          "for scoring models")
 
             if isinstance(tokenizer, MistralTokenizer):
                 raise ValueError(
