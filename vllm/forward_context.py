@@ -84,8 +84,9 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
                 forward_stats = []
                 for bs, _ in sorted_by_count:
                     times = batchsize_forward_time[bs]
-                    forward_stats.append(
-                        (bs, len(times), torch.quantile(times, q=0.5).item()))
+                    forward_stats.append((bs, len(times),
+                                          torch.quantile(torch.tensor(times),
+                                                         q=0.5).item()))
                 logger.info(("Batchsize forward time stats "
                              "(batchsize, count, median_time): %s"),
                             forward_stats)
