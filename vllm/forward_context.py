@@ -1,5 +1,5 @@
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 track_batchsize: bool = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
-batchsize_counter: Counter = Counter()
 last_logging_time: float = 0
 forward_start_time: float = 0
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
@@ -67,27 +66,26 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
             else:
                 # for v1 attention backends
                 batchsize = context.num_input_tokens
-            batchsize_counter[batchsize] += 1
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
             torch.cuda.synchronize()
             now = time.monotonic()
-            batchsize_forward_time[batchsize].append(now - forward_start_time)
+            # time measurement is in milliseconds
+            batchsize_forward_time[batchsize].append(
+                (now - forward_start_time) * 1000)
             if now - last_logging_time > batchsize_logging_interval:
                 last_logging_time = now
-                sorted_by_count = sorted(batchsize_counter.items(),
-                                         key=lambda x: x[1],
-                                         reverse=True)
-                logger.info("Batchsize distribution (batchsize, count): %s",
-                            sorted_by_count)
                 forward_stats = []
-                for bs, _ in sorted_by_count:
-                    times = batchsize_forward_time[bs]
+                for bs, times in batchsize_forward_time.items():
+                    if len(times) <= 1:
+                        # can be cudagraph / profiling run
+                        continue
                     forward_stats.append((bs, len(times),
                                           torch.quantile(torch.tensor(times),
                                                          q=0.5).item()))
+                forward_stats.sort(key=lambda x: x[1], reverse=True)
                 logger.info(("Batchsize forward time stats "
-                             "(batchsize, count, median_time): %s"),
+                             "(batchsize, count, median_time(ms)): %s"),
                             forward_stats)
         _forward_context = prev_context
