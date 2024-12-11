@@ -69,7 +69,8 @@ class CPUPoolingModelRunner(
             intermediate_tensors,
         }
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+        with set_forward_context({"attn_metadata": model_input.attn_metadata},
+                                 self.vllm_config):
             hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.

@@ -307,5 +307,5 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def access_cpu_hit_blocks(self, now: float) -> None:
-        """Access cache hitted blocks on CPU to update last accessed time."""
+        """Access cache hit blocks on CPU to update last accessed time."""
         pass

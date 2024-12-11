@@ -114,7 +114,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             self.block_allocator)
 
         # request_id -> (blocks_to_swap_out, blocks_to_swap_in)
-        self.blocks_to_swap_of_request_id: List[
+        self.blocks_to_swap_of_sequence_id: List[
             Tuple[int, Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]]] = \
                 []
 
@@ -177,8 +177,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         blocks_to_swap_out, blocks_to_swap_in = \
             self.block_allocator.get_and_reset_swaps()
         if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
-            self.blocks_to_swap_of_request_id.append((
-                seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
+            self.blocks_to_swap_of_sequence_id.append(
+                (seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
@@ -269,8 +269,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         blocks_to_swap_out, blocks_to_swap_in = \
             self.block_allocator.get_and_reset_swaps()
         if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
-            self.blocks_to_swap_of_request_id.append((
-                seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
+            self.blocks_to_swap_of_sequence_id.append(
+                (seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
         return new_cows
 
     def free(self, seq: Sequence) -> None:
@@ -541,7 +541,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
     def get_and_reset_swaps(self,
                             now: float) -> \
-            List[Tuple[int, Tuple[List[Tuple[int, int]], ...]]]:
+            List[Tuple[int,
+                       Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default. 
@@ -555,7 +556,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             source to destination block IDs. The block IDs are physical block
             IDs and it's expected to be used by the cache engine directly.
         """
-        ret = self.blocks_to_swap_of_request_id
+        ret = self.blocks_to_swap_of_sequence_id
         self.block_allocator.access_cpu_hit_blocks(now)
-        self.blocks_to_swap_of_request_id = []
+        self.blocks_to_swap_of_sequence_id = []
         return ret

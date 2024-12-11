@@ -128,7 +128,9 @@ class BlockSpaceManager(ABC):
 
     @abstractmethod
     def get_and_reset_swaps(self,
-                            now: float) -> Tuple[List[Tuple[int, int]], ...]:
+                            now: float) -> \
+            List[Tuple[int,
+                       Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default. 

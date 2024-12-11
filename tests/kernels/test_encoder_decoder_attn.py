@@ -625,7 +625,7 @@ def _run_encoder_attention_test(
     attn_type = AttentionType.ENCODER
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
-    with set_forward_context(attn_metadata, vllm_config):
+    with set_forward_context({"attn_metadata": attn_metadata}, vllm_config):
         # In the test setup the shape of the query is
         # [batch_size, seq_len, num_heads, head_size]. However
         # the attention backend expect the shape to be
@@ -680,7 +680,7 @@ def _run_decoder_self_attention_test(
     kv_cache = test_rsrcs.kv_cache
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
-    with set_forward_context(attn_metadata, vllm_config):
+    with set_forward_context({"attn_metadata": attn_metadata}, vllm_config):
         # In the test setup the shape of the query is
         # [batch_size, seq_len, num_heads, head_size]. However
         # the attention backend expect the shape to be
@@ -752,7 +752,7 @@ def _run_encoder_decoder_cross_attention_test(
         cross_pckd_qkv = cross_test_params.packed_qkvo.packed_qkv
         key = (None if cross_pckd_qkv is None else cross_pckd_qkv.key)
         value = (None if cross_pckd_qkv is None else cross_pckd_qkv.value)
-    with set_forward_context(attn_metadata, vllm_config):
+    with set_forward_context({"attn_metadata": attn_metadata}, vllm_config):
         # In the test setup the shape of the query is
         # [batch_size, seq_len, num_heads, head_size]. However
         # the attention backend expect the shape to be

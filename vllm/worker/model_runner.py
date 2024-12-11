@@ -58,6 +58,8 @@ from vllm.worker.model_runner_base import (
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
+    from vllm.worker.cache_engine import CacheEngine
+    from vllm.worker.worker_base import WorkerInput
 
 logger = init_logger(__name__)
 
@@ -1610,6 +1612,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        cache_engine: Optional["CacheEngine"] = None,
+        worker_input: Optional["WorkerInput"] = None,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1674,8 +1678,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config):
+            with set_forward_context(
+                {
+                    "attn_metadata": model_input.attn_metadata,
+                    "cache_engine": cache_engine,
+                    "worker_input": worker_input,
+                }, self.vllm_config):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,

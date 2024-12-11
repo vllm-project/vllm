@@ -140,12 +140,10 @@ class SchedulerOutputs:
     blocks_to_swap_in: List[Tuple[int, int]]
     # swap in requests offsets
     swap_in_offsets: List[int]
+    # swap in sequence IDs
+    swap_in_sequence_ids: List[int]
     # Blocks to swap out. List of GPU -> CPU block number.
     blocks_to_swap_out: List[Tuple[int, int]]
-    # swap out requests offsets
-    swap_out_offsets: List[int]
-    # swap requests IDs
-    swap_sequence_ids: List[int]
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]]
     # Sequence groups that are going to be ignored.
@@ -1134,20 +1132,21 @@ class Scheduler:
         blocks_to_swap_in = swapped_in.blocks_to_swap_in
         blocks_to_swap_out = running_scheduled.blocks_to_swap_out
 
-        swap_out_cnt = len(blocks_to_swap_out)
-        swap_in_cnt = len(blocks_to_swap_in)
-        swap_out_offsets = [0, swap_out_cnt]
-        swap_in_offsets = [0, swap_in_cnt]
-        swap_sequence_ids = [-1]
+        swap_in_cnt = 0
+        swap_in_offsets = [0]
+        swap_in_sequence_ids = []
+        if (len(blocks_to_swap_in) > 0):
+            swap_in_cnt += len(blocks_to_swap_in)
+            swap_in_offsets.append(swap_in_cnt)
+            swap_in_sequence_ids.append(-1)
         for seq_id, (new_swap_out, new_swap_in) in \
                 self.block_manager.get_and_reset_swaps(time.time()):
             blocks_to_swap_out.extend(new_swap_out)
-            swap_out_cnt += len(new_swap_out)
-            swap_out_offsets.append(swap_out_cnt)
-            blocks_to_swap_in.extend(new_swap_in)
-            swap_in_cnt += len(new_swap_in)
-            swap_in_offsets.append(swap_in_cnt)
-            swap_sequence_ids.append(seq_id)
+            if (len(new_swap_in) > 0):
+                blocks_to_swap_in.extend(new_swap_in)
+                swap_in_cnt += len(new_swap_in)
+                swap_in_offsets.append(swap_in_cnt)
+                swap_in_sequence_ids.append(seq_id)
 
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
@@ -1159,9 +1158,8 @@ class Scheduler:
             budget.num_cached_tokens,
             blocks_to_swap_in=blocks_to_swap_in,
             swap_in_offsets=swap_in_offsets,
+            swap_in_sequence_ids=swap_in_sequence_ids,
             blocks_to_swap_out=blocks_to_swap_out,
-            swap_out_offsets=swap_out_offsets,
-            swap_sequence_ids=swap_sequence_ids,
             blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=ignored_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
@@ -1237,20 +1235,21 @@ class Scheduler:
         blocks_to_swap_in = swapped_in.blocks_to_swap_in
         blocks_to_swap_out = running_scheduled.blocks_to_swap_out
 
-        swap_out_cnt = len(blocks_to_swap_out)
-        swap_in_cnt = len(blocks_to_swap_in)
-        swap_out_offsets = [0, swap_out_cnt]
-        swap_in_offsets = [0, swap_in_cnt]
-        swap_sequence_ids = [-1]
+        swap_in_cnt = 0
+        swap_in_offsets = [0]
+        swap_in_sequence_ids = []
+        if (len(blocks_to_swap_in) > 0):
+            swap_in_cnt += len(blocks_to_swap_in)
+            swap_in_offsets.append(swap_in_cnt)
+            swap_in_sequence_ids.append(-1)
         for seq_id, (new_swap_out, new_swap_in) in \
                 self.block_manager.get_and_reset_swaps(time.time()):
             blocks_to_swap_out.extend(new_swap_out)
-            swap_out_cnt += len(new_swap_out)
-            swap_out_offsets.append(swap_out_cnt)
-            blocks_to_swap_in.extend(new_swap_in)
-            swap_in_cnt += len(new_swap_in)
-            swap_in_offsets.append(swap_in_cnt)
-            swap_sequence_ids.append(seq_id)
+            if (len(new_swap_in) > 0):
+                blocks_to_swap_in.extend(new_swap_in)
+                swap_in_cnt += len(new_swap_in)
+                swap_in_offsets.append(swap_in_cnt)
+                swap_in_sequence_ids.append(seq_id)
 
         # Put prefills first due to Attention backend ordering assumption.
         scheduled_seq_groups = (prefills.seq_groups +
@@ -1276,9 +1275,8 @@ class Scheduler:
             budget.num_cached_tokens,
             blocks_to_swap_in=blocks_to_swap_in,
             swap_in_offsets=swap_in_offsets,
+            swap_in_sequence_ids=swap_in_sequence_ids,
             blocks_to_swap_out=blocks_to_swap_out,
-            swap_out_offsets=swap_out_offsets,
-            swap_sequence_ids=swap_sequence_ids,
             blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,

@@ -384,7 +384,6 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             # free the block
             cpu_allocator.free(cpu_block)
 
-
     def will_swap_in_cpu_blocks(self):
         """Check if there are CPU blocks that will be swapped in
 

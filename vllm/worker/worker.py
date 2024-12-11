@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.worker.cache_engine import CacheEngine
+from vllm.worker.cache_engine import CacheEngine, GPUCacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.pooling_model_runner import PoolingModelRunner
@@ -289,8 +289,8 @@ class Worker(LocalOrDistributedWorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
-            CacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
+            GPUCacheEngine(self.cache_config, self.model_config,
+                           self.parallel_config, self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.gpu_cache = [
@@ -319,23 +319,32 @@ class Worker(LocalOrDistributedWorkerBase):
         virtual_engine = execute_model_req.virtual_engine
         num_steps = execute_model_req.num_steps
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
+        seq_ids = []
+        for metadata_or_delta in execute_model_req.seq_group_metadata_list:
+            if isinstance(metadata_or_delta, SequenceGroupMetadata):
+                seq_ids.extend(metadata_or_delta.seq_data.keys())
+        if (len(seq_ids) == 0):
+            swap_in_offsets = []
+            swap_in_sequence_ids = []
+
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
                                          device="cuda",
                                          dtype=torch.int64).view(-1, 2)
         swap_in_offsets = torch.tensor(execute_model_req.swap_in_offsets,
-                                       device="cuda",
+                                       device="cpu",
                                        dtype=torch.int64).view(-1)
+        swap_in_sequence_ids = \
+            torch.tensor(execute_model_req.swap_in_sequence_ids,
+                         device="cpu",
+                         dtype=torch.int64).view(-1)
         blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
                                           device="cuda",
                                           dtype=torch.int64).view(-1, 2)
-        swap_out_offsets = torch.tensor(execute_model_req.swap_out_offsets,
-                                        device="cuda",
-                                        dtype=torch.int64).view(-1)
-        swap_sequence_ids = torch.tensor(execute_model_req.swap_sequence_ids,
-                                         device="cuda",
-                                         dtype=torch.int64).view(-1)
+        running_sequence_ids = torch.tensor(seq_ids,
+                                            device="cpu",
+                                            dtype=torch.int64).view(-1)
         # `blocks_to_copy` is a gpu tensor. The src and tgt of
         # blocks to copy are in the same device, and `blocks_to_copy`
         # can be used directly within cuda kernels.
@@ -347,29 +356,30 @@ class Worker(LocalOrDistributedWorkerBase):
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
             swap_in_offsets=swap_in_offsets,
+            swap_in_sequence_ids=swap_in_sequence_ids,
             blocks_to_swap_out=blocks_to_swap_out,
-            swap_out_offsets=swap_out_offsets,
-            swap_sequence_ids=swap_sequence_ids,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
+            running_sequence_ids=running_sequence_ids,
         )
+
+    @torch.inference_mode()
+    def get_cache_engine(self, worker_input: WorkerInput) -> CacheEngine:
+        return self.cache_engine[worker_input.virtual_engine]
 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
         virtual_engine = worker_input.virtual_engine
         # Issue cache operations.
-        if (worker_input.blocks_to_swap_in is not None
-                and worker_input.blocks_to_swap_in.numel() > 0):
-            self.cache_engine[virtual_engine].swap_in(
-                worker_input.blocks_to_swap_in)
-        if (worker_input.blocks_to_swap_out is not None
-                and worker_input.blocks_to_swap_out.numel() > 0):
-            self.cache_engine[virtual_engine].swap_out(
-                worker_input.blocks_to_swap_out)
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+        if (worker_input.blocks_to_swap_in is not None
+                and worker_input.blocks_to_swap_in.numel() > 0):
+            self.cache_engine[virtual_engine].swap_in(
+                worker_input.blocks_to_swap_in, worker_input.swap_in_offsets,
+                worker_input.swap_in_sequence_ids)
 
     def _get_cached_seq_group_metadata(
             self,
