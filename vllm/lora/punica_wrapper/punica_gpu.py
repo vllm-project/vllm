@@ -160,7 +160,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         expand_slice_fun: Callable = (self._expand_slice_prefill
                                       if self.is_prefill else
-                                      self._expand_slice_decode)
+                                      self._apply_expand_decode)
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_input)
 
     def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor,
@@ -178,6 +178,21 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         shrink_fun: Callable = (self._shrink_prefill
                                 if self.is_prefill else self._shrink_decode)
         shrink_fun(y, x, w_t_all, scale)
+        y = y.view_as(y_org)
+
+    def _apply_shrink_nslices_prefill(self, y: torch.Tensor, x: torch.Tensor,
+                                      w_t_all: torch.Tensor, scale: float):
+        """
+        Perform the ` y+=x@w_t_all` computation, which is suitable for the
+        GEMM of lora'a.
+        When `is_prefill is` true, it indicates that it is currently the
+        prefill stage, and the `_shrink_prefill` function should be called.
+        Otherwise, it is the decode stage, and the _shrink_decode function
+        should be called.
+        """
+        y_org = y
+
+        self._shrink_prefill(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
@@ -203,9 +218,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         x = x.view(-1, x.shape[-1])
         # TODO fuse these kernels
-        for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
-                               scale)
+        if self.is_prefill:
+            # NOTE fused kernel
+            self._apply_shrink_nslices_prefill(y, x, lora_a_stacked, scale)
+        else:
+            for slice_idx in range(len(lora_a_stacked)):
+                self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
+                                   scale)
 
     def add_expand(self,
                    y: torch.Tensor,
@@ -242,9 +261,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                              lora_bias_stacked)
         if self.is_prefill:
             # NOTE fused kernel
-            self._apply_expand_prefill(
-                y, x, lora_b_stacked, offset_start, add_input=True
-            )
+            self._apply_expand_prefill(y,
+                                       x,
+                                       lora_b_stacked,
+                                       offset_start,
+                                       add_input=True)
         else:
             for slice_idx in range(len(lora_b_stacked)):
                 self._apply_expand_decode(
