@@ -86,7 +86,7 @@ def _run_test(
     )
 
 
-@pytest.mark.skipif(transformers.__version__.startswith("4.46"),
+@pytest.mark.skipif(transformers.__version__ >= "4.46",
                     reason="Model broken with changes in transformers 4.46")
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
