@@ -208,7 +208,7 @@ def check_punica_wrapper(punica_wrapper) -> bool:
         return type(punica_wrapper) is PunicaWrapperGPU
     elif current_platform.is_cpu():
         from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
-        
+
         return type(punica_wrapper) is PunicaWrapperCPU
     else:
         return False

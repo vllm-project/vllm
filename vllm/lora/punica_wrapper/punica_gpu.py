@@ -5,7 +5,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union, final
 
 import torch
 
@@ -14,7 +14,7 @@ from vllm.lora.ops import (bgmv_expand, bgmv_expand_slice, bgmv_shrink,
 
 from .punica_base import PunicaWrapperBase
 
-
+@final
 class PunicaWrapperGPU(PunicaWrapperBase):
     """
     PunicaWrapperGPU is designed to manage and provide metadata for the punica 
