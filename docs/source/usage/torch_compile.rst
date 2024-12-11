@@ -167,6 +167,6 @@ Most features in vLLM are compatible with ``torch.compile``, including tensor pa
 Future Directions
 -----------------
 
-In the future, we plan to further reduce the compilation time of ``torch.compile``. Ideally, when we run the same model with the same ``candidate_compile_sizes``, the first run (code start) will take some time to compile, but the second run (warm start) should take close-to-zero time to compile. This is a challenging problem, but we are actively working on it together with the PyTorch team.
+We plan to further reduce the compilation time of ``torch.compile``. Ideally, when running the same model with the same ``candidate_compile_sizes``, the first run (cold start) will take some time to compile, but subsequent runs (warm start) should take close to zero time to compile. This is a challenging problem, but we are actively working on it with the PyTorch team.
 
-Another direction is to introduce more compilation optimization passes. Right now we directly use Inductor to compile the computation graph into Triton kernels. There are many graph-level optimizations that can be done before the compilation. Please stay tuned for more updates.
+Another direction is to introduce more compilation optimization passes. Currently, we use Inductor to compile the computation graph into Triton kernels directly. There are many graph-level optimizations that can be done before the compilation. Please stay tuned for more updates.
