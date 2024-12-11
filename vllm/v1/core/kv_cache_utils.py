@@ -79,8 +79,8 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks = len(blocks)
 
         # Initialize the doubly linked list of free blocks.
-        self.free_list_head = blocks[0]
-        self.free_list_tail = blocks[-1]
+        self.free_list_head: Optional[KVCacheBlock] = blocks[0]
+        self.free_list_tail: Optional[KVCacheBlock] = blocks[-1]
         for i in range(self.num_free_blocks):
             if i > 0:
                 blocks[i].prev_free_block = blocks[i - 1]
