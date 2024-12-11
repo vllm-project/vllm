@@ -1069,8 +1069,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         ).index_select(0, indices_padded).nan_to_num_(nan=float("-inf"),
                                                       posinf=float("inf"),
                                                       neginf=float("-inf")))
+
+        # HPU needs special handling to prune out dummy samples.
         if current_platform.is_hpu():
             lora_logits = lora_logits[:logits.shape[0], :]
+
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
