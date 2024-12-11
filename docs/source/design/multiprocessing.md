@@ -1,8 +1,14 @@
 # Python Multiprocessing
 
-*Note that source code references are to the state of the code at the time of writing in December, 2024.*
+## Debugging
+
+Please see the [Debugging
+Tips](https://docs.vllm.ai/en/latest/getting_started/debugging.html#python-multiprocessing)
+page for information on known issues and how to solve them.
 
 ## Introduction
+
+*Note that source code references are to the state of the code at the time of writing in December, 2024.*
 
 The use of Python multiprocessing in vLLM is complicated by:
 
@@ -112,9 +118,11 @@ If that known-failure case occurs, the user will see two messages that explain
 what is happening. First, a log message from vLLM:
 
 ```
-        logger.warning("CUDA was previously initialized. We must use "
-                       "the `spawn` multiprocessing start method. Setting "
-                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.")
+    WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
+      initialized. We must use the `spawn` multiprocessing start method. Setting
+      VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
+      https://docs.vllm.ai/en/latest/getting_started/debugging.html#python-multiprocessing
+      for more information.
 ```
 
 Second, Python itself will raise an exception with a nice explanation:
