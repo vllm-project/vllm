@@ -81,3 +81,6 @@ class EngineCoreRequestType(enum.Enum):
     ADD = b'\x00'
     ABORT = b'\x01'
     PROFILE = b'\x02'
+
+
+EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, List[str]]

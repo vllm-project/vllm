@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
-from typing import List, Tuple, Type, Union
+from typing import List, Tuple, Type
 
 import zmq
 import zmq.asyncio
@@ -20,7 +20,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType)
+                            EngineCoreRequestType, EngineCoreRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -161,8 +161,8 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue = queue.Queue()
-        self.output_queue = queue.Queue()
+        self.input_queue: queue.Queue[EngineCoreRequestUnion] = queue.Queue()
+        self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
                          daemon=True).start()
@@ -318,9 +318,7 @@ class EngineCoreProc(EngineCore):
 
             self._last_logging_time = now
 
-    def _handle_client_request(
-        self, request: Union[EngineCoreRequest, EngineCoreProfile,
-                             List[str]]) -> None:
+    def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""
 
         if isinstance(request, EngineCoreRequest):

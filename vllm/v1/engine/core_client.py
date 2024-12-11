@@ -1,6 +1,6 @@
 import atexit
 import os
-from typing import List, Union
+from typing import List
 
 import msgspec
 import zmq
@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType)
+                            EngineCoreRequestType, EngineCoreRequestUnion)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.serial_utils import PickleEncoder
 
@@ -204,10 +204,8 @@ class SyncMPClient(MPClient):
         engine_core_outputs = self.decoder.decode(frame.buffer).outputs
         return engine_core_outputs
 
-    def _send_input(
-        self, request_type: EngineCoreRequestType,
-        request: Union[EngineCoreRequest, EngineCoreProfile,
-                       List[str]]) -> None:
+    def _send_input(self, request_type: EngineCoreRequestType,
+                    request: EngineCoreRequestUnion) -> None:
 
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
@@ -237,10 +235,8 @@ class AsyncMPClient(MPClient):
 
         return engine_core_outputs
 
-    async def _send_input(
-        self, request_type: EngineCoreRequestType,
-        request: Union[EngineCoreRequest, EngineCoreProfile,
-                       List[str]]) -> None:
+    async def _send_input(self, request_type: EngineCoreRequestType,
+                          request: EngineCoreRequestUnion) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
