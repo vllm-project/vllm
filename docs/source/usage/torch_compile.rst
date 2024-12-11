@@ -147,11 +147,13 @@ Note that ``torch.compile`` only helps to accelerate the model forwarding. To se
 Supported Models
 ----------------
 
-Most models in vLLM are supported by ``torch.compile``. If a model is not supported, but you turn on ``torch.compile``, you will see a warning like ``torch.compile is turned on, but the model does not support it`` , and the ``torch.compile`` configs will be ignored. If you want to get this model supported, please file an issue.
+Most models in vLLM are supported by ``torch.compile``, and you should see logs like ``torch.compile takes 19.37 s in total`` in the server logs when you turn on ``torch.compile``. If a model is not supported, but you turn on ``torch.compile``, you will see a warning like ``torch.compile is turned on, but the model does not support it`` , and the ``torch.compile`` configs will be ignored. If you want to get this model supported, please file an issue.
 
 For text-only models, we compile the part of model from input token ids to final hidden states, excluding the lm head and logits processing.
 
-For multi-modality models, 
+For multi-modality models, we compile the text-only part of the model from input embeddings to final hidden states, excluding the vision encoder part and the part of merging multi-modality embeddings with text embeddings.
+
+By carefully compiling the main computation graph of the model, we can avoid unnecessary compilation time and achieve better performance.
 
 Feature Compatibility
 ---------------------
