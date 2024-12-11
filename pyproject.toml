@@ -96,7 +96,8 @@ markers = [
     "core_model: enable this model test in each PR instead of only nightly",
     "cpu_model: enable this model test in CPU tests",
     "quant_model: run this model test under Quantized category",
-    "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
+    "split: run this test as part of a split",
+    "distributed: run this test only in distributed GPU tests",
     "skip_v1: do not run this test with v1",
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]

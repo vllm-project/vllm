@@ -1,7 +1,9 @@
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
+import math
 import os
+from collections import defaultdict
 from pathlib import PosixPath
 from typing import Type
 
@@ -10,11 +12,12 @@ from transformers import AutoModelForVision2Seq
 from transformers.utils import is_flash_attn_2_available
 
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless, identity
+from vllm.utils import identity
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
                           _VideoAssets)
-from ....utils import fork_new_process_for_each_test, large_gpu_mark
+from ....utils import (fork_new_process_for_each_test, large_gpu_mark,
+                       multi_gpu_marks)
 from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
 from .vlm_utils.case_filtering import get_parametrized_options
@@ -382,7 +385,7 @@ VLM_TEST_SETTINGS = {
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
     ### Tensor parallel / multi-gpu broadcast tests
-    "broadcast-chameleon": VLMTestInfo(
+    "chameleon-broadcast": VLMTestInfo(
         models=["facebook/chameleon-7b"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
@@ -393,43 +396,25 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
         hf_output_post_proc = lambda hf_output, model: hf_output[:2],
         comparator=check_outputs_equal,
-        marks=[
-            pytest.mark.distributed_2_gpus,
-            pytest.mark.skipif(
-                cuda_device_count_stateless() < 2,
-                reason="Need at least 2 GPUs to run the test.",
-            ),
-        ],
+        marks=multi_gpu_marks(num_gpus=2),
         **COMMON_BROADCAST_SETTINGS # type: ignore
     ),
-    "broadcast-llava": VLMTestInfo(
+    "llava-broadcast": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
-        marks=[
-            pytest.mark.distributed_2_gpus,
-            pytest.mark.skipif(
-                cuda_device_count_stateless() < 2,
-                reason="Need at least 2 GPUs to run the test.",
-            )
-        ],
+        marks=multi_gpu_marks(num_gpus=2),
         **COMMON_BROADCAST_SETTINGS # type: ignore
     ),
-    "broadcast-llava_next": VLMTestInfo(
+    "llava_next-broadcast": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
         max_model_len=10240,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
-        marks=[
-            pytest.mark.distributed_2_gpus,
-            pytest.mark.skipif(
-                cuda_device_count_stateless() < 2,
-                reason="Need at least 2 GPUs to run the test.",
-            )
-        ],
+        marks=multi_gpu_marks(num_gpus=2),
         **COMMON_BROADCAST_SETTINGS # type: ignore
     ),
     ### Custom input edge-cases for specific models
@@ -466,6 +451,41 @@ VLM_TEST_SETTINGS = {
     ),
 }
 # yapf: enable
+
+
+def _mark_splits(
+    test_settings: dict[str, VLMTestInfo],
+    *,
+    num_groups: int,
+) -> dict[str, VLMTestInfo]:
+    name_by_test_info_id = {id(v): k for k, v in test_settings.items()}
+    test_infos_by_model = defaultdict[str, list[VLMTestInfo]](list)
+
+    for info in test_settings.values():
+        for model in info.models:
+            test_infos_by_model[model].append(info)
+
+    models = sorted(test_infos_by_model.keys())
+    split_size = math.ceil(len(models) / num_groups)
+
+    new_test_settings = dict[str, VLMTestInfo]()
+
+    for i in range(num_groups):
+        models_in_group = models[i * split_size:(i + 1) * split_size]
+
+        for model in models_in_group:
+            for info in test_infos_by_model[model]:
+                new_marks = (info.marks or []) + [pytest.mark.split(group=i)]
+                new_info = info._replace(marks=new_marks)
+                new_test_settings[name_by_test_info_id[id(info)]] = new_info
+
+    missing_keys = test_settings.keys() - new_test_settings.keys()
+    assert not missing_keys, f"Missing keys: {missing_keys}"
+
+    return new_test_settings
+
+
+VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 
 
 ### Test wrappers
