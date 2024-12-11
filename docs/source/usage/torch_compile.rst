@@ -109,9 +109,9 @@ For example, when running ``python benchmarks/benchmark_latency.py --model meta-
 .. code-block:: bash
 
     $ # running a 8B model on H100
-    $ python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy
+    $ python3 benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy
     Avg latency: 0.9704469823899369 seconds
-    $ python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy -O "{'level': 3, 'candidate_compile_sizes': [1]}"
+    $ python3 benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy -O "{'level': 3, 'candidate_compile_sizes': [1]}"
     Avg latency: 0.8950413154981409 seconds
 
 The end-to-end latency (the smaller the better) is reduced from 0.9704 seconds to 0.8950 seconds (7.7% improvement), with the help of ``torch.compile``.
@@ -138,6 +138,10 @@ Supported Models
 ----------------
 
 Most models in vLLM are supported by ``torch.compile``. If a model is not supported, but you turn on ``torch.compile``, you will see a warning like ``torch.compile is turned on, but the model does not support it`` , and the ``torch.compile`` configs will be ignored. If you want to get this model supported, please file an issue.
+
+For text-only models, we compile the part of model from input token ids to final hidden states, excluding the lm head and logits processing.
+
+For multi-modality models, 
 
 Feature Compatibility
 ---------------------
