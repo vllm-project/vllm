@@ -60,7 +60,8 @@ class Idefics3ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
     """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
+    Shape: `(batch_size * num_images * num_patches, 
+             num_channels, height, width)`
     """
     pixel_attention_mask: Optional[torch.BoolTensor]
 
