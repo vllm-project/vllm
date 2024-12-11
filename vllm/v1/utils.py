@@ -73,10 +73,12 @@ class ConstantList(Generic[T]):
 
 
 @contextmanager
-def make_zmq_socket(path: str, type: Any) -> Iterator[zmq.Socket]:
+def make_zmq_socket(
+        path: str,
+        type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
-    ctx = zmq.Context()
+    ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
         socket = ctx.socket(type)
 

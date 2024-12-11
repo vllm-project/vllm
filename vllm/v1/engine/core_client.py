@@ -133,7 +133,10 @@ class MPClient(EngineCoreClient):
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.
-        self.ctx = (zmq.asyncio.Context() if asyncio_mode else zmq.Context())
+        if asyncio_mode:
+            self.ctx = zmq.asyncio.Context()
+        else:
+            self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
         # Path for IPC.
         ready_path = get_open_zmq_ipc_path()
