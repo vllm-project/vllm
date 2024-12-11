@@ -124,23 +124,25 @@ For example, when running ``python benchmarks/benchmark_latency.py --model meta-
     init engine (profile, create kv cache, warmup model) took 87.17 seconds
     Avg latency: 7.495755991366673 seconds
 
-For a dynamic workload, we can use the ``VLLM_LOG_BATCHSIZE_INTERVAL`` environment variable to monitor the batchsize distribution:
+For a dynamic workload, we can use the ``VLLM_LOG_BATCHSIZE_INTERVAL`` environment variable to monitor the batch size distribution:
 
 .. code-block:: bash
 
-    $ # run the baseline setting
+    $ # running a 8B model on H100 with various batch sizes, 72.76 seconds of compilation time, 3.9% improvement in throughput
+    $
+    $ # 1. run the baseline setting
     $ python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --load-format dummy --num-scheduler-steps 64
+    init engine (profile, create kv cache, warmup model) took 14.42 seconds
     Throughput: 44.39 requests/s, 22728.17 total tokens/s, 11364.08 output tokens/s
-    $ # run the same setting with profiling
+    $ # 2. run the same setting with profiling
     $ VLLM_LOG_BATCHSIZE_INTERVAL=1.0 python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --num-scheduler-steps 64
     INFO 12-10 15:42:47 forward_context.py:58] Batchsize distribution (batchsize, count): [(256, 769), (232, 215), ...]
-    $ # the most common batchsizes are 256 and 232, so we can compile the model for these two batchsizes
+    $ # 3. the most common batchsizes are 256 and 232, so we can compile the model for these two batchsizes
     $ python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --num-scheduler-steps 64 -O "{'level': 3, 'candidate_compile_sizes': [232, 256]}"
+    init engine (profile, create kv cache, warmup model) took 87.18 seconds
     Throughput: 46.11 requests/s, 23606.51 total tokens/s, 11803.26 output tokens/s
 
-The end-to-end throughput (the larger the better) is increased from 44.39 requests/s to 46.11 requests/s (3.9% improvement), with the help of ``torch.compile``.
-
-Note that ``torch.compile`` only helps to accelerate the model forwarding. To see the benefit, please make sure GPUs are already busy executing the model, otherwise the benefit will be hidden because GPUs are idle. That's why we have added ``--num-scheduler-steps 64`` to the command line arguments.
+Note that ``torch.compile`` only helps to accelerate the model forwarding. To see the benefit, please make sure GPUs are already busy executing the model, otherwise the benefit will be hidden because GPUs are idle. That's why we have added ``--num-scheduler-steps 64`` to the command line arguments when benchmarking the throughput.
 
 Supported Models
 ----------------
