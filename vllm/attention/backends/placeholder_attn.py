@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
 
-# Placeholder attention backend for models like Mamba and embedding models that
+# Placeholder attention backend for models like Mamba and pooling models that
 # lack attention.
 
 

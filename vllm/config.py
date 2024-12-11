@@ -152,7 +152,7 @@ class ModelConfig:
             this argument will be used to configure the neuron config that
             can not be gathered from the vllm arguments.
         override_pooler_config: Initialize non default pooling config or
-            override default pooling config for the embedding model.
+            override default pooling config for the pooling model.
     """
 
     def __init__(
@@ -576,7 +576,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Async postprocessor is not necessary with embedding mode
+        # Async postprocessor is not necessary for pooling models
         # since there is no token generation
         if self.runner_type == "pooling":
             self.use_async_output_proc = False
@@ -1825,11 +1825,11 @@ class MultiModalConfig:
 
 @dataclass
 class PoolerConfig:
-    """Controls the behavior of output pooling in embedding models."""
+    """Controls the behavior of output pooling in pooling models."""
 
     pooling_type: Optional[str] = None
     """
-    The pooling method of the embedding model. This should be a key in
+    The pooling method of the pooling model. This should be a key in
     :class:`vllm.model_executor.layers.pooler.PoolingType`.
     """
 

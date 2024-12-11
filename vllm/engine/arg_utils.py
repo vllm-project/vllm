@@ -893,7 +893,7 @@ class EngineArgs:
             '--override-pooler-config',
             type=PoolerConfig.from_json,
             default=None,
-            help="Override or set the pooling method in the embedding model. "
+            help="Override or set the pooling method for pooling models. "
             "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
 
         parser.add_argument('--compilation-config',
@@ -1085,7 +1085,7 @@ class EngineArgs:
                 "setting --max-model-len to a smaller value.", max_model_len)
         elif (self.enable_chunked_prefill
               and model_config.runner_type == "pooling"):
-            msg = "Chunked prefill is not supported for embedding models"
+            msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
 

@@ -618,9 +618,9 @@ class SequenceGroup:
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         embeddings: The embeddings vectors of the prompt of the sequence group
-            for an embedding model.
+            for a pooling model.
         pooling_params: The pooling parameters used to generate the pooling
-            for an embedding model.
+            for a pooling model.
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
@@ -1102,7 +1102,7 @@ class PoolerOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True):  # type: ignore[call-arg]
-    """The output from a pooling operation in the embedding model."""
+    """The output from a pooling operation in the pooling model."""
     outputs: List[EmbeddingSequenceGroupOutput]
 
     # lazy import to avoid circular import

@@ -59,7 +59,7 @@ class Processor:
         priority: int = 0,
     ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
 
-        # TODO(woosuk): Support embedding mode.
+        # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Check max_logprobs
         # TODO(woosuk): Support encoder-decoder models.
 
