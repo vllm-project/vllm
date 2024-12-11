@@ -1,0 +1,265 @@
+{
+    "$schema": "http://json-schema.org/schema#",
+    "type": "object",
+    "properties": {
+        "image": {
+            "type": "object",
+            "properties": {
+                "repository": {
+                    "type": "string"
+                },
+                "tag": {
+                    "type": "string"
+                },
+                "command": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            },
+            "required": [
+                "command",
+                "repository",
+                "tag"
+            ]
+        },
+        "containerPort": {
+            "type": "integer"
+        },
+        "serviceName": {
+            "type": "null"
+        },
+        "servicePort": {
+            "type": "integer"
+        },
+        "extraPorts": {
+            "type": "array"
+        },
+        "replicaCount": {
+            "type": "integer"
+        },
+        "deploymentStrategy": {
+            "type": "object"
+        },
+        "resources": {
+            "type": "object",
+            "properties": {
+                "requests": {
+                    "type": "object",
+                    "properties": {
+                        "cpu": {
+                            "type": "integer"
+                        },
+                        "memory": {
+                            "type": "string"
+                        },
+                        "nvidia.com/gpu": {
+                            "type": "integer"
+                        }
+                    },
+                    "required": [
+                        "cpu",
+                        "memory",
+                        "nvidia.com/gpu"
+                    ]
+                },
+                "limits": {
+                    "type": "object",
+                    "properties": {
+                        "cpu": {
+                            "type": "integer"
+                        },
+                        "memory": {
+                            "type": "string"
+                        },
+                        "nvidia.com/gpu": {
+                            "type": "integer"
+                        }
+                    },
+                    "required": [
+                        "cpu",
+                        "memory",
+                        "nvidia.com/gpu"
+                    ]
+                }
+            },
+            "required": [
+                "limits",
+                "requests"
+            ]
+        },
+        "gpuModels": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "autoscaling": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "minReplicas": {
+                    "type": "integer"
+                },
+                "maxReplicas": {
+                    "type": "integer"
+                },
+                "targetCPUUtilizationPercentage": {
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "enabled",
+                "maxReplicas",
+                "minReplicas",
+                "targetCPUUtilizationPercentage"
+            ]
+        },
+        "configs": {
+            "type": "object"
+        },
+        "secrets": {
+            "type": "object"
+        },
+        "externalConfigs": {
+            "type": "array"
+        },
+        "customObjects": {
+            "type": "array"
+        },
+        "maxUnavailablePodDisruptionBudget": {
+            "type": "string"
+        },
+        "extraInit": {
+            "type": "object",
+            "properties": {
+                "s3modelpath": {
+                    "type": "string"
+                },
+                "pvcStorage": {
+                    "type": "string"
+                },
+                "awsEc2MetadataDisabled": {
+                    "type": "boolean"
+                }
+            },
+            "required": [
+                "pvcStorage",
+                "s3modelpath",
+                "awsEc2MetadataDisabled"
+            ]
+        },
+        "extraContainers": {
+            "type": "array"
+        },
+        "readinessProbe": {
+            "type": "object",
+            "properties": {
+                "initialDelaySeconds": {
+                    "type": "integer"
+                },
+                "periodSeconds": {
+                    "type": "integer"
+                },
+                "failureThreshold": {
+                    "type": "integer"
+                },
+                "httpGet": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string"
+                        },
+                        "port": {
+                            "type": "integer"
+                        }
+                    },
+                    "required": [
+                        "path",
+                        "port"
+                    ]
+                }
+            },
+            "required": [
+                "failureThreshold",
+                "httpGet",
+                "initialDelaySeconds",
+                "periodSeconds"
+            ]
+        },
+        "livenessProbe": {
+            "type": "object",
+            "properties": {
+                "initialDelaySeconds": {
+                    "type": "integer"
+                },
+                "failureThreshold": {
+                    "type": "integer"
+                },
+                "periodSeconds": {
+                    "type": "integer"
+                },
+                "httpGet": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string"
+                        },
+                        "port": {
+                            "type": "integer"
+                        }
+                    },
+                    "required": [
+                        "path",
+                        "port"
+                    ]
+                }
+            },
+            "required": [
+                "failureThreshold",
+                "httpGet",
+                "initialDelaySeconds",
+                "periodSeconds"
+            ]
+        },
+        "labels": {
+            "type": "object",
+            "properties": {
+                "environment": {
+                    "type": "string"
+                },
+                "release": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "environment",
+                "release"
+            ]
+        }
+    },
+    "required": [
+        "autoscaling",
+        "configs",
+        "containerPort",
+        "customObjects",
+        "deploymentStrategy",
+        "externalConfigs",
+        "extraContainers",
+        "extraInit",
+        "extraPorts",
+        "gpuModels",
+        "image",
+        "labels",
+        "livenessProbe",
+        "maxUnavailablePodDisruptionBudget",
+        "readinessProbe",
+        "replicaCount",
+        "resources",
+        "secrets",
+        "servicePort"
+    ]
+}

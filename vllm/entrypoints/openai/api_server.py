@@ -305,7 +305,7 @@ async def health(raw_request: Request) -> Response:
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_tokenize(request)
+    generator = await handler.create_tokenize(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -319,7 +319,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_detokenize(request)
+    generator = await handler.create_detokenize(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -573,7 +573,7 @@ def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -582,7 +582,7 @@ def init_app_state(
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -590,13 +590,13 @@ def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embedding" else None
+    ) if model_config.runner_type == "pooling" else None
     state.openai_serving_scores = OpenAIServingScores(
         engine_client,
         model_config,
         base_model_paths,
         request_logger=request_logger
-    ) if (model_config.task == "embedding" \
+    ) if (model_config.runner_type == "pooling" \
           and model_config.is_cross_encoder) else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,

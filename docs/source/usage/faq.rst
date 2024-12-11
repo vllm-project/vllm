@@ -11,7 +11,12 @@ A: Assuming that you're referring to using OpenAI compatible server to serve mul
 
     Q: Which model to use for offline inference embedding?
 
-A: If you want to use an embedding model, try: https://huggingface.co/intfloat/e5-mistral-7b-instruct. Instead models, such as Llama-3-8b, Mistral-7B-Instruct-v0.3, are generation models rather than an embedding model
+A: You can try `e5-mistral-7b-instruct <https://huggingface.co/intfloat/e5-mistral-7b-instruct>`__ and `BAAI/bge-base-en-v1.5 <https://huggingface.co/BAAI/bge-base-en-v1.5>`__;
+more are listed :ref:`here <supported_models>`.
+
+By extracting hidden states, vLLM can automatically convert text generation models like `Llama-3-8B <https://huggingface.co/meta-llama/Meta-Llama-3-8B>`__,
+`Mistral-7B-Instruct-v0.3 <https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3>`__ into embedding models,
+but they are expected be inferior to models that are specifically trained on embedding tasks.
 
 ----------------------------------------
 
