@@ -4,7 +4,6 @@ import time
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
-from collections import defaultdict
 
 import torch
 import torch.fx as fx
@@ -21,24 +20,21 @@ from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
-cache_data = defaultdict(dict)
-
-# after the first run, copy the cache_data from output and paste it here
-# cache_data = {None: {'0/33': 'f6h6htedygecjjatlh2o744cyy2llqnnlnd2wrkdkwdnwpzt2k3c', '1/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '2/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '3/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '4/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '5/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '6/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '7/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '8/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '9/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '10/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '11/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '12/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '13/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '14/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '15/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '16/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '17/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '18/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '19/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '20/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '21/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '22/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '23/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '24/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '25/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '26/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '27/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '28/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '29/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '30/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '31/33': 'f4ycvrrg5zgohxl653ee6mczg2g6giqw7pv7pr26idfu2fjkasqr', '32/33': 'f4bo7l22lcuvyzi2fwd3pybsaqxhqjapnem3z2oi3wvmehf4idxv'}, 2: {'0/33': 'f4wtnb57h3i27su43u5vkfhtvwn3ditpxmfkad6vxvxkpfrefsau', '1/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '2/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '3/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '4/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '5/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '6/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '7/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '8/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '9/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '10/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '11/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '12/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '13/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '14/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '15/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '16/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '17/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '18/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '19/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '20/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '21/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '22/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '23/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '24/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '25/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '26/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '27/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '28/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '29/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '30/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '31/33': 'flwlr2rdx4dw3p2ro7jgz2adn3pirta3cc22rjjnwmqcpyikhmhs', '32/33': 'fkg6kvb42vsweeiiwbrk6sfnyxlwhxvbgqb3h3tshespjkn2way4'}, 1: {'0/33': 'fhsgadoel2bnequ2aecms3sz46ctlhhyvtissmc3vhc2njhpypky', '1/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '2/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '3/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '4/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '5/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '6/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '7/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '8/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '9/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '10/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '11/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '12/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '13/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '14/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '15/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '16/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '17/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '18/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '19/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '20/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '21/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '22/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '23/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '24/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '25/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '26/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '27/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '28/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '29/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '30/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '31/33': 'fokvjusvuf4hosdz75jsxctqdsgtu4vrzrpenidjyswfnr25gizz', '32/33': 'fmthtajdsdmqwxwutsyonttumil5wfqqawqgxkxdbl55tsst4ekc'}}
 
 class AlwaysHitShapeEnv:
 
     def __init__(self) -> None:
-        self.guards = []
+        self.guards: List[Any] = []
 
     def evaluate_guards_expression(self, *args, **kwargs):
         return True
-    
+
     def get_pruned_guards(self, *args, **kwargs):
         return []
 
     def produce_guards_expression(self, *args, **kwargs):
         return ""
+
 
 def wrap_inductor(graph,
                   example_inputs,
@@ -74,30 +70,40 @@ def wrap_inductor(graph,
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
-    if runtime_shape in cache_data and f"{graph_index}/{num_graphs}" in cache_data[runtime_shape]:
+    cache_data = compilation_config.inductor_graph_hash
+    if str(runtime_shape
+           ) in cache_data and f"{graph_index}/{num_graphs}" in cache_data[str(
+               runtime_shape)]:
         from torch._inductor.codecache import FxGraphCache
         from torch._inductor.compile_fx import graph_returns_tuple
-        key = cache_data[runtime_shape][f"{graph_index}/{num_graphs}"]
-        with patch("torch._inductor.codecache.FxGraphCache._get_shape_env", lambda *args, **kwargs: AlwaysHitShapeEnv()):
+        key = cache_data[str(runtime_shape)][f"{graph_index}/{num_graphs}"]
+        with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
+                   lambda *args, **kwargs: AlwaysHitShapeEnv()):
             inductor_compiled_graph = FxGraphCache._lookup_graph(
-                key, example_inputs, True, False
-            )
+                key, example_inputs, True, False)
         returns_tuple = graph_returns_tuple(graph)
+
         def compiled_graph(*args):
-            args = list(args)
-            graph_output = inductor_compiled_graph(args)
+            list_args = list(args)
+            graph_output = inductor_compiled_graph(list_args)
             if returns_tuple:
-                return graph_output
+                return graph_output  # type: ignore
             else:
                 return graph_output[0]
     else:
         from torch._inductor.codecache import compiled_fx_graph_hash
+
         def mocked_compiled_fx_graph_hash(*args, **kwargs):
             out = compiled_fx_graph_hash(*args, **kwargs)
-            global cache_data
-            cache_data[runtime_shape][f"{graph_index}/{num_graphs}"] = out[0]
+            nonlocal cache_data
+            cache_data[str(
+                runtime_shape)][f"{graph_index}/{num_graphs}"] = out[0]
             return out
-        with patch("torch._inductor.codecache.compiled_fx_graph_hash", mocked_compiled_fx_graph_hash), patch("torch._inductor.codecache.FxGraphCache._get_shape_env", lambda *args, **kwargs: AlwaysHitShapeEnv()):
+
+        with patch("torch._inductor.codecache.compiled_fx_graph_hash",
+                   mocked_compiled_fx_graph_hash), patch(
+                       "torch._inductor.codecache.FxGraphCache._get_shape_env",
+                       lambda *args, **kwargs: AlwaysHitShapeEnv()):
             compiled_graph = compile_fx(graph,
                                         example_inputs,
                                         config_patches=current_config)
@@ -500,8 +506,11 @@ class PiecewiseBackend:
 
             # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:
-                # print to output for manual inspection
-                print(cache_data)
+
+                # save the hash of the inductor graph for the next run
+                with open(self.compilation_config.inductor_graph_hash_path,
+                          "w") as f:
+                    print(self.compilation_config.inductor_graph_hash, file=f)
                 end_monitoring_torch_compile(self.vllm_config)
 
         if not entry.use_cudagraph:
