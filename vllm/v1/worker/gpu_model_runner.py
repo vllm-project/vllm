@@ -374,7 +374,7 @@ class GPUModelRunner:
 
         # Batch the multi-modal inputs.
         mm_inputs: List[MultiModalKwargs] = []
-        req_input_ids: List[Tuple[int, int]] = []
+        req_input_ids: List[Tuple[str, int]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:
