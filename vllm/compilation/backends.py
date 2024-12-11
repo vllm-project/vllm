@@ -287,9 +287,11 @@ class VllmBackend:
             graph, self.compilation_config.splitting_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
-        logger.debug("%s", lazy_format_graph_code("before split", self.graph))
-        logger.debug("%s", lazy_format_graph_code("after split",
-                                                  self.split_gm))
+
+        # depyf will hook lazy_format_graph_code and dump the graph
+        # for debugging, no need to print the graph here
+        lazy_format_graph_code("before split", self.graph)
+        lazy_format_graph_code("after split", self.split_gm)
 
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)
