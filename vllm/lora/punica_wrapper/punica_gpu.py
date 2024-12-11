@@ -111,7 +111,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_input,
         )
 
-    def _expand_nslices_prefill(
+    def _apply_expand_prefill(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -131,7 +131,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_input,
         )
 
-    def _expand_slice_decode(
+    def _apply_expand_decode(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -237,20 +237,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        # offset_ = offset_start
         if lora_bias_stacked is not None:
             self._apply_bias(self.token_lora_indices, y, output_slices,
                              lora_bias_stacked)
         if self.is_prefill:
             # NOTE fused kernel
-            self._expand_nslices_prefill(y,
-                                         x,
-                                         lora_b_stacked,
-                                         offset_start,
-                                         add_input=True)
+            self._apply_expand_prefill(
+                y, x, lora_b_stacked, offset_start, add_input=True
+            )
         else:
             for slice_idx in range(len(lora_b_stacked)):
-                self._apply_expand(
+                self._apply_expand_decode(
                     y,
                     x[slice_idx],
                     lora_b_stacked[slice_idx],
