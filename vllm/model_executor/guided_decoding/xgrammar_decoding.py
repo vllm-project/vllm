@@ -167,6 +167,15 @@ class GrammarConfig:
                         f"Conversion error: {str(e)}") from e
             else:
                 grammar_str = guided_params.grammar
+
+            # Validate the grammar and raise ValueError here if it is invalid.
+            # This is to avoid exceptions in model execution, which will crash
+            # the engine worker process.
+            try:
+                xgr.Grammar.from_ebnf(grammar_str)
+            except RuntimeError as err:
+                raise ValueError(str(err)) from err
+
             return cls(grammar_str=grammar_str,
                        vocab_size=model_config.hf_text_config.vocab_size,
                        encoded_vocab=encoded_vocab,
