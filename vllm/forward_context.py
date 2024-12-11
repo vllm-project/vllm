@@ -1,8 +1,10 @@
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -13,7 +15,9 @@ logger = init_logger(__name__)
 track_batchsize: bool = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
 batchsize_counter: Counter = Counter()
 last_logging_time: float = 0
+forward_start_time: float = 0
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
+batchsize_forward_time: defaultdict = defaultdict(list)
 
 
 @dataclass
@@ -40,23 +44,10 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
     """
-    global track_batchsize, batchsize_counter
-    global last_logging_time, batchsize_logging_interval
-    if track_batchsize and context is not None:
-        if hasattr(context, "num_prefill_tokens"):
-            # for v0 attention backends
-            batchsize = context.num_prefill_tokens + context.num_decode_tokens
-        else:
-            # for v1 attention backends
-            batchsize = context.num_input_tokens
-        batchsize_counter[batchsize] += 1
-        if time.monotonic() - last_logging_time > batchsize_logging_interval:
-            last_logging_time = time.monotonic()
-            sorted_data = sorted(batchsize_counter.items(),
-                                 key=lambda x: x[1],
-                                 reverse=True)
-            logger.info("Batchsize distribution (batchsize, count): %s",
-                        sorted_data)
+    global forward_start_time
+    need_to_track_batchsize = track_batchsize and context is not None
+    if need_to_track_batchsize:
+        forward_start_time = time.monotonic()
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
@@ -66,4 +57,36 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
     try:
         yield
     finally:
+        global batchsize_counter
+        global last_logging_time, batchsize_logging_interval
+        if need_to_track_batchsize:
+            if hasattr(context, "num_prefill_tokens"):
+                # for v0 attention backends
+                batchsize = context.num_prefill_tokens + \
+                    context.num_decode_tokens
+            else:
+                # for v1 attention backends
+                batchsize = context.num_input_tokens
+            batchsize_counter[batchsize] += 1
+            # we use synchronous scheduling right now,
+            # adding a sync point here should not affect
+            # scheduling of the next batch
+            torch.cuda.synchronize()
+            now = time.monotonic()
+            batchsize_forward_time[batchsize].append(now - forward_start_time)
+            if now - last_logging_time > batchsize_logging_interval:
+                last_logging_time = now
+                sorted_by_count = sorted(batchsize_counter.items(),
+                                         key=lambda x: x[1],
+                                         reverse=True)
+                logger.info("Batchsize distribution (batchsize, count): %s",
+                            sorted_by_count)
+                forward_stats = []
+                for bs, _ in sorted_by_count:
+                    times = batchsize_forward_time[bs]
+                    forward_stats.append(
+                        (bs, len(times), torch.quantile(times, q=0.5).item()))
+                logger.info(("Batchsize forward time stats "
+                             "(batchsize, count, median_time): %s"),
+                            forward_stats)
         _forward_context = prev_context
