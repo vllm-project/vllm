@@ -73,6 +73,29 @@ class InductorHashCache:
 
 
 class AlwaysHitShapeEnv:
+    """
+    Why do we need this class:
+
+    For normal `torch.compile` usage, every compilation will have
+    one Dynamo bytecode compilation and one Inductor compilation.
+    The Inductor compilation happens under the context of the
+    Dynamo bytecode compilation, and that context is used to
+    determine the dynamic shape information, etc.
+
+    For our use case, we only run Dynamo bytecode compilation once,
+    and run Inductor compilation multiple times with different shapes
+    plus a general shape. The compilation for specific shapes happens
+    outside of the context of the Dynamo bytecode compilation. At that
+    time, we don't have shape environment to provide to Inductor, and
+    it will fail the Inductor code cache lookup.
+
+    By providing a dummy shape environment that always hits, we can
+    make the Inductor code cache lookup always hit, and we can
+    compile the graph for different shapes as needed.
+
+    The following dummy methods are obtained by trial-and-error
+    until it works.
+    """
 
     def __init__(self) -> None:
         self.guards: List[Any] = []
