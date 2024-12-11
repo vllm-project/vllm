@@ -1,5 +1,4 @@
 import atexit
-import multiprocessing
 from typing import List, Union
 
 import msgspec

@@ -5,7 +5,6 @@ import signal
 import threading
 import time
 from multiprocessing.process import BaseProcess
-from multiprocessing.sharedctypes import Synchronized
 from typing import List, Tuple, Type, Union
 
 import zmq
