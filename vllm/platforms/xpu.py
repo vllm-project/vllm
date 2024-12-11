@@ -86,7 +86,11 @@ class XPUPlatform(Platform):
                 parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "ray"
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls = \
+                            "vllm.v1.worker.xpu_worker.XPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
     @classmethod
     def is_pin_memory_available(cls):

@@ -126,6 +126,7 @@ class AsyncLLM(EngineClient):
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
 
+
     async def add_request(
         self,
         request_id: str,
