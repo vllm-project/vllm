@@ -19,7 +19,7 @@ To use INT8 quantization with vLLM, you'll need to install the `llm-compressor <
 
 .. code-block:: console
 
-   $ pip install llmcompressor==0.1.0
+   $ pip install llmcompressor
 
 Quantization Process
 --------------------

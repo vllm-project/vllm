@@ -45,7 +45,7 @@ To produce performant FP8 quantized models with vLLM, you'll need to install the
 
 .. code-block:: console
 
-   $ pip install llmcompressor==0.1.0
+   $ pip install llmcompressor
 
 Quantization Process
 --------------------
