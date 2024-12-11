@@ -49,13 +49,13 @@ When using vLLM from Python, the ``torch.compile`` flags can be specified via th
         compilation_config=3,
     )
 
-    # Compile the model with level 3, for a general shape plus batchsize 1
+    # Compile the model with level 3, for a general shape plus batch size 1
     llm = LLM(
         model="model",
         compilation_config={"level": 3, "candidate_compile_sizes": [1]},
     )
 
-    # Compile the model with level 3, for a general shape plus batchsize 1, 2, 4, 8
+    # Compile the model with level 3, for a general shape plus batch sizes 1, 2, 4, 8
     llm = LLM(
         model="model",
         compilation_config={"level": 3, "candidate_compile_sizes": list(range(1, 9))},
