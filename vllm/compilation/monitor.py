@@ -1,13 +1,10 @@
-import time
-
 import os
+import time
 
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-torch_compile_start_time: float = 0.0
 
 context_manager = None
 torch_compile_start_time: float = 0.0
