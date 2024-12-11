@@ -6,7 +6,6 @@ from pathlib import PosixPath
 from typing import Type
 
 import pytest
-import transformers
 from transformers import AutoModelForVision2Seq
 from transformers.utils import is_flash_attn_2_available
 
@@ -35,7 +34,7 @@ COMMON_BROADCAST_SETTINGS = {
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
-    "model_kwargs": {"device_map": "auto"},
+    "hf_model_kwargs": {"device_map": "auto"},
     "image_size_factors": [(.25, 0.5, 1.0)],
     "distributed_executor_backend": (
         "ray",
@@ -109,7 +108,7 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "What is in the picture?",
         }),
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
@@ -152,7 +151,7 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "<vlm_image>Please infer the season with reason.",
         }),
         multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
-        postprocess_inputs=model_utils.get_key_type_post_processor("pixel_values"),
+        postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"),
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
@@ -178,7 +177,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         # For chameleon, we only compare the sequences
@@ -187,12 +186,6 @@ VLM_TEST_SETTINGS = {
         comparator=check_outputs_equal,
         max_tokens=8,
         dtype="bfloat16",
-        marks=[
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.2",
-                reason="Model broken in HF, see huggingface/transformers#34379"
-            ),
-        ]
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -243,13 +236,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
-        marks=[
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.0",
-                reason="Model introduced in HF >= 4.46.0"
-            ),
-            large_gpu_mark(min_gb=48),
-        ],
+        marks=[large_gpu_mark(min_gb=48)],
     ),
     "intern_vl": VLMTestInfo(
         models=[
@@ -294,7 +281,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
         num_video_frames=16,
         max_model_len=16384,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values_videos"
         ),
         auto_cls=AutoModelForVision2Seq,
@@ -318,12 +305,20 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
-        marks=[
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.2",
-                reason="Model broken with changes in transformers 4.46"
-            )
-        ],
+    ),
+    "mantis": VLMTestInfo(
+        models=["TIGER-Lab/Mantis-8B-siglip-llama3"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        max_model_len=4096,
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
+            "pixel_values"
+        ),
+        vllm_runner_kwargs={"hf_overrides": {"architectures": ["MantisForConditionalGeneration"]}},  # noqa: E501
+        get_stop_token_ids=lambda tok: [128009],
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
+        patch_hf_runner=model_utils.mantis_patch_hf_runner,
     ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
@@ -361,7 +356,7 @@ VLM_TEST_SETTINGS = {
     #     max_num_seqs=2,
     #     task="generate",
     #     # use eager mode for hf runner since phi3v didn't work with flash_attn
-    #     model_kwargs={"_attn_implementation": "eager"},
+    #     hf_model_kwargs={"_attn_implementation": "eager"},
     #     use_tokenizer_eos=True,
     #     vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
     #     num_logprobs=10,
@@ -392,7 +387,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
@@ -404,10 +399,6 @@ VLM_TEST_SETTINGS = {
                 cuda_device_count_stateless() < 2,
                 reason="Need at least 2 GPUs to run the test.",
             ),
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.2",
-                reason="Model broken in HF, see huggingface/transformers#34379"
-            )
         ],
         **COMMON_BROADCAST_SETTINGS # type: ignore
     ),
@@ -461,7 +452,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
         max_num_seqs=2,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         auto_cls=AutoModelForVision2Seq,

@@ -12,6 +12,7 @@ class MMInputMapper:
         model_config: ModelConfig,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
+        self.model_config = model_config
         self.mm_registry = mm_registry
         self.multi_modal_input_mapper = mm_registry.create_input_mapper(
             model_config)
@@ -32,7 +33,7 @@ class MMInputMapper:
         num_images = len(image_inputs)
         for i in range(num_images):
             mm_input = self.multi_modal_input_mapper(
-                {"image": [image_inputs[i]]},
+                {"image": image_inputs[i]},
                 mm_processor_kwargs=mm_processor_kwargs,
             )
             mm_inputs.append(mm_input)
