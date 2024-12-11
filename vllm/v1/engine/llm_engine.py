@@ -21,8 +21,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.ray_executor import RayExecutor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.ray_executor import RayExecutor
 
 logger = init_logger(__name__)
 
