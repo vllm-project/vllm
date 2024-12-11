@@ -15,7 +15,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import make_async, merge_async_iterators
+from vllm.utils import make_async, merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
@@ -102,7 +102,7 @@ class OpenAIServingScores(OpenAIServing):
             return error_check_ret
 
         model_name = request.model
-        request_id = f"score-{self._base_request_id(raw_request)}"
+        request_id = f"score-{random_uuid()}"
         created_time = int(time.monotonic())
         truncate_prompt_tokens = request.truncate_prompt_tokens
 

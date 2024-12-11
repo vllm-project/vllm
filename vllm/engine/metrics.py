@@ -6,7 +6,6 @@ from typing import Dict, List, Optional, Type, Union, cast
 import numpy as np
 import prometheus_client
 
-from vllm.config import VllmConfig
 from vllm.engine.metrics_types import (StatLoggerBase, Stats,
                                        SupportsMetricsInfo)
 from vllm.executor.ray_utils import ray
@@ -45,11 +44,9 @@ class Metrics:
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
 
-    def __init__(self, labelnames: List[str], vllm_config: VllmConfig):
+    def __init__(self, labelnames: List[str], max_model_len: int):
         # Unregister any existing vLLM collectors (for CI/CD)
         self._unregister_vllm_metrics()
-
-        max_model_len = vllm_config.model_config.max_model_len
 
         # System stats
         #   Scheduler State
@@ -118,15 +115,11 @@ class Metrics:
             name="vllm:tokens_total",
             documentation="Number of prefill plus generation tokens processed.",
             labelnames=labelnames)
-        buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
-        if not vllm_config.model_config.enforce_eager:
-            buckets = vllm_config.compilation_config.capture_sizes.copy()
-            buckets.sort()
         self.histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
             documentation="Histogram of number of tokens per engine_step.",
             labelnames=labelnames,
-            buckets=buckets)
+            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096])
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
@@ -368,10 +361,10 @@ class RayMetrics(Metrics):
     _histogram_cls: Type[prometheus_client.Histogram] = cast(
         Type[prometheus_client.Histogram], _RayHistogramWrapper)
 
-    def __init__(self, labelnames: List[str], vllm_config: VllmConfig):
+    def __init__(self, labelnames: List[str], max_model_len: int):
         if ray_metrics is None:
             raise ImportError("RayMetrics requires Ray to be installed.")
-        super().__init__(labelnames, vllm_config)
+        super().__init__(labelnames, max_model_len)
 
     def _unregister_vllm_metrics(self) -> None:
         # No-op on purpose
@@ -428,8 +421,8 @@ def get_throughput(tracked_stats: List[int], now: float,
 class LoggingStatLogger(StatLoggerBase):
     """LoggingStatLogger is used in LLMEngine to log to Stdout."""
 
-    def __init__(self, local_interval: float, vllm_config: VllmConfig) -> None:
-        super().__init__(local_interval, vllm_config)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.last_prompt_throughput: Optional[float] = None
         self.last_generation_throughput: Optional[float] = None
 
@@ -522,12 +515,12 @@ class PrometheusStatLogger(StatLoggerBase):
     _gauge_cls = prometheus_client.Gauge
 
     def __init__(self, local_interval: float, labels: Dict[str, str],
-                 vllm_config: VllmConfig) -> None:
-        super().__init__(local_interval, vllm_config)
+                 max_model_len: int) -> None:
+        super().__init__(local_interval)
         # Prometheus metrics
         self.labels = labels
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
-                                         vllm_config=vllm_config)
+                                         max_model_len=max_model_len)
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.

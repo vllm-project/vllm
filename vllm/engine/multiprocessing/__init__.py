@@ -35,9 +35,11 @@ class RPCProcessRequest:
     priority: int = 0
 
     @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def __init__(
         self,
-        prompt: PromptType,
+        *,
+        inputs: PromptType,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -48,11 +50,9 @@ class RPCProcessRequest:
         ...
 
     @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
     def __init__(
         self,
-        *,
-        inputs: PromptType,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,

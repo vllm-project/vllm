@@ -10,7 +10,7 @@ from vllm.v1.worker.gpu_worker import Worker
 logger = init_logger(__name__)
 
 
-class UniprocExecutor:
+class GPUExecutor:
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -54,7 +54,7 @@ class UniprocExecutor:
         """
         return self.worker.determine_num_available_blocks()
 
-    def initialize(self, num_gpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 worker
@@ -71,13 +71,7 @@ class UniprocExecutor:
         output = self.worker.execute_model(scheduler_output)
         return output
 
-    def profile(self, is_start: bool = True):
-        self.worker.profile(is_start)
-
-    def shutdown(self):
-        self.worker = None
-
     def check_health(self) -> None:
-        # UniprocExecutor will always be healthy as long as
+        # GPUExecutor will always be healthy as long as
         # it's running.
         return
