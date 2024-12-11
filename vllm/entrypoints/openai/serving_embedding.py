@@ -18,9 +18,10 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.utils import is_disconnected_patch
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.utils import is_disconnected_patch, merge_async_iterators
+from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
 

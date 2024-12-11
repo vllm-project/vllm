@@ -18,11 +18,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.utils import is_disconnected_patch
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, is_disconnected_patch,
-                        iterate_with_cancellation, random_uuid)
+from vllm.utils import (FlexibleArgumentParser, iterate_with_cancellation,
+                        random_uuid)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")

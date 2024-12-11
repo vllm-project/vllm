@@ -12,11 +12,12 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, ScoreRequest,
                                               ScoreResponse, ScoreResponseData,
                                               UsageInfo)
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.utils import is_disconnected_patch
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import is_disconnected_patch, make_async, merge_async_iterators
+from vllm.utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
 

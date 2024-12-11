@@ -26,12 +26,13 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
+from vllm.entrypoints.utils import is_disconnected_patch
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import is_disconnected_patch, merge_async_iterators
+from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
 
