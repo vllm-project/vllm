@@ -160,5 +160,5 @@ Feature Compatibility
 
 Most features in vLLM are compatible with ``torch.compile``, including tensor parallel, pipeline parallel, quantization, etc. There are two features that are not compatible with ``torch.compile``:
 
-- **CPU offloading**: It is not compatible with ``torch.compile`` right now, but should be compatible in the future. Check `this issue <https://github.com/vllm-project/vllm/issues/10612>`__ for more information.
-- **Lora serving**: It can be made compatible with ``torch.compile``, but the benefit would be minimal. Check `this issue <https://github.com/vllm-project/vllm/issues/10617>`__ for more information.
+- **CPU offloading**: It is not compatible with ``torch.compile`` right now, but should be compatible in the future. Track `this issue <https://github.com/vllm-project/vllm/issues/10612>`__ for the progress.
+- **Lora serving**: It can be made compatible with ``torch.compile``, but the benefit would be minimal. Models with LoRA adapters mainly use custom (punica) kernels that ``torch.compile`` cannot optimize. Therefore, when LoRA is enabled, ``torch.compile`` will be disabled. Check `this issue <https://github.com/vllm-project/vllm/issues/10617>`__ for more information.
