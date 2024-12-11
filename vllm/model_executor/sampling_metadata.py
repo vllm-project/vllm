@@ -151,6 +151,7 @@ class SamplingMetadata:
         pin_memory: bool,
         generators: Optional[Dict[str, torch.Generator]] = None,
         cache: Optional[SamplingMetadataCache] = None,
+        pad_for_invariant_seq_len: Optional[bool] = False,
     ) -> "SamplingMetadata":
         (
             seq_groups,
@@ -158,7 +159,8 @@ class SamplingMetadata:
             categorized_sample_indices,
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
-                                device, generators, cache)
+                                device, generators, cache,
+                                pad_for_invariant_seq_len)
         selected_token_indices = async_tensor_h2d(
             selected_token_indices,
             dtype=torch.long,
@@ -198,6 +200,7 @@ def _prepare_seq_groups(
     device: str,
     generators: Optional[Dict[str, torch.Generator]] = None,
     cache: Optional[SamplingMetadataCache] = None,
+    pad_for_invariant_seq_len: Optional[bool] = False,
 ) -> Tuple[List[SequenceGroupToSample], List[int], Dict[SamplingType,
                                                         List[int]], int, ]:
     """Prepare sequence groups and indices for sampling.
@@ -212,6 +215,9 @@ def _prepare_seq_groups(
             `SequenceGroupToSample.generator`.
         generators: A store of per-request random number generators used
             for seeded requests.
+        pad_for_invariant_seq_len: A flag indicating whether pad is required.
+            Padding is required when the input tokens/positions of different
+            batches needed to be aligned to the same length `max_seq_len`.
 
     Returns:
         seq_groups: A list of sequence group to sample.
@@ -258,6 +264,7 @@ def _prepare_seq_groups(
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
         query_len: Optional[int] = None
+        padding_len: int = 0
         prompt_logprob_indices: List[int] = (sample_obj.prompt_logprob_indices
                                              if cache is not None else [])
         sample_indices: List[int] = (sample_obj.sample_indices
@@ -281,6 +288,8 @@ def _prepare_seq_groups(
             prompt_logprob_len = (query_len - num_prefill_sample
                                   if do_sample else query_len)
             sample_len = num_prefill_sample if do_sample else 0
+            if pad_for_invariant_seq_len:
+                padding_len = max(query_lens) - sample_len - prompt_logprob_len
         else:
             # Decode
             prompt_logprob_len = 0
@@ -308,6 +317,8 @@ def _prepare_seq_groups(
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + sample_len))
         model_output_idx += sample_len
+        if pad_for_invariant_seq_len:
+            model_output_idx += padding_len
 
         # We now find indices for logprob computation and sampling.
         """

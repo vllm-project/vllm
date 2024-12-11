@@ -1,0 +1,8 @@
+# Common dependencies
+-r requirements-common.txt
+
+decorator
+pyyaml
+scipy
+setuptools
+torch_npu == 2.5.1rc1
