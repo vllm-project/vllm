@@ -1,10 +1,6 @@
-import ast
 import copy
 import dataclasses
-import os
-import pprint
 import time
-from collections import defaultdict
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
@@ -23,53 +19,6 @@ from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
-
-
-class InductorHashCache:
-    """
-    Disk format: a Python list of tuples, each tuple is
-    (runtime_shape, graph_index, hash_str)
-    We use list of tuple for readability.
-
-    In-memory format: a defaultdict of dict, where the key is
-    runtime_shape, and the value is a dict of graph_index to hash_str.
-    """
-
-    def __init__(self, cache_file_path: str):
-        self.cache_file_path = cache_file_path
-        self.cache: defaultdict = defaultdict(dict)
-        if os.path.exists(self.cache_file_path):
-            with open(self.cache_file_path) as f:
-                self.deserialize(f.read())
-
-    def deserialize(self, data: str):
-        # we use ast.literal_eval to parse the data
-        # because it is a safe way to parse Python literals.
-        # do not use eval(), it is unsafe.
-        list_data = ast.literal_eval(data)
-        for runtime_shape, graph_index, hash_str in list_data:
-            self.cache[runtime_shape][graph_index] = hash_str
-
-    def serialize(self) -> str:
-        data = []
-        for runtime_shape, graph_index_to_hash_str in self.cache.items():
-            for graph_index, hash_str in graph_index_to_hash_str.items():
-                data.append((runtime_shape, graph_index, hash_str))
-        printer = pprint.PrettyPrinter(indent=4)
-        return printer.pformat(data)
-
-    def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
-        runtime_shape, graph_index = key
-        return runtime_shape in self.cache and graph_index in self.cache[
-            runtime_shape]
-
-    def __getitem__(self, key: Tuple[Optional[int], int]) -> str:
-        runtime_shape, graph_index = key
-        return self.cache[runtime_shape][graph_index]
-
-    def __setitem__(self, key: Tuple[Optional[int], int], value: str):
-        runtime_shape, graph_index = key
-        self.cache[runtime_shape][graph_index] = value
 
 
 class AlwaysHitShapeEnv:

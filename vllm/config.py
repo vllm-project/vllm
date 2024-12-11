@@ -4,7 +4,9 @@ import enum
 import hashlib
 import json
 import os
+import pprint
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -35,7 +37,6 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
-    from vllm.compilation.backends import InductorHashCache
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
@@ -2214,6 +2215,53 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
+class InductorHashCache:
+    """
+    Disk format: a Python list of tuples, each tuple is
+    (runtime_shape, graph_index, hash_str)
+    We use list of tuple for readability.
+
+    In-memory format: a defaultdict of dict, where the key is
+    runtime_shape, and the value is a dict of graph_index to hash_str.
+    """
+
+    def __init__(self, cache_file_path: str):
+        self.cache_file_path = cache_file_path
+        self.cache: defaultdict = defaultdict(dict)
+        if os.path.exists(self.cache_file_path):
+            with open(self.cache_file_path) as f:
+                self.deserialize(f.read())
+
+    def deserialize(self, data: str):
+        # we use ast.literal_eval to parse the data
+        # because it is a safe way to parse Python literals.
+        # do not use eval(), it is unsafe.
+        list_data = ast.literal_eval(data)
+        for runtime_shape, graph_index, hash_str in list_data:
+            self.cache[runtime_shape][graph_index] = hash_str
+
+    def serialize(self) -> str:
+        data = []
+        for runtime_shape, graph_index_to_hash_str in self.cache.items():
+            for graph_index, hash_str in graph_index_to_hash_str.items():
+                data.append((runtime_shape, graph_index, hash_str))
+        printer = pprint.PrettyPrinter(indent=4)
+        return printer.pformat(data)
+
+    def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
+        runtime_shape, graph_index = key
+        return runtime_shape in self.cache and graph_index in self.cache[
+            runtime_shape]
+
+    def __getitem__(self, key: Tuple[Optional[int], int]) -> str:
+        runtime_shape, graph_index = key
+        return self.cache[runtime_shape][graph_index]
+
+    def __setitem__(self, key: Tuple[Optional[int], int], value: str):
+        runtime_shape, graph_index = key
+        self.cache[runtime_shape][graph_index] = value
+
+
 class CompilationConfig(BaseModel):
     """
     Configuration for compilation.
@@ -2360,7 +2408,7 @@ class CompilationConfig(BaseModel):
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
     compilation_time: float = PrivateAttr
-    inductor_hash_cache: "InductorHashCache" = PrivateAttr
+    inductor_hash_cache: InductorHashCache = PrivateAttr
     inductor_hash_cache_path: str = PrivateAttr
 
     # Per-model forward context
@@ -2429,7 +2477,6 @@ class CompilationConfig(BaseModel):
         os.makedirs(self.cache_dir, exist_ok=True)
         self.inductor_hash_cache_path = os.path.join(self.cache_dir,
                                                      "inductor_hash_cache.py")
-        from vllm.compilation.backends import InductorHashCache
         self.inductor_hash_cache = InductorHashCache(
             self.inductor_hash_cache_path)
 
