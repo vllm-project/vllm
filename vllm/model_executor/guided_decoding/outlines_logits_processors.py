@@ -99,7 +99,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
     def _get_guide(cls, regex_string: str,
                    tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
-        return RegexGuide(regex_string, tokenizer)
+        return RegexGuide.from_regex(regex_string, tokenizer)
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the regex-structured generation.

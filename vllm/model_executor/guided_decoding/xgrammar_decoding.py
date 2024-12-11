@@ -148,7 +148,7 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
             return cls(json_str=json_str,
-                       vocab_size=model_config.hf_config.vocab_size,
+                       vocab_size=model_config.hf_text_config.vocab_size,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
                        backend_str=backend_str,
@@ -168,7 +168,7 @@ class GrammarConfig:
             else:
                 grammar_str = guided_params.grammar
             return cls(grammar_str=grammar_str,
-                       vocab_size=model_config.hf_config.vocab_size,
+                       vocab_size=model_config.hf_text_config.vocab_size,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
                        backend_str=backend_str,
@@ -176,7 +176,7 @@ class GrammarConfig:
                        max_threads=max_threads)
         elif guided_params.json_object:
             return cls(json_object=True,
-                       vocab_size=model_config.hf_config.vocab_size,
+                       vocab_size=model_config.hf_text_config.vocab_size,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
                        backend_str=backend_str,
