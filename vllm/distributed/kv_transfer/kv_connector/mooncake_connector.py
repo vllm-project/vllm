@@ -116,8 +116,8 @@ class MooncakeConnector(KVConnectorBase):
         model_config = model_executable.model.config
         num_heads = model_config.num_key_value_heads
         hidden_size = model_config.hidden_size
-        num_hidden_layers = model_config.num_attention_heads
-        head_size = int(hidden_size / num_hidden_layers)
+        num_attention_heads = model_config.num_attention_heads
+        head_size = int(hidden_size / num_attention_heads)
 
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
