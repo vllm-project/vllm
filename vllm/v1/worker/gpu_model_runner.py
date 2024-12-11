@@ -92,6 +92,7 @@ class GPUModelRunner:
             max_num_blocks_per_req=self.max_num_blocks_per_req,
             device=self.device,
             pin_memory=self.pin_memory,
+            vocab_size=model_config.get_vocab_size(),
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
@@ -345,7 +346,8 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        sampling_metadata = self.input_batch.make_sampling_metadata(
+            self.requests, skip_copy)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
