@@ -15,23 +15,27 @@ To effectively use ``torch.compile``, the TL;DR; is:
 - Compile the model for these batch sizes and, if using Docker or Kubernetes for deployment, carry the compilation cache to the deployment environment.
 - Benefit from the performance improvements.
 
+.. warning::
+
+    ``torch.compile`` is an experimental feature and the flags and behavior are subject to change. Please refer to the latest documentation for the most up-to-date information.
+
 Usage
 -----
 
-When using vLLM from command line, the ``torch.compile`` flags can be specified via the command line argument ``-O`` or ``--compilation-config``. We use ``-O`` to mimic the behavior of traditional C/C++ compilers' optimization level control. The flag value should be a simple integer (which means the compilation level), or a string form of a Python dict containing the values. For example:
+When using vLLM from the command line, the ``torch.compile`` flags can be specified via the command line argument ``-O`` or ``--compilation-config``. The ``-O`` flag mimics the behavior of traditional C/C++ compilers' optimization level control. The flag value can be a simple integer (indicating the compilation level) or a string representation of a Python dictionary containing the values. For example:
 
 .. code-block:: bash
 
     $ # Compile the model with level 3, for a general shape
     $ vllm serve model -O 3
-    $ # Compile the model with level 3, for a general shape plus batchsize 1
-    $ vllm serve model -O "{'level': 3, 'candidate_compile_sizes': [1,]}"
-    $ # Compile the model with level 3, for a general shape plus batchsize 1, 2, 4, 8
-    $ # Note that candidate_compile_sizes from cli are 1, 2, 3, 4, 5, 6, 7, 8,
+    $ # Compile the model with level 3, for a general shape plus batch size 1
+    $ vllm serve model -O "{'level': 3, 'candidate_compile_sizes': [1]}"
+    $ # Compile the model with level 3, for a general shape plus batch sizes 1, 2, 4, 8
+    $ # Note that candidate_compile_sizes from CLI are 1, 2, 3, 4, 5, 6, 7, 8,
     $ # but the final compiled sizes are 1, 2, 4, 8 because only the ones in cudagraph capture sizes will be compiled.
     $ vllm serve model -O "{'level': 3, 'candidate_compile_sizes': [$(seq -s, 1 1 8)]}"
 
-When passing the full config from command line, it is recommended to use double quotes for the outermost quotes, and single quotes for the keys of the dict, so that you can use shell commands or environment variables in the value part. This is because shell will not expand variables inside single quotes.
+When passing the full config from the command line, it is recommended to use double quotes for the outermost quotes and single quotes for the keys of the dictionary. This allows you to use shell commands or environment variables in the value part, as the shell will not expand variables inside single quotes.
 
 When using vLLM from Python, the ``torch.compile`` flags can be specified via the ``compilation_config`` argument of the ``LLM`` class. For example:
 
