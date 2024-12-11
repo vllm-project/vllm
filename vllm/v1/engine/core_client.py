@@ -59,7 +59,7 @@ class EngineCoreClient:
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    async def profile(self, is_start=True) -> None:
+    def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
     def abort_requests(self, request_ids: List[str]) -> None:
@@ -69,6 +69,9 @@ class EngineCoreClient:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        raise NotImplementedError
+
+    async def profile_async(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -105,7 +108,7 @@ class InprocClient(EngineCoreClient):
     def __del__(self):
         self.shutdown()
 
-    def profile(self, is_start=True) -> None:
+    def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
 
 
@@ -220,7 +223,7 @@ class SyncMPClient(MPClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def profile(self, is_start=True) -> None:
+    def profile(self, is_start: bool = True) -> None:
         self._send_input(EngineCoreRequestType.PROFILE,
                          EngineCoreProfile(is_start))
 
@@ -251,6 +254,6 @@ class AsyncMPClient(MPClient):
         if len(request_ids) > 0:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    async def profile(self, is_start=True) -> None:
+    async def profile_async(self, is_start: bool = True) -> None:
         await self._send_input(EngineCoreRequestType.PROFILE,
                                EngineCoreProfile(is_start))

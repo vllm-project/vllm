@@ -361,10 +361,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        await self.engine_core.profile(True)
+        await self.engine_core.profile_async(True)
 
     async def stop_profile(self) -> None:
-        await self.engine_core.profile(False)
+        await self.engine_core.profile_async(False)
 
     @property
     def is_running(self) -> bool:

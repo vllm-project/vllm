@@ -153,7 +153,7 @@ class MultiprocExecutor:
                                            args=(scheduler_output, ))[0]
         return model_output
 
-    def profile(self, is_start=True):
+    def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))
         return
 

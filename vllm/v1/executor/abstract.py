@@ -28,7 +28,7 @@ class Executor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def profile(self, is_start=True):
+    def profile(self, is_start: bool = True):
         raise NotImplementedError
 
     @abstractmethod

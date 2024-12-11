@@ -128,7 +128,7 @@ class EngineCore:
     def shutdown(self):
         self.model_executor.shutdown()
 
-    def profile(self, is_start=True):
+    def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
 
