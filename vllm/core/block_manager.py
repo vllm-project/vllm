@@ -153,7 +153,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         if seq.get_token_ids():
             # NOTE: If there are any factors affecting the block besides
             # token_ids, they should be added as input to contextual_hash.
-            contextual_hash = seq.hash_of_block_v2()
+            contextual_hash = seq.contextual_hash_of_block()
 
             # Add blocks to the block table only if the sequence is non empty.
             block_table.allocate(token_ids=seq.get_token_ids(),
@@ -243,7 +243,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
-            contextual_hash=seq.hash_of_block_v2(),
+            contextual_hash=seq.contextual_hash_of_block(),
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()

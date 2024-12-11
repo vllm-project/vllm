@@ -963,7 +963,7 @@ class ComputedBlocksTracker:
 
             # NOTE: If there are any factors affecting the block besides
             # token_ids, they should be added as input to contextual_hash.
-            contextual_hash = seq.hash_of_block_v2()
+            contextual_hash = seq.contextual_hash_of_block()
 
             # This has to be kept in sync with the allocator's hash
             # calculation.
