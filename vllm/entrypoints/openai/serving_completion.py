@@ -392,6 +392,12 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
             prompt_logprobs = final_res.prompt_logprobs
+            if prompt_logprobs:
+                for logprob_dict in prompt_logprobs:
+                    if logprob_dict:
+                        for logprob_values in logprob_dict.values():
+                            if logprob_values.logprob == float('-inf'):
+                                logprob_values.logprob = -9999.0
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
