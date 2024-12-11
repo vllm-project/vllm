@@ -78,13 +78,13 @@ class XPUPlatform(Platform):
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
-        if (parallel_config.distributed_executor_backend is not None
-                and parallel_config.distributed_executor_backend != "ray"):
-            logger.warning(
-                "%s is not supported on XPU, fallback to ray distributed"
-                " executor backend.",
-                parallel_config.distributed_executor_backend)
-            parallel_config.distributed_executor_backend = "ray"
+        # if (parallel_config.distributed_executor_backend is not None
+        #         and parallel_config.distributed_executor_backend != "ray"):
+        #     logger.warning(
+        #         "%s is not supported on XPU, fallback to ray distributed"
+        #         " executor backend.",
+        #         parallel_config.distributed_executor_backend)
+        #     parallel_config.distributed_executor_backend = "ray"
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = \
