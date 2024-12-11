@@ -1,8 +1,8 @@
 
 ## vLLM and tt-metal Branches
 Git-checkout the following branches in each repo separately:
-- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [384f179](https://github.com/tenstorrent/vllm/tree/384f1790c3be16e1d1b10de07252be2e66d00935))
-- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [3859041](https://github.com/tenstorrent/tt-metal/tree/385904186f81fed15d5c87c162221d4f34387164))
+- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [9531611](https://github.com/tenstorrent/vllm/tree/953161188c50f10da95a88ab305e23977ebd3750))
+- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [142379a](https://github.com/tenstorrent/tt-metal/tree/142379a0e28f2daba5e8f05df3936bc8a565de89))
 
 ## Environment Creation
 
@@ -59,5 +59,5 @@ WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_infer
 
 ## Running the server example (experimental)
 ```python
-WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/server_example_tt.py
+VLLM_RPC_TIMEOUT=100000 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/server_example_tt.py
 ```
