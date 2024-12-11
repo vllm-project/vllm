@@ -171,7 +171,8 @@ class BlockTable:
 
         self._num_full_slots += len(token_ids)
 
-    def ensure_num_empty_slots(self, num_empty_slots: int,
+    def ensure_num_empty_slots(self,
+                               num_empty_slots: int,
                                contextual_hash: Optional[int] = None) -> None:
         """Ensures that the BlockTable has at least the specified number of
         empty slots available.
