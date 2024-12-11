@@ -2408,7 +2408,8 @@ class CompilationConfig(BaseModel):
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
     compilation_time: float = PrivateAttr
-    inductor_hash_cache: InductorHashCache = PrivateAttr
+    # should be InductorHashCache , but Pydantic does not support it
+    inductor_hash_cache: Any = PrivateAttr
     inductor_hash_cache_path: str = PrivateAttr
 
     # Per-model forward context
