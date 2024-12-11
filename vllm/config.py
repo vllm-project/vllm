@@ -2222,6 +2222,7 @@ class CompilationConfig(BaseModel):
             - 1: dynamo as is.
             - 2: dynamo once.
             - 3: piecewise compilation.
+        - debug_dump_path: the path to dump the debug information.
         - backend: the backend for compilation. It needs to be a string.
             - "" (empty string): use the default backend.
             - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
@@ -2289,6 +2290,7 @@ class CompilationConfig(BaseModel):
         certain small batchsizes, where inductor is good at optimizing.
     """ # noqa
     level: int = 0
+    debug_dump_path: str = ""
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
     splitting_ops: List[str] = Field(default_factory=lambda: [
@@ -2394,7 +2396,7 @@ class CompilationConfig(BaseModel):
         self.static_forward_context = {}
         self.compilation_time = 0.0
 
-    def init_backend(self) -> Union[str, Callable]:
+    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -2413,7 +2415,7 @@ class CompilationConfig(BaseModel):
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
         from vllm.compilation.backends import VllmBackend
-        return VllmBackend(self)
+        return VllmBackend(vllm_config)
 
     def init_with_cudagraph_sizes(self, sizes_to_specialize: List[int]):
         """To complete the initialization of config,
