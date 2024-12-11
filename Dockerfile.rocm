@@ -7,6 +7,9 @@ ARG BASE_IMAGE=rocm/vllm-dev:base_ubuntu22.04_py3.12_ROCm6.3_hipblaslt0.12_torch
 
 FROM ${BASE_IMAGE} AS base
 
+ARG ARG_PYTORCH_ROCM_ARCH
+ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
+
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
