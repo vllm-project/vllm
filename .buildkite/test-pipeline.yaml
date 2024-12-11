@@ -369,7 +369,7 @@ steps:
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
-- label: Multi-Modal Models Test (Extended) # 1h15m
+- label: Multi-Modal Models Test (Extended 1) # 1h15m
   optional: true
   source_file_dependencies:
   - vllm/
@@ -380,13 +380,23 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
+    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=0)'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_models.py --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/vision_language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
+
+- label: Multi-Modal Models Test (Extended 2) # 45m
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/vision_language
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=1)'
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
