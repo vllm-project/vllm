@@ -20,8 +20,7 @@ from ..utils import multi_gpu_test
 
 MODELS = [
     "google/gemma-2-2b-it",
-    # "facebook/opt-125m",
-    # "meta-llama/Llama-3.2-1B",
+    "meta-llama/Llama-3.2-1B",
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
