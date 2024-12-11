@@ -64,15 +64,15 @@ When using vLLM from Python, the ``torch.compile`` flags can be specified via th
 Understanding the compilation time
 ----------------------------------
 
-It takes time to compile the model to get the speedups. However, vLLM guarantees that all compilation happens before we serve any requests. No compilation will happen during the serving time. To understand the time taken for compilation, you can check the logs of the vLLM server, e.g. ``init engine (profile, create kv cache, warmup model) took 14.18 seconds``. This is the time taken to start the engine. Compare it with and without the compilation, and you will get an idea of how much time the compilation took.
+Compiling the model to achieve speedups takes time. No matter how long the compilation takes, vLLM ensures that all compilation occurs before serving any requests. No compilation will happen during serving time. To understand the compilation time, you can check the vLLM server logs, e.g., ``init engine (profile, create kv cache, warmup model) took 14.18 seconds``. Compare this with and without compilation to gauge the compilation time.
 
 The breakdown of the compilation time is as follows:
 
-- **Dynamo bytecode transform**: This is the time taken for TorchDynamo to analyze the Python code. Check the logs for ``Dynamo bytecode transform time: 4.60 s``.
-- **Inductor graph compilation**: This is the time taken for the inductor to compile the computation graph into triton kernels. It includes two parts: compilation for a general shape and compilation for specific shapes. Check the logs for ``Compiling a graph for general shape takes 14.77 s`` and ``Compiling a graph for shape 1 takes 13.52 s``.
-- **Triton kernel compilation**: This is the time taken for Triton to compile the triton kernels into GPU kernels. No logs are available for this part.
+- **Dynamo bytecode transform**: Time taken for TorchDynamo to analyze the Python code. Check the logs for ``Dynamo bytecode transform time: 4.60 s``.
+- **Inductor graph compilation**: Time taken for the inductor to compile the computation graph into Triton kernels. It includes compilation for a general shape and specific shapes. Check the logs for ``Compiling a graph for general shape takes 14.77 s`` and ``Compiling a graph for shape 1 takes 13.52 s``.
+- **Triton kernel compilation**: Time taken for Triton to compile the Triton kernels into GPU kernels. No specific logs are available for this part.
 
-There will also be a log ``torch.compile takes 19.37 s in total``, which is the sum of Dynamo bytecode transform time, inductor graph compilation time. If you want to know the triton kernel compilation time, you need to use the increase of ``init engine`` time as a reference, and then subtract the Dynamo bytecode transform time and inductor graph compilation time.
+There will also be a log ``torch.compile takes 19.37 s in total``, which sums up the Dynamo bytecode transform time and inductor graph compilation time. To determine the Triton kernel compilation time, use the increase in ``init engine`` time as a reference, then subtract the Dynamo bytecode transform time and inductor graph compilation time.
 
 For example:
 
