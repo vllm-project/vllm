@@ -16,8 +16,8 @@
 #include "cutlass/numeric_conversion.h"
 #include "cutlass/detail/dependent_false.hpp"
 
-#include "util/broadcast_load_epilogue_c3x.hpp"
-#include "util/common.hpp"
+#include "epilogue/broadcast_load_epilogue_c3x.hpp"
+#include "common.hpp"
 
 #include "cutlass/transform/device/transform_universal_adapter.hpp"
 #include "cutlass/transform/kernel/sparse_gemm_compressor.hpp"
@@ -36,10 +36,8 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/dispatch_policy.hpp"
 
-#include "util/host_tensor.h"
-#include "util/packed_stride.hpp"
-
-#include "util/helper.h"
+#include "cutlass/util/host_tensor.h"
+#include "cutlass/util/packed_stride.hpp"
 
 #include "sparse_scaled_mm_c3x.cuh"
 
@@ -109,8 +107,6 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   LayoutA a_layout = SparseConfig::fill_layoutA(prob_shape);
   LayoutE e_layout = SparseConfig::fill_layoutE(prob_shape);
 
-  // typename Gemm::GemmKernel::ProblemShape prob_shape{m, 1, k, 1};
-
   // Offline compressor kernel
   using CompressorUtility =
       cutlass::transform::kernel::StructuredSparseCompressorUtility<
@@ -141,29 +137,14 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
 
   auto a_ptr = static_cast<ElementA*>(a.data_ptr());
 
-  // cutlass::DeviceAllocation<typename Gemm::ElementA> block_A;
-  // cutlass::DeviceAllocation<typename Gemm::ElementA> block_A_compressed;
-  // cutlass::DeviceAllocation<typename Gemm::CollectiveMainloop::ElementE>
-  // block_E;
-
   auto a_compressed_ptr = static_cast<ElementA*>(a_compressed.data_ptr());
   auto e_ptr =
       static_cast<typename Gemm::CollectiveMainloop::ElementE*>(e.data_ptr());
-
-  // block_A_compressed.reset(M * KC * L);
-  // block_E.reset(ME * KE * L);
 
   stride_A_compressed =
       cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, KC, L));
   stride_E =
       cutlass::make_cute_packed_stride(StrideE{}, cute::make_shape(ME, KE, L));
-
-  // // Random sparsification is performed on host
-  // std::vector<ElementA> block_A_host(m * k);
-  // cutlass::device_memory::copy_to_host(block_A_host.data(), a_ptr, m * k);
-  // compressor_utility.structure_sparse_zero_mask_fill(block_A_host.data(),
-  // 2024); cutlass::device_memory::copy_to_device(a_ptr, block_A_host.data(), m
-  // * k);
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = 0;

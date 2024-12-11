@@ -23,8 +23,8 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
-#include "util/broadcast_load_epilogue_c3x.hpp"
-#include "util/common.hpp"
+#include "epilogue/broadcast_load_epilogue_c3x.hpp"
+#include "common.hpp"
 // clang-format on
 
   #include "sparse_scaled_mm_c3x.cuh"

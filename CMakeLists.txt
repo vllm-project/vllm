@@ -408,7 +408,7 @@ define_gpu_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR};${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/
   USE_SABI 3
   WITH_SOABI)
 
@@ -417,9 +417,6 @@ define_gpu_extension_target(
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
-
-# include(nm_cutlass_c.cmake)
-# build_nm_cutlass_c()
 
 #
 # _moe_C extension
