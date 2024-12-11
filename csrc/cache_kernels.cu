@@ -11,6 +11,7 @@
   #include "quantization/fp8/nvidia/quant_utils.cuh"
 #endif
 
+#include <cstdio>
 #include <algorithm>
 #include <cassert>
 #include <map>
@@ -21,8 +22,64 @@
 typedef __hip_bfloat16 __nv_bfloat16;
 #endif
 
-void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
-                 const torch::Tensor& block_mapping) {
+namespace vllm {
+
+template <typename T, typename ACC_T>
+__global__ void paged_copy(T* __restrict__ dst, const T* __restrict__ src,
+                           ACC_T src_to_dst, const int num_pages,
+                           const int num_elements_per_page) {
+  const int64_t srcPageIdx = src_to_dst[blockIdx.x][0];
+  const int64_t dstPageIdx = src_to_dst[blockIdx.x][1];
+
+  const int64_t srcPageOffset = srcPageIdx * num_elements_per_page;
+  const int64_t dstPageOffset = dstPageIdx * num_elements_per_page;
+
+  for (int i = threadIdx.x; i < num_elements_per_page; i += blockDim.x) {
+    dst[dstPageOffset + i] = src[srcPageOffset + i];
+  }
+}
+
+}  // namespace vllm
+
+template <int DTYPE_LEN, typename DTYPE>
+void launch_swap_block_kernel(DTYPE* dst, const DTYPE* src,
+                              const torch::Tensor& block_mapping,
+                              const int num_blocks,
+                              const int block_size_in_bytes) {
+  c10::cuda::CUDAGuard device_guard(block_mapping.device());
+  auto block_mapping_accessor =
+      block_mapping.packed_accessor32<int64_t, 2, torch::RestrictPtrTraits>();
+
+  int num_threads = 1024;
+  int grid_size = num_blocks;
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  vllm::paged_copy<<<grid_size, num_threads, 0, stream>>>(
+      dst, src, block_mapping_accessor, num_blocks,
+      block_size_in_bytes / DTYPE_LEN);
+}
+
+template <typename T>
+T* get_kernel_ptr(torch::Tensor& tensor) {
+  // Get the kernel-accessible pointer of the given type T
+  // Returns NULL if the tensor is on CPU and non-pinned
+  torch::Device device = tensor.device();
+  if (device.is_cuda()) {
+    return static_cast<T*>(tensor.data_ptr());
+  } else if (device.is_cpu() && tensor.is_pinned()) {
+    T* ptr;
+    cudaHostGetDevicePointer((void**)&ptr, static_cast<T*>(tensor.data_ptr()),
+                             0);
+    return ptr;
+  } else if (device.is_cpu()) {
+    return NULL;
+  } else {
+    TORCH_CHECK(false, "Invalid device");
+  }
+}
+
+void swap_blocks_slow(torch::Tensor& src, torch::Tensor& dst,
+                      const torch::Tensor& block_mapping) {
   torch::Device src_device = src.device();
   torch::Device dst_device = dst.device();
   cudaMemcpyKind memcpy_type;
@@ -59,6 +116,41 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     int64_t dst_offset = dst_block_number * block_size_in_bytes;
     cudaMemcpyAsync(dst_ptr + dst_offset, src_ptr + src_offset,
                     block_size_in_bytes, memcpy_type, stream);
+  }
+}
+
+void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
+                 const torch::Tensor& block_mapping) {
+  int64_t* src_ptr = get_kernel_ptr<int64_t>(src);
+  int64_t* dst_ptr = get_kernel_ptr<int64_t>(dst);
+  if (src_ptr == NULL || dst_ptr == NULL) {
+    // fall back to the slow implementation
+    swap_blocks_slow(src, dst, block_mapping.cpu());
+  } else {
+    // Check the device
+    torch::Device src_device = src.device();
+    torch::Device dst_device = dst.device();
+    torch::Device block_mapping_device = block_mapping.device();
+    TORCH_CHECK(block_mapping_device.is_cuda(), "block_mapping must be on GPU");
+    if (src_device.is_cuda() && dst_device.is_cuda()) {
+      TORCH_CHECK(src_device.index() == dst_device.index(),
+                  "src and dst must be on the same GPU");
+    }
+    if (src_device.is_cuda()) {
+      TORCH_CHECK(src_device.index() == block_mapping_device.index(),
+                  "src and block_mapping must be on the same GPU");
+    }
+    if (dst_device.is_cuda()) {
+      TORCH_CHECK(dst_device.index() == block_mapping_device.index(),
+                  "src and block_mapping must be on the same GPU");
+    }
+
+    const int64_t num_blocks = block_mapping.size(0);
+    const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
+
+    launch_swap_block_kernel<8, int64_t>(dst_ptr, (const int64_t*)src_ptr,
+                                         block_mapping, num_blocks,
+                                         block_size_in_bytes);
   }
 }
 
