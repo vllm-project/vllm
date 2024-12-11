@@ -26,7 +26,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging cmake ninja wheel setuptools Cython
+RUN pip install -U packaging cmake ninja wheel setuptools pybind11 Cython
 
 FROM base AS build_hipblaslt
 ARG HIPBLASLT_BRANCH="507a649"
@@ -50,7 +50,7 @@ RUN cd rccl \
 RUN mkdir -p /app/install && cp /app/rccl/build/release/*.deb /app/install
 
 FROM base AS build_triton
-ARG TRITON_BRANCH="release/3.1.x"
+ARG TRITON_BRANCH="e192dba"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
