@@ -960,12 +960,18 @@ class ComputedBlocksTracker:
             assert len(token_ids) >= (i + 1) * self._block_size
             block_token_ids = token_ids[i * self._block_size:(i + 1) *
                                         self._block_size]
+
+            # NOTE: If there are any factors affecting the block besides
+            # token_ids, they should be added as input to contextual_hash.
+            contextual_hash = seq.hash_of_block_v2()
+
             # This has to be kept in sync with the allocator's hash
             # calculation.
             block_hash = PrefixCachingBlock.hash_block_tokens(
                 is_first_block=prev_block_hash is None,
                 prev_block_hash=prev_block_hash,
                 cur_block_token_ids=block_token_ids,
+                contextual_hash=contextual_hash,
             )
             block_hashes_recorded.append(block_hash)
             prev_block_hash = block_hash

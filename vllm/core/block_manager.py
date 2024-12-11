@@ -151,8 +151,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             max_block_sliding_window=self.max_block_sliding_window,
         )
         if seq.get_token_ids():
-            # NOTE: If there are any factors affecting the block besides token_ids,
-            # they should be added as input arguments to contextual_hash.
+            # NOTE: If there are any factors affecting the block besides
+            # token_ids, they should be added as input to contextual_hash.
             contextual_hash = seq.hash_of_block_v2()
 
             # Add blocks to the block table only if the sequence is non empty.
