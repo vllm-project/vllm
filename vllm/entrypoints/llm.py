@@ -254,8 +254,21 @@ class LLM:
         else:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
+    @overload
+    def generate(
+        self,
+        prompts: Union[PromptType, Sequence[PromptType]],
+        /,
+        *,
+        sampling_params: Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+    ) -> List[RequestOutput]:
+        ...
+
     @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def generate(
         self,
         prompts: str,
@@ -268,7 +281,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def generate(
         self,
         prompts: List[str],
@@ -281,7 +294,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def generate(
         self,
         prompts: Optional[str] = None,
@@ -295,7 +308,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def generate(
         self,
         prompts: Optional[List[str]] = None,
@@ -309,25 +322,12 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def generate(
         self,
         prompts: None,
         sampling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[RequestOutput]:
-        ...
-
-    @overload
-    def generate(
-        self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
-        *,
-        sampling_params: Optional[Union[SamplingParams,
-                                        Sequence[SamplingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
@@ -383,19 +383,20 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        task = self.llm_engine.model_config.task
-        if task != "generate":
+        runner_type = self.llm_engine.model_config.runner_type
+        if runner_type != "generate":
             messages = [
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).",
             ]
 
-            supported_tasks = self.llm_engine.model_config.supported_tasks
-            if "generate" in supported_tasks:
+            supported_runner_types = self.llm_engine.model_config \
+                .supported_runner_types
+            if "generate" in supported_runner_types:
                 messages.append(
-                    "Your model supports the 'generate' task, but is "
-                    f"currently initialized for the '{task}' task. Please "
-                    "initialize the model using `--task generate`.")
+                    "Your model supports the 'generate' runner, but is "
+                    f"currently initialized for the '{runner_type}' runner. "
+                    "Please initialize vLLM using `--task generate`.")
 
             raise ValueError(" ".join(messages))
 
@@ -674,8 +675,21 @@ class LLM:
             lora_request=lora_request,
         )
 
+    @overload
+    def encode(
+        self,
+        prompts: Union[PromptType, Sequence[PromptType]],
+        /,
+        *,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+    ) -> List[PoolingRequestOutput]:
+        ...
+
     @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def encode(
         self,
         prompts: str,
@@ -688,7 +702,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def encode(
         self,
         prompts: List[str],
@@ -701,7 +715,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def encode(
         self,
         prompts: Optional[str] = None,
@@ -715,7 +729,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def encode(
         self,
         prompts: Optional[List[str]] = None,
@@ -729,25 +743,12 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts")
+    @deprecated("'prompt_token_ids' will become part of 'prompts'")
     def encode(
         self,
         prompts: None,
         pooling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[PoolingRequestOutput]:
-        ...
-
-    @overload
-    def encode(
-        self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
-        *,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[PoolingRequestOutput]:
@@ -795,16 +796,18 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        task = self.llm_engine.model_config.task
-        if task != "embedding":
-            messages = ["LLM.encode() is only supported for embedding models."]
+        runner_type = self.llm_engine.model_config.runner_type
+        if runner_type != "pooling":
+            messages = ["LLM.encode() is only supported for pooling models."]
 
-            supported_tasks = self.llm_engine.model_config.supported_tasks
-            if "embedding" in supported_tasks:
+            supported_runner_types = self.llm_engine.model_config \
+                .supported_runner_types
+            if "pooling" in supported_runner_types:
                 messages.append(
-                    "Your model supports the 'embedding' task, but is "
-                    f"currently initialized for the '{task}' task. Please "
-                    "initialize the model using `--task embedding`.")
+                    "Your model supports the 'pooling' runner, but is "
+                    f"currently initialized for the '{runner_type}' runner. "
+                    "Please initialize vLLM using `--task embed`, "
+                    "`--task classify`, `--task score` etc.")
 
             raise ValueError(" ".join(messages))
 
@@ -866,21 +869,23 @@ class LLM:
             A list of ``PoolingRequestOutput`` objects containing the
             generated scores in the same order as the input prompts.
         """
-        task = self.llm_engine.model_config.task
-        if task != "embedding":
-            messages = ["LLM.score() is only supported for embedding models."]
+        runner_type = self.llm_engine.model_config.runner_type
+        if runner_type != "pooling":
+            messages = ["LLM.score() is only supported for pooling models."]
 
-            supported_tasks = self.llm_engine.model_config.supported_tasks
-            if "embedding" in supported_tasks:
+            supported_runner_types = self.llm_engine.model_config \
+                .supported_runner_types
+            if "pooling" in supported_runner_types:
                 messages.append(
-                    "Your model supports the 'embedding' task, but is "
-                    f"currently initialized for the '{task}' task. Please "
-                    "initialize the model using `--task embedding`.")
+                    "Your model supports the 'pooling' runner, but is "
+                    f"currently initialized for the '{runner_type}' runner. "
+                    "Please initialize vLLM using `--task embed`, "
+                    "`--task classify`, `--task score` etc.")
 
             raise ValueError(" ".join(messages))
 
         if not self.llm_engine.model_config.is_cross_encoder:
-            raise ValueError("Your model does not support the cross encoding")
+            raise ValueError("Your model does not support cross encoding")
 
         tokenizer = self.llm_engine.get_tokenizer()
 
