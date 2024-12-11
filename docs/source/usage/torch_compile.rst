@@ -98,9 +98,13 @@ The second time you compile for the same shape, the autotuning will be skipped, 
 Profiling the workload
 ----------------------
 
-We find that ``torch.compile`` mainly helps with the performance of the model for fixed shapes. Since it takes time to compile every shapes, it is recommended to profile the workload and find the most common shapes. Then you can compile the model for these shapes to get the best performance.
+``torch.compile`` primarily enhances the performance of models with static shapes. Since compiling each shape takes time, it is advisable to profile your workload to identify the most common shapes. Then, compile the model for these shapes to achieve optimal performance.
 
-For example, when we run ``python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1``, we know the main workload is batchsize 1. We can compile the model for batchsize 1 to get the best performance, without wasting time on compiling for other shapes:
+.. note::
+
+    For LLM inference, the batch size (number of tokens we process at every step) is usually the only shape that changes. Therefore, we use the term "shape" and "batch size" interchangeably.
+
+For example, when running ``python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1``, it is obvious that the main workload involves batch size 1. By compiling the model specifically for batch size 1, you can improve the performance without wasting time on compiling other batch sizes.
 
 .. code-block:: bash
 
