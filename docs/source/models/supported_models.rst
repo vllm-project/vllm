@@ -128,7 +128,7 @@ Text Generation
     - FalconMamba
     - :code:`tiiuae/falcon-mamba-7b`, :code:`tiiuae/falcon-mamba-7b-instruct`, etc.
     - ✅︎
-    -  
+    - ✅︎
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
@@ -193,7 +193,7 @@ Text Generation
     - Jamba
     - :code:`ai21labs/AI21-Jamba-1.5-Large`, :code:`ai21labs/AI21-Jamba-1.5-Mini`, :code:`ai21labs/Jamba-v0.1`, etc.
     - ✅︎
-    - 
+    - ✅︎
   * - :code:`LlamaForCausalLM`
     - Llama 3.1, Llama 3, Llama 2, LLaMA, Yi
     - :code:`meta-llama/Meta-Llama-3.1-405B-Instruct`, :code:`meta-llama/Meta-Llama-3.1-70B`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-70b-hf`, :code:`01-ai/Yi-34B`, etc.
@@ -203,7 +203,7 @@ Text Generation
     - Mamba
     - :code:`state-spaces/mamba-130m-hf`, :code:`state-spaces/mamba-790m-hf`, :code:`state-spaces/mamba-2.8b-hf`, etc.
     -
-    -
+    - ✅︎
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, :code:`openbmb/MiniCPM-S-1B-sft`, etc.
