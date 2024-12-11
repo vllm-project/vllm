@@ -5,9 +5,13 @@ from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
+import os
+import ast
 import torch
 import torch.fx as fx
 
+import pprint
+from collections import defaultdict
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
@@ -19,6 +23,39 @@ from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
+
+
+class InductorHashCache:
+
+    def __init__(self, cache_file_path: str):
+        self.cache_file_path = cache_file_path
+        self.cache: defaultdict = defaultdict(dict)
+        if os.path.exists(self.cache_file_path):
+            with open(self.cache_file_path) as f:
+                self.deserialize(f.read())
+
+    def deserialize(self, data: str):
+        list_data = ast.literal_eval(data)
+        for runtime_shape, graph_index, key in list_data:
+            self.cache[runtime_shape][graph_index] = key
+
+    def serialize(self) -> str:
+        data = []
+        for runtime_shape, graph_index_to_key in self.cache.items():
+            for graph_index, key in graph_index_to_key.items():
+                data.append((runtime_shape, graph_index, key))
+        printer = pprint.PrettyPrinter(indent=4)
+        return printer.pformat(data)
+
+    def exists(self, runtime_shape: Optional[int], graph_index) -> bool:
+        return runtime_shape in self.cache and graph_index in self.cache[
+            runtime_shape]
+
+    def get(self, runtime_shape: Optional[int], graph_index) -> str:
+        return self.cache[runtime_shape][graph_index]
+
+    def store(self, runtime_shape: Optional[int], graph_index, key: str):
+        self.cache[runtime_shape][graph_index] = key
 
 
 class AlwaysHitShapeEnv:
@@ -70,13 +107,11 @@ def wrap_inductor(graph,
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
-    cache_data = compilation_config.inductor_graph_hash
-    if str(runtime_shape
-           ) in cache_data and f"{graph_index}/{num_graphs}" in cache_data[str(
-               runtime_shape)]:
+    cache_data = compilation_config.inductor_hash_cache
+    if cache_data.exists(runtime_shape, graph_index):
         from torch._inductor.codecache import FxGraphCache
         from torch._inductor.compile_fx import graph_returns_tuple
-        key = cache_data[str(runtime_shape)][f"{graph_index}/{num_graphs}"]
+        key = cache_data.get(runtime_shape, graph_index)
         with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                    lambda *args, **kwargs: AlwaysHitShapeEnv()):
             inductor_compiled_graph = FxGraphCache._lookup_graph(
@@ -96,8 +131,7 @@ def wrap_inductor(graph,
         def mocked_compiled_fx_graph_hash(*args, **kwargs):
             out = compiled_fx_graph_hash(*args, **kwargs)
             nonlocal cache_data
-            cache_data[str(
-                runtime_shape)][f"{graph_index}/{num_graphs}"] = out[0]
+            cache_data.store(runtime_shape, graph_index, out[0])
             return out
 
         with patch("torch._inductor.codecache.compiled_fx_graph_hash",
@@ -508,9 +542,9 @@ class PiecewiseBackend:
             if self.is_last_graph and not self.to_be_compiled_sizes:
 
                 # save the hash of the inductor graph for the next run
-                with open(self.compilation_config.inductor_graph_hash_path,
+                with open(self.compilation_config.inductor_hash_cache_path,
                           "w") as f:
-                    print(dict(self.compilation_config.inductor_graph_hash),
+                    print(dict(self.compilation_config.inductor_hash_cache),
                           file=f)
                 end_monitoring_torch_compile(self.vllm_config)
 

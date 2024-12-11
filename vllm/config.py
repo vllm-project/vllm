@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import warnings
-from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -42,6 +41,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+    from vllm.compilation.backends import InductorHashCache
 else:
     QuantizationConfig = None
 
@@ -2360,8 +2360,8 @@ class CompilationConfig(BaseModel):
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
     compilation_time: float = PrivateAttr
-    inductor_graph_hash: Dict[str, Dict[str, str]] = PrivateAttr
-    inductor_graph_hash_path: str = PrivateAttr
+    inductor_hash_cache: "InductorHashCache" = PrivateAttr
+    inductor_hash_cache_path: str = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
@@ -2427,14 +2427,11 @@ class CompilationConfig(BaseModel):
         self.cache_dir = os.path.join(
             self.cache_dir, f"rank_{vllm_config.parallel_config.rank}")
         os.makedirs(self.cache_dir, exist_ok=True)
-        self.inductor_graph_hash_path = os.path.join(self.cache_dir,
-                                                     "inductor_graph_hash.py")
-        self.inductor_graph_hash = defaultdict(dict)
-        if os.path.exists(self.inductor_graph_hash_path):
-            with open(self.inductor_graph_hash_path) as f:
-                dict_data = ast.literal_eval(f.read())
-                for k, v in dict_data.items():
-                    self.inductor_graph_hash[k] = v
+        self.inductor_hash_cache_path = os.path.join(self.cache_dir,
+                                                     "inductor_hash_cache.py")
+        from vllm.compilation.backends import InductorHashCache
+        self.inductor_hash_cache = InductorHashCache(
+            self.inductor_hash_cache_path)
 
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
@@ -2680,7 +2677,8 @@ class VllmConfig:
             assert self.parallel_config is not None
             tp_size = self.parallel_config.tensor_parallel_size
             pp_size = self.parallel_config.pipeline_parallel_size
-            compilation_factors = (tp_size, pp_size, model)
+            splitting_ops = sorted(self.compilation_config.splitting_ops)
+            compilation_factors = (tp_size, pp_size, model, splitting_ops)
             import hashlib
             hash_str = hashlib.md5(
                 str(compilation_factors).encode()).hexdigest()[:10]
