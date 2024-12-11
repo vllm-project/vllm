@@ -81,7 +81,7 @@ class AsyncLLM(EngineClient):
             asyncio_mode=True,
         )
 
-        self.output_handler = None
+        self.output_handler: Optional[asyncio.Task] = None
 
     def __del__(self):
         self.shutdown()
