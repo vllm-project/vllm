@@ -1,5 +1,6 @@
 import asyncio
 import time
+from functools import partial
 from typing import AsyncGenerator, AsyncIterator, Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple, Union, cast
@@ -30,7 +31,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators
+from vllm.utils import is_disconnected_patch, merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -159,8 +160,10 @@ class OpenAIServingCompletion(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        result_generator = merge_async_iterators(
-            *generators, is_cancelled=raw_request.is_disconnected)
+        result_generator = merge_async_iterators(*generators,
+                                                 is_cancelled=partial(
+                                                     is_disconnected_patch,
+                                                     request=raw_request))
 
         num_prompts = len(engine_prompts)
 

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import time
+from functools import partial
 from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
 
 import numpy as np
@@ -19,7 +20,7 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.utils import merge_async_iterators
+from vllm.utils import is_disconnected_patch, merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -201,7 +202,8 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         result_generator = merge_async_iterators(
             *generators,
-            is_cancelled=raw_request.is_disconnected if raw_request else None,
+            is_cancelled=partial(is_disconnected_patch, request=raw_request)
+            if raw_request else None,
         )
 
         num_prompts = len(engine_prompts)

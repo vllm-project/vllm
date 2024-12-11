@@ -1,5 +1,6 @@
 import asyncio
 import time
+from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union, cast
 
 from fastapi import Request
@@ -15,7 +16,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import make_async, merge_async_iterators
+from vllm.utils import is_disconnected_patch, make_async, merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -188,7 +189,8 @@ class OpenAIServingScores(OpenAIServing):
 
         result_generator = merge_async_iterators(
             *generators,
-            is_cancelled=raw_request.is_disconnected if raw_request else None,
+            is_cancelled=partial(is_disconnected_patch, request=raw_request)
+            if raw_request else None,
         )
 
         num_prompts = len(engine_prompts)

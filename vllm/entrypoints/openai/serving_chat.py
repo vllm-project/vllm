@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from functools import partial
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
                     Optional)
 from typing import Sequence as GenericSequence
@@ -32,7 +33,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
-from vllm.utils import iterate_with_cancellation
+from vllm.utils import is_disconnected_patch, iterate_with_cancellation
 
 logger = init_logger(__name__)
 
@@ -233,7 +234,8 @@ class OpenAIServingChat(OpenAIServing):
 
         if raw_request:
             result_generator = iterate_with_cancellation(
-                result_generator, raw_request.is_disconnected)
+                result_generator,
+                partial(is_disconnected_patch, request=raw_request))
 
         # Streaming response
         if request.stream:

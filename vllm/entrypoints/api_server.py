@@ -9,6 +9,7 @@ import asyncio
 import json
 import ssl
 from argparse import Namespace
+from functools import partial
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import FastAPI, Request
@@ -20,8 +21,8 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, iterate_with_cancellation,
-                        random_uuid)
+from vllm.utils import (FlexibleArgumentParser, is_disconnected_patch,
+                        iterate_with_cancellation, random_uuid)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -54,8 +55,10 @@ async def generate(request: Request) -> Response:
 
     assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
-    results_generator = iterate_with_cancellation(
-        results_generator, is_cancelled=request.is_disconnected)
+    results_generator = iterate_with_cancellation(results_generator,
+                                                  is_cancelled=partial(
+                                                      is_disconnected_patch,
+                                                      request=request))
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
