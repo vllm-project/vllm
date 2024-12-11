@@ -2,19 +2,15 @@ from typing import Optional
 
 import torch
 
-from vllm.inputs import INPUT_REGISTRY
 from vllm.model_executor.models.llava import (LlavaForConditionalGeneration,
-                                              dummy_data_for_llava,
-                                              get_max_llava_image_tokens,
-                                              input_processor_for_llava)
+                                              LlavaProcessor,
+                                              get_max_llava_image_tokens)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
+@MULTIMODAL_REGISTRY.register_processor(LlavaProcessor)
 class MyLlava(LlavaForConditionalGeneration):
 
     def compute_logits(
