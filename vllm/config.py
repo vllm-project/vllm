@@ -2429,11 +2429,13 @@ class CompilationConfig(BaseModel):
         os.makedirs(self.cache_dir, exist_ok=True)
         self.inductor_graph_hash_path = os.path.join(self.cache_dir,
                                                      "inductor_graph_hash.py")
+        self.inductor_graph_hash = defaultdict(dict)
         if os.path.exists(self.inductor_graph_hash_path):
             with open(self.inductor_graph_hash_path) as f:
-                self.inductor_graph_hash = ast.literal_eval(f.read())
-        else:
-            self.inductor_graph_hash = defaultdict(dict)
+                dict_data = ast.literal_eval(f.read())
+                for k, v in dict_data.items():
+                    self.inductor_graph_hash[k] = v
+
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
 
