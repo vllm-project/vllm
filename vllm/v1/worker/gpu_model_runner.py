@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import numpy as np
 import torch
@@ -407,6 +407,7 @@ class GPUModelRunner:
         encoder_outputs: List[torch.Tensor] = []
         num_reqs = self.input_batch.num_reqs
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -515,6 +516,7 @@ class GPUModelRunner:
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            assert req_id is not None
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -540,8 +542,15 @@ class GPUModelRunner:
             logprobs = None
         else:
             logprobs = sampler_output.logprobs.cpu()
+
+        # num_reqs entries should be non-None
+        assert all(
+            req_id is not None for req_id in
+            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
+        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
+
         model_runner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
