@@ -446,11 +446,11 @@ steps:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
-  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
+  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
-  - pytest models/encoder_decoder/language/test_bart.py -v -s -m distributed_2_gpus
-  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
-  - pytest models/decoder_only/vision_language/test_models.py -v -s -m distributed_2_gpus
+  - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
@@ -540,7 +540,7 @@ steps:
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed_2_gpus
+  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: LM Eval Large Models # optional

@@ -724,7 +724,7 @@ def multi_gpu_test(*, num_gpus: int):
     """
     Decorate a test to be run only when multiple GPUs are available.
     """
-    test_selector = getattr(pytest.mark, f"distributed_{num_gpus}_gpus")
+    test_selector = pytest.mark.distributed(num_gpus=num_gpus)
     test_skipif = pytest.mark.skipif(
         cuda_device_count_stateless() < num_gpus,
         reason=f"Need at least {num_gpus} GPUs to run the test.",
