@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from contextlib import contextmanager
-from typing import Any, Generic, Iterator, List, TypeVar, overload
+from typing import Any, Generic, Iterator, List, TypeVar, Union, overload
 
 import zmq
 
@@ -38,25 +38,25 @@ class ConstantList(Generic[T]):
         return self._x.index(item)
 
     @overload
-    def __getitem__(self, item) -> T:
+    def __getitem__(self, item: int) -> T:
         ...
 
     @overload
     def __getitem__(self, s: slice, /) -> List[T]:
         ...
 
-    def __getitem__(self, item):
+    def __getitem__(self, item: Union[int, slice]) -> Union[T, List[T]]:
         return self._x[item]
 
     @overload
-    def __setitem__(self, item, value):
+    def __setitem__(self, item: int, value: T):
         ...
 
     @overload
-    def __setitem__(self, s: slice, value, /):
+    def __setitem__(self, s: slice, value: T, /):
         ...
 
-    def __setitem__(self, item, value):
+    def __setitem__(self, item: Union[int, slice], value: Union[T, List[T]]):
         raise Exception("Cannot set item in a constant list")
 
     def __delitem__(self, item):
