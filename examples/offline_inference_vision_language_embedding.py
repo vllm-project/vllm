@@ -59,7 +59,7 @@ def run_e5_v(query: Query):
 
     llm = LLM(
         model="royokong/e5-v",
-        task="embedding",
+        task="embed",
         max_model_len=4096,
     )
 
@@ -88,7 +88,7 @@ def run_vlm2vec(query: Query):
 
     llm = LLM(
         model="TIGER-Lab/VLM2Vec-Full",
-        task="embedding",
+        task="embed",
         trust_remote_code=True,
         mm_processor_kwargs={"num_crops": 4},
     )
