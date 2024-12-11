@@ -411,7 +411,7 @@ def test_engine_log_metrics_ray(
         logger = _RayPrometheusStatLogger(
             local_interval=0.5,
             labels=dict(model_name=engine.model_config.served_model_name),
-            vllm_config=engine.vllm_config)
+            max_model_len=engine.model_config.max_model_len)
         engine.add_logger("ray", logger)
         for i, prompt in enumerate(example_prompts):
             engine.add_request(

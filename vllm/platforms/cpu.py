@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import psutil
 import torch
@@ -36,10 +36,6 @@ class CpuPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         return psutil.virtual_memory().total
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
 
     @classmethod
     def inference_mode(cls):

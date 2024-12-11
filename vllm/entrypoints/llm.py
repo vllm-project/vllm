@@ -1,4 +1,5 @@
 import itertools
+import json
 import warnings
 from contextlib import contextmanager
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
@@ -185,9 +186,12 @@ class LLM:
             kwargs["disable_log_stats"] = True
 
         if compilation_config is not None:
-            if isinstance(compilation_config, (int, dict)):
+            if isinstance(compilation_config, (int)):
                 compilation_config_instance = CompilationConfig.from_cli(
                     str(compilation_config))
+            elif isinstance(compilation_config, (dict)):
+                compilation_config_instance = CompilationConfig.from_cli(
+                    json.dumps(compilation_config))
             else:
                 compilation_config_instance = compilation_config
         else:
@@ -252,21 +256,8 @@ class LLM:
         else:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
-    @overload
-    def generate(
-        self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
-        *,
-        sampling_params: Optional[Union[SamplingParams,
-                                        Sequence[SamplingParams]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[RequestOutput]:
-        ...
-
     @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: str,
@@ -279,7 +270,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: List[str],
@@ -292,7 +283,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: Optional[str] = None,
@@ -306,7 +297,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: Optional[List[str]] = None,
@@ -320,12 +311,25 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def generate(
         self,
         prompts: None,
         sampling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload
+    def generate(
+        self,
+        prompts: Union[PromptType, Sequence[PromptType]],
+        /,
+        *,
+        sampling_params: Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
@@ -672,21 +676,8 @@ class LLM:
             lora_request=lora_request,
         )
 
-    @overload
-    def encode(
-        self,
-        prompts: Union[PromptType, Sequence[PromptType]],
-        /,
-        *,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
-    ) -> List[PoolingRequestOutput]:
-        ...
-
     @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: str,
@@ -699,7 +690,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: List[str],
@@ -712,7 +703,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: Optional[str] = None,
@@ -726,7 +717,7 @@ class LLM:
         ...
 
     @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: Optional[List[str]] = None,
@@ -740,12 +731,25 @@ class LLM:
         ...
 
     @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
+    @deprecated("'prompt_token_ids' will become part of 'prompts")
     def encode(
         self,
         prompts: None,
         pooling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+    ) -> List[PoolingRequestOutput]:
+        ...
+
+    @overload
+    def encode(
+        self,
+        prompts: Union[PromptType, Sequence[PromptType]],
+        /,
+        *,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[PoolingRequestOutput]:

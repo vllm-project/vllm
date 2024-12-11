@@ -4,8 +4,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import lru_cache, wraps
-from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
-                    Union)
+from typing import TYPE_CHECKING, Callable, List, TypeVar
 
 import pynvml
 import torch
@@ -13,7 +12,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -79,9 +77,7 @@ class CudaPlatformBase(Platform):
     dispatch_key: str = "CUDA"
 
     @classmethod
-    def get_device_capability(cls,
-                              device_id: int = 0
-                              ) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         raise NotImplementedError
 
     @classmethod
@@ -91,16 +87,6 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         raise NotImplementedError
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        if enforce_eager:
-            logger.warning(
-                "To see benefits of async output processing, enable CUDA "
-                "graph. Since, enforce-eager is enabled, async output "
-                "processor cannot be used")
-            return False
-        return True
 
     @classmethod
     def is_full_nvlink(cls, device_ids: List[int]) -> bool:
@@ -114,28 +100,17 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
-
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_worker.MultiStepWorker"
+                parallel_config.worker_cls = \
+                    "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                    parallel_config.sd_worker_cls = \
-                        "vllm.worker.worker.Worker"
+                parallel_config.worker_cls = \
+                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = \
+                    "vllm.worker.worker.Worker"
             else:
-                if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
-                            "vllm.v1.worker.gpu_worker.Worker"
-                else:
-                    parallel_config.worker_cls = "vllm.worker.worker.Worker"
+                parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
 
 # NVML utils
@@ -147,29 +122,11 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @lru_cache(maxsize=8)
     @with_nvml_context
-    def get_device_capability(cls,
-                              device_id: int = 0
-                              ) -> Optional[DeviceCapability]:
-        try:
-            physical_device_id = device_id_to_physical_device_id(device_id)
-            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-            major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
-            return DeviceCapability(major=major, minor=minor)
-        except RuntimeError:
-            return None
-
-    @classmethod
-    @lru_cache(maxsize=8)
-    @with_nvml_context
-    def has_device_capability(
-        cls,
-        capability: Union[Tuple[int, int], int],
-        device_id: int = 0,
-    ) -> bool:
-        try:
-            return super().has_device_capability(capability, device_id)
-        except RuntimeError:
-            return False
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
+        return DeviceCapability(major=major, minor=minor)
 
     @classmethod
     @lru_cache(maxsize=8)

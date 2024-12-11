@@ -96,8 +96,7 @@ class PlaceholderRange(TypedDict):
     """The length of the placeholder."""
 
 
-NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor,
-                      Tuple[torch.Tensor, ...]]
+NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """

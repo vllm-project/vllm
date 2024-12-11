@@ -20,7 +20,7 @@ from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
 
@@ -30,7 +30,7 @@ class AsyncLLM(EngineClient):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: Type[GPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -65,12 +65,7 @@ class AsyncLLM(EngineClient):
                                    input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
-        self.detokenizer = Detokenizer(
-            tokenizer_name=vllm_config.model_config.tokenizer,
-            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-            revision=vllm_config.model_config.tokenizer_revision,
-        )
+        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_client(
@@ -119,24 +114,14 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
 
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+        self.engine_core.shutdown()
 
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig):
-        distributed_executor_backend = (
-            vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-            executor_class = MultiprocExecutor
-        else:
-            assert (distributed_executor_backend is None)
-            from vllm.v1.executor.uniproc_executor import UniprocExecutor
-            executor_class = UniprocExecutor
-        return executor_class
+        return GPUExecutor
 
     async def add_request(
         self,

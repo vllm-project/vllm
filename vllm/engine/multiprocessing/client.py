@@ -415,9 +415,11 @@ class MQLLMEngineClient(EngineClient):
         return ENGINE_DEAD_ERROR(self._errored_with)
 
     @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def generate(
         self,
-        prompt: PromptType,
+        *,
+        inputs: PromptType,
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -428,11 +430,9 @@ class MQLLMEngineClient(EngineClient):
         ...
 
     @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
     def generate(
         self,
-        *,
-        inputs: PromptType,
+        prompt: PromptType,
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -487,9 +487,11 @@ class MQLLMEngineClient(EngineClient):
                                      prompt_adapter_request, priority)
 
     @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def encode(
         self,
-        prompt: PromptType,
+        *,
+        inputs: PromptType,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -499,11 +501,9 @@ class MQLLMEngineClient(EngineClient):
         ...
 
     @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
     def encode(
         self,
-        *,
-        inputs: PromptType,
+        prompt: PromptType,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,

@@ -212,9 +212,12 @@ class EngineArgs:
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
-        if isinstance(self.compilation_config, (int, dict)):
+        if isinstance(self.compilation_config, (int)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
+        elif isinstance(self.compilation_config, (dict)):
+            self.compilation_config = CompilationConfig.from_cli(
+                json.dumps(self.compilation_config))
 
         # Setup plugins
         from vllm.plugins import load_general_plugins
@@ -440,7 +443,6 @@ class EngineArgs:
                             'capping to sliding window size')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
-                            default=True,
                             help='[DEPRECATED] block manager v1 has been '
                             'removed and SelfAttnBlockSpaceManager (i.e. '
                             'block manager v2) is now the default. '
@@ -1077,12 +1079,9 @@ class EngineArgs:
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
 
-            # For multimodal models, chunked prefill is disabled by default in
-            # V0, but enabled by design in V1
-            if model_config.is_multimodal_model:
-                self.enable_chunked_prefill = bool(envs.VLLM_USE_V1)
-
-            elif use_long_context:
+            # Chunked prefill is currently disabled for multimodal models by
+            # default.
+            if use_long_context and not model_config.is_multimodal_model:
                 is_gpu = device_config.device_type == "cuda"
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
@@ -1275,9 +1274,12 @@ class EngineArgs:
         Override the EngineConfig's configs based on the usage context for V1.
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
+        # TODO (ywang96): Enable APC by default when VLM supports it.
         if engine_config.model_config.is_multimodal_model:
-            # TODO (ywang96): Enable APC by default when VLM supports it.
-            assert not engine_config.cache_config.enable_prefix_caching
+            logger.warning(
+                "Prefix caching is currently not supported for multimodal "
+                "models and has been disabled.")
+            engine_config.cache_config.enable_prefix_caching = False
 
 
 @dataclass

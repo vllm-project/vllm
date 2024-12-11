@@ -149,14 +149,13 @@ def causal_conv1d_opcheck_fn(x: torch.Tensor,
 @pytest.mark.parametrize("itype", [torch.bfloat16, torch.float])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
-@pytest.mark.parametrize("has_initial_state", [True, False])
 @pytest.mark.parametrize("width", [4])
 @pytest.mark.parametrize(
     'seqlen', [1, 8, 16, 32, 64, 128, 256, 512, 784, 1024, 1025, 2048, 4096])
 @pytest.mark.parametrize('dim', [64])
 @pytest.mark.parametrize('batch', [1])
 def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
-                       has_initial_state, itype):
+                       itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -168,18 +167,11 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
 
     weight = torch.randn(dim, width, device=device, dtype=itype)
     bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
-    if has_initial_state:
-        initial_states = torch.randn(batch,
-                                     dim,
-                                     width - 1,
-                                     device=device,
-                                     dtype=itype)
-        has_initial_state_tensor = torch.ones(batch,
-                                              dtype=torch.bool,
-                                              device=x.device)
-    else:
-        initial_states = None
-        has_initial_state_tensor = None
+    initial_states = torch.randn(batch,
+                                 dim,
+                                 width - 1,
+                                 device=device,
+                                 dtype=itype)
     x_ref = x.clone()
     weight_ref = weight.clone()
     bias_ref = bias.clone() if bias is not None else None
@@ -191,7 +183,9 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
                            bias,
                            activation=activation,
                            conv_states=initial_states,
-                           has_initial_state=has_initial_state_tensor)
+                           has_initial_state=torch.ones(batch,
+                                                        dtype=torch.bool,
+                                                        device=x.device))
     out_ref, final_states_ref = causal_conv1d_ref(
         x_ref,
         weight_ref,
@@ -199,12 +193,11 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
         initial_states=initial_states_ref,
         return_final_states=True,
         activation=activation)
-    if has_initial_state:
-        assert initial_states is not None and final_states_ref is not None
-        assert torch.allclose(initial_states,
-                              final_states_ref,
-                              rtol=rtol,
-                              atol=atol)
+    assert initial_states is not None and final_states_ref is not None
+    assert torch.allclose(initial_states,
+                          final_states_ref,
+                          rtol=rtol,
+                          atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
     causal_conv1d_opcheck_fn(x,
@@ -212,7 +205,9 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
                              bias,
                              activation=activation,
                              conv_states=initial_states,
-                             has_initial_state=has_initial_state_tensor)
+                             has_initial_state=torch.ones(batch,
+                                                          dtype=torch.bool,
+                                                          device=x.device))
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
