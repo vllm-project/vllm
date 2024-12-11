@@ -560,9 +560,9 @@ def cutlass_compress_entry(a: torch.Tensor) \
 
 
 def cutlass_scaled_sparse_mm(
-        a: torch.Tensor,
+        a: torch.Tensor, # row-major activations
+        b: torch.Tensor, # row-major weight matrix
         e: torch.Tensor,
-        b: torch.Tensor,
         scale_a: torch.Tensor,
         scale_b: torch.Tensor,
         out_dtype: torch.dtype,
@@ -572,11 +572,13 @@ def cutlass_scaled_sparse_mm(
     assert bias is None or bias.shape[0] == a.shape[0] \
         and bias.dtype == out_dtype
 
-    m = a.shape[0]
-    n = b.shape[1]
+    a_t = a.t()
+
+    m = b.shape[0]
+    n = a_t.shape[1]
     out = torch.empty((n, m), dtype=out_dtype, device=a.device).t()
 
-    torch.ops._C.cutlass_scaled_sparse_mm(out, a, e, b, scale_a, scale_b, bias)
+    torch.ops._C.cutlass_scaled_sparse_mm(out, b, e, a_t, scale_b, scale_a, bias)
 
     return out.t()
 

@@ -245,7 +245,6 @@ def run_single_benchmark_process(kernel_config: Dict, gpu_id: int,
         # Create tensors
         BComps, Es, As, Bs = make_n_rand_sparse_tensors(
             kernel_config.get('arg_pool_size', 1), dtype, m, n, k)
-        AsT = [x.t() for x in As]
         bf16_As = [x.to(dtype=torch.bfloat16) for x in As]
         bf16_Bs = [x.to(dtype=torch.bfloat16) for x in Bs]
         scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
@@ -304,8 +303,8 @@ def run_single_benchmark_process(kernel_config: Dict, gpu_id: int,
         elif kernel_type == 'cutlass_scaled_sparse_mm':
             bench = BenchMM(cuda_graph_params, label, sub_label,
                             "cutlass_fp8_fp8_bf16_scaled_sparse_mm",
-                            ops.cutlass_scaled_sparse_mm, ArgPool(BComps),
-                            ArgPool(Es), ArgPool(AsT), scale_b, scale_a,
+                            ops.cutlass_scaled_sparse_mm, ArgPool(As),
+                            ArgPool(BComps), ArgPool(Es), scale_a, scale_b,
                             torch.bfloat16)
 
         # Run the benchmark
@@ -430,7 +429,6 @@ def run_kernels_on_gpus(
                 # Create tensors
                 BComps, Es, As, Bs = make_n_rand_sparse_tensors(
                     config.get('arg_pool_size', 1), dtype, m, n, k)
-                AsT = [x.t() for x in As]
                 bf16_As = [x.to(dtype=torch.bfloat16) for x in As]
                 bf16_Bs = [x.to(dtype=torch.bfloat16) for x in Bs]
                 scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
@@ -491,9 +489,9 @@ def run_kernels_on_gpus(
                 elif kernel_type == 'cutlass_scaled_sparse_mm':
                     bench = BenchMM(cuda_graph_params, label, sub_label,
                                     "cutlass_fp8_fp8_bf16_scaled_sparse_mm",
-                                    ops.cutlass_scaled_sparse_mm,
-                                    ArgPool(BComps), ArgPool(Es), ArgPool(AsT),
-                                    scale_b, scale_a, torch.bfloat16)
+                                    ops.cutlass_scaled_sparse_mm, ArgPool(As),
+                                    ArgPool(BComps), ArgPool(Es),
+                                    scale_a, scale_b, torch.bfloat16)
 
                 # Run the benchmark
                 result = bench.run()
