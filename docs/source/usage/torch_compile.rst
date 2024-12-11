@@ -3,17 +3,17 @@
 Tuning ``torch.compile``
 ========================
 
-vLLM provides many knobs for users to use ``torch.compile`` to optimize the performance of their models. As we push forward the integration, more and more flags will be available for the users. As of now, there are mainly two flags that users can use to optimize the performance of their models:
+vLLM provides several options for users to optimize the performance of their models using ``torch.compile``. As the integration progresses, more flags will become available. Currently, there are two main flags that users can utilize:
 
-- ``level``: when used, please set it to 3. Other levels are for internal testing and debugging purposes.
-- ``candidate_compile_sizes``: a list of batchsizes that the user wants to compile the model for. For the specified batchsizes, only the ones in cudagraph capture sizes will be compiled.
+- ``level``: Set this to 3 for optimal performance. Other levels are intended for internal testing and debugging.
+- ``candidate_compile_sizes``: A list of batch sizes for which the user wants to compile the model. Only the batch sizes that are part of cudagraph capture sizes will be compiled.
 
-The TL;DR; for using ``torch.compile``, is to:
+To effectively use ``torch.compile``, the TL;DR; is:
 
-- Make sure GPUs are busy executing the model before using ``torch.compile``.
-- Understand your workload and profile it to find the most common batchsizes.
-- Compile the model for these batchsizes, and collect compilation cache if you are using docker or k8s for deployment, carry the compilation cache to the deployment environment.
-- Enjoy the performance improvement.
+- Ensure GPUs are busy executing the model before enabling ``torch.compile``.
+- Profile your workload to identify the most common batch sizes.
+- Compile the model for these batch sizes and, if using Docker or Kubernetes for deployment, carry the compilation cache to the deployment environment.
+- Benefit from the performance improvements.
 
 Usage
 -----
