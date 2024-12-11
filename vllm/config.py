@@ -2360,8 +2360,7 @@ class CompilationConfig(BaseModel):
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
     compilation_time: float = PrivateAttr
-    inductor_graph_hash: Dict[str, Dict[str, str]] = Field(
-        default_factory=defaultdict(dict))
+    inductor_graph_hash: Dict[str, Dict[str, str]] = PrivateAttr
     inductor_graph_hash_path: str = PrivateAttr
 
     # Per-model forward context
