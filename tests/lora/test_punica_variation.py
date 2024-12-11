@@ -6,13 +6,30 @@ maximum ranks.
 import pytest
 import torch
 
-# Enable custom op register
-import vllm.lora.ops.bgmv_expand
-import vllm.lora.ops.bgmv_expand_slice
-import vllm.lora.ops.bgmv_shrink
-import vllm.lora.ops.sgmv_expand
-import vllm.lora.ops.sgmv_expand_slice
-import vllm.lora.ops.sgmv_shrink  # noqa: F401
+from vllm.triton_utils import HAS_TRITON
+
+# Enable custom op register if we're using custom ops
+if HAS_TRITON:
+    import vllm.lora.ops.triton.bgmv_expand
+    import vllm.lora.ops.triton.bgmv_expand_slice
+    import vllm.lora.ops.triton.bgmv_shrink
+    import vllm.lora.ops.triton.sgmv_expand
+    import vllm.lora.ops.triton.sgmv_expand_slice
+    import vllm.lora.ops.triton.sgmv_shrink  # noqa: F401
+
+    # Unlike test_punica_sizes.py, we directly utilize custom op for
+    # testing, which verifies the correct registration of these ops.
+    bgmv_expand = torch.ops.vllm.bgmv_expand
+    bgmv_expand_slice = torch.ops.vllm.bgmv_expand_slice
+    bgmv_shrink = torch.ops.vllm.bgmv_shrink
+    sgmv_expand = torch.ops.vllm.sgmv_expand
+    sgmv_expand_slice = torch.ops.vllm.sgmv_expand_slice
+    sgmv_shrink = torch.ops.vllm.sgmv_shrink
+else:
+    from vllm.lora.ops.default.lora_ops import (  # type: ignore
+        bgmv_expand, bgmv_expand_slice, bgmv_shrink, sgmv_expand,
+        sgmv_expand_slice, sgmv_shrink)
+
 from vllm.platforms import current_platform
 
 from .utils import (generate_data, generate_data_for_expand_nslices,
@@ -26,7 +43,10 @@ DTYPES = [torch.float16, torch.bfloat16]
 MAX_RANKS = [1, 4, 8, 16, 32, 64, 128, 256]
 SCALES = [0.5]
 SEED = [0]
-CUDA_DEVICES = [f"cuda:{0}"]
+
+CUDA_DEVICES = ["cuda:0"]
+CPU_DEVICES = ["cpu"]
+DEVICES = CUDA_DEVICES if current_platform.is_cuda_alike() else CPU_DEVICES
 
 
 def assert_close(a, b):
@@ -38,16 +58,6 @@ def assert_close(a, b):
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
-# Unlike test_punica_sizes.py, we directly utilize custom op for
-# testing, which verifies the correct registration of these ops.
-bgmv_expand = torch.ops.vllm.bgmv_expand
-bgmv_expand_slice = torch.ops.vllm.bgmv_expand_slice
-bgmv_shrink = torch.ops.vllm.bgmv_shrink
-sgmv_expand = torch.ops.vllm.sgmv_expand
-sgmv_expand_slice = torch.ops.vllm.sgmv_expand_slice
-sgmv_shrink = torch.ops.vllm.sgmv_shrink
-
-
 @pytest.mark.parametrize("batches", BATCHES)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
@@ -56,7 +66,7 @@ sgmv_shrink = torch.ops.vllm.sgmv_shrink
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("op_type", ["shrink", "expand"])
 @pytest.mark.parametrize("seed", SEED)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_punica_sgmv(
     batches: int,
     num_loras: int,
@@ -146,7 +156,7 @@ def test_punica_sgmv(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("op_type", ["shrink", "expand"])
 @pytest.mark.parametrize("seed", SEED)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_punica_bgmv(
     batches: int,
     num_loras: int,
@@ -222,7 +232,7 @@ def test_punica_bgmv(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("op_type", ["sgmv", "bgmv"])
 @pytest.mark.parametrize("seed", SEED)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_punica_expand_nslices(
     batches: int,
     num_loras: int,
