@@ -156,7 +156,7 @@ Note that ``torch.compile`` only helps to accelerate the model forwarding. To se
 Supported Models
 ----------------
 
-Most models in vLLM are supported by ``torch.compile``. You should see logs like ``torch.compile takes 19.37 s in total`` in the server logs when you enable ``torch.compile``. If a model is not supported but you enable ``torch.compile``, you will see a warning like ``torch.compile is turned on, but the model does not support it``, and the ``torch.compile`` configurations will be ignored. If you want to get this model supported, please file an issue.
+Most models in vLLM are supported by ``torch.compile``. You should see logs like ``torch.compile takes 19.37 s in total`` in the server logs when you enable ``torch.compile``. If a model does not support ``torch.compile`` but you enable it, there will be a warning ``torch.compile is turned on, but the model does not support it``, and the ``torch.compile`` configurations will be ignored. If you want to get this model supported, please file an issue.
 
 For text-only models, we compile the part of the model from input token IDs to final hidden states, excluding the LM head and logits processing.
 
