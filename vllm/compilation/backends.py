@@ -1,17 +1,17 @@
+import ast
 import copy
 import dataclasses
+import os
+import pprint
 import time
+from collections import defaultdict
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
-import os
-import ast
 import torch
 import torch.fx as fx
 
-import pprint
-from collections import defaultdict
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
@@ -26,6 +26,14 @@ logger = init_logger(__name__)
 
 
 class InductorHashCache:
+    """
+    Disk format: a Python list of tuples, each tuple is
+    (runtime_shape, graph_index, hash_str)
+    We use list of tuple for readability.
+
+    In-memory format: a defaultdict of dict, where the key is
+    runtime_shape, and the value is a dict of graph_index to hash_str.
+    """
 
     def __init__(self, cache_file_path: str):
         self.cache_file_path = cache_file_path
@@ -36,14 +44,14 @@ class InductorHashCache:
 
     def deserialize(self, data: str):
         list_data = ast.literal_eval(data)
-        for runtime_shape, graph_index, key in list_data:
-            self.cache[runtime_shape][graph_index] = key
+        for runtime_shape, graph_index, hash_str in list_data:
+            self.cache[runtime_shape][graph_index] = hash_str
 
     def serialize(self) -> str:
         data = []
-        for runtime_shape, graph_index_to_key in self.cache.items():
-            for graph_index, key in graph_index_to_key.items():
-                data.append((runtime_shape, graph_index, key))
+        for runtime_shape, graph_index_to_hash_str in self.cache.items():
+            for graph_index, hash_str in graph_index_to_hash_str.items():
+                data.append((runtime_shape, graph_index, hash_str))
         printer = pprint.PrettyPrinter(indent=4)
         return printer.pformat(data)
 
@@ -54,8 +62,8 @@ class InductorHashCache:
     def get(self, runtime_shape: Optional[int], graph_index) -> str:
         return self.cache[runtime_shape][graph_index]
 
-    def store(self, runtime_shape: Optional[int], graph_index, key: str):
-        self.cache[runtime_shape][graph_index] = key
+    def store(self, runtime_shape: Optional[int], graph_index, hash_str: str):
+        self.cache[runtime_shape][graph_index] = hash_str
 
 
 class AlwaysHitShapeEnv:
@@ -111,11 +119,11 @@ def wrap_inductor(graph,
     if cache_data.exists(runtime_shape, graph_index):
         from torch._inductor.codecache import FxGraphCache
         from torch._inductor.compile_fx import graph_returns_tuple
-        key = cache_data.get(runtime_shape, graph_index)
+        hash_str = cache_data.get(runtime_shape, graph_index)
         with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                    lambda *args, **kwargs: AlwaysHitShapeEnv()):
             inductor_compiled_graph = FxGraphCache._lookup_graph(
-                key, example_inputs, True, False)
+                hash_str, example_inputs, True, False)
         returns_tuple = graph_returns_tuple(graph)
 
         def compiled_graph(*args):

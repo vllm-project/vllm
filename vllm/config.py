@@ -35,13 +35,13 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.compilation.backends import InductorHashCache
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
-    from vllm.compilation.backends import InductorHashCache
 else:
     QuantizationConfig = None
 
