@@ -51,7 +51,7 @@ class AsyncLLM(EngineClient):
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            enable_lora=bool(vllm_config.lora_config))
+            lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
         # Request streams (map of request_id -> AsyncStream).
@@ -65,7 +65,12 @@ class AsyncLLM(EngineClient):
                                    input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
-        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
+        self.detokenizer = Detokenizer(
+            tokenizer_name=vllm_config.model_config.tokenizer,
+            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
+            trust_remote_code=vllm_config.model_config.trust_remote_code,
+            revision=vllm_config.model_config.tokenizer_revision,
+        )
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_client(
