@@ -5,6 +5,8 @@ from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
+from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.base import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -73,12 +75,12 @@ class Scheduler:
         # has the Transformer architecture (e.g., ViT).
         # FIXME(woosuk): Below are placeholder values. We need to calculate the
         # actual values from the configurations.
-        self.max_num_encoder_input_tokens = 2048
+        self.max_num_encoder_input_tokens = 16384
         # NOTE(woosuk): For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized and used, regardless of
         # the cache size. This is because the memory space for the encoder cache
         # is preallocated in the profiling run.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
+        self.encoder_cache_manager = EncoderCacheManager(cache_size=16384)
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
@@ -383,7 +385,7 @@ class Scheduler:
         model_runner_output: "ModelRunnerOutput",
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
-        sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
+        sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []

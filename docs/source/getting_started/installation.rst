@@ -21,7 +21,7 @@ You can install vLLM using pip:
 .. code-block:: console
 
     $ # (Recommended) Create a new conda environment.
-    $ conda create -n myenv python=3.10 -y
+    $ conda create -n myenv python=3.12 -y
     $ conda activate myenv
 
     $ # Install vLLM with CUDA 12.1.
@@ -73,7 +73,7 @@ Another way to access the latest code is to use the docker images:
 .. code-block:: console
 
     $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-    $ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${VLLM_COMMIT}
+    $ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}
 
 These docker images are used for CI and testing only, and they are not intended for production use. They will be expired after several days.
 
@@ -89,45 +89,24 @@ Build from source
 Python-only build (without compilation)
 ---------------------------------------
 
-If you only need to change Python code, you can simply build vLLM without compilation.
-
-The first step is to install the latest vLLM wheel:
-
-.. code-block:: console
-
-    pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
-
-You can find more information about vLLM's wheels `above <#install-the-latest-code>`_.
-
-After verifying that the installation is successful, you can use `the following script <https://github.com/vllm-project/vllm/blob/main/python_only_dev.py>`_:
+If you only need to change Python code, you can build and install vLLM without compilation. Using `pip's ``--editable`` flag <https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs>`_, changes you make to the code will be reflected when you run vLLM:
 
 .. code-block:: console
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
-    $ python python_only_dev.py
+    $ VLLM_USE_PRECOMPILED=1 pip install --editable .
 
-The script will:
+This will download the latest nightly wheel and use the compiled libraries from there in the install.
 
-* Find the installed vLLM package in the current environment.
-* Copy built files to the current directory.
-* Rename the installed vLLM package.
-* Symbolically link the current directory to the installed vLLM package.
-
-Now, you can edit the Python code in the current directory, and the changes will be reflected when you run vLLM.
-
-Once you have finished editing or want to install another vLLM wheel, you should exit the development environment using `the same script <https://github.com/vllm-project/vllm/blob/main/python_only_dev.py>`_ with the ``--quit-dev`` (or ``-q`` for short) flag:
+The ``VLLM_PRECOMPILED_WHEEL_LOCATION`` environment variable can be used instead of ``VLLM_USE_PRECOMPILED`` to specify a custom path or URL to the wheel file. For example, to use the `0.6.1.post1 PyPi wheel <https://pypi.org/project/vllm/#files>`_:
 
 .. code-block:: console
 
-    $ python python_only_dev.py --quit-dev
+   $ export VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/4a/4c/ee65ba33467a4c0de350ce29fbae39b9d0e7fcd887cc756fa993654d1228/vllm-0.6.3.post1-cp38-abi3-manylinux1_x86_64.whl
+   $ pip install --editable .
 
-The ``--quit-dev`` flag will:
-
-* Remove the symbolic link from the current directory to the vLLM package.
-* Restore the original vLLM package from the backup.
-
-If you update the vLLM wheel and rebuild from the source to make further edits, you will need to repeat the `Python-only build <#python-only-build>`_ steps again.
+You can find more information about vLLM's wheels `above <#install-the-latest-code>`_.
 
 .. note::
 
@@ -148,8 +127,12 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
 .. tip::
 
     Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
+
     For example, you can install `ccache <https://github.com/ccache/ccache>`_ using ``conda install ccache`` or ``apt install ccache`` .
     As long as ``which ccache`` command can find the ``ccache`` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
+
+    `sccache <https://github.com/mozilla/sccache>`_ works similarly to ``ccache``, but has the capability to utilize caching in remote storage environments.
+    The following environment variables can be set to configure the vLLM ``sccache`` remote: ``SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1``. We also recommend setting ``SCCACHE_IDLE_TIMEOUT=0``.
 
 
 Use an existing PyTorch installation

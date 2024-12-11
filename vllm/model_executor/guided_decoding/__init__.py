@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.platforms import CpuArchEnum, current_platform
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -12,6 +13,40 @@ if TYPE_CHECKING:
     from vllm.sampling_params import GuidedDecodingParams
 
 logger = init_logger(__name__)
+
+
+def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
+    """Check if JSON schema contains features unsupported by xgrammar."""
+
+    def check_object(obj: dict) -> bool:
+        if not isinstance(obj, dict):
+            return False
+
+        # Check for pattern restrictions
+        if "pattern" in obj:
+            return True
+
+        # Check for numeric ranges
+        if obj.get("type") in ("integer", "number") and any(
+                key in obj for key in [
+                    "minimum", "maximum", "exclusiveMinimum",
+                    "exclusiveMaximum", "multipleOf"
+                ]):
+            return True
+
+        # Recursively check all nested objects and arrays
+        for value in obj.values():
+            if isinstance(value, dict):
+                if check_object(value):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict) and check_object(item):
+                        return True
+
+        return False
+
+    return check_object(schema)
 
 
 def maybe_backend_fallback(
@@ -25,6 +60,12 @@ def maybe_backend_fallback(
         guided_params.backend = "xgrammar"
 
     if guided_params.backend == "xgrammar":
+        # xgrammar only has x86 wheels for linux, fallback to outlines
+        if current_platform.get_cpu_architecture() is not CpuArchEnum.X86:
+            logger.warning("xgrammar is only supported on x86 CPUs. "
+                           "Falling back to use outlines instead.")
+            guided_params.backend = "outlines"
+
         # xgrammar doesn't support regex or choice, fallback to outlines
         if guided_params.regex is not None or guided_params.choice is not None:
             logger.warning(
@@ -32,12 +73,13 @@ def maybe_backend_fallback(
                 "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
 
-        # xgrammar only supports EBNF grammars and uses the GBNF format
-        # https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md
-        elif (guided_params.grammar is not None
-              and "::=" not in guided_params.grammar):
-            logger.warning("xgrammar only supports EBNF grammars. "
-                           "Falling back to use outlines instead.")
+        # xgrammar doesn't support some JSON schema features
+        elif (guided_params.json is not None
+              and has_xgrammar_unsupported_json_features(guided_params.json)):
+            logger.warning(
+                "xgrammar does not support advanced JSON schema features like "
+                "patterns or numeric ranges. "
+                "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
 
     return guided_params

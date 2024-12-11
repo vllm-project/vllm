@@ -175,8 +175,8 @@ async def build_async_engine_client_from_engine_args(
 
         # Select random path for IPC.
         ipc_path = get_open_zmq_ipc_path()
-        logger.info("Multiprocessing frontend to use %s for IPC Path.",
-                    ipc_path)
+        logger.debug("Multiprocessing frontend to use %s for IPC Path.",
+                     ipc_path)
 
         # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
@@ -249,8 +249,8 @@ def mount_metrics(app: FastAPI):
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
-        logger.info("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
-                    prometheus_multiproc_dir_path)
+        logger.debug("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
+                     prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
 
@@ -305,7 +305,7 @@ async def health(raw_request: Request) -> Response:
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_tokenize(request)
+    generator = await handler.create_tokenize(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -319,7 +319,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_detokenize(request)
+    generator = await handler.create_detokenize(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
