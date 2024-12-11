@@ -380,7 +380,7 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
-    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=0)'
+    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=0) and not core_model and not quant_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
@@ -396,7 +396,7 @@ steps:
   - tests/models/decoder_only/vision_language
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=1)'
+    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=1) and not core_model and not quant_model'
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
