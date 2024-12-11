@@ -88,7 +88,11 @@ class GraniteToolParser(ToolParser):
     ) -> Union[DeltaMessage, None]:
 
         start_idx = consume_space(0, current_text)
-        if not current_text or current_text[start_idx] != '[':
+        if current_text[start_idx:].startswith(self.bot_token):
+            start_idx = consume_space(start_idx + len(self.bot_token),
+                                      current_text)
+        if not current_text or start_idx >= len(current_text)\
+            or current_text[start_idx] != '[':
             return DeltaMessage(content=delta_text)
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
