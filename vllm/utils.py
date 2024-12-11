@@ -170,6 +170,11 @@ class Device(enum.Enum):
     CPU = enum.auto()
 
 
+class LayerBlockType(enum.Enum):
+    attention = "attention"
+    mamba = "mamba"
+
+
 class Counter:
 
     def __init__(self, start: int = 0) -> None:

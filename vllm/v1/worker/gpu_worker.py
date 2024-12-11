@@ -14,7 +14,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -260,8 +260,8 @@ def _get_cache_block_size(
 ) -> int:
     head_size = model_config.get_head_size()
     num_heads = model_config.get_num_kv_heads(parallel_config)
-    num_attention_layers = model_config.get_num_attention_layers(
-        parallel_config)
+    num_attention_layers = model_config.get_num_layers_by_block_type(
+        parallel_config, LayerBlockType.attention)
 
     key_cache_block = cache_config.block_size * num_heads * head_size
     value_cache_block = key_cache_block
