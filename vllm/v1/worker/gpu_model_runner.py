@@ -193,9 +193,9 @@ class GPUModelRunner:
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
-        for req_data in scheduler_output.scheduled_new_reqs:
-            req_id = req_data.req_id
-            sampling_params = req_data.sampling_params
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            req_id = new_req_data.req_id
+            sampling_params = new_req_data.sampling_params
             if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
@@ -204,25 +204,25 @@ class GPUModelRunner:
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
-                prompt_token_ids=req_data.prompt_token_ids,
-                prompt=req_data.prompt,
-                mm_inputs=req_data.mm_inputs,
-                mm_positions=req_data.mm_positions,
+                prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt=new_req_data.prompt,
+                mm_inputs=new_req_data.mm_inputs,
+                mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
                 generator=generator,
-                block_ids=req_data.block_ids,
-                num_computed_tokens=req_data.num_computed_tokens,
+                block_ids=new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
             )
             req_ids_to_add.append(req_id)
 
         # Update the cached states of the resumed requests.
-        for req_data in scheduler_output.scheduled_resumed_reqs:
-            req_id = req_data.req_id
+        for res_req_data in scheduler_output.scheduled_resumed_reqs:
+            req_id = res_req_data.req_id
             req_state = self.requests[req_id]
 
-            req_state.block_ids = req_data.block_ids
-            req_state.num_computed_tokens = req_data.num_computed_tokens
+            req_state.block_ids = res_req_data.block_ids
+            req_state.num_computed_tokens = res_req_data.num_computed_tokens
             req_ids_to_add.append(req_id)
 
         # Add the new or resumed requests to the persistent batch.
