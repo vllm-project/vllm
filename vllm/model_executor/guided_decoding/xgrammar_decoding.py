@@ -43,9 +43,9 @@ class TokenizerData:
     """Immutable container for cached tokenizer data."""
     encoded_vocab: list[str] = field(default_factory=list)
     stop_token_ids: list[int] | None = None
-    # These fields are mutually exclusive `backend_str` is used to create a
-    # TokenizeInfo with `TokenizerInfo.from_huggingface` while vocab_type is
-    # used with the constructor of TokenizeInfo
+    # These fields are mutually exclusive: `backend_str` is used to create a
+    # TokenizeInfo with `TokenizerInfo.from_huggingface` while `vocab_type` is
+    # used within the constructor of TokenizeInfo
     backend_str: str | None = None
     vocab_type: xgr.VocabType | None = None
 
@@ -148,11 +148,6 @@ class GrammarConfig:
     grammar_str: str | None = None
     json_object: bool | None = None
     max_threads: int = 8
-    # Only populated if tokenizer_hash not in cache
-    # encoded_vocab: list[str] | None = None
-    # stop_token_ids: list[int] | None = None
-    # backend_str: str | None = None
-    # vocab_type: xgr.VocabType | None = None
     tokenizer_data: TokenizerData | None = None
 
     @classmethod
@@ -172,16 +167,11 @@ class GrammarConfig:
                 json_str = json.dumps(guided_params.json)
             else:
                 json_str = guided_params.json
-            return cls(
-                json_str=json_str,
-                vocab_size=model_config.hf_text_config.vocab_size,
-                tokenizer_hash=tokenizer_hash,
-                max_threads=max_threads,
-                #    encoded_vocab=encoded_vocab,
-                #    stop_token_ids=stop_token_ids,
-                #    backend_str=backend_str,
-                #    vocab_type=vocab_type
-                tokenizer_data=tokenizer_data)
+            return cls(json_str=json_str,
+                       vocab_size=model_config.hf_text_config.vocab_size,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads,
+                       tokenizer_data=tokenizer_data)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -195,17 +185,11 @@ class GrammarConfig:
                         f"Conversion error: {str(e)}") from e
             else:
                 grammar_str = guided_params.grammar
-            return cls(
-                grammar_str=grammar_str,
-                vocab_size=model_config.hf_text_config.vocab_size,
-                tokenizer_hash=tokenizer_hash,
-                max_threads=max_threads,
-                tokenizer_data=tokenizer_data
-                #    encoded_vocab=encoded_vocab,
-                #    stop_token_ids=stop_token_ids,
-                #    backend_str=backend_str,
-                #    vocab_type=vocab_type
-            )
+            return cls(grammar_str=grammar_str,
+                       vocab_size=model_config.hf_text_config.vocab_size,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads,
+                       tokenizer_data=tokenizer_data)
         elif guided_params.json_object:
             return cls(
                 json_object=True,
@@ -213,10 +197,6 @@ class GrammarConfig:
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
-                #    encoded_vocab=encoded_vocab,
-                #    stop_token_ids=stop_token_ids,
-                #    backend_str=backend_str,
-                #    vocab_type=vocab_type
             )
         else:
             raise ValueError(

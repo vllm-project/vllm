@@ -320,7 +320,7 @@ class MistralTokenizer:
 
         return decoded
 
-    # WARN: Outlines logits processors can be overwrite this method.
+    # WARN: Outlines logits processors can overwrite this method.
     # See: guided_decoding/outlines_logits_processors.py::_adapt_tokenizer
     # for more.
     def decode(self,
