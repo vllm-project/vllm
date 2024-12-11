@@ -414,12 +414,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
         import pkg_resources
         from packaging import version
 
-        required_version = version.parse("2.35")
+        required_version = version.parse("2.40")
         current_version = version.parse(
             pkg_resources.get_distribution("ray").version)
-        # TODO: update the constraint once we adapt to the backward
-        # incompatible API change from ray 2.36
-        if current_version != required_version:
+        if current_version < required_version:
             raise ValueError(f"Ray version {required_version} is "
                              f"required, but found {current_version}")
 
@@ -445,6 +443,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
             # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
@@ -480,7 +480,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
             forward_dag = MultiOutputNode(outputs)
 
-        return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
+        return forward_dag.experimental_compile(
+            enable_asyncio=enable_asyncio,
+            _overlap_gpu_communication=envs.
+            VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
 
     def __del__(self):
         self.shutdown()
@@ -507,8 +510,8 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
 
         serialized_data = self.input_encoder.encode(execute_model_req)
         dag_future = await self.forward_dag.execute_async(serialized_data)
-        outputs = await dag_future
-        return self.output_decoder.decode(outputs[0])
+        output = await dag_future[0]
+        return self.output_decoder.decode(output)
 
     async def _driver_execute_model_async(
         self,
