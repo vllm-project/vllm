@@ -163,3 +163,10 @@ Most features in vLLM are compatible with ``torch.compile``, including tensor pa
 - **CPU offloading**: This feature is not compatible with ``torch.compile`` at the moment but is expected to be compatible in the future. Track the progress on `this issue <https://github.com/vllm-project/vllm/issues/10612>`__.
 - **LoRA serving**: While it can be made compatible with ``torch.compile``, the benefits would be minimal. Models with LoRA adapters primarily use custom (punica) kernels that ``torch.compile`` cannot optimize. Therefore, when LoRA is enabled, ``torch.compile`` will be disabled. For more information, check `this issue <https://github.com/vllm-project/vllm/issues/10617>`__.
 
+
+Future Directions
+-----------------
+
+In the future, we plan to further reduce the compilation time of ``torch.compile``. Ideally, when we run the same model with the same ``candidate_compile_sizes``, the first run (code start) will take some time to compile, but the second run (warm start) should take close-to-zero time to compile. This is a challenging problem, but we are actively working on it together with the PyTorch team.
+
+Another direction is to introduce more compilation optimization passes. Right now we directly use Inductor to compile the computation graph into Triton kernels. There are many graph-level optimizations that can be done before the compilation. Please stay tuned for more updates.
