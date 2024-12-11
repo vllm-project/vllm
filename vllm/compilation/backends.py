@@ -184,6 +184,7 @@ def wrap_inductor(graph,
 
         def mocked_compiled_fx_graph_hash(*args, **kwargs):
             out = compiled_fx_graph_hash(*args, **kwargs)
+            # store the hash in the cache
             nonlocal cache_data
             cache_data[(runtime_shape, graph_index)] = out[0]
             return out
@@ -598,8 +599,8 @@ class PiecewiseBackend:
                 # save the hash of the inductor graph for the next run
                 with open(self.compilation_config.inductor_hash_cache_path,
                           "w") as f:
-                    print(dict(self.compilation_config.inductor_hash_cache),
-                          file=f)
+                    f.write(self.compilation_config.inductor_hash_cache.
+                            serialize())
                 end_monitoring_torch_compile(self.vllm_config)
 
         if not entry.use_cudagraph:
