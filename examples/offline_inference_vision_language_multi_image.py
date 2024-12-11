@@ -165,7 +165,7 @@ def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     # Stop tokens for InternVL
     # models variants may have different stop tokens
     # please refer to the model card for the correct "stop words":
-    # https://huggingface.co/OpenGVLab/InternVL2-2B#service
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
     stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
