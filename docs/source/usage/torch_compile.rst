@@ -108,6 +108,7 @@ For example, when running ``python benchmarks/benchmark_latency.py --model meta-
 
 .. code-block:: bash
 
+    $ # running a 8B model on H100
     $ python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1
     Avg latency: 0.9704469823899369 seconds
     $ python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 -O "{'level': 3, 'candidate_compile_sizes': [1]}"
