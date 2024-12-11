@@ -25,7 +25,8 @@ def _query_server_long(prompt: str) -> dict:
 
 
 @pytest.fixture
-def api_server(tokenizer_pool_size: int, worker_use_ray: bool):
+def api_server(tokenizer_pool_size: int, worker_use_ray: bool,
+               add_middleware: bool):
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
     commands = [
@@ -37,15 +38,19 @@ def api_server(tokenizer_pool_size: int, worker_use_ray: bool):
 
     if worker_use_ray:
         commands.append("--worker-use-ray")
+    if add_middleware:
+        commands.append("--add-middleware")
     uvicorn_process = subprocess.Popen(commands)
     yield
     uvicorn_process.terminate()
 
 
-@pytest.mark.parametrize("tokenizer_pool_size", [0, 2])
-@pytest.mark.parametrize("worker_use_ray", [False, True])
-def test_api_server(api_server, tokenizer_pool_size: int,
-                    worker_use_ray: bool):
+@pytest.mark.parametrize(
+    ["tokenizer_pool_size", "worker_use_ray", "add_middleware"],
+    [(0, False, False), (0, False, True), (2, False, False), (0, True, False),
+     (2, True, False)])
+def test_api_server(api_server, tokenizer_pool_size: int, worker_use_ray: bool,
+                    add_middleware: bool):
     """
     Run the API server and test it.
 

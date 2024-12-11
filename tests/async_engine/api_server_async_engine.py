@@ -3,6 +3,7 @@ from typing import Any, Dict, Iterable
 
 import uvicorn
 from fastapi.responses import JSONResponse, Response
+from starlette.requests import Request
 
 import vllm.entrypoints.api_server
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -37,12 +38,21 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--add-middleware", action='store_true')
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngineWithStats.from_engine_args(engine_args)
     vllm.entrypoints.api_server.engine = engine
+
+    if args.add_middleware:
+
+        async def dummy_middleware(request: Request, call_next):
+            return await call_next(request)
+
+        app.middleware("http")(dummy_middleware)
+
     uvicorn.run(
         app,
         host=args.host,
