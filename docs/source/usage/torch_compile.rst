@@ -167,13 +167,12 @@ By carefully compiling the main computation of the model, we can avoid unnecessa
 Feature Compatibility
 ---------------------
 
-Engine features are naturally compatible with ``torch.compile``, because they do not touch the model execution. For example, chunked prefill, prefix caching, and multi-step scheduling are all compatible with ``torch.compile``.
+Engine features are naturally compatible with ``torch.compile`` because they do not affect model execution. For example, chunked prefill, prefix caching, and multi-step scheduling are all compatible with ``torch.compile``.
 
-For features that touch the model execution, such as tensor parallel, pipeline parallel, and quantization, we have made them compatible with ``torch.compile``. However, there are two features that are not currently compatible with ``torch.compile``:
+For features that do affect model execution, such as tensor parallel, pipeline parallel, and quantization, we have ensured compatibility with ``torch.compile``. However, there are two features that are currently not compatible with ``torch.compile``:
 
 - **CPU offloading**: This feature is not compatible with ``torch.compile`` at the moment but is expected to be compatible in the future. Track the progress on `this issue <https://github.com/vllm-project/vllm/issues/10612>`__.
 - **LoRA serving**: While it can be made compatible with ``torch.compile``, the benefits would be minimal. Models with LoRA adapters primarily use custom (punica) kernels that ``torch.compile`` cannot optimize. Therefore, when LoRA is enabled, ``torch.compile`` will be disabled. For more information, check `this issue <https://github.com/vllm-project/vllm/issues/10617>`__.
-
 
 Future Directions
 -----------------
