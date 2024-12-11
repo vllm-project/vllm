@@ -2,7 +2,7 @@
 
 Run `pytest tests/kernels/test_cutlass.py`.
 """
-from typing import Optional, Type, Tuple
+from typing import Optional, Tuple, Type
 
 import pytest
 import torch
@@ -86,8 +86,9 @@ def prune_to_2_4(tensor):
     return pruned.reshape(original_shape)
 
 
-def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
-                             k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def make_rand_sparse_tensors(
+        dtype: torch.dtype, m: int, n: int, k: int
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     a = torch.randn((m, k), device='cuda') * 5
     b = torch.randn((n, k), device='cuda').t() * 5
 
@@ -464,7 +465,8 @@ def test_cutlass_sparse_subset():
     m, n, k = 512, 512, 512
 
     # Create tensors
-    b_comp, e, whole_a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, big_m, n, k)
+    b_comp, e, whole_a, b = make_rand_sparse_tensors(torch.float8_e4m3fn,
+                                                     big_m, n, k)
     a = whole_a[0:m, 0:k]
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
@@ -472,11 +474,11 @@ def test_cutlass_sparse_subset():
     print("in test")
 
     out = ops.cutlass_scaled_sparse_mm(a,
-                                b_comp,
-                                e,
-                                scale_a,
-                                scale_b,
-                                out_dtype=torch.bfloat16)
+                                       b_comp,
+                                       e,
+                                       scale_a,
+                                       scale_b,
+                                       out_dtype=torch.bfloat16)
     baseline = baseline_scaled_mm(a,
                                   b,
                                   scale_a,

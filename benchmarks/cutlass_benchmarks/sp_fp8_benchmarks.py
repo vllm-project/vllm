@@ -1,11 +1,11 @@
 import argparse
 import copy
-import itertools
-import pickle as pkl
-import time
 import dataclasses
+import itertools
 import multiprocessing as mp
 import os
+import pickle as pkl
+import time
 import traceback
 from multiprocessing import Process, Queue
 from pathlib import Path
@@ -15,11 +15,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
-from weight_shapes import WEIGHT_SHAPES
-from vllm.utils import FlexibleArgumentParser
-import vllm._custom_ops as ops
 from utils import make_n_rand_sparse_tensors
+from weight_shapes import WEIGHT_SHAPES
 
+import vllm._custom_ops as ops
+from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
@@ -490,8 +490,8 @@ def run_kernels_on_gpus(
                     bench = BenchMM(cuda_graph_params, label, sub_label,
                                     "cutlass_fp8_fp8_bf16_scaled_sparse_mm",
                                     ops.cutlass_scaled_sparse_mm, ArgPool(As),
-                                    ArgPool(BComps), ArgPool(Es),
-                                    scale_a, scale_b, torch.bfloat16)
+                                    ArgPool(BComps), ArgPool(Es), scale_a,
+                                    scale_b, torch.bfloat16)
 
                 # Run the benchmark
                 result = bench.run()
@@ -575,8 +575,8 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
 
 
 def bench(dtype: torch.dtype, with_cuda_graph: Optional[int],
-             with_arg_pool: Optional[int], m: int, k: int, n: int, label: str,
-             sub_label: str) -> Iterable[TMeasurement]:
+          with_arg_pool: Optional[int], m: int, k: int, n: int, label: str,
+          sub_label: str) -> Iterable[TMeasurement]:
     if dtype == torch.float8_e4m3fn:
         return bench_fp8(dtype, with_cuda_graph, with_arg_pool, m, k, n, label,
                          sub_label)
@@ -599,9 +599,8 @@ def run(args, MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
                 if args.with_cuda_graph else label
         label = f"{label}-argpool_{args.with_arg_pool}" \
             if args.with_arg_pool else label
-        timers = bench(args.dtype, args.with_cuda_graph,
-                            args.with_arg_pool, m, k, n, label,
-                            f"MKN=({m}x{k}x{n})")
+        timers = bench(args.dtype, args.with_cuda_graph, args.with_arg_pool, m,
+                       k, n, label, f"MKN=({m}x{k}x{n})")
 
         print_timers(timers)
         results.extend(timers)
