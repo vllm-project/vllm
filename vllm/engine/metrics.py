@@ -1,4 +1,5 @@
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Type, Union, cast
@@ -433,7 +434,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_prompt_throughput: Optional[float] = None
         self.last_generation_throughput: Optional[float] = None
 
-    def log(self, stats: Stats) -> None:
+    def log(self,
+            stats: Stats,
+            custom_labels: Optional[dict[str, str]] = None) -> None:
         """Called by LLMEngine.
            Logs to Stdout every self.local_interval seconds."""
 
@@ -528,10 +531,33 @@ class PrometheusStatLogger(StatLoggerBase):
         self.labels = labels
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
                                          vllm_config=vllm_config)
+        self.current_custom_labels: Dict[str, str] = {}
+
+    @contextmanager
+    def use_labels(self, custom_labels: Optional[Dict[str, str]] = None):
+        """Context manager to set custom labels"""
+        original_labels = self.current_custom_labels
+        if custom_labels is not None:
+            self.current_custom_labels = custom_labels
+        try:
+            yield
+        finally:
+            self.current_custom_labels = original_labels
+
+    def _merge_labels(
+            self,
+            additional_labels: Optional[Dict[str,
+                                             str]] = None) -> Dict[str, str]:
+        """Merges static labels with additional labels."""
+        merged_labels = {**self.labels, **self.current_custom_labels}
+        if additional_labels:
+            merged_labels.update(additional_labels)
+        return merged_labels
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
-        gauge.labels(**self.labels).set(data)
+        labels = self._merge_labels()
+        gauge.labels(**labels).set(data)
 
     def _log_counter(self, counter, data: Union[int, float]) -> None:
         # Convenience function for logging to counter.
@@ -540,31 +566,43 @@ class PrometheusStatLogger(StatLoggerBase):
             logger.warning("Skipping negative increment of %g to %s", data,
                            counter)
             return
-        counter.labels(**self.labels).inc(data)
+        labels = self._merge_labels()
+        counter.labels(**labels).inc(data)
 
     def _log_counter_labels(self, counter, data: CollectionsCounter,
                             label_key: str) -> None:
         # Convenience function for collection counter of labels.
         for label, count in data.items():
-            counter.labels(**{**self.labels, label_key: label}).inc(count)
+            labels = self._merge_labels({label_key: label})
+            counter.labels(**labels).inc(count)
 
     def _log_histogram(self, histogram, data: Union[List[int],
                                                     List[float]]) -> None:
         # Convenience function for logging list to histogram.
+        labels = self._merge_labels()
         for datum in data:
-            histogram.labels(**self.labels).observe(datum)
+            histogram.labels(**labels).observe(datum)
 
-    def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
-        gauge.labels(**data).set_to_current_time()
+    def _log_gauge_string(self, gauge, additional_label: Dict[str,
+                                                              str]) -> None:
+        # _log_guage_string is used to log lora metadata
+        gauge.labels(**additional_label).set_to_current_time()
 
-    def _log_prometheus(self, stats: Stats) -> None:
+    def _log_prometheus(
+            self,
+            stats: Stats,
+            custom_labels: Optional[Dict[str, str]] = None) -> None:
         # System state data
-        self._log_gauge(self.metrics.gauge_scheduler_running,
-                        stats.num_running_sys)
-        self._log_gauge(self.metrics.gauge_scheduler_swapped,
-                        stats.num_swapped_sys)
-        self._log_gauge(self.metrics.gauge_scheduler_waiting,
-                        stats.num_waiting_sys)
+        with self.use_labels(custom_labels):
+            self._log_gauge(self.metrics.gauge_scheduler_running,
+                            stats.num_waiting_sys)
+            self._log_gauge(self.metrics.gauge_scheduler_swapped,
+                            stats.num_running_sys)
+            self._log_gauge(self.metrics.gauge_scheduler_waiting,
+                            stats.num_swapped_sys)
+
+        # The metrics provided here are specific to device performance.
+        # Do not include model-specific labels such as LoRA.
         self._log_gauge(self.metrics.gauge_gpu_cache_usage,
                         stats.gpu_cache_usage_sys)
         self._log_gauge(self.metrics.gauge_cpu_cache_usage,
@@ -584,55 +622,62 @@ class PrometheusStatLogger(StatLoggerBase):
             stats.max_lora,
         }
         self._log_gauge_string(self.metrics.gauge_lora_info, lora_info)
-        # Iteration level data
-        self._log_counter(self.metrics.counter_num_preemption,
-                          stats.num_preemption_iter)
-        self._log_counter(self.metrics.counter_prompt_tokens,
-                          stats.num_prompt_tokens_iter)
-        self._log_counter(self.metrics.counter_generation_tokens,
-                          stats.num_generation_tokens_iter)
-        self._log_histogram(self.metrics.histogram_iteration_tokens,
-                            [stats.num_tokens_iter])
-        self._log_histogram(self.metrics.histogram_time_to_first_token,
-                            stats.time_to_first_tokens_iter)
-        self._log_histogram(self.metrics.histogram_time_per_output_token,
-                            stats.time_per_output_tokens_iter)
 
-        # Request level data
-        # Latency
-        self._log_histogram(self.metrics.histogram_e2e_time_request,
-                            stats.time_e2e_requests)
-        self._log_histogram(self.metrics.histogram_queue_time_request,
-                            stats.time_queue_requests)
-        self._log_histogram(self.metrics.histogram_inference_time_request,
-                            stats.time_inference_requests)
-        self._log_histogram(self.metrics.histogram_prefill_time_request,
-                            stats.time_prefill_requests)
-        self._log_histogram(self.metrics.histogram_decode_time_request,
-                            stats.time_decode_requests)
-        self._log_histogram(self.metrics.histogram_time_in_queue_request,
-                            stats.time_in_queue_requests)
-        self._log_histogram(self.metrics.histogram_model_forward_time_request,
-                            stats.model_forward_time_requests)
-        self._log_histogram(self.metrics.histogram_model_execute_time_request,
-                            stats.model_execute_time_requests)
-        # Metadata
-        finished_reason_counter = CollectionsCounter(
-            stats.finished_reason_requests)
-        self._log_counter_labels(self.metrics.counter_request_success,
-                                 finished_reason_counter,
-                                 Metrics.labelname_finish_reason)
-        self._log_histogram(self.metrics.histogram_num_prompt_tokens_request,
-                            stats.num_prompt_tokens_requests)
-        self._log_histogram(
-            self.metrics.histogram_num_generation_tokens_request,
-            stats.num_generation_tokens_requests)
-        self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
-        self._log_histogram(
-            self.metrics.histogram_max_num_generation_tokens_request,
-            stats.max_num_generation_tokens_requests)
-        self._log_histogram(self.metrics.histogram_max_tokens_request,
-                            stats.max_tokens_requests)
+        # `use_labels` can be used to append or replace labels in metrics
+        with self.use_labels(custom_labels):
+            # Iteration level data
+            self._log_counter(self.metrics.counter_num_preemption,
+                              stats.num_preemption_iter)
+            self._log_counter(self.metrics.counter_prompt_tokens,
+                              stats.num_prompt_tokens_iter)
+            self._log_counter(self.metrics.counter_generation_tokens,
+                              stats.num_generation_tokens_iter)
+            self._log_histogram(self.metrics.histogram_iteration_tokens,
+                                [stats.num_tokens_iter])
+            self._log_histogram(self.metrics.histogram_time_to_first_token,
+                                stats.time_to_first_tokens_iter)
+            self._log_histogram(self.metrics.histogram_time_per_output_token,
+                                stats.time_per_output_tokens_iter)
+
+            # Request level data
+            # Latency
+            self._log_histogram(self.metrics.histogram_e2e_time_request,
+                                stats.time_e2e_requests)
+            self._log_histogram(self.metrics.histogram_queue_time_request,
+                                stats.time_queue_requests)
+            self._log_histogram(self.metrics.histogram_inference_time_request,
+                                stats.time_inference_requests)
+            self._log_histogram(self.metrics.histogram_prefill_time_request,
+                                stats.time_prefill_requests)
+            self._log_histogram(self.metrics.histogram_decode_time_request,
+                                stats.time_decode_requests)
+            self._log_histogram(self.metrics.histogram_time_in_queue_request,
+                                stats.time_in_queue_requests)
+            self._log_histogram(
+                self.metrics.histogram_model_forward_time_request,
+                stats.model_forward_time_requests)
+            self._log_histogram(
+                self.metrics.histogram_model_execute_time_request,
+                stats.model_execute_time_requests)
+            # Metadata
+            finished_reason_counter = CollectionsCounter(
+                stats.finished_reason_requests)
+            self._log_counter_labels(self.metrics.counter_request_success,
+                                     finished_reason_counter,
+                                     Metrics.labelname_finish_reason)
+            self._log_histogram(
+                self.metrics.histogram_num_prompt_tokens_request,
+                stats.num_prompt_tokens_requests)
+            self._log_histogram(
+                self.metrics.histogram_num_generation_tokens_request,
+                stats.num_generation_tokens_requests)
+            self._log_histogram(self.metrics.histogram_n_request,
+                                stats.n_requests)
+            self._log_histogram(
+                self.metrics.histogram_max_num_generation_tokens_request,
+                stats.max_num_generation_tokens_requests)
+            self._log_histogram(self.metrics.histogram_max_tokens_request,
+                                stats.max_tokens_requests)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:
@@ -643,15 +688,18 @@ class PrometheusStatLogger(StatLoggerBase):
         # Which log raw data and calculate summaries using rate() on the
         # grafana/prometheus side. See
         # https://github.com/vllm-project/vllm/pull/2316#discussion_r1464204666
+        labels = self._merge_labels()
         self.metrics.gauge_avg_prompt_throughput.labels(
-            **self.labels).set(prompt_throughput)
+            **labels).set(prompt_throughput)
         self.metrics.gauge_avg_generation_throughput.labels(
-            **self.labels).set(generation_throughput)
+            **labels).set(generation_throughput)
 
-    def log(self, stats: Stats):
+    def log(self,
+            stats: Stats,
+            custom_labels: Optional[Dict[str, str]] = None):
         """Logs to prometheus and tracked stats every iteration."""
         # Log to prometheus.
-        self._log_prometheus(stats)
+        self._log_prometheus(stats, custom_labels)
 
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
@@ -673,9 +721,10 @@ class PrometheusStatLogger(StatLoggerBase):
                 now=stats.now,
                 last_log=self.last_local_log)
 
-            self._log_prometheus_interval(
-                prompt_throughput=prompt_throughput,
-                generation_throughput=generation_throughput)
+            with self.use_labels(custom_labels):
+                self._log_prometheus_interval(
+                    prompt_throughput=prompt_throughput,
+                    generation_throughput=generation_throughput)
 
             if self.spec_decode_metrics is not None:
                 self._log_gauge(

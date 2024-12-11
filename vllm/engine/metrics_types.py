@@ -87,7 +87,9 @@ class StatLoggerBase(ABC):
         self.spec_decode_metrics: Optional[SpecDecodeWorkerMetrics] = None
 
     @abstractmethod
-    def log(self, stats: Stats) -> None:
+    def log(self,
+            stats: Stats,
+            custom_labels: Optional[Dict[str, str]] = None) -> None:
         raise NotImplementedError
 
     @abstractmethod
