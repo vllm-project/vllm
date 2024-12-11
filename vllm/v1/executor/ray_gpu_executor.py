@@ -6,7 +6,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port)
+from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.executor.distributed_gpu_executor import DistributedGPUExecutor
 from vllm.v1.executor.ray_utils import RayWorkerWrapper, ray
@@ -197,19 +197,22 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # VLLM_INSTANCE_ID = get_vllm_instance_id()
 
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = [({
-            "CUDA_VISIBLE_DEVICES":
-            ",".join(map(str, node_gpus[node_id])),
-            # "VLLM_INSTANCE_ID":
-            # VLLM_INSTANCE_ID,
-            "VLLM_TRACE_FUNCTION":
-            str(envs.VLLM_TRACE_FUNCTION),
-            "VLLM_USE_V1":
-            str(int(envs.VLLM_USE_V1)),
-            **({
-                "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
-            } if envs.VLLM_ATTENTION_BACKEND is not None else {})
-        }, ) for (node_id, _) in worker_node_and_gpu_ids]
+        all_args_to_update_environment_variables = [
+            (
+                {
+                    "CUDA_VISIBLE_DEVICES":
+                    ",".join(map(str, node_gpus[node_id])),
+                    # "VLLM_INSTANCE_ID":
+                    # VLLM_INSTANCE_ID,
+                    "VLLM_TRACE_FUNCTION":
+                    str(envs.VLLM_TRACE_FUNCTION),
+                    "VLLM_USE_V1":
+                    str(int(envs.VLLM_USE_V1)),
+                    **({
+                        "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
+                    } if envs.VLLM_ATTENTION_BACKEND is not None else {})
+                }, ) for (node_id, _) in worker_node_and_gpu_ids
+        ]
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
