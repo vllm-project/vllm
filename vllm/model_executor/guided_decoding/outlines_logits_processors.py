@@ -25,7 +25,7 @@ from lark import Lark
 from outlines import grammars
 from outlines.caching import cache
 from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
-from outlines.fsm.json_schema import build_regex_from_schema
+from outlines_core.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
