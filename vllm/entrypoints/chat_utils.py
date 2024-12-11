@@ -93,16 +93,6 @@ class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     audio_url: Required[str]
 
 
-class CustomChatCompletionContentInputAudioParam(TypedDict, total=False):
-    # Same as InputAudio type from https://github.com/openai/openai-python/blob/main/src/openai/types/chat/chat_completion_content_part_input_audio_param.py
-    data: Required[str]
-    """Base64 encoded audio data."""
-
-    format: Required[Literal["wav", "mp3"]]
-    """The format of the encoded audio data. 
-    Currently supports "wav" and "mp3"."""
-
-
 class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain audio_url.
 
@@ -117,7 +107,6 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartInputAudioParam,
-    CustomChatCompletionContentInputAudioParam,
     ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
     CustomChatCompletionContentSimpleImageParam,
     CustomChatCompletionContentSimpleAudioParam,
