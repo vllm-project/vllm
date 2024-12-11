@@ -164,6 +164,11 @@ For multi-modality models, we compile the text-only part of the model from input
 
 By carefully compiling the main computation of the model, we can avoid unnecessary compilation time and achieve better performance.
 
+Supported Hardware
+------------------
+
+Right now ``torch.compile`` is supported on NVIDIA GPUs and AMD GPUs. Google TPUs also use ``torch.compile``, but in a different way.
+
 Feature Compatibility
 ---------------------
 
