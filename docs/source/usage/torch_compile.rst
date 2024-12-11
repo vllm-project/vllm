@@ -109,9 +109,9 @@ For example, when running ``python benchmarks/benchmark_latency.py --model meta-
 .. code-block:: bash
 
     $ # running a 8B model on H100
-    $ python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1
+    $ python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy
     Avg latency: 0.9704469823899369 seconds
-    $ python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 -O "{'level': 3, 'candidate_compile_sizes': [1]}"
+    $ python benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy -O "{'level': 3, 'candidate_compile_sizes': [1]}"
     Avg latency: 0.8950413154981409 seconds
 
 The end-to-end latency (the smaller the better) is reduced from 0.9704 seconds to 0.8950 seconds (7.7% improvement), with the help of ``torch.compile``.
