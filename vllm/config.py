@@ -59,6 +59,7 @@ RunnerType = Literal["generate", "pooling", "draft"]
 _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
     "generate": ["generate"],
     "pooling": ["embed", "classify", "score", "reward"],
+    "draft": ["draft"],
 }
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
