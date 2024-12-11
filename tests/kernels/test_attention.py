@@ -6,6 +6,12 @@ import torch
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
+from vllm.attention.ops.triton_paged_attn_decode import (
+    _SEQ_PARTITION_SIZE as TRITON_PAGED_ATTN_DECODE_PARTITION_SIZE)
+from vllm.attention.ops.triton_paged_attn_decode import (
+    paged_attn_decode_v1 as triton_paged_attn_decode_v1)
+from vllm.attention.ops.triton_paged_attn_decode import (
+    paged_attn_decode_v2 as triton_paged_attn_decode_v2)
 from vllm.platforms import current_platform
 from vllm.utils import get_max_shared_memory_bytes
 
@@ -117,7 +123,8 @@ def ref_single_query_cached_kv_attention(
 
 @pytest.mark.parametrize(
     "version",
-    ["v1", "v2"] if not current_platform.is_rocm() else ["v1", "v2", "rocm"])
+    ["v1", "v2", "triton_v1", "triton_v2"] if not current_platform.is_rocm()
+    else ["v1", "v2", "rocm", "triton_v1", "triton_v2"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -146,6 +153,7 @@ def test_paged_attention(
 
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
+    torch.cuda.set_device(device)
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
     query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
@@ -157,7 +165,13 @@ def test_paged_attention(
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
 
-    seq_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    if version == "triton_v2":
+        seq_lens = [
+            random.randint(TRITON_PAGED_ATTN_DECODE_PARTITION_SIZE + 1,
+                           MAX_SEQ_LEN) for _ in range(num_seqs)
+        ]
+    else:
+        seq_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
     seq_lens[-1] = MAX_SEQ_LEN
     max_seq_len = max(seq_lens)
     seq_lens = torch.tensor(seq_lens, dtype=torch.int)
@@ -180,38 +194,58 @@ def test_paged_attention(
                                                 kv_cache_dtype, dtype, seed,
                                                 device)
     key_cache, value_cache = key_caches[0], value_caches[0]
-
     # Using default kv_scale
     k_scale = v_scale = 1.0
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    if version == "v1":
-        ops.paged_attention_v1(
-            output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            block_tables,
-            seq_lens,
-            block_size,
-            max_seq_len,
-            alibi_slopes,
-            kv_cache_dtype,
-            k_scale,
-            v_scale,
-        )
+    if version in ("v1", "triton_v1"):
+        if version == "v1":
+            ops.paged_attention_v1(
+                output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                block_tables,
+                seq_lens,
+                block_size,
+                max_seq_len,
+                alibi_slopes,
+                kv_cache_dtype,
+                k_scale,
+                v_scale,
+            )
 
-        opcheck(torch.ops._C.paged_attention_v1,
+            opcheck(
+                torch.ops._C.paged_attention_v1,
                 (output, query, key_cache, value_cache, num_kv_heads, scale,
                  block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
-                 kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
+                 kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0, 1024),
                 cond=(head_size == HEAD_SIZES[0]
                       and block_size == BLOCK_SIZES[0]))
+        else:
+            key_cache_tri = key_cache.permute(0, 1, 3, 2,
+                                              4).flatten(3, 4).contiguous()
+            value_cache_tri = value_cache.permute(0, 1, 3, 2).contiguous()
+            triton_paged_attn_decode_v1(
+                output,
+                query,
+                key_cache_tri,
+                value_cache_tri,
+                block_tables,
+                seq_lens,
+                max_seq_len,
+                kv_cache_dtype,
+                num_kv_heads,
+                scale,
+                alibi_slopes,
+                k_scale,
+                v_scale,
+            )
 
-    elif version in ("v2", "rocm"):
+    elif version in ("v2", "rocm", "triton_v2"):
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
@@ -253,6 +287,19 @@ def test_paged_attention(
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
 
+        elif version == "triton_v2":
+            key_cache_tri = key_cache.permute(0, 1, 3, 2,
+                                              4).flatten(3, 4).contiguous()
+            value_cache_tri = value_cache.permute(0, 1, 3, 2).contiguous()
+            num_partitions = (
+                (max_seq_len + TRITON_PAGED_ATTN_DECODE_PARTITION_SIZE - 1) //
+                TRITON_PAGED_ATTN_DECODE_PARTITION_SIZE)
+            assert TRITON_PAGED_ATTN_DECODE_PARTITION_SIZE % block_size == 0
+            triton_paged_attn_decode_v2(output, query, key_cache_tri,
+                                        value_cache_tri, block_tables,
+                                        seq_lens, max_seq_len, kv_cache_dtype,
+                                        num_kv_heads, scale, alibi_slopes,
+                                        k_scale, v_scale, num_partitions)
         else:
             ops.paged_attention_rocm(
                 output,
@@ -281,7 +328,6 @@ def test_paged_attention(
                      kv_cache_dtype, k_scale, v_scale),
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
-
     else:
         raise AssertionError(f"Unknown version: {version}")
 
