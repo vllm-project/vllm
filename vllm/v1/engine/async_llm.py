@@ -380,7 +380,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def dead_error(self) -> BaseException:
-        return Exception
+        return Exception()  # TODO: implement
 
 
 # Retain V0 name for backwards compatibility.
