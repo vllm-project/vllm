@@ -144,25 +144,42 @@ def wrap_inductor(graph,
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
+
     cache_data = compilation_config.inductor_hash_cache
     if (runtime_shape, graph_index) in cache_data:
-        from torch._inductor.codecache import FxGraphCache
-        from torch._inductor.compile_fx import graph_returns_tuple
+        # we compiled this graph before
+        # so we can directly lookup the compiled graph via hash
         hash_str = cache_data[(runtime_shape, graph_index)]
+        from torch._inductor.codecache import FxGraphCache
         with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                    lambda *args, **kwargs: AlwaysHitShapeEnv()):
             inductor_compiled_graph = FxGraphCache._lookup_graph(
                 hash_str, example_inputs, True, False)
+
+        # Inductor calling convention (function signature):
+        # f(list) -> tuple
+        # Dynamo calling convention (function signature):
+        # f(*args) -> Any
+
+        # need to know if the graph returns a tuple
+        from torch._inductor.compile_fx import graph_returns_tuple
         returns_tuple = graph_returns_tuple(graph)
 
+        # this is the graph we return to Dynamo to run
         def compiled_graph(*args):
+            # convert args to list
             list_args = list(args)
             graph_output = inductor_compiled_graph(list_args)
+            # unpack the tuple if needed
             if returns_tuple:
-                return graph_output  # type: ignore
+                return graph_output
             else:
                 return graph_output[0]
     else:
+        # it's the first time we compile this graph
+        # the assumption is that we don't have nested Inductor compilation.
+        # compiled_fx_graph_hash will only be called once, and we can hook
+        # it to get the hash of the compiled graph directly.
         from torch._inductor.codecache import compiled_fx_graph_hash
 
         def mocked_compiled_fx_graph_hash(*args, **kwargs):
