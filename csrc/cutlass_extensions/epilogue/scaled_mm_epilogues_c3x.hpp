@@ -1,4 +1,4 @@
-#include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
+#include "broadcast_load_epilogue_c3x.hpp"
 
 /*
    This file defines custom epilogues for fusing channel scales, token scales,
@@ -36,13 +36,13 @@ struct ScaledEpilogueBase {
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using ColLoad = cutlass::epilogue::fusion::Sm90ColBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T, T,
       Stride<Int<1>, Int<0>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T, T,
       Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // This utility function constructs the arguments for the load descriptors
