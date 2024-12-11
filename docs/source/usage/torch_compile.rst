@@ -162,7 +162,7 @@ For text-only models, we compile the part of the model from input token IDs to f
 
 For multi-modality models, we compile the text-only part of the model from input embeddings to final hidden states, excluding the vision encoder part and the part of merging multi-modality embeddings with text embeddings.
 
-By carefully compiling the main computation graph of the model, we can avoid unnecessary compilation time and achieve better performance.
+By carefully compiling the main computation of the model, we can avoid unnecessary compilation time and achieve better performance.
 
 Feature Compatibility
 ---------------------
