@@ -61,6 +61,7 @@ class GPUModelRunner:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
+        self.is_multimodal_model = model_config.is_multimodal_model
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
@@ -103,6 +104,11 @@ class GPUModelRunner:
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
             reversed(self.vllm_config.compilation_config.capture_sizes))
+
+        # Persistent buffers for CUDA graphs.
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
@@ -310,7 +316,8 @@ class GPUModelRunner:
         seq_start_loc_np[0] = 0
         np.cumsum(seq_lens, out=seq_start_loc_np[1:])
 
-        input_ids = input_ids.to(self.device, non_blocking=True)
+        self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
+                                                          non_blocking=True)
         self.positions[:total_num_scheduled_tokens].copy_(positions,
                                                           non_blocking=True)
         query_start_loc = query_start_loc.to(self.device, non_blocking=True)
@@ -331,7 +338,7 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return input_ids, attn_metadata, logits_indices
+        return attn_metadata, logits_indices
 
     def _prepare_sampling(
         self,
@@ -427,13 +434,15 @@ class GPUModelRunner:
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
-        # Run the encoder.
-        self._execute_encoder(scheduler_output)
-        encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            self._execute_encoder(scheduler_output)
+            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        else:
+            encoder_outputs = []
 
         # Prepare the decoder inputs.
-        input_ids, attn_metadata, logits_indices = self._prepare_inputs(
-            scheduler_output)
+        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -444,29 +453,39 @@ class GPUModelRunner:
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
-
         attn_metadata.num_input_tokens = num_input_tokens
 
-        # Get the inputs embeds.
-        if encoder_outputs:
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids, encoder_outputs)
+        if self.is_multimodal_model:
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
+            input_ids = self.input_ids[:num_scheduled_tokens]
+            if encoder_outputs:
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids, encoder_outputs)
+            else:
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            # TODO(woosuk): Avoid the copy. Optimize.
+            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            input_ids = None
         else:
-            inputs_embeds = self.model.get_input_embeddings(input_ids)
-        # NOTE(woosuk): To unify token ids and soft tokens (vision embeddings),
-        # always use embeddings (rather than token ids) as input to the model.
-        # TODO(woosuk): Avoid the copy. Optimize.
-        self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+            # For text-only models, we use token ids as input.
+            # While it is possible to use embeddings as input just like the
+            # multimodal models, it is not desirable for performance since
+            # then the embedding layer is not included in the CUDA graph.
+            input_ids = self.input_ids[:num_input_tokens]
+            inputs_embeds = None
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
-                input_ids=None,
+                input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
-                inputs_embeds=self.inputs_embeds[:num_input_tokens],
+                inputs_embeds=inputs_embeds,
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
@@ -534,13 +553,20 @@ class GPUModelRunner:
         num_tokens: int,
         kv_caches: List[torch.Tensor],
     ) -> torch.Tensor:
+        if self.is_multimodal_model:
+            input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_tokens]
+        else:
+            input_ids = self.input_ids[:num_tokens]
+            inputs_embeds = None
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(
-                input_ids=None,
+                input_ids=input_ids,
                 positions=self.positions[:num_tokens],
                 kv_caches=kv_caches,
                 attn_metadata=None,
-                inputs_embeds=self.inputs_embeds[:num_tokens])
+                inputs_embeds=inputs_embeds,
+            )
         return hidden_states
 
     def profile_run(self) -> None:
