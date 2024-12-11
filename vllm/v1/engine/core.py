@@ -262,8 +262,33 @@ class EngineCoreProc(EngineCore):
 
         # Loop until we get a shutdown signal.
         while not self.should_shutdown:
-            # 1) Poll the input queue until there is work to do.
+            try:
+                self.model_executor.wait_microbatch(timeout=0)
+            except TimeoutError:
+                pass
+            except BaseException:
+                raise
+
+            # Wait for the microbatch slot to be ready.
+            if not self.model_executor.can_submit_microbatch():
+                while True:
+                    try:
+                        self.model_executor.wait_microbatch(
+                            timeout=POLLING_TIMEOUT_S)
+                        break
+                    except TimeoutError:
+                        continue
+                    except BaseException:
+                        raise
+
             if not self.scheduler.has_unfinished_requests():
+                # If all requests are finished, there are no inflight
+                # microbatches, we can take our time to poll the input queue,
+                # without checking microbatch finishes.
+                # TOOD(rui): check if all_requests_finished ==
+                # no_inflight_microbatches
+
+                # Poll the input queue until there is work to do.
                 while True:
                     try:
                         req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
@@ -277,15 +302,21 @@ class EngineCoreProc(EngineCore):
                     except BaseException:
                         raise
 
-            # 2) Handle any new client requests (Abort or Add).
+            # At this point, there is microbatch slot available as well
+            # as requests to schedule.
+            # Once we reach here, the following should be fast.
+            # And we can get to the next check of microbatch finish
+            # (in the beginning of the loop) fast.
+
+            # Handle any new client requests (Abort or Add).
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
                 self._handle_client_request(req)
 
-            # 3) Step the engine core.
+            # Step the engine core.
             outputs = self.step()
 
-            # 4) Put EngineCoreOutputs into the output queue.
+            # Put EngineCoreOutputs into the output queue.
             self.output_queue.put_nowait(outputs)
 
             self._log_stats()
