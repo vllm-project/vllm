@@ -89,11 +89,11 @@ For example:
 In this example, the increase in ``init engine`` time is 25.16 seconds. The Triton kernel compilation time is calculated as 25.16 - 4.60 - 14.77 = 5.79 seconds.
 
 Exploiting the compilation cache
----------------------------------
+--------------------------------
 
-When you first compile for a specific shape, e.g. via ``-O "{'level': 3, 'candidate_compile_sizes': [1]}"``, the compilation for batchsize 1 will take some time because Inductor will run autotuning to find the best kernel for this shape. The result of the autotuning will be saved in the inductor compilation cache. By default the location is the system temp directory under ``torchinductor_<username>``, and you can also set ``TORCHINDUCTOR_CACHE_DIR`` environment variable to change the location. Check `PyTorch documentation <https://pytorch.org/tutorials/recipes/torch_compile_caching_tutorial.html#torchinductor-cache-dir>`_ for more information.
+When you first compile for a specific shape, such as via ``-O "{'level': 3, 'candidate_compile_sizes': [1]}"``, the compilation for batch size 1 will take some time because Inductor will run autotuning to find the best kernel for this shape. The result of the autotuning will be saved in the Inductor compilation cache. By default, the location is the system temp directory under ``torchinductor_<username>``. You can also set the ``TORCHINDUCTOR_CACHE_DIR`` environment variable to change the location. Check the `PyTorch documentation <https://pytorch.org/tutorials/recipes/torch_compile_caching_tutorial.html#torchinductor-cache-dir>`_ for more information.
 
-The second time you compile for the same shape, the autotuning will be skipped and the result will be loaded from the cache. This will save a lot of compilation time.
+The second time you compile for the same shape, the autotuning will be skipped, and the result will be loaded from the cache. This will save a significant amount of compilation time.
 
 Profiling the workload
 ----------------------
