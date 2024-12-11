@@ -3,12 +3,12 @@ name: Lint documentation
 on:
   push:
     branches:
-      - main
+      - habana_main
     paths:
       - "docs/**"
   pull_request:
     branches:
-      - main
+      - habana_main
     paths:
       - "docs/**"
 

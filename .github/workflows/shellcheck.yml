@@ -2,13 +2,13 @@ name: Lint shell scripts
 on:
   push:
     branches:
-      - "main"
+      - "habana_main"
     paths:
       - '**/*.sh'
       - '.github/workflows/shellcheck.yml'
   pull_request:
     branches:
-      - "main"
+      - "habana_main"
     paths:
       - '**/*.sh'
       - '.github/workflows/shellcheck.yml'
