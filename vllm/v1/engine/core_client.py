@@ -1,3 +1,4 @@
+import atexit
 import multiprocessing
 from typing import List, Union
 
@@ -157,6 +158,7 @@ class MPClient(EngineCoreClient):
             should_shutdown=self.should_shutdown,
             **kwargs,
         )
+        atexit.register(self.shutdown)
 
     def shutdown(self):
         # Send shutdown signal to background process.
