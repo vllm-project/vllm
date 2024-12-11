@@ -93,6 +93,7 @@ def test_models(
     )
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
