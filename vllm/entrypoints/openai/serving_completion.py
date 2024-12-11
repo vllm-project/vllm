@@ -85,7 +85,6 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "suffix is not currently supported")
 
-        model_name = self.base_model_paths[0].name
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
@@ -162,6 +161,7 @@ class OpenAIServingCompletion(OpenAIServing):
         result_generator = merge_async_iterators(
             *generators, is_cancelled=raw_request.is_disconnected)
 
+        model_name = self._get_model_name(lora_request)
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
