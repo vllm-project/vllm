@@ -86,7 +86,7 @@ For example:
     torch.compile takes 19.37 s in total
     init engine (profile, create kv cache, warmup model) took 39.34 seconds
 
-In this example, the increase of ``init engine`` time is 25.16 seconds. The triton kernel compilation time is 25.16 - 4.60 - 14.77 = 5.79 seconds.
+In this example, the increase in ``init engine`` time is 25.16 seconds. The Triton kernel compilation time is calculated as 25.16 - 4.60 - 14.77 = 5.79 seconds.
 
 Exploiting the compilation cache
 ---------------------------------
