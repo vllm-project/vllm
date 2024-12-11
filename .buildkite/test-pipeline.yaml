@@ -369,7 +369,7 @@ steps:
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
-- label: Multi-Modal Models Test (Extended 1) # 1h15m
+- label: Multi-Modal Models Test (Extended) 1 # 1h15m
   optional: true
   source_file_dependencies:
   - vllm/
@@ -389,7 +389,7 @@ steps:
     - pytest -v -s models/encoder_decoder/language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
 
-- label: Multi-Modal Models Test (Extended 2) # 45m
+- label: Multi-Modal Models Test (Extended) 2 # 45m
   optional: true
   source_file_dependencies:
   - vllm/
