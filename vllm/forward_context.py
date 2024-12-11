@@ -82,7 +82,7 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
                         # can be cudagraph / profiling run
                         continue
                     medium = torch.quantile(torch.tensor(times), q=0.5).item()
-                    medium = f"{medium:.2f}"
+                    medium = round(medium, 2)
                     forward_stats.append((bs, len(times), medium))
                 forward_stats.sort(key=lambda x: x[1], reverse=True)
                 logger.info(("Batchsize forward time stats "
