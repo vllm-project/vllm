@@ -125,6 +125,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.num_prefills: int = 0
             self.num_prefill_tokens: int = 0
             self.num_decode_tokens: int = 0
+            # input from v1
+            self.query_start_loc: Optional[torch.Tensor] = None
+            self.seq_start_loc: Optional[torch.Tensor] = None
             self.slot_mapping: List[int] = []
             self.multi_modal_inputs_list: List[MultiModalKwargs] = []
             self.multi_modal_placeholder_maps: Dict[
