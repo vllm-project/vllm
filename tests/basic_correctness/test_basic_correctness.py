@@ -47,11 +47,10 @@ def test_vllm_gc_ed():
 
 @pytest.mark.skip_v1
 @pytest.mark.parametrize("model", MODELS)
-# @pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN_VLLM_V1"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False, True])
 def test_models(
     hf_runner,
     model: str,
@@ -84,9 +83,7 @@ def test_models(
                     max_model_len=8192,
                     dtype=dtype,
                     enforce_eager=enforce_eager,
-                    distributed_executor_backend="ray",
-                    gpu_memory_utilization=0.7,
-                    tensor_parallel_size=4) as vllm_model:
+                    gpu_memory_utilization=0.7) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
