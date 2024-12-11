@@ -8,6 +8,13 @@ vLLM provides many knobs for users to use ``torch.compile`` to optimize the perf
 - ``level``: when used, please set it to 3. Other levels are for internal testing and debugging purposes.
 - ``candidate_compile_sizes``: a list of batchsizes that the user wants to compile the model for. For the specified batchsizes, only the ones in cudagraph capture sizes will be compiled.
 
+The TL;DR; for using ``torch.compile``, is to:
+
+- Make sure GPUs are busy executing the model before using ``torch.compile``.
+- Understand your workload and profile it to find the most common batchsizes.
+- Compile the model for these batchsizes, and collect compilation cache if you are using docker or k8s for deployment, carry the compilation cache to the deployment environment.
+- Enjoy the performance improvement.
+
 Usage
 -----
 
