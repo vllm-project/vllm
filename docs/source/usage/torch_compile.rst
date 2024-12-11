@@ -28,8 +28,10 @@ When using vLLM from the command line, the ``torch.compile`` flags can be specif
 
     $ # Compile the model with level 3, for a general shape
     $ vllm serve model -O 3
+
     $ # Compile the model with level 3, for a general shape plus batch size 1
     $ vllm serve model -O "{'level': 3, 'candidate_compile_sizes': [1]}"
+
     $ # Compile the model with level 3, for a general shape plus batch sizes 1, 2, 4, 8
     $ # Note that candidate_compile_sizes from CLI are 1, 2, 3, 4, 5, 6, 7, 8,
     $ # but the final compiled sizes are 1, 2, 4, 8 because only the ones in cudagraph capture sizes will be compiled.
@@ -80,6 +82,7 @@ For example:
 
     $ vllm serve meta-llama/Meta-Llama-3-8B
     init engine (profile, create kv cache, warmup model) took 14.18 seconds
+
     $ vllm serve meta-llama/Meta-Llama-3-8B -O3
     Dynamo bytecode transform time: 4.60 s
     Compiling a graph for general shape takes 14.77 s
@@ -109,17 +112,21 @@ For example, when running ``python benchmarks/benchmark_latency.py --model meta-
 .. code-block:: bash
 
     $ # running a 8B model on H100 with batch size 1, 36.39 seconds of compilation time, 7.7% improvement in latency
+
     $ python3 benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy
     init engine (profile, create kv cache, warmup model) took 11.79 seconds
     Avg latency: 0.9704469823899369 seconds
+
     $ python3 benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy -O "{'level': 3, 'candidate_compile_sizes': [1]}"
     init engine (profile, create kv cache, warmup model) took 48.18 seconds
     Avg latency: 0.8950413154981409 seconds
 
     $ # running a 8B model on L4 with batch size 1, 66.54 seconds of compilation time, 4.1 % improvement in latency
+
     $ python3 benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy
     init engine (profile, create kv cache, warmup model) took 20.63 seconds
     Avg latency: 7.81603614680001 seconds
+
     $ python3 benchmarks/benchmark_latency.py --model meta-llama/Meta-Llama-3-8B --batch-size 1 --load-format dummy -O "{'level': 3, 'candidate_compile_sizes': [1]}"
     init engine (profile, create kv cache, warmup model) took 87.17 seconds
     Avg latency: 7.495755991366673 seconds
@@ -134,9 +141,11 @@ For a dynamic workload, we can use the ``VLLM_LOG_BATCHSIZE_INTERVAL`` environme
     $ python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --load-format dummy --num-scheduler-steps 64
     init engine (profile, create kv cache, warmup model) took 14.42 seconds
     Throughput: 44.39 requests/s, 22728.17 total tokens/s, 11364.08 output tokens/s
+
     $ # 2. Run the same setting with profiling
     $ VLLM_LOG_BATCHSIZE_INTERVAL=1.0 python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --num-scheduler-steps 64
     INFO 12-10 15:42:47 forward_context.py:58] Batchsize distribution (batchsize, count): [(256, 769), (232, 215), ...]
+
     $ # 3. The most common batch sizes are 256 and 232, so we can compile the model for these two batch sizes
     $ python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --num-scheduler-steps 64 -O "{'level': 3, 'candidate_compile_sizes': [232, 256]}"
     init engine (profile, create kv cache, warmup model) took 87.18 seconds
