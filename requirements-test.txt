@@ -410,7 +410,7 @@ pyyaml==6.0.2
     #   ray
     #   timm
     #   transformers
-ray[adag]==2.35.0
+ray[adag]==2.40.0
     # via -r requirements-test.in
 redis==5.2.0
     # via tensorizer
