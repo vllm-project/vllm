@@ -259,6 +259,7 @@ class GPUModelRunner:
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
