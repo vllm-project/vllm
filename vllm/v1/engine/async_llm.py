@@ -126,7 +126,8 @@ class AsyncLLM(EngineClient):
             handler.cancel()
 
     @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig):
+    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
+        executor_class: Type[Executor]
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
         if distributed_executor_backend == "mp":

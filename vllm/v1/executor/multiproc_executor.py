@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import zmq
 
@@ -21,6 +21,7 @@ from vllm.executor.multiproc_worker_utils import (
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_open_port,
                         get_open_zmq_ipc_path)
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import make_zmq_socket
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -31,7 +32,7 @@ POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
 
-class MultiprocExecutor:
+class MultiprocExecutor(Executor):
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         # Call self.shutdown at exit to clean up
@@ -63,7 +64,7 @@ class MultiprocExecutor:
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
-        self.workers: List[WorkerProcHandle] = []
+        self.workers: Optional[List[WorkerProcHandle]] = []
         for rank in range(self.world_size):
             worker = WorkerProc.make_worker_process(vllm_config, rank, rank,
                                                     distributed_init_method,
@@ -103,7 +104,7 @@ class MultiprocExecutor:
                        method: str,
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> []:
+                       kwargs: Optional[Dict] = None) -> Any:
         """
         Execute an RPC call on workers.
         
@@ -124,8 +125,9 @@ class MultiprocExecutor:
             self.rpc_broadcast_mq.enqueue((method, args, kwargs))
 
             responses = [None] * self.world_size
+            assert self.workers is not None
             for w in self.workers:
-                dequeue_timeout = timeout - (time.monotonic() - start_time()
+                dequeue_timeout = timeout - (time.monotonic() - start_time
                                              ) if timeout is not None else None
                 status, result = w.worker_response_mq.dequeue(
                     timeout=dequeue_timeout)
@@ -175,6 +177,7 @@ class MultiprocExecutor:
             return False
 
         # Send SIGTERM if still running
+        assert self.workers is not None
         active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
         for p in active_procs:
             p.terminate()
