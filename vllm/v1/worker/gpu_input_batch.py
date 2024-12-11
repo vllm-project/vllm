@@ -53,7 +53,8 @@ class InputBatch:
         self.req_ids: List[Optional[str]] = [None] * max_num_reqs
         self.req_id_to_index: Dict[str, int] = {}
 
-        # NOTE(woosuk): This buffer could be too large if max_model_len is big.
+        # TODO(woosuk): This buffer could be too large if max_model_len is big.
+        # Find a way to reduce the CPU memory usage.
         self.token_ids_cpu_tensor = torch.zeros(
             (max_num_reqs, max_model_len),
             device="cpu",
