@@ -196,7 +196,7 @@ class EngineCoreProc(EngineCore):
         # so we need to spawn a new process.
         # NOTE(rob): this is a problem for using EngineCoreProc w/
         # LLM, since we need a if __name__ == "__main__" guard.
-        context = multiprocessing.get_context("fork")
+        context = multiprocessing.get_context("spawn")
 
         process_kwargs = {
             "input_path": input_path,
