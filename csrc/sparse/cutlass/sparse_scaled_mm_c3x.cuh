@@ -364,8 +364,6 @@ struct cutlass_3x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
   using ElementAcc = AccType;
-  // typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
-  //                           float>::type;
 
   using EpilogueDescriptor =
       cutlass::epilogue::collective::detail::EpilogueDescriptor<
@@ -431,9 +429,6 @@ void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   int64_t lda = a.stride(0);
   int64_t ldb = b.stride(1);
   int64_t ldc = out.stride(1);
-
-  // using StrideB = Stride<int64_t, Int<1>, int64_t>;
-  // using StrideC = typename Gemm::StrideC;
 
   using LayoutA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutA;
   using LayoutE = typename Gemm::GemmKernel::CollectiveMainloop::LayoutE;

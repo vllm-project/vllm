@@ -163,11 +163,11 @@ class CompressedTensors24(CompressedTensorsScheme):
             input_scale = layer.input_scale
             q_input = x
 
-        out = ops.cutlass_scaled_sparse_mm(a=layer.weight,
+        out = ops.cutlass_scaled_sparse_mm(a=q_input,
+                                           b=layer.weight,
                                            e=layer.meta,
-                                           b=q_input.t(),
-                                           scale_a=layer.weight_scale,
-                                           scale_b=input_scale,
+                                           scale_a=input_scale,
+                                           scale_b=layer.weight_scale,
                                            out_dtype=self.output_dtype,
                                            bias=bias)
         assert out.is_contiguous()

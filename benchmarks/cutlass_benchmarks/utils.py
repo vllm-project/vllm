@@ -52,11 +52,6 @@ def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
     a = torch.randn((m, k), device='cuda') * 5
     b = torch.randn((n, k), device='cuda').t() * 5
 
-    # # Initialize a to all ones
-    # a = torch.ones((m, k), device='cuda')
-    # # Initialize b to all ones
-    # b = torch.ones((n, k), device='cuda')
-
     b = prune_to_2_4(b.t()).t()
 
     if dtype == torch.int8:

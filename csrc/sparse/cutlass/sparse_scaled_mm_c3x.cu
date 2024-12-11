@@ -297,7 +297,8 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
   }
 }
 
-void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
+void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out,
+                                   torch::Tensor const& a,
                                    torch::Tensor const& e,
                                    torch::Tensor const& b,
                                    torch::Tensor const& a_scales,
@@ -306,36 +307,35 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   if (bias) {
-    TORCH_CHECK(bias->dtype() == c.dtype(),
-                "currently bias dtype must match output dtype ", c.dtype());
+    TORCH_CHECK(bias->dtype() == out.dtype(),
+                "currently bias dtype must match output dtype ", out.dtype());
     return cutlass_scaled_sparse_mm_sm90_epilogue<ScaledEpilogueBias>(
-        c, a, e, b, a_scales, b_scales, *bias);
+        out, a, e, b, a_scales, b_scales, *bias);
   } else {
     return cutlass_scaled_sparse_mm_sm90_epilogue<ScaledEpilogue>(
-        c, a, e, b, a_scales, b_scales);
+        out, a, e, b, a_scales, b_scales);
   }
 }
 
-// void cutlass_scaled_sparse_mm_azp_sm90(torch::Tensor& out, torch::Tensor
-// const& a,
-//                                 torch::Tensor const& e,
-//                                 torch::Tensor const& b,
-//                                 torch::Tensor const& a_scales,
-//                                 torch::Tensor const& b_scales,
-//                                 torch::Tensor const& azp_adj,
-//                                 c10::optional<torch::Tensor> const& azp,
-//                                 c10::optional<torch::Tensor> const& bias) {
-//   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
-//   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+void cutlass_scaled_sparse_mm_azp_sm90(torch::Tensor& out,
+                                torch::Tensor const& a,
+                                torch::Tensor const& e,
+                                torch::Tensor const& b,
+                                torch::Tensor const& a_scales,
+                                torch::Tensor const& b_scales,
+                                torch::Tensor const& azp_adj,
+                                c10::optional<torch::Tensor> const& azp,
+                                c10::optional<torch::Tensor> const& bias) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
 
-//   if (azp) {
-//     return
-//     cutlass_scaled_sparse_mm_sm90_epilogue<ScaledEpilogueBiasAzpToken>(
-//         out, a, e, b, a_scales, b_scales, azp_adj, *azp, bias);
-//   } else {
-//     return cutlass_scaled_sparse_mm_sm90_epilogue<ScaledEpilogueBiasAzp>(
-//         out, a, e, b, a_scales, b_scales, azp_adj, bias);
-//   }
-// }
+  if (azp) {
+    return cutlass_scaled_sparse_mm_sm90_epilogue<ScaledEpilogueBiasAzpToken>(
+        out, a, e, b, a_scales, b_scales, azp_adj, *azp, bias);
+  } else {
+    return cutlass_scaled_sparse_mm_sm90_epilogue<ScaledEpilogueBiasAzp>(
+        out, a, e, b, a_scales, b_scales, azp_adj, bias);
+  }
+}
 
 #endif
