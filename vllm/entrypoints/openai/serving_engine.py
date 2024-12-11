@@ -662,7 +662,7 @@ class OpenAIServing:
     def _is_model_supported(self, model_name):
         return any(model.name == model_name for model in self.base_model_paths)
 
-    def _get_model_name(self, lora: LoRARequest):
+    def _get_model_name(self, lora: Optional[LoRARequest]):
         """
         Returns the appropriate model name depending on the availability
         and support of the LoRA or base model.
