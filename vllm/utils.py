@@ -20,7 +20,7 @@ import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generator,
@@ -1648,48 +1648,83 @@ class MemoryProfilingResult:
     2. (marked by +) memory used by torch in this process.
     3. (marked by *) memory used in this process, but not by torch.
 
-    torch API `torch.cuda.memory_stats()["allocated_bytes.all.current"]` can only get the memory used by torch in this process, which is the second category.
+    The torch api `torch.cuda.memory_stats()` measures category (2). It has the
+    keys
+    - "allocated_bytes.all.current": the current torch memory usage
+    - "allocated_bytes.all.peak": the peak torch memory usage during profiling
+    
     We don't have direct APIs to get the first and third categories.
-    There's one API from cuda `torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]` , which is the sum of all the three categories.
+    There's one API from cuda `torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]`, 
+    which is the sum of all the three categories.
 
     Because of the limitation of the APIs, to make profiling possible, we have the following assumptions:
-    - Before profiling, in this process, only torch is using the GPU memory. (technically, there will be some memory used by this processes but not by torch, e.g. cuda context of this process. Since they are constant during the profiling, and we cannot directly measure them, we can classify them into the first category, i.e. treat them as memory used by other processes.)
     - The memory used by other processes is constant during the profiling.
     - The memory used in this process, but not by torch, will only grow during the profiling. Examples of this kind of memory are memory used by NCCL.
     - The memory used by torch in this process can grow and shrink during the profiling.
 
-    Illustration:
+    Then, this profiler simply returns:
+    - The baseline memory increase during profiling, which is the difference
+      in total cuda memory allocated from before and after profiling
+    - The torch memory spike during profiling, which is the difference between 
+      the peak torch memory usage and the post-profiling torch memory usage
 
-                                |              cuda memory         |
-                                |            | torch memory  |     |
-    Before profiling:           | ---------- | +++++++++     |     |
-    During profiling (peak):    | ---------- | +++++++++++++ | *** |
-    After profiling:            | ---------- | +++++++++++   | *** |
+    Illustration:
+                                |              cuda memory                |
+                                | Other procs | This process              |
+                                |             | torch memory      |       |
+    Before profiling:           | ----------- | ++++++            | **    |
+    During profiling (peak):    | ----------- | +++++++++++++++++ | ***** |
+    After profiling:            | ----------- | ++++++++++++      | ***** |
+    
+    This profiler returns two values:
+    Baseline memory:            |             |       ++++++      |   *** |
+    Memory Spike                |             |             +++++ |       |
+
     """ # noqa
-    memory_used_by_other_process_in_bytes: int = 0
-    torch_peak_memory_in_bytes: int = 0
-    non_torch_memory_in_bytes: int = 0
-    peak_memory_in_this_process_in_bytes: int = 0
-    before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
-    after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
+    memory_spike_bytes: int = 0
+    baseline_memory_bytes: int = 0
     profile_time: float = 0.0
+    total_gpu_memory_bytes: int = 0
 
 
 @contextlib.contextmanager
-def memory_profiling() -> Generator[MemoryProfilingResult, None, None]:
-    """Memory profiling context manager."""
+def memory_profiling(
+    pre_profile_snapshot: MemorySnapshot
+) -> Generator[MemoryProfilingResult, None, None]:
+    """Memory profiling context manager.
+    
+    pre_profile_snapshot is a snapshot of memory before anything that we want to
+    measure is allocated.
+    """
     result = MemoryProfilingResult()
-    result.before_profile.measure()
+    _, result.total_gpu_memory_bytes = torch.cuda.mem_get_info()
+    profile_start_time = time.time()
 
-    result.memory_used_by_other_process_in_bytes = result.before_profile.cuda_memory_in_bytes - result.before_profile.torch_memory_in_bytes  # noqa
+    # Prepare to measure peak memory usage
+    torch.cuda.reset_peak_memory_stats()
 
+    # Yield to run the code under profile
     yield result
 
-    result.after_profile.measure()
+    # Clean up anything that would be GC'ed so we don't measure it as well
+    torch.cuda.synchronize()
+    gc.collect()
+    torch.cuda.empty_cache()
 
-    result.torch_peak_memory_in_bytes = torch.cuda.memory_stats(
-    )["allocated_bytes.all.peak"]
-    diff = result.after_profile - result.before_profile
-    result.non_torch_memory_in_bytes = diff.cuda_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
-    result.profile_time = diff.timestamp
-    result.peak_memory_in_this_process_in_bytes = result.non_torch_memory_in_bytes + result.torch_peak_memory_in_bytes  # noqa
+    post_profile_snapshot = MemorySnapshot()
+    post_profile_snapshot.measure()
+
+    torch_peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+    result.memory_spike_bytes = \
+        torch_peak - \
+        post_profile_snapshot.torch_memory_in_bytes
+    result.baseline_memory_bytes = \
+        post_profile_snapshot.cuda_memory_in_bytes - \
+        pre_profile_snapshot.cuda_memory_in_bytes
+    result.profile_time = post_profile_snapshot.timestamp - profile_start_time
+
+    assert result.baseline_memory_bytes >= 0, (
+        "Error in memory profiling. "
+        f"Negative memory usage detected: {result.baseline_memory_bytes}. "
+        "This happens when the GPU memory was not properly cleaned up before "
+        "initializing the vLLM instance.")

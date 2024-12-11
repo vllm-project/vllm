@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import memory_profiling
+from vllm.utils import MemorySnapshot, memory_profiling
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
@@ -109,6 +109,7 @@ class Worker(LocalOrDistributedWorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+        self._initial_memory_snapshot = MemorySnapshot()
 
     def start_profile(self):
         if self.profiler is None:
@@ -138,7 +139,7 @@ class Worker(LocalOrDistributedWorkerBase):
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
-            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+            self._initial_memory_snapshot.measure()
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -186,24 +187,15 @@ class Worker(LocalOrDistributedWorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
-        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
-
-        # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        with memory_profiling() as result:
+        with memory_profiling(self._initial_memory_snapshot) as result:
+            # Execute a forward pass with dummy inputs
             self.model_runner.profile_run()
-            torch.cuda.synchronize()
-            gc.collect()
-            torch.cuda.empty_cache()
 
-        self._assert_memory_footprint_increased_during_profiling()
-
-        available_kv_cache_memory = (
-            total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            result.peak_memory_in_this_process_in_bytes)
+        target_gpu_utilization_bytes = result.total_gpu_memory_bytes * \
+            self.cache_config.gpu_memory_utilization
+        available_kv_cache_memory = (target_gpu_utilization_bytes -
+                                     result.baseline_memory_bytes -
+                                     result.memory_spike_bytes)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -220,25 +212,19 @@ class Worker(LocalOrDistributedWorkerBase):
 
         logger.info(
             "Memory profiling results:\n"
-            "duration\t%.2f seconds\n"
-            "total_gpu_memory (GPU level)\t%.2fGiB\n"
-            "gpu_memory_utilization (current process)\t%.2f\n"
-            "initial_memory_usage (GPU level)\t%.2fGiB\n"
-            "initial_torch_memory (current process)\t%.2fGiB\n"
-            "post_profile_memory_usage (GPU level)\t%.2fGiB\n"
-            "post_profile_torch_memory (current process)\t%.2fGiB\n"
-            "peak_torch_memory (current process)\t%.2fGiB\n"
-            "non_torch_memory (current process)\t%.2fGiB\n"
-            "kv_cache_size (current process)\t%.2fGiB\n",
+            "duration               %.2f seconds\n"
+            "total_gpu_memory       %.2fGiB\n"
+            "gpu_memory_utilization %.2f\n"
+            "target_allocation      %.2fGiB\n"
+            "baseline_memory        %.2fGiB\n"
+            "max_inference_spike    %.2fGiB\n"
+            "kv_cache_size          %.2fGiB\n",
             result.profile_time,
-            total_gpu_memory / (1024**3),
+            result.total_gpu_memory_bytes / (1024**3),
             self.cache_config.gpu_memory_utilization,
-            (result.before_profile.cuda_memory_in_bytes) / (1024**3),
-            (result.before_profile.torch_memory_in_bytes) / (1024**3),
-            (result.after_profile.cuda_memory_in_bytes) / (1024**3),
-            (result.after_profile.torch_memory_in_bytes) / (1024**3),
-            result.torch_peak_memory_in_bytes / (1024**3),
-            result.non_torch_memory_in_bytes / (1024**3),
+            target_gpu_utilization_bytes / (1024**3),
+            result.baseline_memory_bytes / (1024**3),
+            result.memory_spike_bytes / (1024**3),
             available_kv_cache_memory / (1024**3),
         )
 
@@ -248,16 +234,6 @@ class Worker(LocalOrDistributedWorkerBase):
         gc.collect()
 
         return num_gpu_blocks, num_cpu_blocks
-
-    def _assert_memory_footprint_increased_during_profiling(self):
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        free_gpu_memory, _ = torch.cuda.mem_get_info()
-        assert self.init_gpu_memory - free_gpu_memory > 0, (
-            "Error in memory profiling. "
-            f"Initial free memory {self.init_gpu_memory}, current free memory"
-            f" {free_gpu_memory}. This happens when the GPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
