@@ -43,6 +43,9 @@ class InductorHashCache:
                 self.deserialize(f.read())
 
     def deserialize(self, data: str):
+        # we use ast.literal_eval to parse the data
+        # because it is a safe way to parse Python literals.
+        # do not use eval(), it is unsafe.
         list_data = ast.literal_eval(data)
         for runtime_shape, graph_index, hash_str in list_data:
             self.cache[runtime_shape][graph_index] = hash_str
