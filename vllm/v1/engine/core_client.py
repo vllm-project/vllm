@@ -1,5 +1,4 @@
 import atexit
-import multiprocessing
 from typing import List, Union
 
 import msgspec
@@ -149,21 +148,16 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
-        self.should_shutdown = multiprocessing.Value('b', False, lock=False)
         self.proc = EngineCoreProc.make_engine_core_process(
             *args,
             input_path=input_path,
             output_path=output_path,
             ready_path=ready_path,
-            should_shutdown=self.should_shutdown,
             **kwargs,
         )
         atexit.register(self.shutdown)
 
     def shutdown(self):
-        # Send shutdown signal to background process.
-        self.should_shutdown = True
-
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
 

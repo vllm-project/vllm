@@ -5,7 +5,6 @@ import signal
 import threading
 import time
 from multiprocessing.process import BaseProcess
-from multiprocessing.sharedctypes import Synchronized
 from typing import List, Tuple, Type, Union
 
 import zmq
@@ -133,12 +132,8 @@ class EngineCoreProc(EngineCore):
         input_path: str,
         output_path: str,
         ready_path: str,
-        should_shutdown: Synchronized,
     ):
         super().__init__(vllm_config, executor_class, usage_context)
-
-        # Signal from main process to shutdown (multiprocessing.Value).
-        self.should_shutdown = should_shutdown
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -195,7 +190,6 @@ class EngineCoreProc(EngineCore):
         input_path: str,
         output_path: str,
         ready_path: str,
-        should_shutdown: Synchronized,
     ) -> BaseProcess:
         # The current process might have CUDA context,
         # so we need to spawn a new process.
@@ -210,7 +204,6 @@ class EngineCoreProc(EngineCore):
             "vllm_config": vllm_config,
             "executor_class": executor_class,
             "usage_context": usage_context,
-            "should_shutdown": should_shutdown
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=EngineCoreProc.run_engine_core,
@@ -260,8 +253,8 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until we get a shutdown signal.
-        while not self.should_shutdown:
+        # Loop until process is sent a SIGINT or SIGTERM
+        while True:
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
@@ -272,8 +265,6 @@ class EngineCoreProc(EngineCore):
                     except queue.Empty:
                         self._log_stats()
                         logger.debug("EngineCore busy loop waiting.")
-                        if self.should_shutdown:
-                            return
                     except BaseException:
                         raise
 
