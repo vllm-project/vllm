@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import torch
 from transformers import PreTrainedTokenizerFast
@@ -38,12 +38,21 @@ def get_local_xgrammar_guided_decoding_logits_processor(
     return XGrammarLogitsProcessor(config)
 
 
-class TokenizerData(NamedTuple):
+@dataclass(frozen=True)
+class TokenizerData:
     """Immutable container for cached tokenizer data."""
-    encoded_vocab: list[str]
-    stop_token_ids: list[int] | None
-    backend_str: str | None
-    vocab_type: xgr.VocabType | None
+    encoded_vocab: list[str] = field(default_factory=list)
+    stop_token_ids: list[int] | None = None
+    # These fields are mutually exclusive `backend_str` is used to create a
+    # TokenizeInfo with `TokenizerInfo.from_huggingface` while vocab_type is
+    # used with the constructor of TokenizeInfo
+    backend_str: str | None = None
+    vocab_type: xgr.VocabType | None = None
+
+    def __post_init__(self):
+        # Check for mutual exclusive
+        assert not (self.backend_str and self.vocab_type), \
+            "backend_str and vocab_type are mutual exclusive"
 
 
 class TokenizerDataCache:
@@ -80,6 +89,7 @@ class TokenizerDataCache:
 
             if isinstance(tokenizer, PreTrainedTokenizerFast):
                 backend_str = tokenizer.backend_tokenizer.to_str()
+                vocab_type = None
 
             elif isinstance(tokenizer, MistralTokenizer):
                 # REF: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
@@ -108,19 +118,21 @@ class GrammarCompilerCache:
         cache_key = str(config.tokenizer_hash)
 
         if cache_key not in cls._cache:
-            assert config.encoded_vocab is not None
+            assert config.tokenizer_data is not None
+            assert config.tokenizer_data.encoded_vocab is not None
 
-            if config.backend_str:
+            config_data = config.tokenizer_data
+            if config_data.backend_str:
                 tokenizer_info = xgr.TokenizerInfo._create_from_handle(
                     xgr_core.TokenizerInfo.from_huggingface(
-                        config.encoded_vocab, config.backend_str,
-                        config.vocab_size, config.stop_token_ids))
+                        config_data.encoded_vocab, config_data.backend_str,
+                        config.vocab_size, config_data.stop_token_ids))
             else:
                 tokenizer_info = xgr.TokenizerInfo(
-                    config.encoded_vocab,
-                    config.vocab_type,
+                    config_data.encoded_vocab,
+                    config_data.vocab_type,
                     vocab_size=config.vocab_size,
-                    stop_token_ids=config.stop_token_ids)
+                    stop_token_ids=config_data.stop_token_ids)
             cls._cache[cache_key] = xgr.GrammarCompiler(
                 tokenizer_info, max_threads=config.max_threads)
 
@@ -137,10 +149,11 @@ class GrammarConfig:
     json_object: bool | None = None
     max_threads: int = 8
     # Only populated if tokenizer_hash not in cache
-    encoded_vocab: list[str] | None = None
-    stop_token_ids: list[int] | None = None
-    backend_str: str | None = None
-    vocab_type: xgr.VocabType = xgr.VocabType.RAW
+    # encoded_vocab: list[str] | None = None
+    # stop_token_ids: list[int] | None = None
+    # backend_str: str | None = None
+    # vocab_type: xgr.VocabType | None = None
+    tokenizer_data: TokenizerData | None = None
 
     @classmethod
     def from_guided_params(cls,
@@ -151,31 +164,24 @@ class GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
         # Only get tokenizer data if not already cached
-        if tokenizer_hash in TokenizerDataCache._cache:
-            encoded_vocab = None
-            stop_token_ids = None
-            backend_str = None
-            vocab_type = xgr.VocabType.RAW
-        else:
-            tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
-            encoded_vocab = tokenizer_data.encoded_vocab
-            stop_token_ids = tokenizer_data.stop_token_ids
-            backend_str = tokenizer_data.backend_str
-            vocab_type = tokenizer_data.vocab_type
+        tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer) \
+            if tokenizer_hash not in TokenizerDataCache._cache else None
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
                 json_str = json.dumps(guided_params.json)
             else:
                 json_str = guided_params.json
-            return cls(json_str=json_str,
-                       vocab_size=model_config.hf_text_config.vocab_size,
-                       encoded_vocab=encoded_vocab,
-                       stop_token_ids=stop_token_ids,
-                       backend_str=backend_str,
-                       tokenizer_hash=tokenizer_hash,
-                       max_threads=max_threads,
-                       vocab_type=vocab_type)
+            return cls(
+                json_str=json_str,
+                vocab_size=model_config.hf_text_config.vocab_size,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                #    encoded_vocab=encoded_vocab,
+                #    stop_token_ids=stop_token_ids,
+                #    backend_str=backend_str,
+                #    vocab_type=vocab_type
+                tokenizer_data=tokenizer_data)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -189,23 +195,29 @@ class GrammarConfig:
                         f"Conversion error: {str(e)}") from e
             else:
                 grammar_str = guided_params.grammar
-            return cls(grammar_str=grammar_str,
-                       vocab_size=model_config.hf_text_config.vocab_size,
-                       encoded_vocab=encoded_vocab,
-                       stop_token_ids=stop_token_ids,
-                       backend_str=backend_str,
-                       tokenizer_hash=tokenizer_hash,
-                       max_threads=max_threads,
-                       vocab_type=vocab_type)
+            return cls(
+                grammar_str=grammar_str,
+                vocab_size=model_config.hf_text_config.vocab_size,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data
+                #    encoded_vocab=encoded_vocab,
+                #    stop_token_ids=stop_token_ids,
+                #    backend_str=backend_str,
+                #    vocab_type=vocab_type
+            )
         elif guided_params.json_object:
-            return cls(json_object=True,
-                       vocab_size=model_config.hf_text_config.vocab_size,
-                       encoded_vocab=encoded_vocab,
-                       stop_token_ids=stop_token_ids,
-                       backend_str=backend_str,
-                       tokenizer_hash=tokenizer_hash,
-                       max_threads=max_threads,
-                       vocab_type=vocab_type)
+            return cls(
+                json_object=True,
+                vocab_size=model_config.hf_text_config.vocab_size,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+                #    encoded_vocab=encoded_vocab,
+                #    stop_token_ids=stop_token_ids,
+                #    backend_str=backend_str,
+                #    vocab_type=vocab_type
+            )
         else:
             raise ValueError(
                 "Currently only support JSON and EBNF grammar mode for xgrammar"
