@@ -153,16 +153,29 @@ For a dynamic workload, we can use the ``VLLM_LOG_BATCHSIZE_INTERVAL`` environme
 
 Note that ``torch.compile`` only helps to accelerate the model forwarding. To see the benefit, please make sure GPUs are already busy executing the model; otherwise, the benefit will be hidden because GPUs are idle. That's why we have added ``--num-scheduler-steps 64`` to the command line arguments when benchmarking the throughput.
 
-Supported Models
-----------------
-
-Most models in vLLM are supported by ``torch.compile``. You should see logs like ``torch.compile takes 19.37 s in total`` in the server logs when you enable ``torch.compile``. If a model does not support ``torch.compile`` but you enable it, there will be a warning ``torch.compile is turned on, but the model does not support it``, and the ``torch.compile`` configurations will be ignored. If you want to get this model supported, please file an issue.
+How does it work?
+-----------------
 
 For text-only models, we compile the part of the model from input token IDs to final hidden states, excluding the LM head and logits processing.
 
 For multi-modality models, we compile the text-only part of the model from input embeddings to final hidden states, excluding the vision encoder part and the part of merging multi-modality embeddings with text embeddings.
 
 By carefully compiling the main computation of the model, we can avoid unnecessary compilation time and achieve better performance.
+
+Supported Models
+----------------
+
+Most models in vLLM are supported by ``torch.compile``. You should see logs like ``torch.compile takes 19.37 s in total`` in the server logs when you enable ``torch.compile``. If a model does not support ``torch.compile`` but you enable it, there will be a warning ``torch.compile is turned on, but the model does not support it``, and the ``torch.compile`` configurations will be ignored. If you want to get this model supported, please file an issue.
+
+The following models are currently not supported by ``torch.compile``, because their computation graphs are too dynamic to compile:
+
+- ``InternLM2VEForCausalLM``, ``InternVLChatModel``
+- cross-attention models like ``MllamaForConditionalGeneration`` and ``BartForConditionalGeneration``
+
+The following models should be supported by ``torch.compile`` in the future, but not supported yet due to bandwidth limitations:
+
+- ``Mamba`` related models
+- ``ChameleonModel``, ``ChatGLMModel``, ``DbrxModel``, ``DeepseekModel``, ``MixtralModel``, ``Olmo2Model``, ``Phi3SmallModel``, ``StableLMEpochModel``
 
 Supported Hardware
 ------------------
