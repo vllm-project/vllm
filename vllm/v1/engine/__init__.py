@@ -44,10 +44,11 @@ class EngineCoreRequest:
     lora_request: Optional[LoRARequest]
 
 
-class EngineCoreOutput(msgspec.Struct,
-                       array_like=True,
-                       omit_defaults=True,
-                       gc=False):
+class EngineCoreOutput(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
 
     request_id: str
     new_token_ids: List[int]
@@ -56,10 +57,11 @@ class EngineCoreOutput(msgspec.Struct,
     stop_reason: Union[int, str, None] = None
 
 
-class EngineCoreOutputs(msgspec.Struct,
-                        array_like=True,
-                        omit_defaults=True,
-                        gc=False):
+class EngineCoreOutputs(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
 
     #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout and using an int enum for finish/stop reason
