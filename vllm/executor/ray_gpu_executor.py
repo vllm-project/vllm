@@ -422,7 +422,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         import pkg_resources
         from packaging import version
 
-        required_version = version.parse("2.39")
+        required_version = version.parse("2.40")
         current_version = version.parse(
             pkg_resources.get_distribution("ray").version)
         if current_version < required_version:
