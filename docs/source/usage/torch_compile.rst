@@ -143,11 +143,11 @@ For a dynamic workload, we can use the ``VLLM_LOG_BATCHSIZE_INTERVAL`` environme
     Throughput: 44.39 requests/s, 22728.17 total tokens/s, 11364.08 output tokens/s
 
     $ # 2. Run the same setting with profiling
-    $ VLLM_LOG_BATCHSIZE_INTERVAL=1.0 python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --num-scheduler-steps 64
+    $ VLLM_LOG_BATCHSIZE_INTERVAL=1.0 python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --load-format dummy --num-scheduler-steps 64
     INFO 12-10 15:42:47 forward_context.py:58] Batchsize distribution (batchsize, count): [(256, 769), (232, 215), ...]
 
     $ # 3. The most common batch sizes are 256 and 232, so we can compile the model for these two batch sizes
-    $ python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --num-scheduler-steps 64 -O "{'level': 3, 'candidate_compile_sizes': [232, 256]}"
+    $ python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --model meta-llama/Meta-Llama-3-8B --load-format dummy --num-scheduler-steps 64 -O "{'level': 3, 'candidate_compile_sizes': [232, 256]}"
     init engine (profile, create kv cache, warmup model) took 87.18 seconds
     Throughput: 46.11 requests/s, 23606.51 total tokens/s, 11803.26 output tokens/s
 
