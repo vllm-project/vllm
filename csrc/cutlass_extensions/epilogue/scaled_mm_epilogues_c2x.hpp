@@ -1,4 +1,4 @@
-#include "broadcast_load_epilogue_c2x.hpp"
+#include "cutlass_extensions/epilogue/broadcast_load_epilogue_c2x.hpp"
 
 /*
    This file defines custom epilogues for fusing channel scales, token scales,

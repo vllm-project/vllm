@@ -290,7 +290,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
       message(STATUS "Not building cutlass_c3x kernels as CUDA Compiler version is "
                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running FP8 quantized models or sparse on "
+                     "later if you intend on running FP8 sparse or quantized models on "
                      "Hopper.")
     else()
       message(STATUS "Not building cutlass_c3x as no compatible archs found "
@@ -408,7 +408,7 @@ define_gpu_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR};${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 
