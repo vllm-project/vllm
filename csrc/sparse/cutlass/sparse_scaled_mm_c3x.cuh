@@ -185,7 +185,6 @@ template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_config_default {};
 
-
 template <typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_config_default<half_t, OutType, Epilogue> {
@@ -196,7 +195,7 @@ struct sm90_config_default<half_t, OutType, Epilogue> {
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<half_t, OutType, Epilogue, TileShape, ClusterShape,
-                      KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule, float>;
 };
 
 template <typename OutType,
@@ -208,8 +207,9 @@ struct sm90_config_default<cutlass::bfloat16_t, OutType, Epilogue> {
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
-      cutlass_sparse_3x_gemm<cutlass::bfloat16_t, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+      cutlass_sparse_3x_gemm<cutlass::bfloat16_t, OutType, Epilogue, TileShape,
+                             ClusterShape, KernelSchedule, EpilogueSchedule,
+                             float>;
 };
 
 //////////////////////// Cherry-Picking Kernels ////////////////////////
@@ -335,8 +335,9 @@ struct sm90_config_default<cutlass::float_e4m3_t, OutType, Epilogue> {
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_1, _2, _1>;
   using Cutlass3xGemm =
-      cutlass_sparse_3x_gemm<cutlass::float_e4m3_t, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+      cutlass_sparse_3x_gemm<cutlass::float_e4m3_t, OutType, Epilogue,
+                             TileShape, ClusterShape, KernelSchedule,
+                             EpilogueSchedule, float>;
 };
 
 template <typename InType, typename OutType,

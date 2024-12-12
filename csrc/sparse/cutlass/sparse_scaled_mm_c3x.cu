@@ -45,8 +45,7 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
   using Cutlass3xGemmDefault =
-      typename sm90_config_default<InType, OutType,
-                                   Epilogue>::Cutlass3xGemm;
+      typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM64 =
       typename sm90_fp8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
@@ -151,8 +150,7 @@ void cutlass_gemm_sm90_fp16_dispatch(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b.dtype() == torch::kFloat16);
 
   using Cutlass3xGemmDefault =
-      typename sm90_config_default<InType, OutType,
-                                        Epilogue>::Cutlass3xGemm;
+      typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
 
   // m in (128, inf)
   return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
@@ -172,8 +170,7 @@ void cutlass_gemm_sm90_bf16_dispatch(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b.dtype() == torch::kBFloat16);
 
   using Cutlass3xGemmDefault =
-      typename sm90_config_default<InType, OutType,
-                                        Epilogue>::Cutlass3xGemm;
+      typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
 
   // m in (128, inf)
   return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
@@ -193,8 +190,7 @@ void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b.dtype() == torch::kInt8);
 
   using Cutlass3xGemmDefault =
-      typename sm90_config_default<InType, OutType,
-                                        Epilogue>::Cutlass3xGemm;
+      typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
       typename sm90_int8_config_M128<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM64 =
