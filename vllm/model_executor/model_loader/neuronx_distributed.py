@@ -299,19 +299,13 @@ class NeuronSpeculationCausalLM(nn.Module):
                             position_ids=positions,
                             seq_ids=input_block_ids,
                             sampling_params=sampling_params)
-        if output.fused_outputs[1].shape[-1] == 1:
-            # CTX encoding
-            return output.fused_outputs[1].view(1, -1)
-        draft_new_tokens = output.fused_outputs[0].view(1, -1)
-        target_tokens = output.fused_outputs[1].view(1, -1)
-        if self.config.neuron_config.enable_eagle_speculation:
-            candidate_new_tokens = draft_new_tokens[:, 1:]
-        else:
-            candidate_new_tokens = draft_new_tokens[:,:-1]
-        selected_tokens = target_tokens[:,:-1]
-        n_matches = ((~(candidate_new_tokens == selected_tokens)).cumsum(dim=-1) < 1).sum()
-        accepted_tokens = target_tokens[:,:n_matches+1]
-        return accepted_tokens
+        # CTX encoding
+        if (positions[:, 0]).sum().item() == 0:
+            return output.fused_outputs[0][:, 0:1]
+
+        # Fused Spec (Generation)
+        accepted_tokens_with_padding = output.fused_outputs[0]
+        return accepted_tokens_with_padding
 
     def sample(
         self,
@@ -322,6 +316,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         seq_ids = [seq_id for sg in sampling_metadata.seq_groups for seq_id in sg.seq_ids]
         # Organize input tensors by step instead of by sequence.
         accepted_token_ids_by_step = logits.transpose(0, 1)
+        accepted_token_ids_by_step[accepted_token_ids_by_step == 0] = -1
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
 
         sampler_output_list = []
