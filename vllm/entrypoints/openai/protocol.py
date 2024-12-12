@@ -308,8 +308,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
              "a JSON object with a required 'qualname' field specifying the "
              "qualified name of the processor class/factory, and optional "
              "'args' and 'kwargs' fields containing positional and keyword "
-             "arguments. For example: {'qualname': 'my_module.MyLogitsProcessor'"
-             ", 'args': [1, 2], 'kwargs': {'param': 'value'}}."))
+             "arguments. For example: {'qualname': "
+             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
+             "{'param': 'value'}}."))
 
     # doc: end-chat-completion-extra-params
 
@@ -634,8 +635,9 @@ class CompletionRequest(OpenAIBaseModel):
              "a JSON object with a required 'qualname' field specifying the "
              "qualified name of the processor class/factory, and optional "
              "'args' and 'kwargs' fields containing positional and keyword "
-             "arguments. For example: {'qualname': 'my_module.MyLogitsProcessor'"
-             ", 'args': [1, 2], 'kwargs': {'param': 'value'}}."))
+             "arguments. For example: {'qualname': "
+             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
+             "{'param': 'value'}}."))
 
     # doc: end-completion-extra-params
 
