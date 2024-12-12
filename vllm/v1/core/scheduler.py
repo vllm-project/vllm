@@ -115,7 +115,7 @@ class Scheduler:
             assert not has_partial_request
             assert token_budget > 0
             request = self.running[req_index]
-            num_new_tokens = request.num_tokens - request.num_computed_tokens
+            num_new_tokens = request.needed_schedule_tokens - request.scheduled_num_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
@@ -137,6 +137,7 @@ class Scheduler:
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
+                    preempted_req.scheduled_num_tokens = 0
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -152,6 +153,7 @@ class Scheduler:
                 break
 
             # Schedule the request.
+            request.scheduled_num_tokens += num_new_tokens
             scheduled_running_reqs.append(request)
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
@@ -159,8 +161,8 @@ class Scheduler:
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
-            has_partial_request = (request.num_computed_tokens + num_new_tokens
-                                   < request.num_tokens)
+            has_partial_request = (request.scheduled_num_tokens + num_new_tokens
+                                   < request.needed_schedule_tokens)
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -220,6 +222,8 @@ class Scheduler:
                     break
 
                 self.waiting.popleft()
+                request.scheduled_num_tokens = num_new_tokens + num_computed_tokens
+                request.needed_schedule_tokens = request.num_tokens
                 self.running.append(request)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
@@ -249,6 +253,7 @@ class Scheduler:
                     encoder_budget = new_encoder_budget
 
         # Check if the scheduling constraints are satisfied.
+        logger.info(f"schedule queue running: {len(self.running)} preempted_reqs: {len(preempted_reqs)} waiting: {len(self.waiting)} request_nums: {len(self.requests)}")
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
@@ -271,7 +276,8 @@ class Scheduler:
         running_reqs_data = [
             self._make_running_request_data(
                 req, req_to_new_block_ids[req.request_id],
-                req.num_computed_tokens) for req in scheduled_running_reqs
+                req.num_computed_tokens,
+                req.scheduled_num_tokens) for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
         scheduler_output = SchedulerOutput(
@@ -298,6 +304,7 @@ class Scheduler:
         request: Request,
         new_block_ids: List[int],
         num_computed_tokens: int,
+        scheduled_num_tokens: int,
     ) -> "RunningRequestData":
         # OPTIMIZATION: Cache the RunningRequestData objects to avoid creating
         # them at each scheduling step.
@@ -305,6 +312,7 @@ class Scheduler:
             req_data = self.running_reqs_data[request.request_id]
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
+            req_data.scheduled_num_tokens = scheduled_num_tokens
         else:
             req_data = RunningRequestData.from_request(request, new_block_ids,
                                                        num_computed_tokens)
@@ -389,51 +397,79 @@ class Scheduler:
         engine_core_outputs: List[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
-            request.num_computed_tokens += num_scheduled_tokens[req_id]
-            # When the request's num_computed_tokens catches up its num_tokens,
-            # the request generates output tokens. Otherwise, we ignore the
-            # sampler output for the request.
-            assert request.num_computed_tokens <= request.num_tokens
+            if req_id in num_scheduled_tokens.keys():
+                request.num_computed_tokens += num_scheduled_tokens[req_id]
+                # When the request's num_computed_tokens catches up its num_tokens,
+                # the request generates output tokens. Otherwise, we ignore the
+                # sampler output for the request.
+                assert request.num_computed_tokens <= request.num_tokens
 
-            cached_encoder_input_ids = (
-                self.encoder_cache_manager.get_cached_input_ids(request))
-            for input_id in list(cached_encoder_input_ids):
-                start_pos = request.mm_positions[input_id]["offset"]
-                num_tokens = request.mm_positions[input_id]["length"]
-                if start_pos + num_tokens <= request.num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    self.encoder_cache_manager.free(request, input_id)
+                cached_encoder_input_ids = (
+                    self.encoder_cache_manager.get_cached_input_ids(request))
+                for input_id in list(cached_encoder_input_ids):
+                    start_pos = request.mm_positions[input_id]["offset"]
+                    num_tokens = request.mm_positions[input_id]["length"]
+                    if start_pos + num_tokens <= request.num_computed_tokens:
+                        # The encoder output is already processed and stored
+                        # in the decoder's KV cache.
+                        self.encoder_cache_manager.free(request, input_id)
 
-            if request.num_computed_tokens == request.num_tokens:
-                req_index = model_runner_output.req_id_to_index[req_id]
-                # NOTE(woosuk): Currently, we assume that each request
-                # generates at most one token at each step.
-                token_id = sampled_token_ids[req_index]
-                request.append_output_token_ids(token_id)
+                if request.num_computed_tokens == request.num_tokens:
+                    req_index = model_runner_output.req_id_to_index[req_id]
+                    # NOTE(woosuk): Currently, we assume that each request
+                    # generates at most one token at each step.
+                    token_id = sampled_token_ids[req_index]
+                    request.append_output_token_ids(token_id)
+                    num_new_tokens = 1
+                    # request.needed_schedule_tokens += num_new_tokens
+                    # TODO: Update the KV cache manager for prefix caching.
+
+                    # Check for stop and update request state.
+                    # This must be called before me make the EngineCoreOutput.
+                    stopped = self._check_stop(request)
+
+                    # Add EngineCoreOutput for this Request.
+                    output = EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=request.output_token_ids[-num_new_tokens:],
+                        finished=request.is_finished(),
+                        finish_reason=request.get_finished_reason(),
+                        stop_reason=request.stop_reason)
+                    engine_core_outputs.append(output)
+
+                    # Breakout of the loop.
+                    if stopped:
+                        continue
+            if request.scheduled_num_tokens == request.needed_schedule_tokens:
                 num_new_tokens = 1
-                # TODO: Update the KV cache manager for prefix caching.
-
-                # Check for stop and update request state.
-                # This must be called before me make the EngineCoreOutput.
-                stopped = self._check_stop(request)
-
-                # Add EngineCoreOutput for this Request.
-                output = EngineCoreOutput(
-                    request_id=req_id,
-                    new_token_ids=request.output_token_ids[-num_new_tokens:],
-                    finished=request.is_finished(),
-                    finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason)
-                engine_core_outputs.append(output)
-
-                # Breakout of the loop.
-                if stopped:
-                    continue
+                request.needed_schedule_tokens += num_new_tokens
 
             new_running.append(request)
         self.running = new_running
         return engine_core_outputs
+
+    
+    def update_from_async_output(
+        self,
+        scheduler_output: "SchedulerOutput",
+        model_runner_output: "ModelRunnerOutput",
+    ) -> List[EngineCoreOutput]:
+        # NOTE(woosuk): This method doesn't consider speculative decoding.
+        # sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
+        # num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        new_running: List[Request] = []
+        engine_core_outputs: List[EngineCoreOutput] = []
+        for request in self.running:
+            req_id = request.request_id
+            assert request.scheduled_num_tokens <= request.needed_schedule_tokens
+            if request.scheduled_num_tokens == request.needed_schedule_tokens:
+                # NOTE Currently, we assume that each request
+                # generates at most one token at each step.
+                # req_index = model_runner_output.req_id_to_index[req_id]
+                request.needed_schedule_tokens += 1
+            new_running.append(request)
+        self.running = new_running
+        return None
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
@@ -514,6 +550,7 @@ class NewRequestData:
     sampling_params: SamplingParams
     block_ids: List[int]
     num_computed_tokens: int
+    scheduled_num_tokens: int
 
     @classmethod
     def from_request(
@@ -531,6 +568,7 @@ class NewRequestData:
             sampling_params=request.sampling_params,
             block_ids=block_ids,
             num_computed_tokens=num_computed_tokens,
+            scheduled_num_tokens=request.scheduled_num_tokens,
         )
 
 
@@ -561,6 +599,7 @@ class RunningRequestData:
     req_id: str
     new_block_ids: List[int]
     num_computed_tokens: int
+    scheduled_num_tokens: int
 
     @classmethod
     def from_request(
@@ -573,6 +612,7 @@ class RunningRequestData:
             req_id=request.request_id,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
+            scheduled_num_tokens=request.scheduled_num_tokens
         )
 
 

@@ -44,6 +44,8 @@ class Request:
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
         self.num_computed_tokens = 0
+        self.scheduled_num_tokens = 0
+        self.needed_schedule_tokens = 0
 
         mm_positions = self.inputs.multi_modal_placeholders
         if mm_positions:

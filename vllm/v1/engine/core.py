@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
 from typing import Any, Iterator, List, Tuple, Type, Union
+from collections import deque
+import nvtx
 
 import zmq
 import zmq.asyncio
@@ -64,6 +66,8 @@ class EngineCore:
                                    vllm_config.lora_config)
 
         self._last_logging_time = time.time()
+        self.last_batch = None
+        self.result_queue = deque()
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -101,11 +105,20 @@ class EngineCore:
 
         if not self.scheduler.has_unfinished_requests():
             return []
-
-        scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output)
+        with nvtx.annotate("schedule", color="gold"):
+            scheduler_output = self.scheduler.schedule()
+        output = self.model_executor.execute_model(scheduler_output, self.last_batch)
+        self.result_queue.append(scheduler_output)
+        if self.last_batch is None:
+            self.scheduler.update_from_async_output(
+                scheduler_output, output)
+            engine_core_outputs = None
+        else:
+            with nvtx.annotate("update_from_output", color="red"):
+                tmp_scheduler_output = self.result_queue.popleft()
+                engine_core_outputs = self.scheduler.update_from_output(
+                    tmp_scheduler_output, output)
+        self.last_batch = scheduler_output
         return engine_core_outputs
 
     def profile(self, is_start=True):
@@ -276,6 +289,8 @@ class EngineCoreProc(EngineCore):
 
             # 3) Step the engine core.
             outputs = self.step()
+            if outputs is None:
+                continue
 
             # 4) Put EngineCoreOutputs into the output queue.
             self.output_queue.put_nowait(outputs)

@@ -7,6 +7,10 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import psutil
+from queue import Queue
+import threading
+import nvtx
 
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
@@ -111,6 +115,85 @@ class GPUModelRunner:
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=self.device)
+        
+        self.launch_done = threading.Event()
+        self.launch_done.set()
+        # Init future mappings
+        self.future_token_ids_ct = 0
+        self.future_token_ids_limit = self.scheduler_config.max_num_seqs * 3
+        self.future_token_ids_map = torch.empty(
+            (self.scheduler_config.max_num_seqs * 5,), dtype=torch.int32, device=self.device
+        )
+
+        # Launch threads
+        self.input_queue = Queue()
+        self.output_queue = Queue()
+        self.forward_stream = torch.cuda.Stream()
+        self.forward_thread = threading.Thread(
+            target=self.forward_thread_func,
+        )
+        self.forward_thread.start()
+        self.parent_process = psutil.Process().parent()
+        
+
+    def resolve_future_token_ids(self, input_ids, future_token_ids_map):
+            input_ids[:] = torch.where(
+            input_ids < 0,
+            future_token_ids_map[torch.clamp(-input_ids, min=0).long()],
+            input_ids,
+        )
+
+    @torch.inference_mode()
+    def forward_thread_func(self):
+        batch_pt = 0
+        while True:
+            inputs_ids, future_token_ids_ct, num_scheduled_tokens, positions, attn_metadata, logits_indices, sampling_metadata, batch_size, num_input_tokens = self.input_queue.get()
+            copy_done = torch.cuda.Event()
+            with nvtx.annotate("gpu-running", color="green"):
+                #preapare input batch
+                input_ids = inputs_ids
+                self.resolve_future_token_ids(input_ids, self.future_token_ids_map)
+
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
+                self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+                only_input_embeds = self.inputs_embeds[:num_input_tokens].clone()
+                # NOTE: To unify token ids and soft tokens (vision embeddings),
+                # always use embeddings (rather than token ids) as input to the model.
+                with nvtx.annotate("gpu-forward", color="black"):
+                    with set_forward_context(attn_metadata, self.vllm_config):
+                        hidden_states = self.model(
+                            input_ids=None,
+                            positions=positions,
+                            kv_caches=self.kv_caches,
+                            attn_metadata=None,
+                            inputs_embeds=only_input_embeds,
+                            # inputs_embeds=inputs_embeds,
+                        )
+                self.launch_done.set()
+                hidden_states = hidden_states[:num_scheduled_tokens]
+                hidden_states = hidden_states[logits_indices]
+                logits = self.model.compute_logits(hidden_states, None)
+                # # Sample the next token and get logprobs if needed.
+                with nvtx.annotate("sampler", color="blue"):
+                    sampler_output = self.model.sample(
+                        logits=logits,
+                        sampling_metadata=sampling_metadata,
+                    )
+                with nvtx.annotate("sampler_D2H", color="red"):
+                    bs = batch_size
+                    self.future_token_ids_map[
+                        future_token_ids_ct + 1 : future_token_ids_ct + bs + 1
+                    ] = sampler_output.sampled_token_ids
+                    next_token_ids = sampler_output.sampled_token_ids.to("cpu", non_blocking=True)
+            copy_done.record()
+            # put data to output queue
+            self.output_queue.put((copy_done, next_token_ids))
+    
+    @nvtx.annotate("resolve_batch_result", "blue")
+    def resolve_batch_result(self)-> List[int]:
+        copy_done, next_token_ids = self.output_queue.get()
+        copy_done.synchronize()
+        return next_token_ids
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -145,9 +228,10 @@ class GPUModelRunner:
             req_index = self.input_batch.req_id_to_index[req_id]
 
             # Update the num_computed_tokens.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
+            fake_computed_tokens = req_data.scheduled_num_tokens - scheduler_output.num_scheduled_tokens[req_id]
+            req_state.num_computed_tokens = fake_computed_tokens
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
+                fake_computed_tokens)
 
             # Update the block table.
             num_new_blocks = len(req_data.new_block_ids)
@@ -209,7 +293,7 @@ class GPUModelRunner:
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
-
+    @nvtx.annotate("_prepare_inputs", "blue")
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -313,17 +397,19 @@ class GPUModelRunner:
 
         input_ids = input_ids.to(self.device, non_blocking=True)
         self.positions[:total_num_scheduled_tokens].copy_(positions,
-                                                          non_blocking=True)
+                                                        non_blocking=True)
         query_start_loc = query_start_loc.to(self.device, non_blocking=True)
         seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
-        slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
+        slot_mapping = slot_mapping.long()
+        slot_mapping = slot_mapping.to(self.device, non_blocking=True)
+        cur_block_table = self.input_batch.block_table[:num_reqs].clone()
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_start_loc=seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
+            block_table=cur_block_table,
             slot_mapping=slot_mapping,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
@@ -425,17 +511,22 @@ class GPUModelRunner:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        last_batch: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
         # Run the encoder.
         self._execute_encoder(scheduler_output)
         encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        if ((not self.input_queue.empty()) or (not self.launch_done.is_set())):
+            self.launch_done.wait()
 
         # Prepare the decoder inputs.
         input_ids, attn_metadata, logits_indices = self._prepare_inputs(
             scheduler_output)
+        sampling_metadata = self._prepare_sampling(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
@@ -447,39 +538,52 @@ class GPUModelRunner:
             num_input_tokens = num_scheduled_tokens
 
         # Get the inputs embeds.
-        if encoder_outputs:
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids, encoder_outputs)
-        else:
-            inputs_embeds = self.model.get_input_embeddings(input_ids)
+        # if encoder_outputs:
+        #     inputs_embeds = self.model.get_input_embeddings(
+        #         input_ids, encoder_outputs)
+        # else:
+        #     inputs_embeds = self.model.get_input_embeddings(input_ids)
         # NOTE(woosuk): To unify token ids and soft tokens (vision embeddings),
         # always use embeddings (rather than token ids) as input to the model.
         # TODO(woosuk): Avoid the copy. Optimize.
-        self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+        tmp_positions = self.positions[:num_input_tokens].clone()
+        # self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+        bs = self.input_batch.num_reqs
+        self.launch_done.clear()
+        self.input_queue.put((input_ids, self.future_token_ids_ct, num_scheduled_tokens, tmp_positions, attn_metadata, logits_indices, sampling_metadata, bs, num_input_tokens))
+        sampled_token_ids = torch.arange(
+            -(self.future_token_ids_ct + 1),
+            -(self.future_token_ids_ct + 1 + bs),
+            -1,
+            dtype=torch.int32
+        )
+        self.future_token_ids_ct = (
+            self.future_token_ids_ct + bs
+        ) % self.future_token_ids_limit
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
-                input_ids=None,
-                positions=self.positions[:num_input_tokens],
-                kv_caches=self.kv_caches,
-                attn_metadata=None,
-                inputs_embeds=self.inputs_embeds[:num_input_tokens],
-            )
-        hidden_states = hidden_states[:num_scheduled_tokens]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
+        # with set_forward_context(attn_metadata, self.vllm_config):
+        #     hidden_states = self.model(
+        #         input_ids=None,
+        #         positions=self.positions[:num_input_tokens],
+        #         kv_caches=self.kv_caches,
+        #         attn_metadata=None,
+        #         inputs_embeds=self.inputs_embeds[:num_input_tokens],
+        #     )
+        # hidden_states = hidden_states[:num_scheduled_tokens]
+        # hidden_states = hidden_states[logits_indices]
+        # logits = self.model.compute_logits(hidden_states, None)
 
-        # Sample the next token and get logprobs if needed.
-        sampling_metadata = self._prepare_sampling(scheduler_output)
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+        # # Sample the next token and get logprobs if needed.
+        # sampling_metadata = self._prepare_sampling(scheduler_output)
+        # sampler_output = self.model.sample(
+        #     logits=logits,
+        #     sampling_metadata=sampling_metadata,
+        # )
 
         # NOTE: CPU-GPU synchronization happens here.
-        sampled_token_ids = sampler_output.sampled_token_ids.cpu()
+        # sampled_token_ids = sampler_output.sampled_token_ids.cpu()
         sampled_token_ids_list = sampled_token_ids.tolist()
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -502,14 +606,19 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        if sampler_output.logprob_token_ids is None:
-            logprob_token_ids = None
-        else:
-            logprob_token_ids = sampler_output.logprob_token_ids.cpu()
-        if sampler_output.logprobs is None:
-            logprobs = None
-        else:
-            logprobs = sampler_output.logprobs.cpu()
+        # if sampler_output.logprob_token_ids is None:
+        #     logprob_token_ids = None
+        # else:
+        #     logprob_token_ids = sampler_output.logprob_token_ids.cpu()
+        # if sampler_output.logprobs is None:
+        #     logprobs = None
+        # else:
+        #     logprobs = sampler_output.logprobs.cpu()
+        logprob_token_ids = None
+        logprobs = None
+        if last_batch is not None:
+            sampled_token_ids = self.resolve_batch_result()
+        
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,

@@ -196,8 +196,9 @@ class Worker:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        last_batch: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        output = self.model_runner.execute_model(scheduler_output)
+        output = self.model_runner.execute_model(scheduler_output, last_batch)
         # TODO(woosuk): Send the output to the engine process.
         return output
 

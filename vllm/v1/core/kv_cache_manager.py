@@ -116,7 +116,7 @@ class KVCacheManager:
             A list of new blocks if new blocks are allocated, or None
             if new blocks are required but cannot be allocated.
         """
-        num_required_blocks = cdiv(request.num_computed_tokens + num_tokens,
+        num_required_blocks = cdiv(request.scheduled_num_tokens + num_tokens,
                                    self.block_size)
         req_blocks = self.req_to_blocks[request.request_id]
 

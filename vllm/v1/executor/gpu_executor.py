@@ -67,8 +67,9 @@ class GPUExecutor:
     def execute_model(
         self,
         scheduler_output,
+        last_batch,
     ) -> ModelRunnerOutput:
-        output = self.worker.execute_model(scheduler_output)
+        output = self.worker.execute_model(scheduler_output, last_batch)
         return output
 
     def check_health(self) -> None:
