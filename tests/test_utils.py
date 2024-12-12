@@ -4,10 +4,13 @@ import socket
 from functools import partial
 from typing import AsyncIterator, Tuple
 
+import cupy
 import pytest
+import torch
 
-from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
-                        get_open_port, merge_async_iterators, supports_kw)
+from vllm.utils import (FlexibleArgumentParser, MemorySnapshot, StoreBoolean,
+                        deprecate_kwargs, get_open_port, memory_profiling,
+                        merge_async_iterators, supports_kw)
 
 from .utils import error_on_warning
 
@@ -270,3 +273,40 @@ def test_supports_kw(callable,kw_name,requires_kw_only,
         requires_kw_only=requires_kw_only,
         allow_var_kwargs=allow_var_kwargs
     ) == is_supported
+
+def test_memory_profiling():
+    # Fake out some model loading + inference memory usage to test profiling
+
+    # Memory used by other processes will show up as cuda usage outside of torch
+    # Use cupy to emulate this
+    other_process_usage = cupy.zeros((1024, 1024, 512), dtype=cupy.float32)
+
+    # Take the initial memory snapshot
+    snapshot = MemorySnapshot()
+    snapshot.measure()
+
+    # Load the model (4GB)
+    model = torch.zeros(1024, 1024, 1024, dtype=torch.float32).to("cuda")
+
+    with memory_profiling(snapshot) as profile:
+        # Add some more "static" torch memory (1GB)
+        static_memory = \
+            torch.zeros(1024, 1024, 256, dtype=torch.float32).to("cuda")
+
+        # make a memory spike (1GB)
+        spike = torch.zeros(1024, 1024, 256, dtype=torch.float32).to("cuda")
+        del spike
+
+        # Add some extra non-torch memory (2GB)
+        extra_cuda = cupy.zeros((1024, 1024, 512), dtype=cupy.float32)
+
+    del model
+    del other_process_usage
+    del extra_cuda
+    del static_memory
+
+    # spike should be 1GB
+    assert profile.memory_spike_bytes == 1024 ** 3
+    # baseline should be model (4) + torch static memory (1) +
+    # extra non-torch (2) GB
+    assert profile.baseline_memory_bytes == 1024 ** 3 * 7
