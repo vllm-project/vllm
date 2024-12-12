@@ -138,10 +138,23 @@ def wrap_inductor(graph,
             cache_data[(runtime_shape, graph_index)] = out[0]
             return out
 
-        with patch("torch._inductor.codecache.compiled_fx_graph_hash",
-                   mocked_compiled_fx_graph_hash), patch(
-                       "torch._inductor.codecache.FxGraphCache._get_shape_env",
-                       lambda *args, **kwargs: AlwaysHitShapeEnv()):
+        def _check_can_cache(*args, **kwargs):
+            # no error means it can be cached
+            # vLLM computation graph can always be cached
+            return
+
+        def _get_shape_env():
+            return AlwaysHitShapeEnv()
+
+        with patch(# for hijacking the hash of the compiled graph
+                "torch._inductor.codecache.compiled_fx_graph_hash",
+                mocked_compiled_fx_graph_hash), \
+            patch(# for providing a dummy shape environment
+                "torch._inductor.codecache.FxGraphCache._get_shape_env",
+                 _get_shape_env), \
+            patch(# for forcing the graph to be cached
+                "torch._inductor.codecache.FxGraphCache._check_can_cache",
+                _check_can_cache):
             compiled_graph = compile_fx(graph,
                                         example_inputs,
                                         config_patches=current_config)
