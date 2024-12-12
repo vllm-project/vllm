@@ -105,7 +105,7 @@ class InprocClient(EngineCoreClient):
     def __del__(self):
         self.shutdown()
 
-    async def profile(self, is_start=True) -> None:
+    def profile(self, is_start=True) -> None:
         self.engine_core.profile(is_start)
 
 
@@ -212,7 +212,7 @@ class SyncMPClient(MPClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    async def profile(self, is_start=True) -> None:
+    def profile(self, is_start=True) -> None:
         self._send_input(EngineCoreRequestType.PROFILE,
                          EngineCoreProfile(is_start))
 
