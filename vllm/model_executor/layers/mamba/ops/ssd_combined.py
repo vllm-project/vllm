@@ -66,7 +66,11 @@ def _mamba_chunk_scan_combined_fwd(x,
     if D is not None and D.stride(-1) != 1:
         D = D.contiguous()
     if initial_states is not None:
-        assert initial_states.shape == (batch, nheads, headdim, dstate)
+        if cu_seqlens is None:
+            assert initial_states.shape == (batch, nheads, headdim, dstate)
+        else:
+            assert initial_states.shape == (len(cu_seqlens) - 1, nheads,
+                                            headdim, dstate)
 
     # This function executes 5 sub-functions for computing mamba
     # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
@@ -97,6 +101,11 @@ def _mamba_chunk_scan_combined_fwd(x,
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
+    # - for handling chunked prefill, this requires i) initial_states
+    #   ii) seq_idx and iii) has_cu_seqlens to be all specified.
+    # - When a new seq_idx is detected, we will load the correct initial_state
+    #   and ensure that the output states is correctly updated.
+    #
     states, final_states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum[:, :, :, -1],
@@ -104,7 +113,8 @@ def _mamba_chunk_scan_combined_fwd(x,
         if initial_states is not None else None,
         seq_idx=seq_idx,
         chunk_size=chunk_size,
-        out_dtype=C.dtype)
+        out_dtype=C.dtype,
+        has_cu_seqlens=cu_seqlens is not None)
     states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
                             for t in [states, final_states])
 
@@ -117,15 +127,23 @@ def _mamba_chunk_scan_combined_fwd(x,
 
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
-    out, out_x = _chunk_scan_fwd(CB,
-                                 x,
-                                 dt,
-                                 dA_cumsum,
-                                 C,
-                                 states,
-                                 D=D,
-                                 z=z,
-                                 seq_idx=seq_idx)
+    # - NOTE: in addition to the logic in _state_passing_fwd to handle
+    #  chunked prefill, we also need to modify _chunk_scan_fwd to
+    # - the updates to _state_passing_fwd only handles initial_state
+    #   if the sequences are synced to the chunk boundaries.
+    # - but in the case where there are offsets from the chunk boundaries
+    #   we need to further update _chunk_scan_fwd (not yet done).
+    out, out_x = _chunk_scan_fwd(
+        CB,
+        x,
+        dt,
+        dA_cumsum,
+        C,
+        states,
+        D=D,
+        z=z,
+        seq_idx=(None if cu_seqlens is not None and initial_states is not None
+                 else seq_idx))
     if cu_seqlens is None:
         return out, out_x, dt, dA_cumsum, states, final_states
     else:

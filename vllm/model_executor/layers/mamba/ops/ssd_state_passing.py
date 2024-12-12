@@ -58,6 +58,7 @@ def _state_passing_fwd_kernel(
     # Meta-parameters
     HAS_INITSTATES: tl.constexpr,
     HAS_SEQ_IDX: tl.constexpr,
+    HAS_CU_SEQLENS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid_b = tl.program_id(axis=1)
@@ -68,7 +69,10 @@ def _state_passing_fwd_kernel(
     out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
     final_states_ptr += pid_b * stride_final_states_batch + pid_h * stride_final_states_head
     if HAS_INITSTATES:
-        initstates_ptr += pid_b * stride_initstates_batch + pid_h * stride_initstates_head
+        initstates_ptr += pid_h * stride_initstates_head
+        if not HAS_CU_SEQLENS:
+            initstates_ptr += pid_b * stride_initstates_batch
+
     if HAS_SEQ_IDX:
         seq_idx_ptr += pid_b * stride_seq_idx_batch
 
@@ -95,7 +99,25 @@ def _state_passing_fwd_kernel(
             seq_idx_new = tl.load(seq_idx_ptr +
                                   (min((c + 1) * chunk_size, seqlen) - 1) *
                                   stride_seq_idx_seqlen)
-            scale = tl.where(seq_idx_new == seq_idx, scale, 0.0)
+            if HAS_INITSTATES:
+                if HAS_CU_SEQLENS and seq_idx != seq_idx_new:
+                    # need to load the initial state for this new sequence
+                    # - override the scanned state
+                    initstates_ptrs += seq_idx_new * stride_initstates_batch
+
+                    states = tl.load(initstates_ptrs,
+                                     mask=offs_m < dim,
+                                     other=0.0).to(tl.float32)
+
+                    # in the previous scan iteration, the wrong state was
+                    # written to the output buffer
+                    # - so we also override it
+                    tl.store(out_ptrs - stride_out_chunk,
+                             states,
+                             mask=offs_m < dim)
+            else:
+                scale = tl.where(seq_idx_new == seq_idx, scale, 0.0)
+
             seq_idx = seq_idx_new
         states = scale * states + new_states
         if c < nchunks - 1:
@@ -107,16 +129,30 @@ def _state_passing_fwd_kernel(
         out_ptrs += stride_out_chunk
 
 
-def _state_passing_fwd(states,
-                       dA_chunk_cumsum,
-                       initial_states=None,
-                       seq_idx=None,
-                       chunk_size=None,
-                       out_dtype=None):
+def _state_passing_fwd(
+    states,
+    dA_chunk_cumsum,
+    initial_states=None,
+    seq_idx=None,
+    chunk_size=None,
+    out_dtype=None,
+    has_cu_seqlens=False,
+):
     batch, nchunks, nheads, dim = states.shape
     assert dA_chunk_cumsum.shape == (batch, nheads, nchunks)
     if initial_states is not None:
-        assert initial_states.shape == (batch, nheads, dim)
+        if has_cu_seqlens:
+            # - if cu_seqlens is provided, then the initial states
+            #   are used for continuous batching. In which case we
+            #   require seq_idx to be provided
+            assert seq_idx is not None, ""
+            assert initial_states.shape == (seq_idx.max().item() + 1, nheads,
+                                            dim)
+        else:
+            # - this is the regular batching case, where initial
+            #   states are used are for each example of the batch.
+            assert initial_states.shape == (batch, nheads, dim)
+
     if seq_idx is not None:
         assert chunk_size is not None
         seqlen = seq_idx.shape[-1]
@@ -162,5 +198,6 @@ def _state_passing_fwd(states,
                seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
             HAS_INITSTATES=initial_states is not None,
             HAS_SEQ_IDX=seq_idx is not None,
+            HAS_CU_SEQLENS=has_cu_seqlens,
         )
     return out, final_states
