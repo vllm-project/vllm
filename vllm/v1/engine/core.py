@@ -4,6 +4,7 @@ import queue
 import signal
 import threading
 import time
+from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from typing import List, Tuple, Type, Union
 
@@ -129,6 +130,14 @@ class EngineCore:
         self.model_executor.profile(is_start)
 
 
+@dataclass
+class EngineCoreProcHandle:
+    proc: BaseProcess
+    ready_path: str
+    input_path: str
+    output_path: str
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -200,7 +209,7 @@ class EngineCoreProc(EngineCore):
         input_path: str,
         output_path: str,
         ready_path: str,
-    ) -> BaseProcess:
+    ) -> EngineCoreProcHandle:
         # The current process might have CUDA context,
         # so we need to spawn a new process.
         # NOTE(rob): this is a problem for using EngineCoreProc w/
@@ -222,7 +231,10 @@ class EngineCoreProc(EngineCore):
 
         # Wait for startup
         EngineCoreProc.wait_for_startup(proc, ready_path)
-        return proc
+        return EngineCoreProcHandle(proc=proc,
+                                    ready_path=ready_path,
+                                    input_path=input_path,
+                                    output_path=output_path)
 
     @staticmethod
     def run_engine_core(*args, **kwargs):

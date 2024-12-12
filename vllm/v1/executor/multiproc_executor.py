@@ -172,16 +172,23 @@ class MultiprocExecutor:
 
         # Send SIGTERM if still running
         active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
-        self.workers = None
         for p in active_procs:
             p.terminate()
-        if wait_for_termination(active_procs, 4):
-            return
+        if not wait_for_termination(active_procs, 4):
+            # Send SIGKILL if still running
+            active_procs = [p for p in active_procs if p.is_alive()]
+            for p in active_procs:
+                p.kill()
 
-        # Send SIGKILL if still running
-        active_procs = [p for p in active_procs if p.is_alive()]
-        for p in active_procs:
-            p.kill()
+        self._cleanup_sockets()
+        self.workers = None
+
+    def _cleanup_sockets(self):
+        for w in self.workers:
+            # Remove the zmq ipc socket file
+            socket_path = w.ready_path.replace("ipc://", "")
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""

@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import importlib
 import inspect
 import multiprocessing
@@ -195,6 +196,14 @@ async def build_async_engine_client_from_engine_args(
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
         logger.info("Started engine process with PID %d", engine_pid)
+
+        def _cleanup_ipc_path():
+            socket_path = ipc_path.replace("ipc://", "")
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
+
+        # Ensure we clean up the local IPC socket file on exit.
+        atexit.register(_cleanup_ipc_path)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
         engine_config = engine_args.create_engine_config()
