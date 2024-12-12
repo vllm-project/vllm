@@ -9,6 +9,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               UnloadLoraAdapterRequest)
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.lora.request import LoRARequest
 
 MODEL_NAME = "meta-llama/Llama-2-7b"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
@@ -31,6 +32,16 @@ async def _async_serving_engine_init():
                                    prompt_adapters=None,
                                    request_logger=None)
     return serving_engine
+
+
+@pytest.mark.asyncio
+async def test_serving_model_name():
+    serving_engine = await _async_serving_engine_init()
+    assert serving_engine._get_model_name(None) == MODEL_NAME
+    request = LoRARequest(lora_name="adapter",
+                          lora_path="/path/to/adapter2",
+                          lora_int_id=1)
+    assert serving_engine._get_model_name(request) == request.lora_name
 
 
 @pytest.mark.asyncio

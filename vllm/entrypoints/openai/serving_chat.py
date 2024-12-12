@@ -123,6 +123,8 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
+            model_name = self._get_model_name(lora_request)
+
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             tool_parser = self.tool_parser
@@ -238,13 +240,13 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation, tokenizer,
-                request_metadata)
+                request, result_generator, request_id, model_name,
+                conversation, tokenizer, request_metadata)
 
         try:
             return await self.chat_completion_full_generator(
-                request, result_generator, request_id, conversation, tokenizer,
-                request_metadata)
+                request, result_generator, request_id, model_name,
+                conversation, tokenizer, request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -259,11 +261,11 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
+        model_name: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
-        model_name = self.base_model_paths[0].name
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -604,12 +606,12 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
+        model_name: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
-        model_name = self.base_model_paths[0].name
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 
