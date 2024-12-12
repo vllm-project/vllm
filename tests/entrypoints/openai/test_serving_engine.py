@@ -38,9 +38,9 @@ async def _async_serving_engine_init():
 async def test_serving_model_name():
     serving_engine = await _async_serving_engine_init()
     assert serving_engine._get_model_name(None) == MODEL_NAME
-    request = LoRARequest(
-        lora_name="adapter", lora_path="/path/to/adapter2", lora_int_id=1
-    )
+    request = LoRARequest(lora_name="adapter",
+                          lora_path="/path/to/adapter2",
+                          lora_int_id=1)
     assert serving_engine._get_model_name(request) == request.lora_name
 
 
