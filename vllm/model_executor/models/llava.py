@@ -218,12 +218,8 @@ class LlavaProcessor(BaseMultiModalProcessor):
         image_processor = hf_processor.image_processor  # type: ignore
         hf_inputs = image_processor.preprocess(data['image'],
                                                return_tensors="pt")
-        is_pixtral = isinstance(hf_processor, PixtralProcessor)
 
-        return MultiModalKwargs(
-            **hf_inputs,
-            is_pixtral=torch.tensor(is_pixtral),
-        )
+        return MultiModalKwargs(**hf_inputs)
 
 
 class LlavaLikeConfig(Protocol):
