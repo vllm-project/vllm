@@ -3,12 +3,10 @@ import copy
 import dataclasses
 import itertools
 import multiprocessing as mp
-import os
 import pickle as pkl
 import time
 import traceback
 from multiprocessing import Process, Queue
-from pathlib import Path
 from queue import Empty
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -539,17 +537,17 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
     }
 
     # Prepare configs for all kernels
-    standard_kernels = [
-        {'kernel_type': 'pytorch_mm'},
-        {'kernel_type': 'pytorch_scaled_mm'},
-        {'kernel_type': 'pytorch_scaled_mm_fast'},
-        {
-            'kernel_type': 'cutlass_scaled_mm'
-        },
-        {
-            'kernel_type': 'cutlass_scaled_sparse_mm'
-        }
-    ]
+    standard_kernels = [{
+        'kernel_type': 'pytorch_mm'
+    }, {
+        'kernel_type': 'pytorch_scaled_mm'
+    }, {
+        'kernel_type': 'pytorch_scaled_mm_fast'
+    }, {
+        'kernel_type': 'cutlass_scaled_mm'
+    }, {
+        'kernel_type': 'cutlass_scaled_sparse_mm'
+    }]
 
     # Create configs for standard kernels
     all_configs = [{**base_config, **kernel} for kernel in standard_kernels]

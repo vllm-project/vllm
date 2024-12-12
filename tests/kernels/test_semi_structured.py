@@ -9,7 +9,6 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
-
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
@@ -129,4 +128,3 @@ def test_cutlass_sparse_subset():
                                   out_dtype=torch.bfloat16)
 
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
-
