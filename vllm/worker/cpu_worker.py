@@ -163,7 +163,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
         ModelRunnerClass: Type[CPUModelRunnerBase] = CPUModelRunner
-        if self.model_config.task == "embedding":
+        if self.model_config.runner_type == "pooling":
             ModelRunnerClass = CPUPoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
@@ -178,7 +178,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CPUCacheEngine]
-        # Initialize cpu_cache as embedding models don't initialize kv_caches
+        # Initialize cpu_cache as pooling models don't initialize kv_caches
         self.cpu_cache: Optional[List[List[torch.Tensor]]] = None
 
         # Torch profiler. Enabled and configured through env vars:
