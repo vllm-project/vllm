@@ -28,6 +28,7 @@ def make_request() -> EngineCoreRequest:
         prompt=PROMPT,
         prompt_token_ids=PROMPT_TOKENS,
         mm_inputs=None,
+        mm_hashes=None,
         mm_placeholders=None,
         sampling_params=SamplingParams(),
         eos_token_id=None,

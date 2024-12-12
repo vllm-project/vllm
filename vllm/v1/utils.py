@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from contextlib import contextmanager
 from typing import Any, Generic, Iterator, List, TypeVar, overload
 
@@ -93,3 +94,23 @@ def make_zmq_socket(path: str, type: Any) -> Iterator[zmq.Socket]:
 
     finally:
         ctx.destroy(linger=0)
+
+
+class LRUDictCache:
+
+    def __init__(self, size: int):
+        self.cache = OrderedDict()
+        self.size = size
+
+    def get(self, key, default=None):
+        if key not in self.cache:
+            return default
+
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+    def put(self, key, value):
+        self.cache[key] = value
+        self.cache.move_to_end(key)
+        if len(self.cache) > self.size:
+            self.cache.popitem(last=False)
