@@ -68,6 +68,10 @@ class PoolingOutput:
     def __repr__(self) -> str:
         return (f"PoolingOutput(data={self.data})")
 
+    def __eq__(self, other: object) -> bool:
+        return (isinstance(other, self.__class__) and bool(
+            (self.data == other.data).all()))
+
     @property
     def embedding(self) -> list[float]:
         msg = ("LLM.encode() now returns raw outputs. "

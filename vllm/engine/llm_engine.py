@@ -1783,8 +1783,8 @@ class LLMEngine:
                                num_prompt_tokens_iter)
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
-        if model_output and (model_output[0].spec_decode_worker_metrics
-                             is not None):
+        if model_output and isinstance(model_output[0], SamplerOutput) and (
+                model_output[0].spec_decode_worker_metrics is not None):
             spec_decode_metrics = model_output[0].spec_decode_worker_metrics
         else:
             spec_decode_metrics = None
