@@ -191,6 +191,7 @@ class MultiprocExecutor(Executor):
         self.workers = None
 
     def _cleanup_sockets(self):
+        assert self.workers is not None
         for w in self.workers:
             # Remove the zmq ipc socket file
             socket_path = w.ready_path.replace("ipc://", "")
