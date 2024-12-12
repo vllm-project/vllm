@@ -52,7 +52,7 @@ class Block(ABC):
 
     @property
     @abstractmethod
-    def contextual_hash(self):
+    def extra_hash(self):
         return None
 
     @property
@@ -87,7 +87,7 @@ class Block(ABC):
             allocator: "BlockAllocator",
             block_id: Optional[int] = None,
             computed: bool = False,
-            contextual_hash: Optional[int] = 0,
+            extra_hash: Optional[int] = 0,
         ) -> "Block":
             pass
 
@@ -107,20 +107,20 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def allocate_mutable_block(self, prev_block: Optional[Block],
-                               contextual_hash: Optional[int]) -> Block:
+                               extra_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 contextual_hash: Optional[int]) -> Block:
+                                 extra_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_blocks(
             self, prev_block: Optional[Block],
             block_token_ids: List[List[int]],
-            contextual_hash: Optional[int]) -> List[Block]:
+            extra_hash: Optional[int]) -> List[Block]:
         pass
 
     @abstractmethod
@@ -210,13 +210,13 @@ class DeviceAwareBlockAllocator(ABC):
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
                                device: Device,
-                               contextual_hash: Optional[int] = 0) -> Block:
+                               extra_hash: Optional[int] = 0) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
                                  token_ids: List[int], device: Device,
-                                 contextual_hash: Optional[int]) -> Block:
+                                 extra_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
@@ -225,7 +225,7 @@ class DeviceAwareBlockAllocator(ABC):
         prev_block: Optional[Block],
         block_token_ids: List[List[int]],
         device: Device,
-        contextual_hash: Optional[int],
+        extra_hash: Optional[int],
     ) -> List[Block]:
         pass
 

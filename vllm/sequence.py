@@ -527,10 +527,10 @@ class Sequence:
         hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
         return hash((hashed_tokens, self.lora_int_id))
 
-    def contextual_hash_of_block(self) -> int:
-        # This function computes a contextual hash for a block, specifically
-        # designed for prefix caching mode. The final block hash is determined
-        # by applying token_ids in PrefixCachingBlock.
+    def extra_hash(self) -> int:
+        # This function computes an extra hash for a sequence, specifically
+        # designed for prefix caching mode. The final sequence hash is determined
+        # by applying token_ids from the sequence's blocks.
 
         # NOTE: If there are additional factors influencing the block aside from
         # token_ids, include them as input parameters to the hash.

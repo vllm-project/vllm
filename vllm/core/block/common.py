@@ -178,7 +178,7 @@ class BlockPool:
                                    block_size=self._block_size,
                                    allocator=self._allocator,
                                    block_id=None,
-                                   contextual_hash=0))
+                                   extra_hash=0))
 
     def increase_pool(self):
         """Doubles the internal pool size
@@ -196,14 +196,14 @@ class BlockPool:
                                    block_size=self._block_size,
                                    allocator=self._allocator,
                                    block_id=None,
-                                   contextual_hash=0))
+                                   extra_hash=0))
 
     def init_block(self,
                    prev_block: Optional[Block],
                    token_ids: List[int],
                    block_size: int,
                    physical_block_id: Optional[int],
-                   contextual_hash: Optional[int] = 0) -> Block:
+                   extra_hash: Optional[int] = 0) -> Block:
         if len(self._free_ids) == 0:
             self.increase_pool()
             assert len(self._free_ids) > 0
@@ -217,7 +217,7 @@ class BlockPool:
             block_size=block_size,
             allocator=block._allocator,  # type: ignore[attr-defined] 
             block_id=physical_block_id,
-            contextual_hash=contextual_hash)
+            extra_hash=extra_hash)
         block.pool_id = pool_id  # type: ignore[attr-defined]
         return block
 

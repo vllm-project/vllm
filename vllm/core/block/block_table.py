@@ -81,7 +81,7 @@ class BlockTable:
     def allocate(self,
                  token_ids: List[int],
                  device: Device = Device.GPU,
-                 contextual_hash: Optional[int] = 0) -> None:
+                 extra_hash: Optional[int] = 0) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -91,7 +91,7 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
-            contextual_hash (Optional[int]): The hash value of additional
+            extra_hash (Optional[int]): The hash value of additional
                 factors, such as adapters, that influence the block hash
                 in the prefixcaching block.
         """
@@ -101,7 +101,7 @@ class BlockTable:
             prev_block=None,
             token_ids=token_ids,
             device=device,
-            contextual_hash=contextual_hash)
+            extra_hash=extra_hash)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
@@ -115,7 +115,7 @@ class BlockTable:
                          token_ids: List[int],
                          num_lookahead_slots: int = 0,
                          num_computed_slots: Optional[int] = None,
-                         contextual_hash: Optional[int] = 0) -> None:
+                         extra_hash: Optional[int] = 0) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -137,7 +137,7 @@ class BlockTable:
                 Without sliding window, None can be passed.
                 Without chunked prefill, it should be the same as
                 _num_full_slots.
-            contextual_hash (Optional[int]): The hash value of additional
+            extra_hash (Optional[int]): The hash value of additional
                 factors such as adapters that influence the block, apart
                 from the token_ids.
         """
@@ -160,7 +160,7 @@ class BlockTable:
         # lookahead slots
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots,
-                                    contextual_hash=contextual_hash)
+                                    extra_hash=extra_hash)
 
         # Update the blocks with the new tokens
         first_block_idx = self._num_full_slots // self._block_size
@@ -173,7 +173,7 @@ class BlockTable:
 
     def ensure_num_empty_slots(self,
                                num_empty_slots: int,
-                               contextual_hash: Optional[int] = None) -> None:
+                               extra_hash: Optional[int] = None) -> None:
         """Ensures that the BlockTable has at least the specified number of
         empty slots available.
 
@@ -184,7 +184,7 @@ class BlockTable:
 
         Args:
             num_empty_slots (int): The minimum number of empty slots required.
-            contextual_hash (Optional[int]): The hash value of additional
+            extra_hash (Optional[int]): The hash value of additional
                 factors such as adapters that influence the block, apart
                 from the token_ids.
         """
@@ -205,7 +205,7 @@ class BlockTable:
                 self._allocator.allocate_mutable_block(
                     prev_block=self._blocks[-1],
                     device=device,
-                    contextual_hash=contextual_hash))
+                    extra_hash=extra_hash))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
@@ -279,7 +279,7 @@ class BlockTable:
 
     def _allocate_blocks_for_token_ids(
             self, prev_block: Optional[Block], token_ids: List[int],
-            device: Device, contextual_hash: Optional[int]) -> List[Block]:
+            device: Device, extra_hash: Optional[int]) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -296,7 +296,7 @@ class BlockTable:
                     prev_block,
                     block_token_ids=block_token_ids,
                     device=device,
-                    contextual_hash=contextual_hash))
+                    extra_hash=extra_hash))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -306,7 +306,7 @@ class BlockTable:
             block = self._allocator.allocate_mutable_block(
                 prev_block=prev_block,
                 device=device,
-                contextual_hash=contextual_hash)
+                extra_hash=extra_hash)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)
