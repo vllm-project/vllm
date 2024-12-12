@@ -10,11 +10,11 @@ This documentation shows some reference performance numbers and the steps to rep
 
 It includes:
 
-   -  ROCm™ 6.2.2
+   -  ROCm™ 6.3
 
    - vLLM 0.6.3
 
-   - PyTorch 2.5dev (nightly)
+   - PyTorch 2.6dev (nightly)
 
 ## System configuration
 
@@ -23,7 +23,7 @@ The performance data below was measured on a server with MI300X accelerators wit
 | System  | MI300X with 8 GPUs  |
 |---|---|
 | BKC | 24.13 |
-| ROCm | version ROCm 6.2.2 |
+| ROCm | version ROCm 6.3 |
 | amdgpu | build 2009461 |
 | OS | Ubuntu 22.04 |
 | Linux Kernel | 5.15.0-117-generic |
@@ -45,9 +45,8 @@ You can pull the image with `docker pull rocm/vllm-dev:main`
 
 ### What is New
 
-   - MoE optimizations for Mixtral 8x22B, FP16
-   - Llama 3.2 stability improvements
-   - Llama 3.3 support
+   - ROCm 6.3 support
+   - Potential bug with Tunable Ops not saving due to a PyTorch issue
       
      
 Gemms are tuned using PyTorch's Tunable Ops  feature (https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/cuda/tunable/README.md)
