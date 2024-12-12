@@ -34,6 +34,7 @@ class CPUPoolingModelRunner(
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> Optional[Union[List[PoolerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(

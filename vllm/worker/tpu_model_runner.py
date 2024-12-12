@@ -587,6 +587,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         kv_caches: Optional[List[Any]],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
         if not model_input.is_first_multi_step:

@@ -512,6 +512,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         previous_hidden_states: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(

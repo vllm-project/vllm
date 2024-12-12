@@ -1617,6 +1617,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         num_steps: int = 1,
         cache_engine: Optional["CacheEngine"] = None,
         worker_input: Optional["WorkerInput"] = None,
+        **kwargs: Any,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")

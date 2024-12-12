@@ -327,6 +327,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[Tuple["ov.Tensor", "ov.Tensor"]],
+        **kwargs: Any,
     ) -> Optional[SamplerOutput]:
         (
             input_tokens,

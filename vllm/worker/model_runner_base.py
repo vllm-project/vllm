@@ -272,6 +272,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         kv_caches: Optional[List[torch.Tensor]],
         intermediate_tensors: Optional[IntermediateTensors],
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> Optional[List[SamplerOutput]]:
         """
         Execute the model on the given input.

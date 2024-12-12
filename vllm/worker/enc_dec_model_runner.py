@@ -154,6 +154,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> Optional[List[PoolerOutput]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in "
