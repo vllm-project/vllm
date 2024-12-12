@@ -16,7 +16,7 @@
 #include "cutlass/numeric_conversion.h"
 #include "cutlass/detail/dependent_false.hpp"
 
-#include "epilogue/broadcast_load_epilogue_c3x.hpp"
+#include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
 #include "common.hpp"
 
 #include "cutlass/transform/device/transform_universal_adapter.hpp"
