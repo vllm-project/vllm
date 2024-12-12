@@ -1762,12 +1762,11 @@ def memory_profiling(
     post_profile_snapshot.measure()
 
     torch_peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-    result.memory_spike_bytes = \
-        torch_peak - \
-        post_profile_snapshot.torch_memory_in_bytes
-    result.baseline_memory_bytes = \
-        post_profile_snapshot.cuda_memory_in_bytes - \
-        pre_profile_snapshot.cuda_memory_in_bytes
+    result.memory_spike_bytes = (torch_peak -
+                                 post_profile_snapshot.torch_memory_in_bytes)
+    result.baseline_memory_bytes = (post_profile_snapshot -
+                                    pre_profile_snapshot).cuda_memory_in_bytes
+
     result.profile_time = post_profile_snapshot.timestamp - profile_start_time
 
     assert result.baseline_memory_bytes >= 0, (
