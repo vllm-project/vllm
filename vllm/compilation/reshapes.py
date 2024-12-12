@@ -3,14 +3,14 @@ from typing import Union
 import torch.fx
 from torch import SymInt
 
-from vllm.compilation.fusion import is_func
-from vllm.compilation.inductor_pass import InductorPass
 from vllm.logger import init_logger
+
+from .vllm_inductor_pass import VllmInductorPass, is_func
 
 logger = init_logger(__name__)
 
 
-class RedundantReshapesPass(InductorPass):
+class RedundantReshapesPass(VllmInductorPass):
     """
     This is an inductor pass that removes redundant reshape operations.
     It is required for RMSNorm-quant fusion to work properly.
@@ -31,6 +31,7 @@ class RedundantReshapesPass(InductorPass):
     """
 
     def __call__(self, graph: torch.fx.Graph):
+        self.begin()
         self.dump_graph(graph, "before_reshapes")
         count = 0
         # Remove no-op reshapes/views:
@@ -56,6 +57,7 @@ class RedundantReshapesPass(InductorPass):
         logger.debug("Removed %s no-op reshapes", count)
 
         self.dump_graph(graph, "after_reshapes")
+        self.end_and_log()
 
     def dims_equivalent(self, dim: Union[int, torch.fx.Node],
                         i_dim: Union[int, SymInt]) -> bool:

@@ -412,6 +412,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return ""
             if model_type == "idefics3":
                 return "<image>"
+            if model_type == "aria":
+                return "<|fim_prefix|><|img|><|fim_suffix|>"
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":

@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -16,6 +16,9 @@ logger = init_logger(__name__)
 
 class XPUPlatform(Platform):
     _enum = PlatformEnum.XPU
+    device_name: str = "xpu"
+    device_type: str = "xpu"
+    dispatch_key: str = "XPU"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -38,6 +41,10 @@ class XPUPlatform(Platform):
         device_props = torch.xpu.get_device_properties(device_id)
         return device_props.total_memory
 
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return True
+
     @staticmethod
     def inference_mode():
         return torch.no_grad()
@@ -56,6 +63,10 @@ class XPUPlatform(Platform):
                 "mode.")
             model_config.enforce_eager = True
 
+        if vllm_config.speculative_config is not None:
+            raise NotImplementedError(
+                "XPU does not support speculative decoding")
+
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         if (parallel_config.distributed_executor_backend is not None
@@ -65,3 +76,5 @@ class XPUPlatform(Platform):
                 " executor backend.",
                 parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "ray"
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"

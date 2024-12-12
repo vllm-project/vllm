@@ -117,6 +117,7 @@ class Phi3SmallSelfAttention(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -214,15 +215,14 @@ class Phi3SmallSelfAttention(nn.Module):
                 "homo_head": self.homo_heads
             }
 
-        self.attn = Attention(
-            self.num_heads_per_partition,
-            self.head_dim,
-            self.scale,
-            num_kv_heads=self.num_kv_heads_per_partion,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            blocksparse_params=bs_params,
-        )
+        self.attn = Attention(self.num_heads_per_partition,
+                              self.head_dim,
+                              self.scale,
+                              num_kv_heads=self.num_kv_heads_per_partion,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              blocksparse_params=bs_params,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -259,13 +259,15 @@ class Phi3SmallDecoderLayer(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Phi3SmallSelfAttention(config,
                                                 layer_idx,
                                                 cache_config=cache_config,
-                                                quant_config=quant_config)
+                                                quant_config=quant_config,
+                                                prefix=f"{prefix}.self_attn")
         self.mlp = Phi3SmallMLP(config, quant_config)
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
@@ -315,7 +317,9 @@ class Phi3SmallModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Phi3SmallDecoderLayer(config,
                                                  int(prefix.split('.')[-1]),
-                                                 cache_config, quant_config),
+                                                 cache_config,
+                                                 quant_config,
+                                                 prefix=prefix),
             prefix=f"{prefix}.layers")
 
         self.final_layernorm = nn.LayerNorm(config.hidden_size,

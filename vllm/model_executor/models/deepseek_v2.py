@@ -268,7 +268,8 @@ class DeepseekV2Attention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_local_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
