@@ -2347,10 +2347,7 @@ class CompilationConfig(BaseModel):
     cache_dir: str = ""
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
-    splitting_ops: List[str] = Field(default_factory=lambda: [
-        "vllm.unified_attention",
-        "vllm.unified_attention_with_output",
-    ])
+    splitting_ops: List[str] = Field(default=None)  # type: ignore
 
     use_inductor: bool = True
     candidate_compile_sizes: Optional[List[int]] = Field(default=None)
@@ -2431,6 +2428,19 @@ class CompilationConfig(BaseModel):
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+
+        if self.splitting_ops is None:
+            if envs.VLLM_USE_V1:
+                # v1 must split the graph on attention ops
+                # for piecewise cudagraph
+                self.splitting_ops = [
+                    "vllm.unified_attention",
+                    "vllm.unified_attention_with_output",
+                ]
+            else:
+                # v0 can use full graph compilation without splitting,
+                # splitting is optional.
+                self.splitting_ops = []
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
