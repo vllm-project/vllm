@@ -20,8 +20,6 @@ MODELS = ["ibm-fms/Bamba-9.8b-1.8T-hf"]
 # choke on the model_kwarg 'attention_mask' if hf_model.generate_greedy is used.
 def generate_greedy(model_name, example_prompts, max_tokens):
     # Create a text generation pipeline
-    # - in the original test_mamba.py they do not put the model to cuda 
-    #   maybe this affects the test.
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
