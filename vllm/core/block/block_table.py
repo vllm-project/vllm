@@ -81,7 +81,7 @@ class BlockTable:
     def allocate(self,
                  token_ids: List[int],
                  device: Device = Device.GPU,
-                 extra_hash: Optional[int] = 0) -> None:
+                 extra_hash: Optional[int] = None) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -115,7 +115,7 @@ class BlockTable:
                          token_ids: List[int],
                          num_lookahead_slots: int = 0,
                          num_computed_slots: Optional[int] = None,
-                         extra_hash: Optional[int] = 0) -> None:
+                         extra_hash: Optional[int] = None) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -279,7 +279,7 @@ class BlockTable:
 
     def _allocate_blocks_for_token_ids(
             self, prev_block: Optional[Block], token_ids: List[int],
-            device: Device, extra_hash: Optional[int]) -> List[Block]:
+            device: Device, extra_hash: Optional[int] = None) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []

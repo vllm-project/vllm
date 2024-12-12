@@ -126,7 +126,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
         computed: bool = False,
-        extra_hash: Optional[int] = 0,
+        extra_hash: Optional[int] = None,
     ) -> Block:
         # Bind block to self.
         allocator = self
@@ -144,7 +144,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 extra_hash: Optional[int] = 0,
+                                 extra_hash: Optional[int] = None,
                                  device: Optional[Device] = None) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
@@ -186,7 +186,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self,
             prev_block: Optional[Block],
             block_token_ids: List[List[int]],
-            extra_hash: Optional[int] = 0,
+            extra_hash: Optional[int] = None,
             device: Optional[Device] = None) -> List[Block]:
         blocks = []
         for token_ids in block_token_ids:
@@ -200,7 +200,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               extra_hash: Optional[int] = 0,
+                               extra_hash: Optional[int] = None,
                                device: Optional[Device] = None) -> Block:
         """Allocates a mutable block. If there are no free blocks, this will
         evict unused cached blocks.
@@ -705,7 +705,7 @@ class PrefixCachingBlock(Block):
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
         computed: bool = False,
-        extra_hash: Optional[int] = 0,
+        extra_hash: Optional[int] = None,
     ):
         assert isinstance(allocator, PrefixCachingBlockAllocator), (
             "Currently this class is only tested with "

@@ -63,7 +63,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 extra_hash: Optional[int] = 0,
+                                 extra_hash: Optional[int] = None,
                                  device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
@@ -86,7 +86,7 @@ class NaiveBlockAllocator(BlockAllocator):
             self,
             prev_block: Optional[Block],
             block_token_ids: List[List[int]],
-            extra_hash: Optional[int] = 0,
+            extra_hash: Optional[int] = None,
             device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
@@ -108,7 +108,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               extra_hash: Optional[int] = 0,
+                               extra_hash: Optional[int] = None,
                                device: Optional[Device] = None) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 

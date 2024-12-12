@@ -87,7 +87,7 @@ class Block(ABC):
             allocator: "BlockAllocator",
             block_id: Optional[int] = None,
             computed: bool = False,
-            extra_hash: Optional[int] = 0,
+            extra_hash: Optional[int] = None,
         ) -> "Block":
             pass
 
@@ -210,13 +210,13 @@ class DeviceAwareBlockAllocator(ABC):
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
                                device: Device,
-                               extra_hash: Optional[int] = 0) -> Block:
+                               extra_hash: Optional[int] = None) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
                                  token_ids: List[int], device: Device,
-                                 extra_hash: Optional[int]) -> Block:
+                                 extra_hash: Optional[int] = None) -> Block:
         pass
 
     @abstractmethod
@@ -225,7 +225,7 @@ class DeviceAwareBlockAllocator(ABC):
         prev_block: Optional[Block],
         block_token_ids: List[List[int]],
         device: Device,
-        extra_hash: Optional[int],
+        extra_hash: Optional[int] = None,
     ) -> List[Block]:
         pass
 
