@@ -3,6 +3,7 @@
 #include "quantization/vectorization.cuh"
 
 #include <cmath>
+#include <c10/core/ScalarType.h>
 
 #ifndef USE_ROCM
   #include <c10/util/Float8_e4m3fn.h>
@@ -17,6 +18,7 @@ using FP8_TYPE = c10::Float8_e4m3fnuz;
 // issue when running dynamic quantization. Here use 224.0f for rocm.
 constexpr auto FP8_E4M3_MAX = 224.0f;
 #endif
+constexpr static auto kFp8Type = c10::CppTypeToScalarType<FP8_TYPE>::value;
 
 namespace vllm {
 

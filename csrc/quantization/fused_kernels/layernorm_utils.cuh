@@ -20,7 +20,7 @@ template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int32_t const hidden_size, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
-  int64_t const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   // sum of squares
   float ss = 0.0f;
 
@@ -53,7 +53,8 @@ __device__ void compute_dynamic_per_token_scales(
     float const rms, float const* __restrict__ scale_ub,
     float const min_scaling_factor, int32_t const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
-  int64_t const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+  ;
   constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
 
   float block_absmax_val_maybe = 0.0f;
@@ -99,7 +100,8 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                float const rms, float const scale,
                                int32_t const hidden_size,
                                scalar_t* __restrict__ residual = nullptr) {
-  int64_t const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+  ;
 
   for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
@@ -123,7 +125,7 @@ template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int32_t const hidden_size, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
-  int64_t const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
   // Vectorized input/output to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
@@ -184,7 +186,8 @@ __device__ void compute_dynamic_per_token_scales(
     float const rms, float const* __restrict__ scale_ub,
     float const min_scaling_factor, int32_t const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
-  int64_t const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+  ;
 
   // Vectorized input/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
@@ -263,7 +266,8 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                float const rms, float const scale,
                                int32_t const hidden_size,
                                scalar_t* __restrict__ residual = nullptr) {
-  int64_t const token_offset = blockIdx.x * hidden_size;
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+  ;
 
   // Vectorized input/output/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =

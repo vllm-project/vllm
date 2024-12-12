@@ -9,10 +9,15 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, torch.float8_e4m3fn]
-NUM_TOKENS = [1, 7, 83, 2048, 4096]  # Arbitrary values for testing
-HIDDEN_SIZES = [1, 3, 4, 16, 64, 2048, 5120,
-                5137]  # Arbitrary values for testing
-HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
+VEC_HIDDEN_SIZES = range(1024, 1030)
+# Avoid combinatorial explosion with full Cartesian product
+NUM_TOKENS_HIDDEN_SIZES = [
+    *[(1, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5120, 5137]],
+    *[(83, i) for i in [1, 1033, 2048, 5120]],
+    *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
+    *[(4096, i) for i in [1, 64, 5137]],
+]
+
 ADD_RESIDUAL = [False, True]
 SCALE_UBS = [True, False]
 SEEDS = [0]
@@ -100,8 +105,7 @@ def ops_impl(weight: torch.Tensor,
                                        scale_ub)
 
 
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("num_tokens, hidden_size", NUM_TOKENS_HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("scale_ub", SCALE_UBS)
 @pytest.mark.parametrize("dtype", DTYPES)
