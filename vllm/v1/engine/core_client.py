@@ -1,4 +1,5 @@
 import atexit
+import os
 from typing import List, Union
 
 import msgspec
@@ -148,7 +149,7 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
-        self.proc = EngineCoreProc.make_engine_core_process(
+        self.proc_handle = EngineCoreProc.make_engine_core_process(
             *args,
             input_path=input_path,
             output_path=output_path,
@@ -161,13 +162,24 @@ class MPClient(EngineCoreClient):
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
 
-        # Shutdown the process if needed.
-        if hasattr(self, "proc") and self.proc.is_alive():
-            self.proc.terminate()
-            self.proc.join(5)
+        if hasattr(self, "proc_handle"):
+            # Shutdown the process if needed.
+            if self.proc_handle.proc.is_alive():
+                self.proc_handle.proc.terminate()
+                self.proc_handle.proc.join(5)
 
-            if self.proc.is_alive():
-                kill_process_tree(self.proc.pid)
+                if self.proc_handle.proc.is_alive():
+                    kill_process_tree(self.proc_handle.proc.pid)
+
+            # Remove zmq ipc socket files
+            ipc_sockets = [
+                self.proc_handle.ready_path, self.proc_handle.output_path,
+                self.proc_handle.input_path
+            ]
+            for ipc_socket in ipc_sockets:
+                socket_file = ipc_socket.replace("ipc://", "")
+                if os.path.exists(socket_file):
+                    os.remove(socket_file)
 
     def __del__(self):
         self.shutdown()
