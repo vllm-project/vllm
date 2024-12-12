@@ -36,7 +36,7 @@ class EngineCoreRequest:
     prompt: Optional[str]
     prompt_token_ids: List[int]
     mm_inputs: Optional[List[Optional[MultiModalKwargs]]]
-    mm_hashes: Optional[List[Optional[str]]]
+    mm_hashes: Optional[List[str]]
     mm_placeholders: Optional[MultiModalPlaceholderDict]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]

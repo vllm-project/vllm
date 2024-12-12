@@ -130,7 +130,7 @@ class MMInputMapperServer:
     def process_inputs(
         self,
         mm_inputs: List[Optional[MultiModalKwargs]],
-        mm_hashes: List[Optional[str]],
+        mm_hashes: List[str],
     ) -> List[MultiModalKwargs]:
         assert len(mm_inputs) == len(mm_hashes)
 
