@@ -2515,9 +2515,6 @@ class VllmConfig:
     instance_id: str = ""
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
-        """Returns the padded batch size given actual batch size,
-        considering the model's configuration.
-        """
         if batch_size > self.compilation_config.max_capture_size:
             return self.compilation_config.max_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
