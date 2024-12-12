@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -344,6 +345,13 @@ class MambaMixer2(CustomOp):
         #   * "context_lens_tensor" = [8, ...]
         has_prefill = attn_metadata.num_prefills > 0
 
+        # - also need flags to indicate if there are initial states
+        # - currently we really only support the FlashAttention backend
+        has_initial_states = None
+        if (isinstance(attn_metadata, FlashAttentionMetadata)
+                and attn_metadata.context_lens_tensor is not None):
+            has_initial_states = attn_metadata.context_lens_tensor > 0
+
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
         gate, hidden_states_B_C, dt = torch.split(
@@ -376,7 +384,7 @@ class MambaMixer2(CustomOp):
                 self.conv1d.bias,
                 activation=self.activation,
                 conv_states=mamba_cache_params.conv_state,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
+                has_initial_state=has_initial_states,
                 cache_indices=mamba_cache_params.state_indices_tensor,
                 query_start_loc=attn_metadata.query_start_loc).transpose(
                     0, 1)[:seq_len]
@@ -404,17 +412,14 @@ class MambaMixer2(CustomOp):
         if has_prefill:
 
             # FIXME: we are having problems using mamba_chunk_scan_combined
-            # with chunked prefill. This is because there is no
-            # initial_states requires initial_states.shape[0] to match
-            # the batch size, but cu_seqlens requires batch_size = 1.
-            # Therefore as of now, initial_states and cu_seqlens are
-            # mutually exclusive.
+            # with chunked prefill. This is because currently
+            # chunked_prefill only works if "attn_metadata.query_start_loc"
+            # is aligned with chunk_size. WIP
 
             initial_states = None
-            # if any(attn_metadata.context_lens_tensor > 0):
-            #     initial_states = mamba_cache_params.ssm_state[
-            #         mamba_cache_params.state_indices_tensor
-            #     ]
+            if has_initial_states is not None and any(has_initial_states):
+                initial_states = mamba_cache_params.ssm_state[
+                    mamba_cache_params.state_indices_tensor]
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
                 hidden_states.view(1, seq_len, self.num_heads // self.tp_size,
