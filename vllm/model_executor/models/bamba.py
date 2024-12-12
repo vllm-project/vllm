@@ -102,6 +102,7 @@ class BambaMixerDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
+        sequence_idx: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         if residual is None:
@@ -112,7 +113,7 @@ class BambaMixerDecoderLayer(nn.Module):
                 hidden_states, residual)
 
         hidden_states = self.mamba(hidden_states, attn_metadata,
-                                   mamba_cache_params)
+                                   mamba_cache_params, sequence_idx)
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
             hidden_states, residual)
@@ -316,17 +317,19 @@ class BambaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        # add additional attn_metadata for the mixer layers
+        # pass a sequence index tensor, that is required for
+        # proper continuous batching computation including
+        # chunked prefill
+        seq_idx = None
         if attn_metadata.num_prefills > 0:
-            sed_idx = torch.zeros_like(input_ids, dtype=torch.int32)
+            seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
             for i, (srt, end) in enumerate(
                     zip(
                         attn_metadata.query_start_loc,
                         attn_metadata.query_start_loc[1:],
                     )):
-                sed_idx[srt:end] = i
-
-            attn_metadata.seq_idx = sed_idx
+                seq_idx[srt:end] = i
+            seq_idx.unsqueeze_(0)
 
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -352,7 +355,9 @@ class BambaModel(nn.Module):
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
                 residual=residual,
-                mamba_cache_params=layer_mamba_cache_params)
+                mamba_cache_params=layer_mamba_cache_params,
+                sequence_idx=seq_idx,
+            )
         hidden_states, _ = self.final_layernorm(hidden_states, residual)
         return hidden_states
 
@@ -364,6 +369,7 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             "k_proj",
             "v_proj",
         ],
+        "gate_up_proj": ["up_proj", "down_proj"]
     }
 
     # LoRA specific attributes

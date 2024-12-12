@@ -191,7 +191,7 @@ class MambaMixer2(CustomOp):
         #   (n_groups / world_size, n_heads / world_size)
         #   also maintains the invariant n_heads % n_groups == 0
         # - HOWEVER IF, world_size DOES NOT divide groups, then we need
-        #   to allocate extra space in the shard, such that groups 
+        #   to allocate extra space in the shard, such that groups
         #   may be replicated to follow the head shard.
         self.tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -322,9 +322,13 @@ class MambaMixer2(CustomOp):
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
 
-    def forward_cuda(self, hidden_states: torch.Tensor,
-                     attn_metadata: AttentionMetadata,
-                     mamba_cache_params: MambaCacheParams):
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        mamba_cache_params: MambaCacheParams,
+        sequence_idx: Optional[torch.Tensor] = None,
+    ):
 
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
@@ -423,7 +427,7 @@ class MambaMixer2(CustomOp):
                 D=self.D,
                 z=None,
                 dt_bias=self.dt_bias,
-                seq_idx=attn_metadata.seq_idx.unsqueeze(0),
+                seq_idx=sequence_idx,
                 cu_seqlens=attn_metadata.query_start_loc,
                 initial_states=initial_states,
                 return_varlen_states=True,
