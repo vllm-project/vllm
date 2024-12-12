@@ -94,6 +94,8 @@ Documentation
    :caption: Models
 
    models/supported_models
+   models/generative_models
+   models/pooling_models
    models/adding_model
    models/enabling_multimodal_inputs
 
