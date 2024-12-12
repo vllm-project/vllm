@@ -85,7 +85,8 @@ class Mixer2RMSNormGated(CustomOp):
 
 
 def extra_groups_for_head_shards(ngroups: int, tp_size: int):
-    """Compute the extra (logical) groups to account for head shards"""
+    """Compute the increase in group numbers to account for 
+    replication in order to accompany the head shards."""
 
     # in the case ngoups % tp_size == 0, this will be zero
     if ngroups % tp_size == 0:
@@ -109,22 +110,29 @@ def mamba_v2_sharded_weight_loader(
 
         # - track boundary of (sharded) param, and loaded_weight, respectively
         boundary, loaded_boundary = 0, 0
-        for full_dim, extra, ratio in shard_spec:
-            # - full dim is the expected size of the model
-            # - if extra > 0, this means there was some expansion
 
-            # - num of dims expected to be loaded
+        # - iterate over the shard specs
+        for full_dim, extra, ratio in shard_spec:
+            # - full dim is the model dim (before TP).
+            # - extra > 0, means there is expected overall increase
+            #   of dimensions. This is so because of replication.
+            # - ratio is used map the tp_rank to the actual shard
+            #   rank. This is useful when there is replication of
+            #   groups to accompany head shards.
+
+            # - size of the loaded shard
             shard_size = full_dim // tp_size
 
-            # - compute where to take the loaded shard from
+            # - compute the rank into the loaded shard.
+            # - if there is replication, different TP shards will
+            #   take from the same rank.
             rank = tp_rank // ratio
 
-            # - should start from here (determined by rank)
-            # - take these number dims from loaded
+            # - leftmost boundary index into loaded weight.
             loaded_skip = rank * shard_size
             loaded_start_idx = loaded_boundary + loaded_skip
 
-            # - these many number dims to take from loaded_weight
+            # - take these many dims from the loaded weight.
             take = min(shard_size, full_dim - extra - loaded_skip)
 
             # - always shard on dim 0
@@ -136,7 +144,7 @@ def mamba_v2_sharded_weight_loader(
                            loaded_start_idx:(  # type: ignore[misc]
                                loaded_start_idx + take)]  # type: ignore[misc]
 
-            # move boundaries
+            # move indexing boundaries
             boundary += shard_size
             loaded_boundary += (full_dim - extra)
 
@@ -169,6 +177,7 @@ class MambaMixer2(CustomOp):
                  head_dim: int = 64,
                  rms_norm_eps: float = 1e-5,
                  activation="silu",
+                 chunk_size: int = 256,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
@@ -178,12 +187,12 @@ class MambaMixer2(CustomOp):
         #   we shard intermediate_size and n_groups
         # - since intermediate_size = n_heads * head_dim, sharding on
         #   intermediate_size is achieved by sharding on n_heads.
-        # - so if world_size divides groups, then sharding
+        # - IF, world_size divides groups, then sharding
         #   (n_groups / world_size, n_heads / world_size)
         #   also maintains the invariant n_heads % n_groups == 0
-        # - HOWEVER< if world_size DOES NOT divide groups, then we need
-        #   to allocate extra space in the shard, such that the WHOLE GROUP
-        #   must be placed together with the HEAD SHARD.
+        # - HOWEVER IF, world_size DOES NOT divide groups, then we need
+        #   to allocate extra space in the shard, such that groups 
+        #   may be replicated to follow the head shard.
         self.tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
@@ -191,7 +200,7 @@ class MambaMixer2(CustomOp):
         self.use_rms_norm = use_rms_norm
         self.activation = activation
 
-        self.chunk_size = 256
+        self.chunk_size = chunk_size
         self.intermediate_size = intermediate_size
         self.head_dim = head_dim
         self.num_heads = num_heads

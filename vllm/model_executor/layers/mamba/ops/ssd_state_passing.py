@@ -58,7 +58,7 @@ def _state_passing_fwd_kernel(
     # Meta-parameters
     HAS_INITSTATES: tl.constexpr,
     HAS_SEQ_IDX: tl.constexpr,
-    HAS_CU_SEQLENS: tl.constexpr,
+    IS_CONT_BATCHED: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid_b = tl.program_id(axis=1)
@@ -70,7 +70,7 @@ def _state_passing_fwd_kernel(
     final_states_ptr += pid_b * stride_final_states_batch + pid_h * stride_final_states_head
     if HAS_INITSTATES:
         initstates_ptr += pid_h * stride_initstates_head
-        if not HAS_CU_SEQLENS:
+        if not IS_CONT_BATCHED:
             initstates_ptr += pid_b * stride_initstates_batch
 
     if HAS_SEQ_IDX:
@@ -100,7 +100,7 @@ def _state_passing_fwd_kernel(
                                   (min((c + 1) * chunk_size, seqlen) - 1) *
                                   stride_seq_idx_seqlen)
             if HAS_INITSTATES:
-                if HAS_CU_SEQLENS and seq_idx != seq_idx_new:
+                if IS_CONT_BATCHED and seq_idx != seq_idx_new:
                     # need to load the initial state for this new sequence
                     # - override the scanned state
                     initstates_ptrs += seq_idx_new * stride_initstates_batch
@@ -136,12 +136,12 @@ def _state_passing_fwd(
     seq_idx=None,
     chunk_size=None,
     out_dtype=None,
-    has_cu_seqlens=False,
+    is_cont_batched=False,
 ):
     batch, nchunks, nheads, dim = states.shape
     assert dA_chunk_cumsum.shape == (batch, nheads, nchunks)
     if initial_states is not None:
-        if has_cu_seqlens:
+        if is_cont_batched:
             # - if cu_seqlens is provided, then the initial states
             #   are used for continuous batching. In which case we
             #   require seq_idx to be provided
@@ -198,6 +198,6 @@ def _state_passing_fwd(
                seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
             HAS_INITSTATES=initial_states is not None,
             HAS_SEQ_IDX=seq_idx is not None,
-            HAS_CU_SEQLENS=has_cu_seqlens,
+            IS_CONT_BATCHED=is_cont_batched,
         )
     return out, final_states

@@ -114,7 +114,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         seq_idx=seq_idx,
         chunk_size=chunk_size,
         out_dtype=C.dtype,
-        has_cu_seqlens=cu_seqlens is not None)
+        is_cont_batched=cu_seqlens is not None)
     states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
                             for t in [states, final_states])
 

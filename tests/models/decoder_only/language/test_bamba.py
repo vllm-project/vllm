@@ -1,9 +1,3 @@
-"""Compare the outputs of HF and vLLM when using greedy sampling for Mamba.
-
-This actually is really identical to test_mamba, so maybe we can reuse
-
-Run `pytest tests/models/decoder_only/language/test_bamba.py`.
-"""
 import pytest
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -38,6 +32,14 @@ def generate_greedy(model_name, example_prompts, max_tokens):
         outputs.append((generated_ids[0].tolist(), generated_text))
 
     return outputs
+
+
+"""Compare the outputs of HF and vLLM when using greedy sampling for Mamba.
+
+This actually is really identical to test_mamba, so maybe we can reuse
+
+Run `pytest tests/models/decoder_only/language/test_bamba.py`.
+"""
 
 
 @pytest.mark.parametrize("model", MODELS)
