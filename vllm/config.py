@@ -2355,8 +2355,10 @@ class CompilationConfig(BaseModel):
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
-    # optimization: Dict[int, int] can be optimized to List[int]
-    # if we know all keys are in a range [0, max_capture_size]
+    # optimization:
+    # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
+    # since we know all keys are in a range [0, max_capture_size],
+    # we can optimize it to List[int] for better lookup performance.
     bs_to_padded_graph_size: List[int] = PrivateAttr
 
     # keep track of enabled and disabled custom ops
