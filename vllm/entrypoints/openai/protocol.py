@@ -299,7 +299,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."))
-    logits_processors: Optional[List[Union[str, LogitsProcessorConstructor]]] = Field(
+    logits_processors: Optional[
+        List[Union[str, LogitsProcessorConstructor]]
+    ] = Field(
         default=None,
         description=(
             "A list of either qualified names of logits processors, or "
@@ -630,7 +632,9 @@ class CompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
-    logits_processors: Optional[List[Union[str, LogitsProcessorConstructor]]] = Field(
+    logits_processors: Optional[
+        List[Union[str, LogitsProcessorConstructor]]
+    ] = Field(
         default=None,
         description=(
             "A list of either qualified names of logits processors, or "
