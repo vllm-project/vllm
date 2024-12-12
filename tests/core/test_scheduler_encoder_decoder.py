@@ -37,7 +37,7 @@ def test_scheduler_schedule_simple_encoder_decoder():
     num_seq_group = 4
     max_model_len = 16
     scheduler_config = SchedulerConfig(
-        task="generate",
+        "generate",
         max_num_batched_tokens=64,
         max_num_seqs=num_seq_group,
         max_model_len=max_model_len,

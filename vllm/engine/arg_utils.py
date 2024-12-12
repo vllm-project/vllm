@@ -143,6 +143,7 @@ class EngineArgs:
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
+    mm_cache_preprocessor: bool = False
     enable_lora: bool = False
     enable_lora_bias: bool = False
     max_loras: int = 1
@@ -593,6 +594,12 @@ class EngineArgs:
             type=json.loads,
             help=('Overrides for the multimodal input mapping/processing, '
                   'e.g., image processor. For example: {"num_crops": 4}.'))
+        parser.add_argument(
+            '--mm-cache-preprocessor',
+            action='store_true',
+            help='If true, then enables caching of the multi-modal '
+            'preprocessor/mapper. Otherwise, the mapper executes each time'
+            ', and for better performance consider enabling frontend process.')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
@@ -893,7 +900,7 @@ class EngineArgs:
             '--override-pooler-config',
             type=PoolerConfig.from_json,
             default=None,
-            help="Override or set the pooling method in the embedding model. "
+            help="Override or set the pooling method for pooling models. "
             "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
 
         parser.add_argument('--compilation-config',
@@ -965,6 +972,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
+            mm_cache_preprocessor=self.mm_cache_preprocessor,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
         )
@@ -1066,7 +1074,7 @@ class EngineArgs:
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and model_config.task != "embedding"):
+                        and model_config.runner_type != "pooling"):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -1083,8 +1091,9 @@ class EngineArgs:
                 "errors during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
-        elif self.enable_chunked_prefill and model_config.task == "embedding":
-            msg = "Chunked prefill is not supported for embedding models"
+        elif (self.enable_chunked_prefill
+              and model_config.runner_type == "pooling"):
+            msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
 
@@ -1144,7 +1153,7 @@ class EngineArgs:
                 " please file an issue with detailed information.")
 
         scheduler_config = SchedulerConfig(
-            task=model_config.task,
+            runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
