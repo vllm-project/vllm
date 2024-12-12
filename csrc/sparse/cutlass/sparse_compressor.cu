@@ -67,23 +67,8 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   using StrideA = cutlass::gemm::TagToStrideA_t<LayoutTagA>;
   using StrideE = StrideA;
 
-  using Gemm = typename std::conditional<
-      std::is_same_v<ElementA, int8_t>,
-      typename sm90_int8_config_default<int8_t, cutlass::half_t,
-                                        c3x::ScaledEpilogue>::Cutlass3xGemm,
-      typename std::conditional<
-          std::is_same_v<ElementA, cutlass::float_e4m3_t>,
-          typename sm90_fp8_config_default<cutlass::float_e4m3_t,
-                                           cutlass::half_t,
-                                           c3x::ScaledEpilogue>::Cutlass3xGemm,
-          typename std::conditional<
-              std::is_same_v<ElementA, cutlass::half_t>,
-              typename sm90_fp16_config_default<
-                  cutlass::half_t, cutlass::half_t,
-                  c3x::ScaledEpilogue>::Cutlass3xGemm,
-              typename sm90_bf16_config_default<
-                  cutlass::bfloat16_t, cutlass::half_t,
-                  c3x::ScaledEpilogue>::Cutlass3xGemm>::type>::type>::type;
+  using Gemm = typename sm90_config_default<ElementA, cutlass::half_t,
+                                            c3x::ScaledEpilogue>::Cutlass3xGemm;
 
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
