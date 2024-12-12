@@ -26,8 +26,8 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
         if not line:
             continue
 
-        # Look for Lark rule definition
-        if ':' in line:
+        # Look for Lark-style rule definitions
+        if ':' in line and '::=' not in line:
             return True
 
     return False
