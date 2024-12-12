@@ -5,7 +5,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import List
+from typing import Dict, List, Tuple
 
 import torch
 import triton
@@ -112,6 +112,44 @@ def _sgmv_shrink_kernel(
         tl.atomic_add(c_ptr, accumulator, mask=c_mask)
 
 
+_LORA_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
+
+
+#TODO FIX THIS
+def _get_lora_ptr(lora_a_weights, device):
+
+    key = tuple(lora_weight.data_ptr() for lora_weight in lora_a_weights)
+
+    if _LORA_PTR_DICT.get(key) is None:
+        lora_strides_d0 = []
+        lora_strides_d1 = []
+        lora_strides_d2 = []
+        tensor_ptrs = []
+        for lora_a_weight in lora_a_weights:
+            if lora_a_weight.ndim == 4:  # shape:(lora_num,1,size,rank)
+                assert lora_a_weight.size(1) == 1
+                lora_a_weight = lora_a_weight.squeeze(dim=1)
+            else:
+                assert lora_a_weight.ndim == 3  # shape:(lora_num,size,rank)
+            assert lora_a_weight.is_contiguous()
+            tensor_ptrs.append(lora_a_weight.data_ptr())
+            lora_strides_d0.append(lora_a_weight.stride(0))
+            lora_strides_d1.append(lora_a_weight.stride(1))
+            lora_strides_d2.append(lora_a_weight.stride(2))
+
+        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
+        lora_strides_d0_tensor = torch.tensor(lora_strides_d0, device=device)
+        lora_strides_d1_tensor = torch.tensor(lora_strides_d1, device=device)
+        lora_strides_d2_tensor = torch.tensor(lora_strides_d2, device=device)
+        _LORA_PTR_DICT[key] = (
+            lora_ptr_tensor,
+            lora_strides_d0_tensor,
+            lora_strides_d1_tensor,
+            lora_strides_d2_tensor,
+        )
+    return _LORA_PTR_DICT.get(key)
+
+
 @torch.inference_mode()
 def _sgmv_shrink(
     inputs: torch.Tensor,
@@ -159,30 +197,12 @@ def _sgmv_shrink(
     assert lora_indices_tensor.size(0) == batches
     assert inputs.is_contiguous()
     assert output_tensor.is_contiguous()
-    lora_strides_d0 = []
-    lora_strides_d1 = []
-    lora_strides_d2 = []
-    tensor_ptrs = []
-    for lora_a_weight in lora_a_weights:
-        if lora_a_weight.ndim == 4:  # shape:(lora_num,1,size,rank)
-            assert lora_a_weight.size(1) == 1
-            lora_a_weight = lora_a_weight.squeeze(dim=1)
-        else:
-            assert lora_a_weight.ndim == 3  # shape:(lora_num,size,rank)
-        assert lora_a_weight.is_contiguous()
-        tensor_ptrs.append(lora_a_weight.data_ptr())
-        lora_strides_d0.append(lora_a_weight.stride(0))
-        lora_strides_d1.append(lora_a_weight.stride(1))
-        lora_strides_d2.append(lora_a_weight.stride(2))
-
-    lora_ptr_tensor = torch.tensor(tensor_ptrs, device=b_seq_start_loc.device)
-    lora_strides_d0_tensor = torch.tensor(lora_strides_d0,
-                                          device=b_seq_start_loc.device)
-    lora_strides_d1_tensor = torch.tensor(lora_strides_d1,
-                                          device=b_seq_start_loc.device)
-    lora_strides_d2_tensor = torch.tensor(lora_strides_d2,
-                                          device=b_seq_start_loc.device)
-
+    (
+        lora_ptr_tensor,
+        lora_strides_d0_tensor,
+        lora_strides_d1_tensor,
+        lora_strides_d2_tensor,
+    ) = _get_lora_ptr(lora_a_weights, b_seq_start_loc.device)
     # TODO tuning this config
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
     BLOCK_M = 32

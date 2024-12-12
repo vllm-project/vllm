@@ -5,7 +5,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import triton
@@ -122,6 +122,51 @@ def _sgmv_expand_slice_kernel(
     tl.store(c_ptr, tiled_c, mask=c_mask)
 
 
+_LORA_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
+
+
+#TODO Optimize
+def _get_lora_ptr(lora_weights, offset_start, device):
+
+    key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
+    if _LORA_PTR_DICT.get(key) is None:
+        slice_offset_lst = []
+        tensor_ptrs = []
+        lora_strides_d0 = []
+        lora_strides_d1 = []
+        lora_strides_d2 = []
+        slice_offset = offset_start
+        for lora_b_weight in lora_weights:
+            if lora_b_weight.ndim == 4:  # shape:(lora_num,1,size,rank)
+                assert lora_b_weight.size(1) == 1
+                lora_b_weight = lora_b_weight.squeeze(dim=1)
+            else:
+                assert lora_b_weight.ndim == 3  # shape:(lora_num,size,rank)
+            assert lora_b_weight.is_contiguous()
+            tensor_ptrs.append(lora_b_weight.data_ptr())
+            lora_strides_d0.append(lora_b_weight.stride(0))
+            lora_strides_d1.append(lora_b_weight.stride(1))
+            lora_strides_d2.append(lora_b_weight.stride(2))
+            slice_offset_lst.append(slice_offset)
+            slice_offset += lora_b_weight.size(1)
+
+        slice_start_tensor = torch.tensor(slice_offset_lst, device=device)
+        # note these are device tensors
+        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
+        lora_strides_d0_tensor = torch.tensor(lora_strides_d0, device=device)
+        lora_strides_d1_tensor = torch.tensor(lora_strides_d1, device=device)
+        lora_strides_d2_tensor = torch.tensor(lora_strides_d2, device=device)
+
+        _LORA_PTR_DICT[key] = (
+            slice_start_tensor,
+            lora_ptr_tensor,
+            lora_strides_d0_tensor,
+            lora_strides_d1_tensor,
+            lora_strides_d2_tensor,
+        )
+    return _LORA_PTR_DICT.get(key)
+
+
 @torch.inference_mode()
 def _sgmv_expand_slice(
     inputs: torch.Tensor,
@@ -148,37 +193,13 @@ def _sgmv_expand_slice(
     assert b_seq_start_loc.size(0) == batches
     assert lora_indices_tensor.size(0) == batches
     assert output_tensor.is_contiguous()
-    # TODO Optimize the following code
-    slice_offset_lst = []
-    tensor_ptrs = []
-    lora_strides_d0 = []
-    lora_strides_d1 = []
-    lora_strides_d2 = []
-    slice_offset = offset_start
-    for lora_b_weight in lora_b_stacked:
-        if lora_b_weight.ndim == 4:  # shape:(lora_num,1,size,rank)
-            assert lora_b_weight.size(1) == 1
-            lora_b_weight = lora_b_weight.squeeze(dim=1)
-        else:
-            assert lora_b_weight.ndim == 3  # shape:(lora_num,size,rank)
-        assert lora_b_weight.is_contiguous()
-        tensor_ptrs.append(lora_b_weight.data_ptr())
-        lora_strides_d0.append(lora_b_weight.stride(0))
-        lora_strides_d1.append(lora_b_weight.stride(1))
-        lora_strides_d2.append(lora_b_weight.stride(2))
-        slice_offset_lst.append(slice_offset)
-        slice_offset += lora_b_weight.size(1)
-
-    slice_start_tensor = torch.tensor(slice_offset_lst,
-                                      device=b_seq_start_loc.device)
-    # note these are device tensors
-    lora_ptr_tensor = torch.tensor(tensor_ptrs, device=b_seq_start_loc.device)
-    lora_strides_d0_tensor = torch.tensor(lora_strides_d0,
-                                          device=b_seq_start_loc.device)
-    lora_strides_d1_tensor = torch.tensor(lora_strides_d1,
-                                          device=b_seq_start_loc.device)
-    lora_strides_d2_tensor = torch.tensor(lora_strides_d2,
-                                          device=b_seq_start_loc.device)
+    (
+        slice_start_tensor,
+        lora_ptr_tensor,
+        lora_strides_d0_tensor,
+        lora_strides_d1_tensor,
+        lora_strides_d2_tensor,
+    ) = _get_lora_ptr(lora_b_stacked, offset_start, b_seq_start_loc.device)
 
     # TODO tuning this config
     N, K = lora_b_stacked[0].shape[-2:]  # K= rank,N=hidden_size
