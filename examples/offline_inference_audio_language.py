@@ -71,15 +71,12 @@ def run_whisper(question: str, audio_count: int):
               enforce_eager=True,
               limit_mm_per_prompt={"audio": audio_count})
 
-    audio_in_prompt = "".join([
-        f"Audio {idx+1}: "
-        f"<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
-    ])
+    # audio_in_prompt = "".join([
+    #     f"Audio {idx+1}: "
+    #     f"<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
+    # ])
 
-    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              "<|im_start|>user\n"
-              f"{audio_in_prompt}{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
+    prompt = "<|startoftranscript|>"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 

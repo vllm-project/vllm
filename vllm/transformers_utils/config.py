@@ -152,7 +152,6 @@ def uses_mrope(config: PretrainedConfig) -> bool:
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
-    return False
     """Detect if the model with this config is used as an encoder/decoder."""
     text_config = getattr(config, "text_config", None)
     if text_config is not None:

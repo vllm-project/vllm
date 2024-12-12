@@ -729,6 +729,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         encoder_seq_len = 0
 
         if self.runner.model_config.is_encoder_decoder:
+            print(seq_group_metadata)
             encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
 
         inter_data = self.init_cached_inter_data(
@@ -1282,6 +1283,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
+            seq_len = min(448, seq_len)
             batch_size += seq_len
 
             dummy_data = self.input_registry \

@@ -150,6 +150,7 @@ class WhisperEncoderAttention(WhisperAttention):
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
+        print(q.shape, k.shape, v.shape, hidden_states.shape)
 
         q = self._shape(q, -1, 1)
         k = self._shape(k, -1, 1)
@@ -533,6 +534,7 @@ class WhisperModel(nn.Module):
 
 def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
                                    mm_counts: Mapping[str, int]):
+    print("DUMMY DATA")
     assert mm_counts["audio"] == 1
     sample_rate = 16000
     return DummyData(
@@ -576,6 +578,8 @@ def get_whisper_processor(
 
 
 def input_processor_for_whisper(ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
+    print("input_processor_for_whisper", inputs)
+    return inputs
     return token_inputs(
         prompt_token_ids=inputs["decoder"]["prompt_token_ids"],
         multi_modal_data=inputs["encoder"]["multi_modal_data"],
@@ -672,6 +676,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
+        print("SAMPLE", next_tokens)
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

@@ -434,6 +434,7 @@ class Scheduler:
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
+        print("ADD", seq_group)
         self.waiting.append(seq_group)
 
     def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
@@ -1318,6 +1319,7 @@ class Scheduler:
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
                 encoder_seq = seq_group.get_encoder_seq()
+                print("encoder_seq", seq_group.encoder_seq.inputs.inputs)
                 assert encoder_seq is not None
                 encoder_seq_data = encoder_seq.data
                 # Block table for cross-attention
@@ -1325,6 +1327,7 @@ class Scheduler:
                 cross_block_table = self.block_manager.get_cross_block_table(
                     seq_group)
             else:
+                print("NOT encoder_seq")
                 encoder_seq_data = None
                 cross_block_table = None
 
@@ -1362,6 +1365,7 @@ class Scheduler:
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
+                print("SCHEDULER SEQGROUP", seq_group.multi_modal_data)
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1381,8 +1385,8 @@ class Scheduler:
                     # between engine and worker.
                     # the subsequent comms can still use delta, but
                     # `multi_modal_data` will be None.
-                    multi_modal_data=seq_group.multi_modal_data
-                    if scheduler_outputs.num_prefill_groups > 0 else None,
+                    multi_modal_data=seq_group.multi_modal_data or seq_group.encoder_seq.multi_modal_data
+                    ,#if scheduler_outputs.num_prefill_groups > 0 else None,
                     multi_modal_placeholders=seq_group.multi_modal_placeholders
                     if scheduler_outputs.num_prefill_groups > 0 else None,
                     mm_processor_kwargs=seq_group.mm_processor_kwargs,
