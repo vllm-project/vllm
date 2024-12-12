@@ -194,7 +194,8 @@ class WhisperDecoderAttention(WhisperAttention):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
-            quant_config=quant_config
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
         )
     
     def forward(
@@ -530,47 +531,17 @@ class WhisperModel(nn.Module):
         return decoder_outputs
 
 
-def _get_dummy_seq_data(seq_len: int,
-                        whisper_config: WhisperConfig) -> SequenceData:
-    # '<|startoftranscript|><|en|><|transcribe|>'
-    token_ids = [50258, 50259, 50360]
-    return SequenceData(token_ids)
-
-
-def _get_dummy_values(whisper_config: WhisperConfig) -> torch.Tensor:
-    values_dtype = torch.float16
-
-    return torch.zeros((30 * whisper_config.sample_rate), dtype=values_dtype)
-
-
-def dummy_data_for_whisper_audio(ctx: InputContext, seq_len: int,
-                                 mm_counts: Mapping[str, int]):
-    num_audios = mm_counts["audio"]
-    max_tokens_per_audio = get_max_whisper_audio_audio_tokens(ctx)
-    max_llm_audio_tokens = max_tokens_per_audio * num_audios
-    # if seq_len - max_llm_audio_tokens - 2 < 0:
-    #     raise RuntimeError(
-    #         f"Qwen2-Audio cannot process {num_audios} audios in a prompt, "
-    #         "please increase max_model_len or reduce audio limit by "
-    #         "--limit-mm-per-prompt.")
-
-    audio_token_index = 0  # ctx.model_config.hf_config.audio_token_index
-
-    dummy_seqdata = SequenceData.from_prompt_token_counts((0, seq_len))
-    # dummy_seqdata = SequenceData.from_prompt_token_counts(
-    #     (audio_token_index, max_llm_audio_tokens),
-    #     (0, seq_len - max_llm_audio_tokens),
-    # )
-    dummy_audio = np.full((max_llm_audio_tokens * 2 * 2 * 160, ), 0.)
-    print("dummy_audio", dummy_audio.shape)
+def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
+                                   mm_counts: Mapping[str, int]):
+    assert mm_counts["audio"] == 1
+    sample_rate = 16000
     return DummyData(
-        dummy_seqdata, {"audio": [(dummy_audio, 16000)] * num_audios}, {
-            "audio":
-            consecutive_placeholder_ranges(num_items=num_audios,
-                                           item_size=max_tokens_per_audio)
-        })
+        SequenceData.from_prompt_token_counts((0, seq_len)),
+        {"audio": [(np.zeros(30 * sample_rate), sample_rate)]},
+    )
 
 
+@lru_cache
 def get_whisper_processor(
     processor_name: str,
     *args,
@@ -604,189 +575,46 @@ def get_whisper_processor(
     return processor
 
 
-cached_get_whisper_processor = lru_cache(get_whisper_processor)
-
-
-def get_processor(
-    processor_name: str,
-    *args,
-    trust_remote_code: bool = False,
-    **kwargs,
-):
-    """Gets a processor for the given model name via HuggingFace.
-
-    Derived from `vllm.transformers_utils.image_processor.get_image_processor`.
-    """
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from transformers import AutoProcessor
-
-    try:
-        processor = AutoProcessor.from_pretrained(
-            processor_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            **kwargs)
-    except ValueError as e:
-        # If the error pertains to the processor class not existing or not
-        # currently being imported, suggest using the --trust-remote-code flag.
-        # Unlike AutoTokenizer, AutoProcessor does not separate such errors
-        if not trust_remote_code:
-            err_msg = (
-                "Failed to load the processor. If the processor is "
-                "a custom processor not yet available in the HuggingFace "
-                "transformers library, consider setting "
-                "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
-
-    return processor
-
-
-cached_get_processor = lru_cache(get_processor)
-
-
-def _get_feat_extract_output_lengths(input_lengths: torch.LongTensor):
-    """
-    Computes the output length of the convolutional layers
-    and the output length of the audio encoder
-    """
-    input_lengths = (input_lengths - 1) // 2 + 1
-    output_lengths = (input_lengths - 2) // 2 + 1
-    print("_get_feat_extract_output_lengths", input_lengths, output_lengths)
-    return input_lengths, output_lengths
-
-
-def get_max_whisper_audio_audio_tokens(ctx: InputContext) -> int:
-    max_source_position = (
-        ctx.model_config.hf_config.max_source_positions)
-    output_lengths = (max_source_position - 2) // 2 + 1
-    print("get_max_whisper_audio_audio_tokens", output_lengths)
-    return output_lengths
-
-
-def input_processor_for_whisper_audio(
-        ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
-    multi_modal_data = inputs.get("multi_modal_data")
-    print("input_processor_for_whisper_audio", multi_modal_data)
-    if multi_modal_data is None or "audio" not in multi_modal_data:
-        return inputs
-
-    audios = multi_modal_data["audio"]
-    if not isinstance(audios, list):
-        audios = [audios]
-
-    if len(audios) == 0:
-        return inputs
-
-    processor = cached_get_whisper_processor(ctx.model_config.model)
-    print("audios", audios)
-
-    whisper_data = processor(
-        audio, 
-        sampling_rate = self.whisper_config.sample_rate,
-        return_tensors = 'pt',
-    )
-    whisper_data = whisper_data.to(self.model_config.dtype).input_features[0]
-    resampled_audios = [
-        librosa.resample(audio,
-                         orig_sr=sampling_rate,
-                         target_sr=processor.feature_extractor.sampling_rate)
-        for audio, sampling_rate in audios
-    ]
-    audio_input_lengths = np.array(
-        [min(3000, _.shape[0] // 160 + 1) for _ in resampled_audios])
-
-    audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
-        audio_input_lengths)
-
-    audio_token_index = ctx.model_config.hf_config.audio_token_index
-
-    input_ids = inputs['prompt_token_ids']
-
-    new_input_ids = []
-    audio_num = input_ids.count(audio_token_index)
-    assert len(audio_input_lengths) == audio_num, \
-        (f'The text input contains {audio_num} audio tokens, '
-         f'but {len(audio_input_lengths)} audios provided')
-    start = 0
-    for audio_idx in range(audio_num):
-        end = input_ids.index(audio_token_index, start)
-        new_input_ids.extend(input_ids[start:end])  # text part
-
-        new_input_ids.extend([audio_token_index] *
-                             audio_output_lengths[audio_idx])
-        start = end + 1
-    new_input_ids.extend(input_ids[start:])
-
+def input_processor_for_whisper(ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
     return token_inputs(
-        prompt_token_ids=new_input_ids,
-        prompt=inputs['prompt'],
-        multi_modal_data=multi_modal_data,
+        prompt_token_ids=inputs["decoder"]["prompt_token_ids"],
+        multi_modal_data=inputs["encoder"]["multi_modal_data"],
     )
 
 
-def input_mapper_for_whisper_audio(
+def input_mapper_for_whisper(
     ctx: InputContext,
     multi_modal_data: Union[np.ndarray, List[np.ndarray]],
 ) -> MultiModalKwargs:
-    """Input mapper for Qwen2-Audio."""
     print("input_mapper_for_whisper_audio", multi_modal_data)
     if not isinstance(multi_modal_data, list):
         multi_modal_data = [multi_modal_data]
 
+    assert len(multi_modal_data) == 1
+
     if len(multi_modal_data) == 0:
         return MultiModalKwargs()
 
-    processor = cached_get_whisper_processor(ctx.model_config.model)
+    processor = get_whisper_processor(ctx.model_config.model)
+    target_sampling_rate = processor.feature_extractor.sampling_rate
 
     resampled_audios = [
-        processor(
-            audio, 
-            sampling_rate=sampling_rate,
-            return_tensors='pt',
-        ).to(torch.float16).input_features[0]
+        librosa.resample(audio, orig_sr=sampling_rate,
+                         target_sr=target_sampling_rate)
         for audio, sampling_rate in multi_modal_data
     ]
-    print([audio.shape for audio in resampled_audios])
 
-    audio_feature_extractor = processor.feature_extractor
-    if audio_feature_extractor is None:
-        raise RuntimeError(
-            "No HuggingFace audio_feature_extractor is available "
-            "to process the audio object")
+    kwargs = processor(resampled_audios, sampling_rate=target_sampling_rate,
+                       return_tensors="pt")
+    kwargs["input_features"] = kwargs["input_features"].squeeze(0)
 
-    try:
-        resampled_audios = [
-            librosa.resample(
-                audio,
-                orig_sr=sampling_rate,
-                target_sr=processor.feature_extractor.sampling_rate)
-            for audio, sampling_rate in multi_modal_data
-        ]
-        print([audio.shape for audio in resampled_audios])
-        batch_data = audio_feature_extractor(resampled_audios,
-                                             sampling_rate=16000,
-                                             return_attention_mask=True,
-                                             padding="max_length",
-                                             return_tensors="pt").data
-        batch_data["feature_attention_mask"] = batch_data.pop("attention_mask")
-    except Exception:
-        logger.error("Failed to process audio (%s)", multi_modal_data)
-        raise
-    batch_data["input_features"] = batch_data["input_features"].squeeze(dim=0)
-    print("input_mapper_for_whisper_audio", batch_data["input_features"].shape)
-    return MultiModalKwargs(batch_data)
+    print("input_mapper_for_whisper_audio", kwargs["input_features"].shape)
+    return MultiModalKwargs(kwargs)
 
 
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_whisper_audio)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_whisper_audio)
-@MULTIMODAL_REGISTRY.register_input_mapper("audio",
-                                           input_mapper_for_whisper_audio)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "audio", get_max_whisper_audio_audio_tokens)
+@INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_whisper)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_whisper)
+@MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_whisper)
 class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -821,6 +649,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
+        print("FORWARD", kwargs.keys())
         
         decoder_outputs = self.model(
             input_features=kwargs["input_features"].to(torch.float16),
