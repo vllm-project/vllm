@@ -278,7 +278,7 @@ class WhisperEncoderLayer(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache
+        cache_config = vllm_config.cache_config
 
         self.embed_dim = config.d_model
         self.self_attn = WhisperEncoderAttention(
@@ -527,7 +527,7 @@ class WhisperModel(nn.Module):
 
 
 def dummy_data_for_whisper_audio(ctx: InputContext, seq_len: int,
-                               mm_counts: Mapping[str, int]):
+                                 mm_counts: Mapping[str, int]):
     num_audios = mm_counts["audio"]
     max_tokens_per_audio = get_max_whisper_audio_audio_tokens(ctx)
     max_llm_audio_tokens = max_tokens_per_audio * num_audios
@@ -605,7 +605,7 @@ def _get_feat_extract_output_lengths(input_lengths: torch.LongTensor):
 
 def get_max_whisper_audio_audio_tokens(ctx: InputContext) -> int:
     max_source_position = (
-        ctx.model_config.hf_config.audio_config.max_source_positions)
+        ctx.model_config.hf_config.max_source_positions)
     output_lengths = (max_source_position - 2) // 2 + 1
     return output_lengths
 
