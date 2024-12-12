@@ -26,9 +26,9 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
         if not line:
             continue
 
-        # Look for GBNF rule definition
-        if '::=' in line:
-            return False
+        # Look for Lark rule definition
+        if ':' in line:
+            return True
 
     return False
 
