@@ -5,7 +5,7 @@ Run `pytest tests/models/test_mamba.py`.
 import pytest
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from vllm.config import VllmConfig, ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
 
 from ...utils import check_outputs_equal

@@ -2481,27 +2481,6 @@ class CompilationConfig(BaseModel):
             self.max_capture_size] = self.max_capture_size
 
 
-"""
-cudagraph batchsize padding logic:
-
-In the default case, `_BATCH_SIZES_TO_CAPTURE` is a list of all possible
-batch sizes that cudagraph will capture. We pre-build a mapping from batch size
-to padded graph size, so that we can quickly find the padded graph size for a
-given batch size. Depending on the model's configuration, like `max_num_seqs`,
-the candidate batch sizes to capture cudagraph will shrink to the subset of
-`_BATCH_SIZES_TO_CAPTURE` that is less than or equal to `max_num_seqs`.
-
-However, if users specify the cudagraph capture sizes through compilation
-config, we will use the specified sizes instead.
-
-In the end, `vllm_config.compilation_config.capture_sizes` will be the final
-sizes to capture cudagraph (in descending order), and
-`vllm_config.compilation_config.bs_to_padded_graph_size` will be the mapping
-from batch size to padded graph size, if the batch size is less than or equal to
-the largest size in `vllm_config.compilation_config.capture_sizes`.
-"""
-
-
 @dataclass
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -2629,6 +2608,50 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
 
+        self._set_cudagraph_sizes()
+
+        if self.cache_config is not None and \
+            self.cache_config.cpu_offload_gb > 0 and \
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
+            logger.warning(
+                "CPU offload is not supported with `torch.compile` yet."
+                " Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if self.lora_config is not None and self.compilation_config.level !=\
+             CompilationLevel.NO_COMPILATION:
+            logger.warning("LoRA is not supported with `torch.compile` yet. "
+                           "Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        current_platform.check_and_update_config(self)
+
+        if not self.instance_id:
+            self.instance_id = random_uuid()[:5]
+
+    def _set_cudagraph_sizes(self):
+        """
+        cudagraph batchsize padding logic:
+
+        In the default case, `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
+        batch sizes that cudagraph will capture. Depending on the engine's configuration of `max_num_seqs`,
+        the candidate batch sizes to capture cudagraph will shrink to the subset which just cover the range of
+        `[1, max_num_seqs]`.
+        
+        However, if users specify the cudagraph capture sizes through compilation
+        config, we will use the specified sizes instead.
+
+        In the end, `vllm_config.compilation_config.capture_sizes` will be the final
+        sizes to capture cudagraph (in descending order)
+
+        We pre-build a mapping from batch size
+        to padded graph size, so that we can quickly find the padded graph size for a
+        given batch size. `vllm_config.compilation_config.bs_to_padded_graph_size` will be the mapping
+        from batch size to padded graph size, if the batch size is less than or equal to
+        the largest size in `vllm_config.compilation_config.capture_sizes`.
+        """ # noqa
+
+        # calculate the default `batch_size_capture_list`
         if not envs.VLLM_USE_V1:
             batch_size_capture_list = []
             max_batchsize_to_capture = 0
@@ -2662,25 +2685,6 @@ class VllmConfig:
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
-
-        if self.cache_config is not None and \
-            self.cache_config.cpu_offload_gb > 0 and \
-            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
-            logger.warning(
-                "CPU offload is not supported with `torch.compile` yet."
-                " Disabling `torch.compile`.")
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
-        if self.lora_config is not None and self.compilation_config.level !=\
-             CompilationLevel.NO_COMPILATION:
-            logger.warning("LoRA is not supported with `torch.compile` yet. "
-                           "Disabling `torch.compile`.")
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
-        current_platform.check_and_update_config(self)
-
-        if not self.instance_id:
-            self.instance_id = random_uuid()[:5]
 
     def __str__(self):
         return (
