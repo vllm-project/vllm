@@ -1,5 +1,5 @@
-from typing import Any
 import pytest
+
 from vllm.sampling_params import SamplingParams
 from vllm.v1.stats.common import RequestStats, RequestStatsUpdate
 
@@ -131,7 +131,8 @@ def test_lifecycle_updates():
     # Since first scheduled
     assert stats.prefill_latency_s == detokenized_ts - prefilling_ts
 
-    # Test another DECODING and DETOKENIZED should yield correct inter token latency
+    # Test another DECODING and DETOKENIZED should
+    # yield correct inter token latency
     decoded_update = RequestStatsUpdate(
         request_id=request_id,
         type=RequestStatsUpdate.Type.DECODING,
