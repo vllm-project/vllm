@@ -1,5 +1,6 @@
 """Fused MoE kernel."""
 import functools
+import inspect
 import json
 import os
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -13,7 +14,6 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-import inspect
 
 logger = init_logger(__name__)
 
