@@ -126,6 +126,16 @@ def llava_onevision_vllm_to_hf_output(vllm_output: RunnerOutput,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
+def mantis_vllm_to_hf_output(vllm_output: RunnerOutput,
+                             model: str) -> RunnerOutput:
+    """Sanitize vllm output [mantis] to compare with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    hf_output_str = output_str + "<|eot_id|>"
+
+    return output_ids, hf_output_str, out_logprobs
+
+
 def phi3v_vllm_to_hf_output(vllm_output: RunnerOutput,
                             model: str) -> RunnerOutput:
     """Sanitize vllm output [phi3v] to be comparable with hf output."""
@@ -170,7 +180,7 @@ def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput,
 
 
 ####### Post-processors for HF outputs
-def minicmpv_trunc_hf_output(hf_output: RunnerOutput,
+def minicpmv_trunc_hf_output(hf_output: RunnerOutput,
                              model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<|eot_id|>"):
@@ -184,7 +194,7 @@ def get_llava_embeddings(image_assets: _ImageAssets):
 
 
 ####### postprocessors to run on HF BatchEncoding
-def get_key_type_post_processor(
+def cast_dtype_post_processor(
         hf_inp_key: str) -> Callable[[BatchEncoding, str], BatchEncoding]:
     """Gets a handle to a post processor which converts a given key into a
     target data type."""
@@ -192,6 +202,17 @@ def get_key_type_post_processor(
     def process(hf_inputs: BatchEncoding, dtype: str):
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
         hf_inputs[hf_inp_key] = hf_inputs[hf_inp_key].to(torch_dtype)
+        return hf_inputs
+
+    return process
+
+
+def ignore_inputs_post_processor(
+        hf_inp_key: str) -> Callable[[BatchEncoding, str], BatchEncoding]:
+    """Gets a handle to a post processor which ignores a given key."""
+
+    def process(hf_inputs: BatchEncoding, dtype: str):
+        del hf_inputs[hf_inp_key]
         return hf_inputs
 
     return process
@@ -407,3 +428,26 @@ def _internvl_generate(
     )
 
     return outputs
+
+
+def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    from mantis.models.mllava import MLlavaProcessor
+
+    hf_model.processor = MLlavaProcessor.from_pretrained(hf_model.model_name)
+
+    orig_generate = hf_model.model.generate
+    tokenizer = hf_model.processor.tokenizer
+
+    def _generate(self, *args, **kwargs):
+        return orig_generate(
+            *args,
+            **kwargs,
+            eos_token_id=[
+                tokenizer.eos_token_id,
+                tokenizer.convert_tokens_to_ids("<|eot_id|>"),
+            ],
+        )
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
+    return hf_model

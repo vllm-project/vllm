@@ -18,7 +18,7 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -84,6 +84,7 @@ class FalconAttention(nn.Module):
         config: FalconConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -158,7 +159,8 @@ class FalconAttention(nn.Module):
                                   self.head_dim,
                                   self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads,
-                                  quant_config=quant_config)
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.attn")
         elif self.use_alibi:
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
@@ -171,14 +173,16 @@ class FalconAttention(nn.Module):
                                   self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads,
                                   alibi_slopes=alibi_slopes,
-                                  quant_config=quant_config)
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.attn")
         else:
             self.attn = Attention(self.num_heads,
                                   self.head_dim,
                                   scale=self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads,
                                   cache_config=cache_config,
-                                  quant_config=quant_config)
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -241,12 +245,16 @@ class FalconDecoderLayer(nn.Module):
         config: FalconConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.self_attention = FalconAttention(config, cache_config,
-                                              quant_config)
+        self.self_attention = FalconAttention(
+            config,
+            cache_config,
+            quant_config,
+            prefix=f"{prefix}.self_attention")
         self.mlp = FalconMLP(config, quant_config)
         self.config = config
 
@@ -357,8 +365,8 @@ class FalconModel(nn.Module):
         # Transformer blocks
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: FalconDecoderLayer(config, cache_config,
-                                              quant_config),
+            lambda prefix: FalconDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h")
 
         # Final Layer Norm
@@ -367,6 +375,9 @@ class FalconModel(nn.Module):
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.hidden_size))
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.word_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -374,9 +385,13 @@ class FalconModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = self.word_embeddings(input_ids)
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
         for i in range(self.start_layer, self.end_layer):
@@ -397,12 +412,6 @@ class FalconForCausalLM(nn.Module, SupportsPP):
 
     # BitandBytes specific attributes
     bitsandbytes_stacked_params_mapping = {}
-    default_bitsandbytes_target_modules = [
-        ".query_key_value.",
-        ".dense.",
-        ".dense_h_to_4h.",
-        ".dense_4h_to_h.",
-    ]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -432,6 +441,9 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.LongTensor,
@@ -439,9 +451,11 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors)
+                                         attn_metadata, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -461,7 +475,8 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -471,6 +486,7 @@ class FalconForCausalLM(nn.Module, SupportsPP):
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if name == "lm_head.weight" and self.tie_word_embeddings:
                 # Falcon uses tied embeddings except Falcon-11b.
@@ -507,3 +523,5 @@ class FalconForCausalLM(nn.Module, SupportsPP):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

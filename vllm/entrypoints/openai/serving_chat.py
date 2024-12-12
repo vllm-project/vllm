@@ -10,7 +10,8 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ConversationMessage, load_chat_template
+from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
+                                         ConversationMessage)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -38,20 +39,23 @@ logger = init_logger(__name__)
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine_client: EngineClient,
-                 model_config: ModelConfig,
-                 base_model_paths: List[BaseModelPath],
-                 response_role: str,
-                 *,
-                 lora_modules: Optional[List[LoRAModulePath]],
-                 prompt_adapters: Optional[List[PromptAdapterPath]],
-                 request_logger: Optional[RequestLogger],
-                 chat_template: Optional[str],
-                 return_tokens_as_token_ids: bool = False,
-                 enable_auto_tools: bool = False,
-                 tool_parser: Optional[str] = None,
-                 enable_prompt_tokens_details: bool = False):
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        model_config: ModelConfig,
+        base_model_paths: List[BaseModelPath],
+        response_role: str,
+        *,
+        lora_modules: Optional[List[LoRAModulePath]],
+        prompt_adapters: Optional[List[PromptAdapterPath]],
+        request_logger: Optional[RequestLogger],
+        chat_template: Optional[str],
+        chat_template_content_format: ChatTemplateContentFormatOption,
+        return_tokens_as_token_ids: bool = False,
+        enable_auto_tools: bool = False,
+        tool_parser: Optional[str] = None,
+        enable_prompt_tokens_details: bool = False,
+    ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
@@ -61,8 +65,8 @@ class OpenAIServingChat(OpenAIServing):
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
         self.response_role = response_role
-        self.use_tool_use_model_template = False
-        self.chat_template = load_chat_template(chat_template)
+        self.chat_template = chat_template
+        self.chat_template_content_format: Final = chat_template_content_format
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
@@ -120,6 +124,7 @@ class OpenAIServingChat(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
+
             tool_parser = self.tool_parser
 
             # validation for OpenAI tools
@@ -157,6 +162,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request.messages,
                 chat_template=request.chat_template or self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
                 add_generation_prompt=request.add_generation_prompt,
                 continue_final_message=request.continue_final_message,
                 tool_dicts=tool_dicts,
@@ -170,7 +176,8 @@ class OpenAIServingChat(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        request_id = f"chatcmpl-{request.request_id}"
+        request_id = "chatcmpl-" \
+                     f"{self._base_request_id(raw_request, request.request_id)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -355,7 +362,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # Send response to echo the input portion of the
                     # last message
-                    if request.echo or request.continue_final_message:
+                    if request.echo:
                         last_msg_content: Union[str, List[Dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
@@ -489,21 +496,33 @@ class OpenAIServingChat(OpenAIServing):
 
                         if self._should_check_for_unstreamed_tool_arg_tokens(
                                 delta_message, output) and tool_parser:
+                            latest_delta_len = 0
+                            if ((isinstance(
+                                    delta_message.tool_calls[0].function,
+                                    DeltaFunctionCall)) and isinstance(
+                                        delta_message.tool_calls[0].function.
+                                        arguments, str)):
+                                latest_delta_len = len(
+                                    delta_message.tool_calls[0].function.
+                                    arguments)
+
                             # get the expected call based on partial JSON
                             # parsing which "autocompletes" the JSON
                             expected_call = json.dumps(
                                 tool_parser.prev_tool_call_arr[index].get(
-                                    "arguments", {}))
+                                    "arguments", {}),
+                                ensure_ascii=False)
 
                             # get what we've streamed so far for arguments
                             # for the current tool
                             actual_call = tool_parser.streamed_args_for_tool[
                                 index]
+                            if (latest_delta_len > 0):
+                                actual_call = actual_call[:-latest_delta_len]
 
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(
                                 actual_call, "", 1)
-
                             # set that as a delta message
                             delta_message = DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=index,
@@ -700,7 +719,7 @@ class OpenAIServingChat(OpenAIServing):
                 stop_reason=output.stop_reason)
             choices.append(choice_data)
 
-        if request.echo or request.continue_final_message:
+        if request.echo:
             last_msg_content: Union[str, List[Dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:

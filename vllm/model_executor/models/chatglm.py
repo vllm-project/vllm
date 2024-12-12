@@ -3,7 +3,8 @@
 """Inference-only ChatGLM model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple, TypedDict
+from typing import (Dict, Iterable, List, Mapping, Optional, Set, Tuple,
+                    TypedDict)
 
 import torch
 from PIL import Image
@@ -29,9 +30,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalData, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalData, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
@@ -228,6 +231,7 @@ class GLMAttention(nn.Module):
         config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -283,7 +287,8 @@ class GLMAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -362,6 +367,7 @@ class GLMBlock(nn.Module):
         config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.apply_residual_connection_post_layernorm = (
@@ -375,7 +381,10 @@ class GLMBlock(nn.Module):
                                                eps=config.layernorm_epsilon)
 
         # Self attention.
-        self.self_attention = GLMAttention(config, cache_config, quant_config)
+        self.self_attention = GLMAttention(config,
+                                           cache_config,
+                                           quant_config,
+                                           prefix=f"{prefix}.self_attention")
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
@@ -444,7 +453,8 @@ class GLMTransformer(nn.Module):
         # Transformer layers.
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.num_layers,
-            lambda prefix: GLMBlock(config, cache_config, quant_config),
+            lambda prefix: GLMBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -498,16 +508,22 @@ class ChatGLMModel(nn.Module):
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
-        self.encoder = GLMTransformer(config, cache_config, quant_config)
+        self.encoder = GLMTransformer(config,
+                                      cache_config,
+                                      quant_config,
+                                      prefix=f"{prefix}.encoder")
 
         self.output_layer = ParallelLMHead(config.padded_vocab_size,
                                            config.hidden_size,
-                                           quant_config=quant_config)
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.output_layer")
 
         vision_config_flag = getattr(config, 'vision_config', None)
         if vision_config_flag is not None:
             self.vision_config = Namespace(**config.vision_config)
-            self.vision = EVA2CLIPModel(self.config, quant_config)
+            self.vision = EVA2CLIPModel(self.config,
+                                        quant_config,
+                                        prefix=f"{prefix}.vision")
         else:
             self.vision = None
 
@@ -530,6 +546,30 @@ class ChatGLMModel(nn.Module):
                     """)
         return GLMImagePixelInputs(pixel_values=pixel_values)
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input["pixel_values"] is None:
+            return None
+        pixel_values = image_input["pixel_values"].to(
+            dtype=self.config.torch_dtype)
+        vision_embeddings = self.vision(pixel_values)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.embedding(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_glm_vision_embeddings(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                vision_embeddings=multimodal_embeddings,
+                boi_token_id=self.config.boi_token_id,
+                eoi_token_id=self.config.eoi_token_id)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -537,26 +577,17 @@ class ChatGLMModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        if intermediate_tensors is None:
-            inputs_embeds = self.embedding(input_ids)
-            image_input = self._parse_and_validate_image_input(**kwargs)
 
-            if image_input["pixel_values"] is not None:
-                pixel_values = image_input["pixel_values"].to(
-                    dtype=inputs_embeds.dtype)
-                image_embeds = self.vision(pixel_values)
-
-                boi_token_id = self.config.boi_token_id
-                eoi_token_id = self.config.eoi_token_id
-
-                inputs_embeds = merge_glm_vision_embeddings(
-                    input_ids=input_ids,
-                    inputs_embeds=inputs_embeds,
-                    vision_embeddings=image_embeds,
-                    boi_token_id=boi_token_id,
-                    eoi_token_id=eoi_token_id)
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        if intermediate_tensors is None and inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
         else:
             inputs_embeds = intermediate_tensors["hidden_states"]
 
@@ -573,25 +604,7 @@ class ChatGLMModel(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(mm_input_mapper_for_glmv)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_glmv_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_glmv)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_glmv)
-class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
-                         SupportsMultiModal):
-    packed_modules_mapping = {
-        "query_key_value": ["query_key_value"],
-        "dense_h_to_4h": ["dense_h_to_4h"]
-    }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "query_key_value",
-        "dense",
-        "dense_h_to_4h",
-        "dense_4h_to_h",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
+class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -645,7 +658,8 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         # Merge two ColumnParallelLinear into one MergedColumnParallelLinear
         merged_weights_dict: Dict[str, Dict[str, Optional[torch.Tensor]]] = {
             "transformer.vision.linear_proj.merged_proj.weight": {
@@ -655,6 +669,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         }
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             is_weight_to_be_merge = False
             for _, merged_weight_dict in merged_weights_dict.items():
@@ -677,6 +692,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
 
         for combined_name, merged_weight_dict in merged_weights_dict.items():
             if combined_name in params_dict:
@@ -686,3 +702,81 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, combined_weight)
+                loaded_params.add(combined_name)
+        return loaded_params
+
+
+class ChatGLM(ChatGLMBaseModel):
+    packed_modules_mapping = {
+        "query_key_value": ["query_key_value"],
+        "dense_h_to_4h": ["dense_h_to_4h"]
+    }
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "query_key_value",
+        "dense",
+        "dense_h_to_4h",
+        "dense_4h_to_h",
+    ]
+
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+
+class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
+    packed_modules_mapping = {
+        "query_key_value": ["query_key_value"],
+        "dense_h_to_4h": ["dense_h_to_4h"],
+        "merged_proj": ["gate_proj", "dense_h_to_4h"]
+    }
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "query_key_value",
+        "dense",
+        "dense_h_to_4h",
+        "dense_4h_to_h",
+        # vision
+        "fc1",
+        "fc2",
+        "merged_proj",
+        "linear_proj"
+    ]
+
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="transformer.encoder",
+            connector="transformer.vision.linear_proj",
+            tower_model="transformer.vision.transformer")
+
+
+@MULTIMODAL_REGISTRY.register_image_input_mapper(mm_input_mapper_for_glmv)
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_glmv_image_tokens)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_glmv)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_glmv)
+class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
+                         SupportsMultiModal):
+    # Ensure that the LoRA support check passes when the class is not
+    # initialized, but set all these attributes to empty.
+    packed_modules_mapping = {}
+    supported_lora_modules = []
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+    def __new__(
+        cls,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        config = vllm_config.model_config.hf_config
+        # Initialize VL
+        if hasattr(config, "visual"):
+            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
+        # Initialize LLM
+        else:
+            return ChatGLM(vllm_config=vllm_config, prefix=prefix)

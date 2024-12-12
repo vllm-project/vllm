@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Protocol, Tuple, Union, overload)
+from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
+                    Protocol, Set, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -9,15 +9,15 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from vllm.attention.selector import (_Backend, backend_name_to_enum,
+from vllm.attention.selector import (backend_name_to_enum,
                                      get_global_forced_attn_backend)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
-from vllm.platforms import current_platform
+from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
+from vllm.utils import is_pin_memory_available, print_warning_once
 
 logger = init_logger(__name__)
 
@@ -172,8 +172,16 @@ class AutoWeightsLoader:
         if module != self.module:
             module_load_weights = getattr(module, "load_weights", None)
             if callable(module_load_weights):
-                module_load_weights(weights)
-                return
+                loaded_params = module_load_weights(weights)
+                if loaded_params is None:
+                    logger.warning(
+                        "Unable to collect loaded parameters "
+                        "for module %s", module)
+                else:
+                    yield from map(
+                        lambda x: self._get_qualname(base_prefix, x),
+                        loaded_params,
+                    )
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
@@ -222,26 +230,36 @@ class AutoWeightsLoader:
         weights: Iterable[Tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-    ) -> List[str]:
+    ) -> Set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
 
-        autoloaded_weights = list(self._load_module("", self.module, weights))
+        autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights
 
 
 def init_vllm_registered_model(
-    hf_config: PretrainedConfig,
     vllm_config: VllmConfig,
+    *,
     prefix: str = "",
+    hf_config: Optional[PretrainedConfig] = None,
+    architectures: Optional[list[str]] = None,
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
     from vllm.model_executor.model_loader.loader import _initialize_model
-    vllm_config = vllm_config.with_hf_config(hf_config)
-    return _initialize_model(vllm_config, prefix)
+
+    if hf_config is None and architectures is not None:
+        # So that the architectures field is overridden
+        hf_config = vllm_config.model_config.hf_config
+
+    if hf_config is not None:
+        vllm_config = vllm_config.with_hf_config(hf_config,
+                                                 architectures=architectures)
+
+    return _initialize_model(vllm_config=vllm_config, prefix=prefix)
 
 
 @overload
@@ -355,8 +373,7 @@ def embed_multimodal(
     input_ids: torch.Tensor,
     multimodal_token_id: int,
     get_text_embeds: Callable[[torch.Tensor], torch.Tensor],
-    get_multimodal_embeds: Callable[[torch.Tensor], Union[torch.Tensor,
-                                                          List[torch.Tensor]]],
+    multimodal_embeds: Union[torch.Tensor, List[torch.Tensor]],
 ) -> torch.Tensor:
     """
     Embed token IDs and multimodal inputs and combine their embeddings.
@@ -373,8 +390,6 @@ def embed_multimodal(
     is_text = ~is_multimodal
 
     text_embeds = get_text_embeds(input_ids[is_text])
-    multimodal_embeds = get_multimodal_embeds(input_ids[is_multimodal])
-
     merged_embeds = torch.empty(
         (input_ids.shape[0], text_embeds.shape[1]),
         dtype=text_embeds.dtype,
@@ -394,16 +409,42 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: int,
+    placeholder_token_id: Union[int, List[int]],
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
     positions in ``inputs_embeds`` corresponding to placeholder tokens in
     ``input_ids``.
+    
+    ``placeholder_token_id`` can be a list of token ids (e.g, token ids 
+    of img_start, img_break, and img_end tokens) when needed: This means 
+    the order of these tokens in the ``input_ids`` MUST MATCH the order of 
+    their embeddings in ``multimodal_embeddings`` since we need to 
+    slice-merge instead of individually scattering.
+
+    For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
+    - T is text token
+    - S is image start token
+    - I is image embedding token
+    - B is image break token
+    - E is image end token.
+    
+    Then the image embeddings (that correspond to I's) from vision encoder 
+    must be padded with embeddings of S, B, and E in the same order of 
+    input_ids for a correct embedding merge.
 
     Note:
         This updates ``inputs_embeds`` in place.
     """
+    if isinstance(placeholder_token_id, list):
+        placeholder_token_id = torch.tensor(placeholder_token_id,
+                                            device=input_ids.device)
+        return _merge_multimodal_embeddings(
+            inputs_embeds,
+            torch.isin(input_ids, placeholder_token_id),
+            multimodal_embeddings,
+        )
+
     return _merge_multimodal_embeddings(
         inputs_embeds,
         (input_ids == placeholder_token_id),
@@ -562,31 +603,11 @@ def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
     return make_empty_intermediate_tensors
 
 
-class LLMWrapper(nn.Module):
+def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
     """
-    To align with the key names of LoRA trained with PEFT, we need to add an
-    additional layer to the llm's implementation.
+    Get the available attention backend for Vision Transformer.
     """
-
-    def __init__(self, llm: nn.Module, name: str) -> None:
-        super().__init__()
-        self.model_name = name
-        setattr(self, name, llm)
-
-    def __getattr__(self, key: str):
-        llm = super().__getattr__(self.model_name)
-        if key == self.model_name:
-            return llm
-
-        return getattr(llm, key)
-
-    # We need to explicitly override this
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        llm = super().__getattr__(self.model_name)
-        return llm(*args, **kwargs)
-
-
-def get_vit_attn_backend() -> _Backend:
+    # TODO(Isotr0py): Remove `support_fa` after support FA for all ViTs attn.
     selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
     if selected_backend is None:
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
@@ -595,17 +616,18 @@ def get_vit_attn_backend() -> _Backend:
     if selected_backend is None:
         # For Volta and Turing GPUs, use xformers instead.
         device_available = current_platform.has_device_capability(80)
-        if device_available:
+        if device_available and support_fa:
             from transformers.utils import is_flash_attn_2_available
             if is_flash_attn_2_available():
                 selected_backend = _Backend.FLASH_ATTN
             else:
-                logger.warning(
+                print_warning_once(
                     "Current `vllm-flash-attn` has a bug inside vision module, "
                     "so we use xformers backend instead. You can run "
                     "`pip install flash-attn` to use flash-attention backend.")
                 selected_backend = _Backend.XFORMERS
-        elif current_platform.is_cpu():
+        elif current_platform.is_cpu() or current_platform.is_rocm():
+            # ROCM doesn't support xformers
             selected_backend = _Backend.TORCH_SDPA
         else:
             selected_backend = _Backend.XFORMERS
@@ -623,3 +645,24 @@ def maybe_prefix(prefix: str, name: str) -> str:
         The string "prefix.name" if prefix was non-empty, otherwise just "name".
     """
     return name if not prefix else f"{prefix}.{name}"
+
+
+def extract_layer_index(layer_name: str) -> int:
+    """
+    Extract the layer index from the module name.
+    Examples:
+    - "encoder.layers.0" -> 0
+    - "encoder.layers.1.self_attn" -> 1
+    - "2.self_attn" -> 2
+    - "model.encoder.layers.0.sub.1" -> ValueError
+    """
+    subnames = layer_name.split(".")
+    int_vals: List[int] = []
+    for subname in subnames:
+        try:
+            int_vals.append(int(subname))
+        except ValueError:
+            continue
+    assert len(int_vals) == 1, (f"layer name {layer_name} should"
+                                " only contain one integer")
+    return int_vals[0]

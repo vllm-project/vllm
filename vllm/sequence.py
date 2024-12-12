@@ -450,6 +450,10 @@ class Sequence:
         return self.inputs.prompt_embeds
 
     @property
+    def token_type_ids(self) -> List[int]:
+        return self.inputs.token_type_ids
+
+    @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         return self.inputs.multi_modal_data
 
@@ -579,6 +583,9 @@ class Sequence:
             return 1
         return self.data.get_num_uncomputed_tokens()
 
+    def get_num_computed_tokens(self) -> int:
+        return self.data.get_num_computed_tokens()
+
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
 
@@ -611,9 +618,9 @@ class SequenceGroup:
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         embeddings: The embeddings vectors of the prompt of the sequence group
-            for an embedding model.
+            for a pooling model.
         pooling_params: The pooling parameters used to generate the pooling
-            for an embedding model.
+            for a pooling model.
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
@@ -683,6 +690,10 @@ class SequenceGroup:
         # distinct from the decoder's.
         return (self.encoder_seq.prompt_token_ids
                 if self.encoder_seq is not None else None)
+
+    @property
+    def token_type_ids(self) -> Optional[List[int]]:
+        return self.first_seq.token_type_ids
 
     @property
     def multi_modal_data(self) -> MultiModalDataDict:
@@ -906,6 +917,7 @@ class SequenceGroupMetadata(
         default_factory=lambda: SequenceGroupState())
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
+    token_type_ids: Optional[List[int]] = None
     multi_modal_data: Optional[Any] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
@@ -1090,7 +1102,7 @@ class PoolerOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True):  # type: ignore[call-arg]
-    """The output from a pooling operation in the embedding model."""
+    """The output from a pooling operation in the pooling model."""
     outputs: List[EmbeddingSequenceGroupOutput]
 
     # lazy import to avoid circular import
