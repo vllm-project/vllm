@@ -2355,7 +2355,9 @@ class CompilationConfig(BaseModel):
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
-    bs_to_padded_graph_size: Dict[int, int] = PrivateAttr
+    # optimization: Dict[int, int] can be optimized to List[int]
+    # if we know all keys are in a range [0, max_capture_size]
+    bs_to_padded_graph_size: List[int] = PrivateAttr
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
@@ -2469,7 +2471,9 @@ class CompilationConfig(BaseModel):
             0] if self.capture_sizes else 0
 
         # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = {}
+        self.bs_to_padded_graph_size = [
+            0 for i in range(self.max_capture_size + 1)
+        ]
         for end, start in zip(self.capture_sizes,
                               self.capture_sizes[1:] + [0]):
             for bs in range(start, end):
