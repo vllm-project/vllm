@@ -166,9 +166,18 @@ class SchedulerOutputs:
                 and not self.blocks_to_swap_out and not self.blocks_to_copy)
 
     def _sort_by_lora_ids(self):
-        self.scheduled_seq_groups = sorted(
-            self.scheduled_seq_groups,
-            key=lambda g: (g.seq_group.lora_int_id, g.seq_group.request_id))
+        assert 0 <= self.num_prefill_groups <= len(self.scheduled_seq_groups)
+
+        def key_fn(group: ScheduledSequenceGroup):
+            key = (group.seq_group.lora_int_id, group.seq_group.request_id)
+            if 0 < self.num_prefill_groups < len(self.scheduled_seq_groups):
+                # Sort sequence groups so that all prefills come before all
+                # decodes as required by chunked prefill.
+                return (not group.seq_group.is_prefill(), *key)
+            return key
+
+        self.scheduled_seq_groups = sorted(self.scheduled_seq_groups,
+                                           key=key_fn)
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:
@@ -328,7 +337,7 @@ class Scheduler:
         self.lora_config = lora_config
 
         version = "selfattn"
-        if (self.scheduler_config.task == "embedding"
+        if (self.scheduler_config.runner_type == "pooling"
                 or self.cache_config.is_attention_free):
             version = "placeholder"
 
@@ -1201,15 +1210,25 @@ class Scheduler:
         # Update swapped requests.
         self.swapped.extend(running_scheduled.swapped_out)
         # Put prefills first due to Attention backend ordering assumption.
+        scheduled_seq_groups = (prefills.seq_groups +
+                                running_scheduled.prefill_seq_groups +
+                                swapped_in.prefill_seq_groups +
+                                running_scheduled.decode_seq_groups +
+                                swapped_in.decode_seq_groups)
+        num_prefill_groups = (len(prefills.seq_groups) +
+                              len(swapped_in.prefill_seq_groups) +
+                              len(running_scheduled.prefill_seq_groups))
+        # If all prompts, then we set num_lookahead_slots to 0
+        # this allows us to go through the `no_spec` path in
+        # `spec_decode_worker.py`
+        all_prefills = (len(scheduled_seq_groups) == num_prefill_groups)
+        num_lookahead_slots = (0 if
+                               (all_prefills
+                                and not self.scheduler_config.is_multi_step)
+                               else running_scheduled.num_lookahead_slots)
         return SchedulerOutputs(
-            scheduled_seq_groups=(prefills.seq_groups +
-                                  running_scheduled.prefill_seq_groups +
-                                  swapped_in.prefill_seq_groups +
-                                  running_scheduled.decode_seq_groups +
-                                  swapped_in.decode_seq_groups),
-            num_prefill_groups=(len(prefills.seq_groups) +
-                                len(swapped_in.prefill_seq_groups) +
-                                len(running_scheduled.prefill_seq_groups)),
+            scheduled_seq_groups=scheduled_seq_groups,
+            num_prefill_groups=num_prefill_groups,
             num_batched_tokens=budget.num_batched_tokens +
             budget.num_cached_tokens,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
@@ -1218,7 +1237,7 @@ class Scheduler:
             swapped_in.blocks_to_copy,
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
-            num_lookahead_slots=running_scheduled.num_lookahead_slots,
+            num_lookahead_slots=num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),

@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -23,6 +23,7 @@ except ImportError as e:
 
 class OpenVinoPlatform(Platform):
     _enum = PlatformEnum.OPENVINO
+    device_name: str = "openvino"
     device_type: str = "openvino"
     dispatch_key: str = "CPU"
 
@@ -35,6 +36,10 @@ class OpenVinoPlatform(Platform):
     @classmethod
     def get_device_name(self, device_id: int = 0) -> str:
         return "openvino"
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return False
 
     @classmethod
     def inference_mode(self):

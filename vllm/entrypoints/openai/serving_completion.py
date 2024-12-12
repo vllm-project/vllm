@@ -30,7 +30,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators, random_uuid
+from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -85,8 +85,7 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "suffix is not currently supported")
 
-        model_name = self.base_model_paths[0].name
-        request_id = f"cmpl-{random_uuid()}"
+        request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
@@ -101,7 +100,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            request_prompts, engine_prompts = self._preprocess_completion(
+            request_prompts, engine_prompts = await self._preprocess_completion(
                 request,
                 tokenizer,
                 request.prompt,
@@ -162,6 +161,7 @@ class OpenAIServingCompletion(OpenAIServing):
         result_generator = merge_async_iterators(
             *generators, is_cancelled=raw_request.is_disconnected)
 
+        model_name = self._get_model_name(lora_request)
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
@@ -392,6 +392,12 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
             prompt_logprobs = final_res.prompt_logprobs
+            if prompt_logprobs:
+                for logprob_dict in prompt_logprobs:
+                    if logprob_dict:
+                        for logprob_values in logprob_dict.values():
+                            if logprob_values.logprob == float('-inf'):
+                                logprob_values.logprob = -9999.0
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]

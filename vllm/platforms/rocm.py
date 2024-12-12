@@ -1,9 +1,10 @@
 import os
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
@@ -35,8 +36,13 @@ if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
 
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
+    device_name: str = "rocm"
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
+    supported_quantization: list[str] = [
+        "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
+        "fbgemm_fp8", "gguf"
+    ]
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -67,6 +73,16 @@ class RocmPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        if enforce_eager:
+            logger.warning(
+                "To see benefits of async output processing, enable CUDA "
+                "graph. Since, enforce-eager is enabled, async output "
+                "processor cannot be used")
+            return False
+        return True
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
@@ -77,5 +93,16 @@ class RocmPlatform(Platform):
             elif vllm_config.speculative_config:
                 parallel_config.worker_cls = \
                     "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = \
+                    "vllm.worker.worker.Worker"
             else:
                 parallel_config.worker_cls = "vllm.worker.worker.Worker"
+
+    @classmethod
+    def verify_quantization(cls, quant: str) -> None:
+        super().verify_quantization(quant)
+        if quant == "awq" and not envs.VLLM_USE_TRITON_AWQ:
+            logger.warning(
+                "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
+                " is not set, enabling VLLM_USE_TRITON_AWQ.")
+        envs.VLLM_USE_TRITON_AWQ = True

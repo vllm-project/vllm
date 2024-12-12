@@ -9,12 +9,13 @@ from typing_extensions import TypeAlias
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import ClassRegistry
 
 from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import MultiModalProcessor
+from .processing import BaseMultiModalProcessor
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ logger = init_logger(__name__)
 N = TypeVar("N", bound=Type[nn.Module])
 
 MultiModalProcessorFactory: TypeAlias = Callable[[InputProcessingContext],
-                                                 MultiModalProcessor]
+                                                 BaseMultiModalProcessor]
 """
 Constructs a :class:`MultiModalProcessor` instance from the context.
 
@@ -62,8 +63,8 @@ class MultiModalRegistry:
             plugins: Sequence[MultiModalPlugin] = DEFAULT_PLUGINS) -> None:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
-        self._processor_factories: Dict[Type[nn.Module],
-                                        MultiModalProcessorFactory] = {}
+        self._processor_factories = ClassRegistry[nn.Module,
+                                                  MultiModalProcessorFactory]()
 
         # This is used for non-multimodal models
         self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
@@ -199,6 +200,27 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
+    def get_max_tokens_by_modality(
+        self,
+        model_config: "ModelConfig",
+    ) -> Mapping[str, int]:
+        """
+        Get the maximum number of tokens from each modality
+        for profiling the memory usage of a model.
+
+        See :meth:`MultiModalPlugin.get_max_multimodal_tokens` for more details.
+
+        Note:
+            This should be called after :meth:`init_mm_limits_per_prompt`.
+        """
+        limits_per_plugin = self._limits_by_model[model_config]
+
+        return {
+            key: (limits_per_plugin[key] *
+                  plugin.get_max_multimodal_tokens(model_config))
+            for key, plugin in self._plugins.items()
+        }
+
     def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
         """
         Get the maximum number of multi-modal tokens
@@ -209,11 +231,7 @@ class MultiModalRegistry:
         Note:
             This should be called after :meth:`init_mm_limits_per_prompt`.
         """
-        limits_per_plugin = self._limits_by_model[model_config]
-
-        return sum((limits_per_plugin[key] *
-                    plugin.get_max_multimodal_tokens(model_config))
-                   for key, plugin in self._plugins.items())
+        return sum(self.get_max_tokens_by_modality(model_config).values())
 
     def init_mm_limits_per_prompt(
         self,
@@ -269,7 +287,8 @@ class MultiModalRegistry:
         factory: MultiModalProcessorFactory,
     ):
         """
-        Register a multi-modal processor to a model class.
+        Register a multi-modal processor to a model class. The processor
+        is constructed lazily, hence a factory method should be passed.
 
         When the model receives multi-modal data, the provided function is
         invoked to transform the data into a dictionary of model inputs.
@@ -306,7 +325,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         tokenizer: AnyTokenizer,
-    ) -> MultiModalProcessor:
+    ) -> BaseMultiModalProcessor:
         """
         Create a multi-modal processor for a specific model and tokenizer.
         """

@@ -454,6 +454,7 @@ class SamplingTensors:
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
                 seq_ids = seq_group.seq_ids
+                sampling_params = seq_group.sampling_params
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
