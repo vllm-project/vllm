@@ -15,7 +15,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
     kernel. The main function is to maintain the state information for 
     Multi-LoRA, and to provide the interface for the pytorch punica ops.
     """
-    
+
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
                  device: Union[torch.device, str], **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,

@@ -14,6 +14,7 @@ from vllm.lora.ops import (bgmv_expand, bgmv_expand_slice, bgmv_shrink,
 
 from .punica_base import PunicaWrapperBase
 
+
 @final
 class PunicaWrapperGPU(PunicaWrapperBase):
     """
