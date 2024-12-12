@@ -830,7 +830,7 @@ class PrefixCachingBlock(Block):
         return self._prev_block
 
     @property
-    def extra_hash(self):
+    def extra_hash(self) -> Optional[int]:
         return self._extra_hash
 
     @property

@@ -52,7 +52,7 @@ class Block(ABC):
 
     @property
     @abstractmethod
-    def extra_hash(self):
+    def extra_hash(self) -> Optional[int]:
         return None
 
     @property
