@@ -98,20 +98,24 @@ def make_zmq_socket(
         ctx.destroy(linger=0)
 
 
-class LRUDictCache:
+K = TypeVar('K')
+V = TypeVar('V')
+
+
+class LRUDictCache(Generic[K, V]):
 
     def __init__(self, size: int):
-        self.cache = OrderedDict()
+        self.cache: OrderedDict[K, V] = OrderedDict()
         self.size = size
 
-    def get(self, key, default=None):
+    def get(self, key: K, default=None) -> V:
         if key not in self.cache:
             return default
 
         self.cache.move_to_end(key)
         return self.cache[key]
 
-    def put(self, key, value):
+    def put(self, key: K, value: V):
         self.cache[key] = value
         self.cache.move_to_end(key)
         if len(self.cache) > self.size:

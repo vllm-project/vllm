@@ -42,7 +42,7 @@ class MMInputMapperClient:
             model_config)
         self.mm_registry.init_mm_limits_per_prompt(model_config)
 
-        self.mm_cache = LRUDictCache(MM_CACHE_SIZE)
+        self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
         self.mm_debug_cache_hit_ratio_steps = None
@@ -120,7 +120,7 @@ class MMInputMapperClient:
 class MMInputMapperServer:
 
     def __init__(self, ):
-        self.mm_cache = LRUDictCache(MM_CACHE_SIZE)
+        self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
     def process_inputs(
         self,
@@ -131,6 +131,7 @@ class MMInputMapperServer:
 
         full_mm_inputs = []
         for mm_input, mm_hash in zip(mm_inputs, mm_hashes):
+            assert mm_hash is not None
             if mm_input is None:
                 mm_input = self.mm_cache.get(mm_hash)
                 assert mm_input is not None
