@@ -21,8 +21,8 @@ outputs = model.classify(prompts)
 
 # Print the outputs.
 for prompt, output in zip(prompts, outputs):
-    logits = output.outputs.logits
-    logits_trimmed = ((str(logits[:16])[:-1] +
-                       ", ...]") if len(logits) > 16 else logits)
+    probs = output.outputs.probs
+    probs_trimmed = ((str(probs[:16])[:-1] +
+                      ", ...]") if len(probs) > 16 else probs)
     print(f"Prompt: {prompt!r} | "
-          f"Logits: {logits_trimmed} (size={len(logits)})")
+          f"Class Probabilities: {probs_trimmed} (size={len(probs)})")

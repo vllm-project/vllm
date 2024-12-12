@@ -436,22 +436,22 @@ class ClassificationOutput:
     """The output data of one classification output of a request.
 
     Args:
-        logits: The logits vector, which is a list of floats.
+        logits: The probability vector, which is a list of floats.
         Its length depends on the number of classes.
     """
-    logits: list[float]
+    probs: list[float]
 
     @staticmethod
     def from_base(pooling_output: PoolingOutput):
         pooled_data = pooling_output.data
         if pooled_data.ndim != 1:
-            raise ValueError("pooled_data should be a 1-D logits vector")
+            raise ValueError("pooled_data should be a 1-D probability vector")
 
         return ClassificationOutput(pooled_data.tolist())
 
     @property
     def num_classes(self) -> int:
-        return len(self.logits)
+        return len(self.probs)
 
     def __repr__(self) -> str:
         return f"ClassificationOutput(num_classes={self.num_classes})"

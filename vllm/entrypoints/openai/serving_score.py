@@ -29,7 +29,7 @@ def request_output_to_score_response(
         classify_res = ClassificationRequestOutput.from_base(final_res)
 
         score_data = ScoreResponseData(index=idx,
-                                       score=classify_res.outputs.logits)
+                                       score=classify_res.outputs.probs)
         data.append(score_data)
 
     usage = UsageInfo(

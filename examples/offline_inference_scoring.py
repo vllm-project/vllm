@@ -14,13 +14,13 @@ model = LLM(
     enforce_eager=True,
 )
 
-# Generate logits. The output is a list of ClassificationRequestOutputs.
+# Generate scores. The output is a list of ClassificationRequestOutputs.
 outputs = model.score(text_1, texts_2)
 
 # Print the outputs.
 for text_2, output in zip(texts_2, outputs):
-    logits = output.outputs.logits
-    logits_trimmed = ((str(logits[:16])[:-1] +
-                       ", ...]") if len(logits) > 16 else logits)
+    scores = output.outputs.probs
+    scores_trimmed = ((str(scores[:16])[:-1] +
+                       ", ...]") if len(scores) > 16 else scores)
     print(f"Pair: {[text_1, text_2]!r} | "
-          f"Logits: {logits_trimmed} (size={len(logits)})")
+          f"Scores: {scores_trimmed} (size={len(scores)})")

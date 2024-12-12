@@ -891,7 +891,7 @@ class VllmRunner:
 
     def classify(self, prompts: List[str]) -> List[List[float]]:
         req_outputs = self.model.classify(prompts)
-        return [req_output.outputs.logits for req_output in req_outputs]
+        return [req_output.outputs.probs for req_output in req_outputs]
 
     def encode(
         self,
@@ -914,7 +914,7 @@ class VllmRunner:
         text_2: Union[str, List[str]],
     ) -> List[List[float]]:
         req_outputs = self.model.score(text_1, text_2)
-        return [req_output.outputs.logits for req_output in req_outputs]
+        return [req_output.outputs.probs for req_output in req_outputs]
 
     def __enter__(self):
         return self

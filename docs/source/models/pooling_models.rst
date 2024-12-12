@@ -74,7 +74,7 @@ A code example can be found in `examples/offline_inference_embedding.py <https:/
 ``LLM.classify``
 ^^^^^^^^^^^^^^^^
 
-The :class:`~vllm.LLM.classify` method outputs a logits vector for each prompt.
+The :class:`~vllm.LLM.classify` method outputs a probability vector for each prompt.
 It is primarily designed for classification models.
 
 .. code-block:: python
@@ -82,8 +82,8 @@ It is primarily designed for classification models.
     llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", task="classify")
     output, = llm.classify("Hello, my name is")
 
-    logits = output.outputs.logits
-    print(f"Logits: {logits!r} (size={len(logits)})")
+    probs = output.outputs.probs
+    print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 
 A code example can be found in `examples/offline_inference_classification.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_classification.py>`_.
 
@@ -105,8 +105,8 @@ These types of models serve as rerankers between candidate query-document pairs 
     output, = llm.score("What is the capital of France?",
                         "The capital of Brazil is Brasilia.")
 
-    logits = output.outputs.logits
-    print(f"Logits: {logits!r} (size={len(logits)})")
+    probs = output.outputs.probs
+    print(f"Scores: {probs!r} (size={len(probs)})")
 
 A code example can be found in `examples/offline_inference_scoring.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_scoring.py>`_.
 
