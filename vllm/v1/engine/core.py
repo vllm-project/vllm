@@ -113,6 +113,20 @@ class EngineCore:
             scheduler_output, output)
         return engine_core_outputs
 
+    def step2(self) -> List[EngineCoreOutput]:
+        """Schedule, execute, and make output."""
+
+        if not self.scheduler.has_unfinished_requests():
+            return []
+
+        scheduler_output = self.scheduler.schedule()
+        # output is the result of prior microbatch(es), and empty
+        # when there is no prior microbatch or none are finished.
+        output = self.model_executor.execute_model(scheduler_output)
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, output)
+        return engine_core_outputs
+
     def shutdown(self):
         self.model_executor.shutdown()
 
@@ -317,6 +331,35 @@ class EngineCoreProc(EngineCore):
             outputs = self.step()
 
             # Put EngineCoreOutputs into the output queue.
+            self.output_queue.put_nowait(outputs)
+
+            self._log_stats()
+
+    def run_busy_loop2(self):
+        # Loop until process is sent a SIGINT or SIGTERM
+        while True:
+            # 1) Poll the input queue until there is work to do.
+            if not self.scheduler.has_unfinished_requests():
+                while True:
+                    try:
+                        req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
+                        self._handle_client_request(req)
+                        break
+                    except queue.Empty:
+                        self._log_stats()
+                        logger.debug("EngineCore busy loop waiting.")
+                    except BaseException:
+                        raise
+
+            # 2) Handle any new client requests (Abort or Add).
+            while not self.input_queue.empty():
+                req = self.input_queue.get_nowait()
+                self._handle_client_request(req)
+
+            # 3) Step the engine core.
+            outputs = self.step2()
+
+            # 4) Put EngineCoreOutputs into the output queue.
             self.output_queue.put_nowait(outputs)
 
             self._log_stats()
