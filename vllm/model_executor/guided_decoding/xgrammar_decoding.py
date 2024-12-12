@@ -131,22 +131,22 @@ class GrammarConfig:
                            max_threads: int = 8) -> GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
-        # Only get tokenizer data if not already cached
-        if tokenizer_hash in TokenizerDataCache._cache:
-            encoded_vocab = None
-            stop_token_ids = None
-            backend_str = None
-        else:
-            tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
-            encoded_vocab = tokenizer_data.encoded_vocab
-            stop_token_ids = tokenizer_data.stop_token_ids
-            backend_str = tokenizer_data.backend_str
+        tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
+        encoded_vocab = tokenizer_data.encoded_vocab
+        stop_token_ids = tokenizer_data.stop_token_ids
+        backend_str = tokenizer_data.backend_str
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
                 json_str = json.dumps(guided_params.json)
             else:
                 json_str = guided_params.json
+
+            try:
+                xgr.Grammar.from_json_schema(json_str)
+            except RuntimeError as err:
+                raise ValueError(str(err)) from err
+
             return cls(json_str=json_str,
                        vocab_size=model_config.hf_text_config.vocab_size,
                        encoded_vocab=encoded_vocab,
