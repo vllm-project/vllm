@@ -7,7 +7,7 @@ from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import _MAX_BATCH_SIZE_TO_CAPTURE, CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -434,8 +434,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 **kwargs):
         if self.mamba_cache is None:
             max_batch_size = (VllmConfig.static_pad_for_cudagraph(
-                self.scheduler_config.max_num_seqs) if self.scheduler_config
-                              else _MAX_BATCH_SIZE_TO_CAPTURE + 2)
+                self.scheduler_config.max_num_seqs)
+                              if self.scheduler_config else 8192 + 2)
 
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
