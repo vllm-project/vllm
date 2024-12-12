@@ -1,7 +1,7 @@
 import pytest
 
 from tests.utils import multi_gpu_test
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, ModelConfig
 from vllm.sampling_params import SamplingParams
 
 from ...utils import check_outputs_equal
@@ -189,7 +189,9 @@ def test_mamba_cache_cg_padding(
     # This test is for verifying that mamba cache is padded to CG captured
     # batch size. If it's not, a torch RuntimeError will be raised because
     # tensor dimensions aren't compatible
-    while len(example_prompts) == VllmConfig.static_pad_for_cudagraph(
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model=model, enforce_eager=False))
+    while len(example_prompts) == vllm_config.pad_for_cudagraph(
             len(example_prompts)):
         example_prompts.append(example_prompts[0])
 

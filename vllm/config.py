@@ -2501,28 +2501,6 @@ from batch size to padded graph size, if the batch size is less than or equal to
 the largest size in `vllm_config.compilation_config.capture_sizes`.
 """
 
-_BATCH_SIZE_ALIGNMENT = 8
-# all the token sizes that **can** be captured by cudagraph.
-# they can be arbitrarily large.
-# currently it includes: 1, 2, 4, 8, 16, 24, 32, 40, ..., 8192.
-# the actual sizes to capture will be determined by the model,
-# depending on the model's max_num_seqs.
-_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
-    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 1025)
-]
-_MAX_BATCH_SIZE_TO_CAPTURE = _BATCH_SIZES_TO_CAPTURE[-1]
-
-bs_to_padded_graph_size: Dict[int, int] = {}
-for start, end in zip([0] + _BATCH_SIZES_TO_CAPTURE[:-1],
-                      _BATCH_SIZES_TO_CAPTURE):
-    for bs in range(start, end):
-        if bs == start:
-            bs_to_padded_graph_size[bs] = start
-        else:
-            bs_to_padded_graph_size[bs] = end
-bs_to_padded_graph_size[
-    _MAX_BATCH_SIZE_TO_CAPTURE] = _MAX_BATCH_SIZE_TO_CAPTURE
-
 
 @dataclass
 class VllmConfig:
@@ -2558,22 +2536,6 @@ class VllmConfig:
         if batch_size > self.compilation_config.max_capture_size:
             return self.compilation_config.max_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
-
-    @staticmethod
-    def static_pad_for_cudagraph(batch_size: int) -> int:
-        """
-        This function statically pads the batch size to the nearest
-        number in _BATCH_SIZES_TO_CAPTURE , without considering the
-        model's configuration.
-
-        if the padded size is in _BATCH_SIZES_TO_CAPTURE, return the padded
-        size. if not, it means the padded size is larger than the largest size
-        in _BATCH_SIZES_TO_CAPTURE, return the largest size in
-        _BATCH_SIZES_TO_CAPTURE.
-        """
-        if batch_size > _MAX_BATCH_SIZE_TO_CAPTURE:
-            return _MAX_BATCH_SIZE_TO_CAPTURE
-        return bs_to_padded_graph_size[batch_size]
 
     @staticmethod
     def _get_quantization_config(
@@ -2668,17 +2630,29 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.PIECEWISE
 
         if not envs.VLLM_USE_V1:
+            batch_size_capture_list = []
             max_batchsize_to_capture = 0
             if self.scheduler_config is not None and \
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
-                max_batchsize_to_capture = \
-                    self.static_pad_for_cudagraph(
-                    self.scheduler_config.max_num_seqs)
-            batch_size_capture_list = [
-                size for size in _BATCH_SIZES_TO_CAPTURE
-                if size <= max_batchsize_to_capture
-            ]
+                # all the token sizes that **can** be captured by cudagraph.
+                # they can be arbitrarily large.
+                # currently it includes: 1, 2, 4, 8, 16, 24, 32, 40, ..., 8192.
+                # the actual sizes to capture will be determined by the model,
+                # depending on the model's max_num_seqs.
+                possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
+                larger_sizes = [
+                    x for x in possible_sizes
+                    if x >= self.scheduler_config.max_num_seqs
+                ]
+                if larger_sizes:
+                    max_batchsize_to_capture = larger_sizes[0]
+                else:
+                    max_batchsize_to_capture = possible_sizes[-1]
+                batch_size_capture_list = [
+                    size for size in possible_sizes
+                    if size <= max_batchsize_to_capture
+                ]
         else:
             batch_size_capture_list = []
             if self.model_config is not None and \
