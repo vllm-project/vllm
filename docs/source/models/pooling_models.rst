@@ -67,7 +67,7 @@ It is primarily designed for embedding models.
     output, = llm.embed("Hello, my name is")
 
     embeds = output.outputs.embedding
-    print(f"Prompt: {prompt!r} | Embeddings: {embeds!r} (size={len(embeds)})")
+    print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 
 A code example can be found in `examples/offline_inference_embedding.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_embedding.py>`_.
 
@@ -83,7 +83,7 @@ It is primarily designed for classification models.
     output, = llm.classify("Hello, my name is")
 
     logits = output.outputs.logits
-    print(f"Prompt: {prompt!r} | Logits: {logits!r} (size={len(logits)})")
+    print(f"Logits: {logits!r} (size={len(logits)})")
 
 A code example can be found in `examples/offline_inference_classification.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_classification.py>`_.
 
@@ -99,7 +99,16 @@ These types of models serve as rerankers between candidate query-document pairs 
     vLLM can only perform the model inference component (e.g. embedding, reranking) of RAG.
     To handle RAG at a higher level, you should use integration frameworks such as `LangChain <https://github.com/langchain-ai/langchain>`_.
 
-You can use `these tests <https://github.com/vllm-project/vllm/blob/main/tests/models/embedding/language/test_scoring.py>`_ as reference.
+.. code-block:: python
+
+    llm = LLM(model="BAAI/bge-reranker-v2-m3", task="score")
+    output, = llm.score("What is the capital of France?",
+                        "The capital of Brazil is Brasilia.")
+
+    logits = output.outputs.logits
+    print(f"Logits: {logits!r} (size={len(logits)})")
+
+A code example can be found in `examples/offline_inference_scoring.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_scoring.py>`_.
 
 Online Inference
 ----------------
