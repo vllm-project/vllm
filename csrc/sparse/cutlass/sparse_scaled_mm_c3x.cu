@@ -23,11 +23,14 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
-#include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
-#include "common.hpp"
+#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "cutlass_extensions/common.hpp"
 // clang-format on
 
-  #include "sparse_scaled_mm_c3x.cuh"
+#include "sparse_scaled_mm_c3x.cuh"
+
+using namespace cute;
+using namespace vllm;
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
@@ -308,10 +311,10 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
   if (bias) {
     TORCH_CHECK(bias->dtype() == out.dtype(),
                 "currently bias dtype must match output dtype ", out.dtype());
-    return cutlass_scaled_sparse_mm_sm90_epilogue<ScaledEpilogueBias>(
+    return cutlass_scaled_sparse_mm_sm90_epilogue<c3x::ScaledEpilogueBias>(
         out, a, e, b, a_scales, b_scales, *bias);
   } else {
-    return cutlass_scaled_sparse_mm_sm90_epilogue<ScaledEpilogue>(
+    return cutlass_scaled_sparse_mm_sm90_epilogue<c3x::ScaledEpilogue>(
         out, a, e, b, a_scales, b_scales);
   }
 }

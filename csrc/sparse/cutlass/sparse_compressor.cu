@@ -17,7 +17,7 @@
 #include "cutlass/detail/dependent_false.hpp"
 
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
-#include "common.hpp"
+#include "cutlass_extensions/common.hpp"
 
 #include "cutlass/transform/device/transform_universal_adapter.hpp"
 #include "cutlass/transform/kernel/sparse_gemm_compressor.hpp"
@@ -39,7 +39,11 @@
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/util/packed_stride.hpp"
 
+#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "sparse_scaled_mm_c3x.cuh"
+
+using namespace cute;
+using namespace vllm;
 
 /// Make A structured sparse by replacing elements with 0 and compress it
 template <typename ElementA_>
@@ -66,20 +70,20 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   using Gemm = typename std::conditional<
       std::is_same_v<ElementA, int8_t>,
       typename sm90_int8_config_default<int8_t, cutlass::half_t,
-                                        ScaledEpilogue>::Cutlass3xGemm,
+                                        c3x::ScaledEpilogue>::Cutlass3xGemm,
       typename std::conditional<
           std::is_same_v<ElementA, cutlass::float_e4m3_t>,
           typename sm90_fp8_config_default<cutlass::float_e4m3_t,
                                            cutlass::half_t,
-                                           ScaledEpilogue>::Cutlass3xGemm,
+                                           c3x::ScaledEpilogue>::Cutlass3xGemm,
           typename std::conditional<
               std::is_same_v<ElementA, cutlass::half_t>,
               typename sm90_fp16_config_default<cutlass::half_t,
                                                 cutlass::half_t,
-                                                ScaledEpilogue>::Cutlass3xGemm,
+                                                c3x::ScaledEpilogue>::Cutlass3xGemm,
               typename sm90_bf16_config_default<
                   cutlass::bfloat16_t, cutlass::half_t,
-                  ScaledEpilogue>::Cutlass3xGemm>::type>::type>::type;
+                  c3x::ScaledEpilogue>::Cutlass3xGemm>::type>::type>::type;
 
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;

@@ -534,8 +534,7 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
 
 def cutlass_compress_entry(a: torch.Tensor) \
     -> Tuple[torch.Tensor, torch.Tensor]:
-    assert (a.dtype is torch.int8 or a.dtype is torch.float8_e4m3fn or \
-            a.dtype is torch.bfloat16 or a.dtype is torch.float16)
+    assert (a.dtype is [torch.int8, torch.float8_e4m3fn, torch.bfloat16, torch.float16])
 
     # e.dtype: torch.uint8 so elemsPerElemE = 8b / 2b_per_nz = 4
     elemsPerElemE = 4

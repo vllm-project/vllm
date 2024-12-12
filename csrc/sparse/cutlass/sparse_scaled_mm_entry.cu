@@ -48,7 +48,6 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
   int32_t version_num = test_get_sm_version_num();
-  // Hopper
 
   // Guard against compilation issues for sm90 kernels
 #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X

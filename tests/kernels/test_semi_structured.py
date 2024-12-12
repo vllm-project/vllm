@@ -113,8 +113,6 @@ def test_cutlass_sparse_subset():
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
-    print("in test")
-
     out = ops.cutlass_scaled_sparse_mm(a,
                                        b_comp,
                                        e,
