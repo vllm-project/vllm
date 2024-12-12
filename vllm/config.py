@@ -2667,12 +2667,10 @@ class VllmConfig:
             if self.scheduler_config is not None and \
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
-                # all the token sizes that **can** be captured by cudagraph.
-                # they can be arbitrarily large.
-                # currently it includes: 1, 2, 4, 8, 16, 24, 32, 40, ..., 8192.
-                # the actual sizes to capture will be determined by the model,
-                # depending on the model's max_num_seqs.
+
                 possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
+                # find the minimum size that is larger than max_num_seqs,
+                # which then becomes the max_batchsize_to_capture
                 larger_sizes = [
                     x for x in possible_sizes
                     if x >= self.scheduler_config.max_num_seqs
@@ -2681,6 +2679,9 @@ class VllmConfig:
                     max_batchsize_to_capture = larger_sizes[0]
                 else:
                     max_batchsize_to_capture = possible_sizes[-1]
+
+                # filter out the sizes that are
+                # larger than max_batchsize_to_capture
                 batch_size_capture_list = [
                     size for size in possible_sizes
                     if size <= max_batchsize_to_capture
