@@ -24,6 +24,19 @@ def to_fp16(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.to(dtype=torch.float16)
 
 
+def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
+                      k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    a = torch.randn((m, k), device='cuda') * 5
+    b = torch.randn((n, k), device='cuda').t() * 5
+
+    if dtype == torch.int8:
+        return to_int8(a), to_int8(b)
+    if dtype == torch.float8_e4m3fn:
+        return to_fp8(a), to_fp8(b)
+
+    raise ValueError("unsupported dtype")
+
+
 def prune_to_2_4(tensor):
     # Reshape tensor to [N, 4] where N is number of groups of 4
     original_shape = tensor.shape

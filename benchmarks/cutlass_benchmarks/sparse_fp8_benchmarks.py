@@ -513,12 +513,6 @@ def run_kernels_on_gpus(
         return results
 
 
-def get_cache_path() -> str:
-    """Get the path to the cache file for the given configuration hash."""
-    path = Path(os.path.dirname(os.path.realpath(__file__)))
-    return f'{path}/stable_kernels.json'
-
-
 def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
               with_arg_pool: Optional[int], m: int, k: int, n: int, label: str,
               sub_label: str) -> Iterable[TMeasurement]:
@@ -546,9 +540,9 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
 
     # Prepare configs for all kernels
     standard_kernels = [
-        # {'kernel_type': 'pytorch_mm'},
-        # {'kernel_type': 'pytorch_scaled_mm'},
-        # {'kernel_type': 'pytorch_scaled_mm_fast'},
+        {'kernel_type': 'pytorch_mm'},
+        {'kernel_type': 'pytorch_scaled_mm'},
+        {'kernel_type': 'pytorch_scaled_mm_fast'},
         {
             'kernel_type': 'cutlass_scaled_mm'
         },
@@ -691,14 +685,8 @@ def run_model_bench(args):
 if __name__ == '__main__':
 
     def to_torch_dtype(dt):
-        if dt == "int8":
-            return torch.int8
         if dt == "fp8":
             return torch.float8_e4m3fn
-        if dt == "fp16":
-            return torch.float16
-        if dt == "bf16":
-            return torch.bfloat16
         raise ValueError("unsupported dtype")
 
     parser = FlexibleArgumentParser(
