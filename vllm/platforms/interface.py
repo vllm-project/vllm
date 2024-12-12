@@ -6,10 +6,14 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+logger = init_logger(__name__)
 
 
 class _Backend(enum.Enum):
@@ -145,6 +149,13 @@ class Platform:
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """Get the total memory of a device in bytes."""
+        raise NotImplementedError
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        """
+        Check if the current platform supports async output.
+        """
         raise NotImplementedError
 
     @classmethod

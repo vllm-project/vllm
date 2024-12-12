@@ -201,7 +201,7 @@ steps:
     - python3 offline_profile.py --model facebook/opt-125m
 
 - label: Prefix Caching Test # 9min
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/prefix_caching
@@ -321,7 +321,7 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 30min
+- label: Basic Models Test # 24min
   source_file_dependencies:
   - vllm/
   - tests/models
@@ -331,7 +331,7 @@ steps:
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_initialization.py
 
-- label: Language Models Test (Standard) # 42min
+- label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -342,7 +342,7 @@ steps:
     - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/language -m core_model
 
-- label: Language Models Test (Extended) # 50min
+- label: Language Models Test (Extended) # 1h10min
   optional: true
   source_file_dependencies:
   - vllm/
@@ -353,7 +353,7 @@ steps:
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/language -m 'not core_model'
 
-- label: Multi-Modal Models Test (Standard) # 26min
+- label: Multi-Modal Models Test (Standard) # 28min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -369,7 +369,7 @@ steps:
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
-- label: Multi-Modal Models Test (Extended) # 1h15m
+- label: Multi-Modal Models Test (Extended) 1 # 1h16m
   optional: true
   source_file_dependencies:
   - vllm/
@@ -380,13 +380,23 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
+    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=0) and not core_model and not quant_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_models.py --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/vision_language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
+
+- label: Multi-Modal Models Test (Extended) 2 # 38m
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/vision_language
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=1) and not core_model and not quant_model'
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
@@ -422,11 +432,11 @@ steps:
   - tests/distributed/
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
 
 - label: Distributed Tests (2 GPUs) # 40min
   #mirror_hardwares: [amd]
@@ -445,12 +455,12 @@ steps:
   commands:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
-  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
-  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
+  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
-  - pytest models/encoder_decoder/language/test_bart.py -v -s -m distributed_2_gpus
-  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
-  - pytest models/decoder_only/vision_language/test_models.py -v -s -m distributed_2_gpus
+  - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
@@ -540,7 +550,7 @@ steps:
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed_2_gpus
+  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: LM Eval Large Models # optional

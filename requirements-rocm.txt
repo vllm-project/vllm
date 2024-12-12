@@ -5,6 +5,7 @@
 awscli
 boto3
 botocore
+datasets
 ray >= 2.10.0
 peft
 pytest-asyncio
