@@ -366,6 +366,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
     @torch.inference_mode()
     def get_cache_engine(self, worker_input: WorkerInput) -> CacheEngine:
+        if (self.cache_engine is None):
+            return None
         return self.cache_engine[worker_input.virtual_engine]
 
     @torch.inference_mode()
