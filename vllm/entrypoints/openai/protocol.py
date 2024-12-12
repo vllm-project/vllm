@@ -343,10 +343,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             prompt_logprobs = self.top_logprobs
 
         if self.logits_processors:
-            logits_processors = [(resolve_obj_by_qualname(p) if isinstance(
-                p, str) else resolve_obj_by_qualname(p.qualname)(
-                    *p.args or [], **p.kwargs or {}))
-                                 for p in self.logits_processors]
+            logits_processors = [
+                (resolve_obj_by_qualname(p) if isinstance(p, str) else
+                 resolve_obj_by_qualname(p.qualname)(*p.args, **p.kwargs))
+                for p in self.logits_processors
+            ]
         else:
             logits_processors = None
 
@@ -670,10 +671,11 @@ class CompletionRequest(OpenAIBaseModel):
         echo_without_generation = self.echo and self.max_tokens == 0
 
         if self.logits_processors:
-            logits_processors = [(resolve_obj_by_qualname(p) if isinstance(
-                p, str) else resolve_obj_by_qualname(p.qualname)(
-                    *p.args or [], **p.kwargs or {}))
-                                 for p in self.logits_processors]
+            logits_processors = [
+                (resolve_obj_by_qualname(p) if isinstance(p, str) else
+                 resolve_obj_by_qualname(p.qualname)(*p.args, **p.kwargs))
+                for p in self.logits_processors
+            ]
         else:
             logits_processors = None
 
