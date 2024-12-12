@@ -17,10 +17,18 @@ import inspect
 
 logger = init_logger(__name__)
 
-if "do_not_specialize_on_alignment" in inspect.getfullargspec(triton.jit).kwonlyargs:
-    moe_triton_jit = functools.partial(triton.jit, do_not_specialize_on_alignment=["EM", "num_valid_tokens"])
+if (
+    "do_not_specialize_on_alignment"
+    in inspect.getfullargspec(triton.jit).kwonlyargs
+):
+    moe_triton_jit = functools.partial(
+        triton.jit, do_not_specialize_on_alignment=["EM", "num_valid_tokens"]
+    )
 else:
-    moe_triton_jit = functools.partial(triton.jit, do_not_specialize=["EM", "num_valid_tokens"])
+    moe_triton_jit = functools.partial(
+        triton.jit, do_not_specialize=["EM", "num_valid_tokens"]
+    )
+
 
 @moe_triton_jit
 def fused_moe_kernel(
