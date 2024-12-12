@@ -1,6 +1,6 @@
 from functools import cached_property
 from importlib.util import find_spec
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.jit
@@ -228,23 +228,13 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         uniform_rand = torch.empty(batch_size, k + 1, device=device)
 
-        non_seeded_indices = []
         for idx in range(batch_size):
             generator = seeded_seqs.get(idx)
-            if generator is None:
-                non_seeded_indices.append(idx)
-            else:
-                uniform_rand[idx, :] = torch.rand(1,
-                                                  k + 1,
-                                                  dtype=self.probs_dtype,
-                                                  device=device,
-                                                  generator=generator)
-        if non_seeded_indices:
-            uniform_rand[non_seeded_indices, :] = torch.rand(
-                len(non_seeded_indices),
-                k + 1,
-                dtype=self.probs_dtype,
-                device=device)
+            uniform_rand[idx, :] = torch.rand(1,
+                                              k + 1,
+                                              dtype=self.probs_dtype,
+                                              device=device,
+                                              generator=generator)
         return uniform_rand
 
     def _get_accepted(
@@ -386,16 +376,11 @@ def _multinomial(
     if not seeded_seqs:
         q.exponential_(1.0)
     else:
-        non_seeded_indices: List[int] = []
         start = 0
         for idx in range(len(q) // k):
             end = start + k
             generator = seeded_seqs.get(idx)
-            if generator is None:
-                non_seeded_indices.extend(list(range(start, end)))
-            else:
-                q[start:end].exponential_(1.0, generator=generator)
+            q[start:end].exponential_(1.0, generator=generator)
             start = end
-        q[non_seeded_indices].exponential_(1.0)
 
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
