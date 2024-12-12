@@ -67,7 +67,7 @@ def run_whisper(question: str, audio_count: int):
 
     llm = LLM(model=model_name,
               max_model_len=4096,
-              max_num_seqs=5,
+              max_num_seqs=1,
               limit_mm_per_prompt={"audio": audio_count})
 
     audio_in_prompt = "".join([
