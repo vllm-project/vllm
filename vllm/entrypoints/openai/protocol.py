@@ -345,8 +345,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 (
                     resolve_obj_by_qualname(p) 
                     if isinstance(p, str) else
-                    resolve_obj_by_qualname(p["qualname"])(
-                        *p.get("args", []), **p.get("kwargs", {})
+                    resolve_obj_by_qualname(p.qualname)(
+                        *p.args or [], **p.kwargs or {}
                     )
                 )
                 for p in self.logits_processors
@@ -676,8 +676,8 @@ class CompletionRequest(OpenAIBaseModel):
                 (
                     resolve_obj_by_qualname(p) 
                     if isinstance(p, str) else
-                    resolve_obj_by_qualname(p["qualname"])(
-                        *p.get("args", []), **p.get("kwargs", {})
+                    resolve_obj_by_qualname(p.qualname)(
+                        *p.args or [], **p.kwargs or {}
                     )
                 )
                 for p in self.logits_processors
