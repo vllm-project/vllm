@@ -10,12 +10,12 @@ from vllm.triton_utils import HAS_TRITON
 
 # Enable custom op register if we're using custom ops
 if HAS_TRITON:
-    import vllm.lora.ops.triton.bgmv_expand
-    import vllm.lora.ops.triton.bgmv_expand_slice
-    import vllm.lora.ops.triton.bgmv_shrink
-    import vllm.lora.ops.triton.sgmv_expand
-    import vllm.lora.ops.triton.sgmv_expand_slice
-    import vllm.lora.ops.triton.sgmv_shrink  # noqa: F401
+    import vllm.lora.ops.triton_ops.bgmv_expand
+    import vllm.lora.ops.triton_ops.bgmv_expand_slice
+    import vllm.lora.ops.triton_ops.bgmv_shrink
+    import vllm.lora.ops.triton_ops.sgmv_expand
+    import vllm.lora.ops.triton_ops.sgmv_expand_slice
+    import vllm.lora.ops.triton_ops.sgmv_shrink  # noqa: F401
 
     # Unlike test_punica_sizes.py, we directly utilize custom op for
     # testing, which verifies the correct registration of these ops.
@@ -26,7 +26,7 @@ if HAS_TRITON:
     sgmv_expand_slice = torch.ops.vllm.sgmv_expand_slice
     sgmv_shrink = torch.ops.vllm.sgmv_shrink
 else:
-    from vllm.lora.ops.default.lora_ops import (  # type: ignore
+    from vllm.lora.ops.torch_ops.lora_ops import (  # type: ignore
         bgmv_expand, bgmv_expand_slice, bgmv_shrink, sgmv_expand,
         sgmv_expand_slice, sgmv_shrink)
 
