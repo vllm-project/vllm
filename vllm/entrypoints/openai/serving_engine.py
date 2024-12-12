@@ -567,12 +567,14 @@ class OpenAIServing:
         return None
 
     @staticmethod
-    def _base_request_id(raw_request: Request,
+    def _base_request_id(raw_request: Optional[Request],
                          default: Optional[str] = None) -> Optional[str]:
         """Pulls the request id to use from a header, if provided"""
         default = default or random_uuid()
-        return raw_request.headers.get(
-            "X-Request-Id", default) if raw_request is not None else default
+        if raw_request is None:
+            return default
+
+        return raw_request.headers.get("X-Request-Id", default)
 
     @staticmethod
     def _get_decoded_token(logprob: Logprob,
