@@ -22,7 +22,7 @@ outputs = model.classify(prompts)
 # Print the outputs.
 for prompt, output in zip(prompts, outputs):
     logits = output.outputs.logits
-    logits_trimmed = (
-        (str(logits[:16])[:-1] + ", ...]") if len(logits) > 16 else logits)
+    logits_trimmed = ((str(logits[:16])[:-1] +
+                       ", ...]") if len(logits) > 16 else logits)
     print(f"Prompt: {prompt!r} | "
           f"Logits: {logits_trimmed} (size={len(logits)})")
