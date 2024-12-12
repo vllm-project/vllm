@@ -2636,22 +2636,25 @@ class VllmConfig:
         """
         cudagraph batchsize padding logic:
 
-        In the default case, `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
-        batch sizes that cudagraph will capture. Depending on the engine's configuration of `max_num_seqs`,
+        `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
+        batch sizes that cudagraph will capture.
+
+        Depending on the engine's configuration of `max_num_seqs`,
         the candidate batch sizes to capture cudagraph will shrink to the subset which just cover the range of
-        `[1, max_num_seqs]`.
-        
+        `[1, max_num_seqs]`. In the common case, `max_num_seqs` is 256,
+        and the cudagraph batch sizes will be `[1, 2, 4, 8, 16, 24, 32, 40, ..., 256]`.
+
         However, if users specify the cudagraph capture sizes through compilation
         config, we will use the specified sizes instead.
 
         In the end, `vllm_config.compilation_config.capture_sizes` will be the final
         sizes to capture cudagraph (in descending order)
 
-        We pre-build a mapping from batch size
-        to padded graph size, so that we can quickly find the padded graph size for a
-        given batch size. `vllm_config.compilation_config.bs_to_padded_graph_size` will be the mapping
-        from batch size to padded graph size, if the batch size is less than or equal to
-        the largest size in `vllm_config.compilation_config.capture_sizes`.
+        During runtime, if batchsize is larger than `vllm_config.compilation_config.capture_sizes`,
+        no cudagraph will be used.
+        if the batch size is no larger than `vllm_config.compilation_config.capture_sizes`, we can
+        quickly find the padded graph size for a
+        given batch size by looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
         """ # noqa
 
         # calculate the default `batch_size_capture_list`
