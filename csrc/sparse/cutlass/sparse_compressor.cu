@@ -78,9 +78,9 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
                                            c3x::ScaledEpilogue>::Cutlass3xGemm,
           typename std::conditional<
               std::is_same_v<ElementA, cutlass::half_t>,
-              typename sm90_fp16_config_default<cutlass::half_t,
-                                                cutlass::half_t,
-                                                c3x::ScaledEpilogue>::Cutlass3xGemm,
+              typename sm90_fp16_config_default<
+                  cutlass::half_t, cutlass::half_t,
+                  c3x::ScaledEpilogue>::Cutlass3xGemm,
               typename sm90_bf16_config_default<
                   cutlass::bfloat16_t, cutlass::half_t,
                   c3x::ScaledEpilogue>::Cutlass3xGemm>::type>::type>::type;

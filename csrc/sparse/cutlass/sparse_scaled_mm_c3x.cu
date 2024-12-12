@@ -27,7 +27,7 @@
 #include "cutlass_extensions/common.hpp"
 // clang-format on
 
-#include "sparse_scaled_mm_c3x.cuh"
+  #include "sparse_scaled_mm_c3x.cuh"
 
 using namespace cute;
 using namespace vllm;
