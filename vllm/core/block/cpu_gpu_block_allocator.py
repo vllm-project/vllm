@@ -142,8 +142,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             prev_block, extra_hash=extra_hash)
 
     def allocate_immutable_blocks(
-            self, prev_block: Optional[Block],
-            block_token_ids: List[List[int]], device: Device,
+            self,
+            prev_block: Optional[Block],
+            block_token_ids: List[List[int]],
+            device: Device,
             extra_hash: Optional[int] = None) -> List[Block]:
         """Allocates a new group of immutable blocks with the provided block 
         token IDs on the specified device.
@@ -165,8 +167,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].allocate_immutable_blocks(
             prev_block, block_token_ids, extra_hash=extra_hash)
 
-    def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int], device: Device,
+    def allocate_immutable_block(self,
+                                 prev_block: Optional[Block],
+                                 token_ids: List[int],
+                                 device: Device,
                                  extra_hash: Optional[int] = None) -> Block:
         """Allocates a new immutable block with the provided token IDs on the
         specified device.

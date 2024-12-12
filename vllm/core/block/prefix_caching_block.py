@@ -177,8 +177,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._block_pool.free_block(block)
 
         # No cached block => Allocate a new block
-        block = self.allocate_mutable_block(prev_block,
-                                            extra_hash=extra_hash)
+        block = self.allocate_mutable_block(prev_block, extra_hash=extra_hash)
         block.append_token_ids(token_ids)
         return block
 
@@ -190,11 +189,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             device: Optional[Device] = None) -> List[Block]:
         blocks = []
         for token_ids in block_token_ids:
-            prev_block = self.allocate_immutable_block(
-                prev_block=prev_block,
-                token_ids=token_ids,
-                device=device,
-                extra_hash=extra_hash)
+            prev_block = self.allocate_immutable_block(prev_block=prev_block,
+                                                       token_ids=token_ids,
+                                                       device=device,
+                                                       extra_hash=extra_hash)
             blocks.append(prev_block)
         return blocks
 
@@ -624,8 +622,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                     extra_hash=block.extra_hash)
             else:
                 tmp_block = self.allocate_mutable_block(
-                    prev_block=block.prev_block,
-                    extra_hash=block.extra_hash)
+                    prev_block=block.prev_block, extra_hash=block.extra_hash)
                 tmp_block.append_token_ids(block.token_ids)
 
             block_id = tmp_block.block_id
@@ -868,7 +865,8 @@ class PrefixCachingBlock(Block):
         return self._cached_content_hash
 
     @staticmethod
-    def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int],
+    def hash_block_tokens(is_first_block: bool,
+                          prev_block_hash: Optional[int],
                           cur_block_token_ids: List[int],
                           extra_hash: Optional[int] = None) -> int:
         """Computes a hash value corresponding to the contents of a block and

@@ -97,11 +97,10 @@ class BlockTable:
         """
         assert not self._is_allocated
         assert token_ids
-        blocks = self._allocate_blocks_for_token_ids(
-            prev_block=None,
-            token_ids=token_ids,
-            device=device,
-            extra_hash=extra_hash)
+        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
+                                                     token_ids=token_ids,
+                                                     device=device,
+                                                     extra_hash=extra_hash)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
@@ -278,8 +277,11 @@ class BlockTable:
         return sequence_token_ids[self.num_full_slots:]
 
     def _allocate_blocks_for_token_ids(
-            self, prev_block: Optional[Block], token_ids: List[int],
-            device: Device, extra_hash: Optional[int] = None) -> List[Block]:
+            self,
+            prev_block: Optional[Block],
+            token_ids: List[int],
+            device: Device,
+            extra_hash: Optional[int] = None) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -304,9 +306,7 @@ class BlockTable:
             cur_token_ids = tail_token_ids[0]
 
             block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block,
-                device=device,
-                extra_hash=extra_hash)
+                prev_block=prev_block, device=device, extra_hash=extra_hash)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)
