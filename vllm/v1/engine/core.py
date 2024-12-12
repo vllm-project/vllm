@@ -18,7 +18,7 @@ from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
-from vllm.v1.engine.mm_input_mapper import MMInputMapper
+from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
@@ -55,15 +55,14 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        # Set up multimodal input mapper (e.g., convert PIL images to tensors).
-        self.mm_input_mapper = MMInputMapper(vllm_config.model_config)
-
         # Setup scheduler.
         self.scheduler = Scheduler(vllm_config.scheduler_config,
                                    vllm_config.cache_config,
                                    vllm_config.lora_config)
 
         self._last_logging_time = time.time()
+
+        self.mm_input_mapper_server = MMInputMapperServer()
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -88,7 +87,18 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
+
+        if request.mm_hashes is not None:
+            # Here, if hash exists for an image, then it will be fetched
+            # from the cache, else it will be added to the cache.
+            # Note that the cache here is mirrored with the client side of the
+            # MM mapper, so anything that has a hash must have a HIT cache
+            # entry here as well.
+            request.mm_inputs = self.mm_input_mapper_server.process_inputs(
+                request.mm_inputs, request.mm_hashes)
+
         req = Request.from_engine_core_request(request)
+
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
