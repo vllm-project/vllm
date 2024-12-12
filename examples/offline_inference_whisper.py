@@ -44,7 +44,7 @@ sampling_params = SamplingParams(
     temperature=0,
     top_p=1.0,
     min_tokens=0,
-    max_tokens=20,
+    max_tokens=200,
 )
 
 # Generate output tokens from the prompts. The output is a list of
