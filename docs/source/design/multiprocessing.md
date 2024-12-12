@@ -84,22 +84,24 @@ Related PRs:
 
 - <https://github.com/vllm-project/vllm/pull/8823>
 
-## Multiprocessing in v1
+## Prior State in v1
 
-There is an environment variable to control whether multiprocessing is used in the v1 engine core, `VLLM_ENABLE_V1_MULTIPROCESSING`. This defaults to off.
+There was an environment variable to control whether multiprocessing is used in
+the v1 engine core, `VLLM_ENABLE_V1_MULTIPROCESSING`. This defaulted to off.
 
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/envs.py#L452-L454>
 
-When it's enabled, the v1 `LLMEngine` will create a new process to run the engine core.
+When it was enabled, the v1 `LLMEngine` would create a new process to run the
+engine core.
 
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/llm_engine.py#L93-L95>
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/llm_engine.py#L70-L77>
 - https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/core_client.py#L44-L45
 
-It is currently off by default for all the reasons mentioned above -
-compatibility with dependencies and code using vLLM as a library.
+It was off by default for all the reasons mentioned above - compatibility with
+dependencies and code using vLLM as a library.
 
-### Proposed Changes
+### Changes Made in v1
 
 There is not an easy solution with Python's `multiprocessing` that will work
 everywhere. As a first step, we can get v1 into a state where it does "best
