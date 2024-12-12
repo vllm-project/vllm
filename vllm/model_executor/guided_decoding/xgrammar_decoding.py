@@ -142,6 +142,9 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
+            # Validate the schmea and raise ValueError here if it is invalid.
+            # This is to avoid exceptions in model execution, which will crash
+            # the engine worker process.
             try:
                 xgr.Grammar.from_json_schema(json_str)
             except RuntimeError as err:
