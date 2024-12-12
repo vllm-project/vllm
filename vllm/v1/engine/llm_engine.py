@@ -1,5 +1,7 @@
 from typing import Dict, List, Mapping, Optional, Type, Union
 
+from typing_extensions import TypeVar
+
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
@@ -12,14 +14,17 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer_group import (
+    BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
+
+_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 
 
 class LLMEngine:
@@ -28,7 +33,7 @@ class LLMEngine:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[GPUExecutor],
+        executor_class: Type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -99,10 +104,17 @@ class LLMEngine:
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig):
-        return GPUExecutor
+        distributed_executor_backend = (
+            vllm_config.parallel_config.distributed_executor_backend)
+        if distributed_executor_backend == "mp":
+            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+            executor_class = MultiprocExecutor
+        else:
+            assert (distributed_executor_backend is None)
+            from vllm.v1.executor.uniproc_executor import UniprocExecutor
+            executor_class = UniprocExecutor
 
-    def stop_remote_worker_execution_loop(self) -> None:
-        raise NotImplementedError("TP not implemented yet.")
+        return executor_class
 
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
@@ -169,5 +181,18 @@ class LLMEngine:
     def stop_profile(self):
         self.engine_core.profile(False)
 
-    def get_tokenizer_group(self, group_type):
-        pass
+    def get_tokenizer_group(
+        self,
+        group_type: Type[_G] = BaseTokenizerGroup,
+    ) -> _G:
+        tokenizer_group = self.tokenizer
+
+        if tokenizer_group is None:
+            raise ValueError("Unable to get tokenizer because "
+                             "skip_tokenizer_init is True")
+        if not isinstance(tokenizer_group, group_type):
+            raise TypeError("Invalid type of tokenizer group. "
+                            f"Expected type: {group_type}, but "
+                            f"found type: {type(tokenizer_group)}")
+
+        return tokenizer_group

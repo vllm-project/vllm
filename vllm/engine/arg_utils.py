@@ -122,7 +122,7 @@ class EngineArgs:
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
-    max_num_seqs: int = 256
+    max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
     revision: Optional[str] = None
@@ -143,6 +143,7 @@ class EngineArgs:
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
+    mm_cache_preprocessor: bool = False
     enable_lora: bool = False
     enable_lora_bias: bool = False
     max_loras: int = 1
@@ -205,16 +206,16 @@ class EngineArgs:
         # by user.
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = bool(envs.VLLM_USE_V1)
+        # Override max_num_seqs if it's not set by user.
+        if self.max_num_seqs is None:
+            self.max_num_seqs = 256 if not envs.VLLM_USE_V1 else 1024
 
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
-        if isinstance(self.compilation_config, (int)):
+        if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
-        elif isinstance(self.compilation_config, (dict)):
-            self.compilation_config = CompilationConfig.from_cli(
-                json.dumps(self.compilation_config))
 
         # Setup plugins
         from vllm.plugins import load_general_plugins
@@ -593,6 +594,12 @@ class EngineArgs:
             type=json.loads,
             help=('Overrides for the multimodal input mapping/processing, '
                   'e.g., image processor. For example: {"num_crops": 4}.'))
+        parser.add_argument(
+            '--mm-cache-preprocessor',
+            action='store_true',
+            help='If true, then enables caching of the multi-modal '
+            'preprocessor/mapper. Otherwise, the mapper executes each time'
+            ', and for better performance consider enabling frontend process.')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
@@ -893,7 +900,7 @@ class EngineArgs:
             '--override-pooler-config',
             type=PoolerConfig.from_json,
             default=None,
-            help="Override or set the pooling method in the embedding model. "
+            help="Override or set the pooling method for pooling models. "
             "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
 
         parser.add_argument('--compilation-config',
@@ -965,6 +972,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
+            mm_cache_preprocessor=self.mm_cache_preprocessor,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
         )
@@ -1053,9 +1061,12 @@ class EngineArgs:
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
 
-            # Chunked prefill is currently disabled for multimodal models by
-            # default.
-            if use_long_context and not model_config.is_multimodal_model:
+            # For multimodal models, chunked prefill is disabled by default in
+            # V0, but enabled by design in V1
+            if model_config.is_multimodal_model:
+                self.enable_chunked_prefill = bool(envs.VLLM_USE_V1)
+
+            elif use_long_context:
                 is_gpu = device_config.device_type == "cuda"
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
@@ -1063,7 +1074,7 @@ class EngineArgs:
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and model_config.task != "embedding"):
+                        and model_config.runner_type != "pooling"):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -1080,8 +1091,9 @@ class EngineArgs:
                 "errors during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
-        elif self.enable_chunked_prefill and model_config.task == "embedding":
-            msg = "Chunked prefill is not supported for embedding models"
+        elif (self.enable_chunked_prefill
+              and model_config.runner_type == "pooling"):
+            msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
 
@@ -1141,7 +1153,7 @@ class EngineArgs:
                 " please file an issue with detailed information.")
 
         scheduler_config = SchedulerConfig(
-            task=model_config.task,
+            runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
@@ -1225,31 +1237,28 @@ class EngineArgs:
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
 
+        # V1 always uses chunked prefills.
+        self.enable_chunked_prefill = True
+        # When no user override, set the default values based on the usage
+        # context.
+        # TODO(woosuk): Tune the default values for different hardware.
         if self.max_num_batched_tokens is None:
-            # When no user override, set the default values based on the
-            # usage context.
             if usage_context == UsageContext.LLM_CLASS:
-                logger.warning("Setting max_num_batched_tokens to 8192 "
-                               "for LLM_CLASS usage context.")
-                self.max_num_seqs = 1024
                 self.max_num_batched_tokens = 8192
             elif usage_context == UsageContext.OPENAI_API_SERVER:
-                logger.warning("Setting max_num_batched_tokens to 2048 "
-                               "for OPENAI_API_SERVER usage context.")
-                self.max_num_seqs = 1024
                 self.max_num_batched_tokens = 2048
+            logger.warning(
+                "Setting max_num_batched_tokens to %d for %s usage context.",
+                self.max_num_batched_tokens, usage_context.value)
 
     def _override_v1_engine_config(self, engine_config: VllmConfig) -> None:
         """
         Override the EngineConfig's configs based on the usage context for V1.
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
-        # TODO (ywang96): Enable APC by default when VLM supports it.
         if engine_config.model_config.is_multimodal_model:
-            logger.warning(
-                "Prefix caching is currently not supported for multimodal "
-                "models and has been disabled.")
-            engine_config.cache_config.enable_prefix_caching = False
+            # TODO (ywang96): Enable APC by default when VLM supports it.
+            assert not engine_config.cache_config.enable_prefix_caching
 
 
 @dataclass
