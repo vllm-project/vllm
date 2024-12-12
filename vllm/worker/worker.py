@@ -142,6 +142,14 @@ class Worker(LocalOrDistributedWorkerBase):
             gc.collect()
             torch.cuda.empty_cache()
             self._initial_memory_snapshot.measure()
+
+            free, total = torch.cuda.mem_get_info()
+            pct_free = free / total
+            if pct_free < self.cache_config.gpu_memory_utilization:
+                raise ValueError(
+                    f"Only {pct_free*100:.2f}% of vram free, cannot allocate"
+                    f"{self.cache_config.gpu_memory_utilization*100:.2f}%")
+
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
