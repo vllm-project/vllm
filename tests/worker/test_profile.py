@@ -31,10 +31,6 @@ def test_gpu_memory_profiling():
         is_driver_worker=True,
     )
 
-    # Load the model so we can profile it
-    worker.init_device()
-    worker.load_model()
-
     # Set 10GiB as the total gpu ram to be device-agnostic
     def mock_mem_info():
         current_usage = torch.cuda.memory_stats(
@@ -46,6 +42,9 @@ def test_gpu_memory_profiling():
 
     from unittest.mock import patch
     with patch("torch.cuda.mem_get_info", side_effect=mock_mem_info):
+        # Load and profile the model
+        worker.init_device()
+        worker.load_model()
         gpu_blocks, _ = worker.determine_num_available_blocks()
 
     # Peak vram usage by torch should be 0.7077 GiB
