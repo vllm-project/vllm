@@ -133,7 +133,7 @@ class Attention(nn.Module):
         forward_context: ForwardContext = get_forward_context()
         cache_engine = None
         worker_input = None
-        if forward_context is not None:
+        if forward_context.dynamic_forward_context is not None:
             cache_engine = \
                 forward_context.dynamic_forward_context.get("cache_engine")
             worker_input= \
@@ -268,8 +268,10 @@ def unified_attention(
     layer_name: str,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.dynamic_forward_context.get(
-        "attn_metadata")
+    attn_metadata = None
+    if forward_context.dynamic_forward_context is not None:
+        attn_metadata = \
+            forward_context.dynamic_forward_context.get("attn_metadata")
     self = forward_context.static_forward_context[layer_name]
     return self.impl.forward(query,
                              key,
@@ -311,8 +313,10 @@ def unified_attention_with_output(
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.dynamic_forward_context.get(
-        "attn_metadata")
+    attn_metadata = None
+    if forward_context.dynamic_forward_context is not None:
+        attn_metadata = \
+            forward_context.dynamic_forward_context.get("attn_metadata")
     self = forward_context.static_forward_context[layer_name]
     self.impl.forward(query,
                       key,
