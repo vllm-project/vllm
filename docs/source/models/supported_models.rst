@@ -664,9 +664,9 @@ Text Generation (``--task generate``)
     - ✅︎
     - ✅︎
   * - :code:`PaliGemmaForConditionalGeneration`
-    - PaliGemma
+    - PaliGemma, PaliGemma 2
     - T + I\ :sup:`E`
-    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
+    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, :code:`google/paligemma2-3b-ft-docci-448`, etc.
     - 
     - ✅︎
     - 
