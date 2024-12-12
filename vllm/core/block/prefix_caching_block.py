@@ -870,7 +870,7 @@ class PrefixCachingBlock(Block):
     @staticmethod
     def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int],
                           cur_block_token_ids: List[int],
-                          extra_hash: Optional[int]) -> int:
+                          extra_hash: Optional[int] = None) -> int:
         """Computes a hash value corresponding to the contents of a block and
         the contents of the preceding block(s). The hash value is used for
         prefix caching.
