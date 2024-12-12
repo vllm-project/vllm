@@ -1,0 +1,62 @@
+'''
+Demonstrate prompting of text-to-text
+encoder/decoder models, specifically BART
+'''
+
+from vllm import LLM, SamplingParams
+from vllm.assets.audio import AudioAsset
+from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt
+
+audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+
+dtype = "float"
+
+# Create a Whisper encoder/decoder model instance
+llm = LLM(
+    model="openai/whisper-large-v3",
+    max_model_len=448,
+    max_num_seqs=1,
+    enforce_eager=True,
+    limit_mm_per_prompt={"audio": 1}
+)
+
+prompts = [
+    ExplicitEncoderDecoderPrompt(
+        encoder_prompt=TextPrompt(
+            prompt="",
+            multi_modal_data={"audio": AudioAsset("mary_had_lamb").audio_and_sample_rate}
+        ),
+        decoder_prompt="<|startoftranscript|>",
+    ),
+    ExplicitEncoderDecoderPrompt(
+        encoder_prompt=TextPrompt(
+            prompt="",
+            multi_modal_data={"audio": AudioAsset("winning_call").audio_and_sample_rate}
+        ),
+        decoder_prompt="<|startoftranscript|>",
+    ),
+]
+
+print(prompts)
+
+# Create a sampling params object.
+sampling_params = SamplingParams(
+    temperature=0,
+    top_p=1.0,
+    min_tokens=0,
+    max_tokens=20,
+)
+
+# Generate output tokens from the prompts. The output is a list of
+# RequestOutput objects that contain the prompt, generated
+# text, and other information.
+outputs = llm.generate(prompts, sampling_params)
+
+# Print the outputs.
+for output in outputs:
+    prompt = output.prompt
+    encoder_prompt = output.encoder_prompt
+    generated_text = output.outputs[0].text
+    print(f"Encoder prompt: {encoder_prompt!r}, "
+          f"Decoder prompt: {prompt!r}, "
+          f"Generated text: {generated_text!r}")
