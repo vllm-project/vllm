@@ -537,8 +537,7 @@ def cutlass_compress_entry(a: torch.Tensor) \
     assert (a.dtype is torch.int8 or a.dtype is torch.float8_e4m3fn or \
             a.dtype is torch.bfloat16 or a.dtype is torch.float16)
 
-    # Not exactly sure what the right value would be based on cutlass definitions
-    # Let's assume e.dtype: torch.uint8 so elemsPerElemE = 8b / 2b_per_nz = 4
+    # e.dtype: torch.uint8 so elemsPerElemE = 8b / 2b_per_nz = 4
     elemsPerElemE = 4
 
     m = a.shape[0]
