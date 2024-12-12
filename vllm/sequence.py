@@ -527,10 +527,14 @@ class Sequence:
         hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
         return hash((hashed_tokens, self.lora_int_id))
 
-    def extra_hash(self) -> int:
-        # This function computes an extra hash for a sequence, specifically
-        # designed for prefix caching mode. The final sequence hash is determined
-        # by applying token_ids from the sequence's blocks.
+    def extra_hash(self) -> Optional[int]:
+        """
+        This function computes an extra hash for a sequence, specifically
+        designed for prefix caching mode. The final sequence hash is determined
+        by applying token_ids from the sequence's blocks.
+        """
+        if self.prompt_adapter_id == 0 and self.lora_int_id == 0:
+            return None
 
         # NOTE: If there are additional factors influencing the block aside from
         # token_ids, include them as input parameters to the hash.
