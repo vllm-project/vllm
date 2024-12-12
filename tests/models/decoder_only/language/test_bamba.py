@@ -1,6 +1,6 @@
 """Compare the outputs of HF and vLLM when using greedy sampling for Mamba.
 
-This actually is really indentical to test_mamba, so maybe we can reuse
+This actually is really identical to test_mamba, so maybe we can reuse
 
 Run `pytest tests/models/decoder_only/language/test_bamba.py`.
 """
@@ -97,6 +97,7 @@ def test_batching(
         name_1="batched_vllm",
     )
 
+
 @pytest.mark.skip("bamba does not support chunked prefill yet")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
@@ -121,6 +122,7 @@ def test_chunked_prefill_with_parallel_sampling(vllm_runner, example_prompts,
             max_num_seqs=10  # forces prefill chunks with decoding
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
+
 
 @pytest.mark.skip("bamba does not support chunked prefill yet")
 @pytest.mark.parametrize("model", MODELS)
@@ -205,7 +207,8 @@ def test_mamba_cache_cg_padding(
     # This test is for verifying that mamba cache is padded to CG captured
     # batch size. If it's not, a torch RuntimeError will be raised because
     # tensor dimensions aren't compatible
-    while len(example_prompts) == VllmConfig.get_graph_batch_size(len(example_prompts)):
+    while len(example_prompts) == VllmConfig.get_graph_batch_size(
+            len(example_prompts)):
         example_prompts.append(example_prompts[0])
 
     try:

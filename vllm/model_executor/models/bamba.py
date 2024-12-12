@@ -10,16 +10,16 @@ from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.config import _BATCH_SIZES_TO_CAPTURE, CacheConfig, VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               RowParallelLinear)
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -66,6 +66,7 @@ class BambaMLP(nn.Module):
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
+
 
 class BambaMixerDecoderLayer(nn.Module):
 
@@ -161,7 +162,7 @@ class BambaAttentionDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             base=rope_theta,
             is_neox_style=True,
-            dtype=torch.get_default_dtype(), # see impl of get_rope
+            dtype=torch.get_default_dtype(),  # see impl of get_rope
         )
 
         self.qkv_proj = QKVParallelLinear(
@@ -203,23 +204,28 @@ class BambaAttentionDecoderLayer(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # because the bamba model may potentially handle long sequences, 
-        # we should adjust the sin_cos cache if necesary to avoid out of bounds
+        # because the bamba model may potentially handle long sequences,
+        # we should adjust the sin_cos cache if necessary to avoid out of bounds
         # - first get the max_position
         max_position = max(
             getattr(attn_metadata, 'max_prefill_seq_len', 0),
             getattr(attn_metadata, 'max_decode_seq_len', 0),
         )
         if max_position == 0:
-            # if we cannot get the max lenght from the metadata, then
-            # get it frmo the positions
+            # if we cannot get the max length from the metadata, then
+            # get it from the positions
             max_position = positions.max().item()
 
-        if self.rotary_emb.max_position_embeddings <= max_position:
+        # when VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 could potentially cause inputs
+        # longer than max_position_embeddings. We extend the rope cache
+        # to prevent CUDA errors. Be aware that the outputs could be of
+        # lower quality for long sequence lengths.
+        rotary = self.rotary_emb
+        if rotary.max_position_embeddings <= max_position:
             # we set it to the next power of two that covers it
-            while self.rotary_emb.max_position_embeddings <= max_position:
-                self.rotary_emb.max_position_embeddings *= 2
-            self.rotary_emb.cos_sin_cache = self.rotary_emb._compute_cos_sin_cache()
+            while rotary.max_position_embeddings <= max_position:
+                rotary.max_position_embeddings *= 2
+            rotary.cos_sin_cache = rotary._compute_cos_sin_cache()
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -259,6 +265,7 @@ ALL_DECODER_LAYER_TYPES = {
     "attention": BambaAttentionDecoderLayer,
     "mamba": BambaMixerDecoderLayer
 }
+
 
 class BambaModel(nn.Module):
 
@@ -312,10 +319,11 @@ class BambaModel(nn.Module):
         # add additional attn_metadata for the mixer layers
         if attn_metadata.num_prefills > 0:
             sed_idx = torch.zeros_like(input_ids, dtype=torch.int32)
-            for i, (srt, end) in enumerate(zip(
-                attn_metadata.query_start_loc,
-                attn_metadata.query_start_loc[1:],
-            )):
+            for i, (srt, end) in enumerate(
+                    zip(
+                        attn_metadata.query_start_loc,
+                        attn_metadata.query_start_loc[1:],
+                    )):
                 sed_idx[srt:end] = i
 
             attn_metadata.seq_idx = sed_idx
@@ -335,7 +343,8 @@ class BambaModel(nn.Module):
 
             layer_mamba_cache_params = None
             if isinstance(layer, BambaMixerDecoderLayer):
-                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(i - num_attn)
+                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
+                    i - num_attn)
 
             hidden_states, residual = layer(
                 positions=positions,
@@ -457,18 +466,14 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
 
         intermediate_size = self.config.mamba_expand * hidden_size
 
-        # if n_groups is not divisible by world_size, need to extend the shards to ensure
-        # all groups needed by a head is sharded along with it
-        n_groups = (
-            self.config.mamba_n_groups + 
-            extra_groups_for_head_shards(self.config.mamba_n_groups, world_size)
-        )
+        # if n_groups is not divisible by world_size, need to extend the shards
+        # to ensure all groups needed by a head is sharded along with it
+        n_groups = (self.config.mamba_n_groups + extra_groups_for_head_shards(
+            self.config.mamba_n_groups, world_size))
 
         # - heads and n_groups are TP-ed
-        conv_dim = (
-            intermediate_size + 
-            2 * n_groups * self.config.mamba_d_state
-        )
+        conv_dim = (intermediate_size +
+                    2 * n_groups * self.config.mamba_d_state)
         conv_state_shape = (
             divide(conv_dim, world_size),
             self.config.mamba_d_conv - 1,

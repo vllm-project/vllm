@@ -1,36 +1,35 @@
+from typing import List, Optional, Tuple, Union
+
 import torch
 from torch import nn
-from torch.nn.parameter import Parameter
-
-# Added by the IBM Team, 2024
 
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.distributed import (divide, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import (
+    LoaderFunction, composed_weight_loader, sharded_weight_loader)
 from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.distributed import (divide, get_tensor_model_parallel_world_size,
-                              get_tensor_model_parallel_rank,
-                              tensor_model_parallel_all_reduce)
-from vllm.model_executor.model_loader.weight_utils import (
-    composed_weight_loader, sharded_weight_loader, LoaderFunction)
 
-from typing import Tuple, Union, Optional, List
-from vllm.model_executor.custom_op import CustomOp
+# Added by the IBM Team, 2024
+
 
 # Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
 # also referenced https://github.com/vllm-project/vllm/pull/9292
 @CustomOp.register("mixer2_gated_rms_norm")
 class Mixer2RMSNormGated(CustomOp):
+
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
         self.hidden_size = hidden_size
@@ -84,6 +83,7 @@ class Mixer2RMSNormGated(CustomOp):
         )
         return out
 
+
 def extra_groups_for_head_shards(ngroups: int, tp_size: int):
     """Compute the extra (logical) groups to account for head shards"""
 
@@ -93,12 +93,16 @@ def extra_groups_for_head_shards(ngroups: int, tp_size: int):
 
     return tp_size - ngroups % tp_size
 
+
 def mamba_v2_sharded_weight_loader(
-    shard_spec: List[int], tp_size: int, tp_rank: int,
+    shard_spec: List[Tuple[int, int, float]],
+    tp_size: int,
+    tp_rank: int,
 ) -> LoaderFunction:
-    """Create a weight loader for mamba v2. This ensures that the projections are
-    correctly sharded so that they can be split into x, B, C. It also ensures the 
-    the all the groups corresponding to a head shard is placed together with it.
+    """Create a weight loader for mamba v2. This ensures that the projections 
+    are correctly sharded so that they can be split into x, B, C. It also 
+    ensures the the all the groups corresponding to a head shard is placed 
+    together with it.
     """
 
     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
@@ -116,18 +120,21 @@ def mamba_v2_sharded_weight_loader(
             rank = tp_rank // ratio
 
             # - should start from here (determined by rank)
-            loaded_skip = rank * shard_size # take these number dims from loaded
+            # - take these number dims from loaded
+            loaded_skip = rank * shard_size
             loaded_start_idx = loaded_boundary + loaded_skip
 
             # - these many number dims to take from loaded_weight
             take = min(shard_size, full_dim - extra - loaded_skip)
 
             # - always shard on dim 0
-            param.data[
-                boundary:boundary+take,...
-            ] = loaded_weight[
-                loaded_start_idx:loaded_start_idx+take
-            ]
+            # - the ignore is for a mundane mypy error as it does not
+            #   seem to handle slices well.
+            # https://github.com/python/mypy/issues/2410
+            param.data[boundary:(boundary + take),  # type: ignore[misc]
+                       ...] = loaded_weight[
+                           loaded_start_idx:(  # type: ignore[misc]
+                               loaded_start_idx + take)]  # type: ignore[misc]
 
             # move boundaries
             boundary += shard_size
@@ -135,8 +142,9 @@ def mamba_v2_sharded_weight_loader(
 
     return loader
 
+
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
-@CustomOp.register("mamba_mixer2") 
+@CustomOp.register("mamba_mixer2")
 class MambaMixer2(CustomOp):
     """
     Compute ∆, A, B, C, and D the state space parameters and compute
@@ -165,17 +173,17 @@ class MambaMixer2(CustomOp):
         super().__init__()
 
         # For TP, the sharding plan is as follows:
-        # - for the conv modules, since 
+        # - for the conv modules, since
         #   conv_dim = intermediate_size * 2 * n_groups * ssm_state_size,
         #   we shard intermediate_size and n_groups
         # - since intermediate_size = n_heads * head_dim, sharding on
         #   intermediate_size is achieved by sharding on n_heads.
-        # - so if world_size divides groups, then sharding 
+        # - so if world_size divides groups, then sharding
         #   (n_groups / world_size, n_heads / world_size)
         #   also maintains the invariant n_heads % n_groups == 0
-        # - HOWEVER< if world_size DOES NOT divide groups, then we need to allocate
-        #   extra space in the shard, such that the WHOLE GROUP must be placed
-        #   together with the HEAD SHARD.
+        # - HOWEVER< if world_size DOES NOT divide groups, then we need
+        #   to allocate extra space in the shard, such that the WHOLE GROUP
+        #   must be placed together with the HEAD SHARD.
         self.tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
@@ -190,14 +198,14 @@ class MambaMixer2(CustomOp):
 
         self.n_groups = n_groups
         if n_groups % self.tp_size != 0:
-            # - for TP we shard conv_dim by sharding on n_groups, 
-            # - but if n_groups cannot divide tp_size, we need to 
+            # - for TP we shard conv_dim by sharding on n_groups,
+            # - but if n_groups cannot divide tp_size, we need to
             #   extend some extra groups
-            self.n_groups = n_groups + extra_groups_for_head_shards(n_groups, self.tp_size)
+            self.n_groups = n_groups + extra_groups_for_head_shards(
+                n_groups, self.tp_size)
 
-        self.conv_dim = (
-            intermediate_size + 2 * self.n_groups * ssm_state_size
-        )
+        self.conv_dim = (intermediate_size +
+                         2 * self.n_groups * ssm_state_size)
         self.conv1d = ColumnParallelLinear(
             input_size=conv_kernel_size,
             output_size=self.conv_dim,
@@ -210,62 +218,76 @@ class MambaMixer2(CustomOp):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        self.in_proj = ColumnParallelLinear(
-            input_size=hidden_size,
-            output_size=intermediate_size + self.conv_dim + self.num_heads,
-            bias=use_bias,
-            quant_config=quant_config)
+        self.in_proj = ColumnParallelLinear(input_size=hidden_size,
+                                            output_size=intermediate_size +
+                                            self.conv_dim + self.num_heads,
+                                            bias=use_bias,
+                                            quant_config=quant_config)
 
-        # - because in_proj is a concatenation of 3 weights, we 
+        # - because in_proj is a concatenation of 3 weights, we
         #   need to interleave them before sharding
         # - use the custom weight loader mamba_v2_sharded_weight_loader
         #   for conv1d.bias, covn1d.weight and in_proj.weight
         # - need to set these settings, to assign the groups to the head shards
         group_shard_settings = (
-            self.n_groups * self.ssm_state_size, # expected model size
-            (self.n_groups - n_groups) * self.ssm_state_size, # extra dims assigned
-            self.num_heads // n_groups, # ratio for mapping back to original group
+            self.n_groups * self.ssm_state_size,  # expected model size
+            (self.n_groups - n_groups) *
+            self.ssm_state_size,  # extra dims assigned
+            self.num_heads //
+            n_groups,  # ratio for mapping back to original group
         )
         intemediate_settings = (intermediate_size, 0, 1)
         head_setings = (self.num_heads, 0, 1)
 
         delattr(self.conv1d.bias, "weight_loader")
-        set_weight_attrs(self.conv1d.bias, {
-            "weight_loader": mamba_v2_sharded_weight_loader(
-                [
-                    intemediate_settings, group_shard_settings, group_shard_settings,
-                ],
-                self.tp_size, tp_rank,
-            )
-        })
+        set_weight_attrs(
+            self.conv1d.bias, {
+                "weight_loader":
+                mamba_v2_sharded_weight_loader(
+                    [
+                        intemediate_settings,
+                        group_shard_settings,
+                        group_shard_settings,
+                    ],
+                    self.tp_size,
+                    tp_rank,
+                )
+            })
 
         delattr(self.conv1d.weight, "weight_loader")
-        set_weight_attrs(self.conv1d.weight, {
-            "weight_loader": mamba_v2_sharded_weight_loader(
-                [
-                    intemediate_settings, group_shard_settings, group_shard_settings,
-                ],
-                self.tp_size, tp_rank
-            )
-        })
+        set_weight_attrs(
+            self.conv1d.weight, {
+                "weight_loader":
+                mamba_v2_sharded_weight_loader([
+                    intemediate_settings,
+                    group_shard_settings,
+                    group_shard_settings,
+                ], self.tp_size, tp_rank)
+            })
 
         delattr(self.in_proj.weight, "weight_loader")
-        set_weight_attrs(self.in_proj.weight, {
-            "weight_loader": mamba_v2_sharded_weight_loader(
-                [
-                    intemediate_settings, # for gate
-                    intemediate_settings, group_shard_settings, group_shard_settings,
-                    head_setings,  # for dt
-                ],
-                self.tp_size, tp_rank
-            )
-        })
+        set_weight_attrs(
+            self.in_proj.weight,
+            {
+                "weight_loader":
+                mamba_v2_sharded_weight_loader(
+                    [
+                        intemediate_settings,  # for gate
+                        intemediate_settings,
+                        group_shard_settings,
+                        group_shard_settings,
+                        head_setings,  # for dt
+                    ],
+                    self.tp_size,
+                    tp_rank)
+            })
 
-        # - these are TPed by heads to reduce the size of the 
+        # - these are TPed by heads to reduce the size of the
         #   temporal shape
         self.A = nn.Parameter(
             torch.empty(
-                divide(num_heads, self.tp_size), dtype=torch.float32,
+                divide(num_heads, self.tp_size),
+                dtype=torch.float32,
             ))
         self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
@@ -277,16 +299,14 @@ class MambaMixer2(CustomOp):
         set_weight_attrs(self.dt_bias,
                          {"weight_loader": sharded_weight_loader(0)})
 
-        self.out_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=use_bias,
-            input_is_parallel=True,
-            quant_config=quant_config)
+        self.out_proj = RowParallelLinear(intermediate_size,
+                                          hidden_size,
+                                          bias=use_bias,
+                                          input_is_parallel=True,
+                                          quant_config=quant_config)
 
-        self.norm = Mixer2RMSNormGated(
-            intermediate_size // self.tp_size, eps=rms_norm_eps
-        )
+        self.norm = Mixer2RMSNormGated(intermediate_size // self.tp_size,
+                                       eps=rms_norm_eps)
 
     def forward_native(self, hidden_states: torch.Tensor,
                        attn_metadata: AttentionMetadata,
@@ -297,27 +317,27 @@ class MambaMixer2(CustomOp):
                      attn_metadata: AttentionMetadata,
                      mamba_cache_params: MambaCacheParams):
 
-
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
 
         # - doing it differently from mixer v1; little confused with its logic
-        # - we need to do is to detect if there is any prefill; if there are 
+        # - we need to do is to detect if there is any prefill; if there are
         #   no prefils, then each example will be coming in one sample at a time
-        # - on the other hand v1 checks for "query_start_loc" and "context_lens_tensor"
-        #   however we have noticed that, even when the samples are coming in
-        #   one at a time, they are still non-NO.e
+        # - on the other hand v1 checks for "query_start_loc"
+        #   and "context_lens_tensor" however we have noticed that, even
+        #   when the samples are coming in
+        #   one at a time, they are still not NONE, e.g.,
         #   * "query_start_loc" = [0, 1, ..]
         #   * "context_lens_tensor" = [8, ...]
-        has_prefill = attn_metadata.num_prefills > 0 
+        has_prefill = attn_metadata.num_prefills > 0
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
         gate, hidden_states_B_C, dt = torch.split(
             projected_states,
             [
-                self.intermediate_size // self.tp_size, 
-                self.conv_dim // self.tp_size, 
+                self.intermediate_size // self.tp_size,
+                self.conv_dim // self.tp_size,
                 self.num_heads // self.tp_size,
             ],
             dim=-1,
@@ -335,7 +355,7 @@ class MambaMixer2(CustomOp):
             # |-------------------- seq_len ---------------------|
             #                                   |-- query_len ---|
 
-            # - "cache_indices" upates the conv_state cache in positions
+            # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "mamba_cache_params.state_indices_tensor"
             hidden_states_B_C = causal_conv1d_fn(
                 hidden_states_B_C.transpose(0, 1),
@@ -345,8 +365,8 @@ class MambaMixer2(CustomOp):
                 conv_states=mamba_cache_params.conv_state,
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
                 cache_indices=mamba_cache_params.state_indices_tensor,
-                query_start_loc=attn_metadata.query_start_loc
-            ).transpose(0, 1)[:seq_len]
+                query_start_loc=attn_metadata.query_start_loc).transpose(
+                    0, 1)[:seq_len]
         else:
             hidden_states_B_C = causal_conv1d_update(
                 hidden_states_B_C,
@@ -354,14 +374,13 @@ class MambaMixer2(CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=mamba_cache_params.state_indices_tensor
-            )
+                conv_state_indices=mamba_cache_params.state_indices_tensor)
 
         # - get hidden_states, B and C after depthwise convolution.
         hidden_states, B, C = torch.split(
             hidden_states_B_C,
             [
-                self.intermediate_size // self.tp_size, 
+                self.intermediate_size // self.tp_size,
                 groups_time_state_size // self.tp_size,
                 groups_time_state_size // self.tp_size,
             ],
@@ -370,12 +389,12 @@ class MambaMixer2(CustomOp):
 
         # 3. State Space Model sequence transformation
         if has_prefill:
-            
+
             # FIXME: we are having problems using mamba_chunk_scan_combined
             # with chunked prefill. This is because there is no
             # initial_states requires initial_states.shape[0] to match
             # the batch size, but cu_seqlens requires batch_size = 1.
-            # Therefore as of now, initial_states and cu_seqlens are 
+            # Therefore as of now, initial_states and cu_seqlens are
             # mutually exclusive.
 
             initial_states = None
@@ -385,7 +404,8 @@ class MambaMixer2(CustomOp):
             #     ]
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
-                hidden_states.view(1, seq_len, self.num_heads // self.tp_size, self.head_dim),
+                hidden_states.view(1, seq_len, self.num_heads // self.tp_size,
+                                   self.head_dim),
                 dt.unsqueeze(0),
                 self.A,
                 B.view(1, seq_len, self.n_groups // self.tp_size, -1),
@@ -412,15 +432,17 @@ class MambaMixer2(CustomOp):
             hidden_states = scan_output.view(seq_len, -1)
         else:
 
-            # NOTE: can be optimized? 
+            # NOTE: can be optimized?
             n_groups = self.n_groups // self.tp_size
-            A = self.A[:, None, ...][:, :, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
+            A = self.A[:, None, ...][:, :, None].expand(
+                -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D = self.D[:, None, ...].expand(-1, self.head_dim)
             B = B.view(-1, n_groups, B.shape[1] // n_groups)
             C = C.view(-1, n_groups, C.shape[1] // n_groups)
-            hidden_states_reshaped = hidden_states.view(-1, self.num_heads // self.tp_size, self.head_dim)
+            hidden_states_reshaped = hidden_states.view(
+                -1, self.num_heads // self.tp_size, self.head_dim)
 
             # - the hidden is reshaped into number of current batches
             # - in this case there is no more prefil, so the batches gen
@@ -434,22 +456,21 @@ class MambaMixer2(CustomOp):
                 mamba_cache_params.ssm_state,
                 hidden_states_reshaped,
                 dt,
-                A, 
+                A,
                 B,
                 C,
-                D, 
+                D,
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
                 state_batch_indices=mamba_cache_params.state_indices_tensor,
             )
             hidden_states = hidden_states.view(
-                -1, (self.num_heads // self.tp_size) * self.head_dim
-            )
+                -1, (self.num_heads // self.tp_size) * self.head_dim)
 
         # # 4. gated MLP
         hidden_states = self.norm(hidden_states, gate)
 
         # # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)
-        return out 
+        return out
