@@ -459,7 +459,7 @@ class GPUModelRunner:
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.model_pad_for_cudagraph(
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
         else:
             # Eager mode.

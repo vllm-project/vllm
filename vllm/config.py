@@ -2551,7 +2551,7 @@ class VllmConfig:
                                                  init=True)  # type: ignore
     instance_id: str = ""
 
-    def model_pad_for_cudagraph(self, batch_size: int) -> int:
+    def pad_for_cudagraph(self, batch_size: int) -> int:
         """Returns the padded batch size given actual batch size,
         considering the model's configuration.
         """

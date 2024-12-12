@@ -802,7 +802,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                         max_encoder_seq_len):
             return -1
 
-        graph_batch_size = self.runner.vllm_config.model_pad_for_cudagraph(
+        graph_batch_size = self.runner.vllm_config.pad_for_cudagraph(
             batch_size)
         assert graph_batch_size >= batch_size
         return graph_batch_size - batch_size
