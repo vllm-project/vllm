@@ -532,11 +532,6 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     return out
 
 
-def cutlass_scaled_sparse_mm_supports_fp8(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_sparse_mm_supports_fp8(
-        cuda_device_capability)
-
-
 def cutlass_compress_entry(a: torch.Tensor) \
     -> Tuple[torch.Tensor, torch.Tensor]:
     assert (a.dtype is torch.int8 or a.dtype is torch.float8_e4m3fn or \

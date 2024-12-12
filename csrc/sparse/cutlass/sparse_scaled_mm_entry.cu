@@ -12,22 +12,6 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                                    c10::optional<torch::Tensor> const& bias);
 #endif
 
-bool cutlass_scaled_sparse_mm_supports_fp8(int64_t cuda_device_capability) {
-  // CUTLASS FP8 kernels need at least
-  //   CUDA 12.0 on SM90 systems (Hopper)
-  //   CUDA 12.4 on SM89 systems (Lovelace)
-
-#if defined CUDA_VERSION
-  if (cuda_device_capability >= 90) {
-    return CUDA_VERSION >= 12000;
-  } else if (cuda_device_capability >= 89) {
-    return CUDA_VERSION >= 12040;
-  }
-#endif
-
-  return false;
-}
-
 int32_t test_get_sm_version_num() {
   int32_t major_capability, minor_capability;
   cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
