@@ -142,7 +142,7 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
-            # Validate the schmea and raise ValueError here if it is invalid.
+            # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
             try:
