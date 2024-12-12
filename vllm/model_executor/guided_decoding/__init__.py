@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -97,6 +96,34 @@ async def get_guided_decoding_logits_processor(
             get_outlines_guided_decoding_logits_processor)
         return await get_outlines_guided_decoding_logits_processor(
             guided_params, tokenizer)
+
+    return _get_local_guided_decoding_logits_processor(guided_params,
+                                                       tokenizer, model_config)
+
+
+def get_local_guided_decoding_logits_processor(
+        guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
+        model_config: ModelConfig) -> LogitsProcessor | None:
+
+    guided_params = maybe_backend_fallback(guided_params)
+    # CFG grammar not supported by LMFE, so we use outlines instead
+    if guided_params.backend == 'outlines':
+        # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
+        from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
+            get_local_outlines_guided_decoding_logits_processor)
+        return get_local_outlines_guided_decoding_logits_processor(
+            guided_params, tokenizer)
+
+    return _get_local_guided_decoding_logits_processor(guided_params,
+                                                       tokenizer, model_config)
+
+
+def _get_local_guided_decoding_logits_processor(
+        guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
+        model_config: ModelConfig) -> LogitsProcessor | None:
+
+    assert guided_params.backend != 'outlines'
+
     if guided_params.backend == 'lm-format-enforcer':
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
@@ -111,14 +138,3 @@ async def get_guided_decoding_logits_processor(
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
         "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar'")
-
-
-def get_local_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizer,
-        model_config: ModelConfig) -> LogitsProcessor | None:
-
-    loop = asyncio.get_event_loop()
-    f = get_guided_decoding_logits_processor(guided_params, tokenizer,
-                                             model_config)
-    res = loop.run_until_complete(f)
-    return res

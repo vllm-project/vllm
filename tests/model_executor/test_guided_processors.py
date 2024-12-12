@@ -1,13 +1,21 @@
+import contextlib
+import pickle
+
 import pytest
 import torch
 from transformers import AutoTokenizer
 
 from vllm.config import ModelConfig
 from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
+    get_guided_decoding_logits_processor,
+    get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
+from vllm.model_executor.guided_decoding.xgrammar_decoding import TokenizerData
 from vllm.sampling_params import GuidedDecodingParams
+
+with contextlib.suppress(ImportError):
+    import xgrammar as xgr
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
 
@@ -41,7 +49,9 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend",
                          ["outlines", "lm-format-enforcer", "xgrammar"])
-async def test_guided_logits_processor_black_box(backend: str, sample_regex,
+@pytest.mark.parametrize("is_local", [True, False])
+async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
+                                                 sample_regex,
                                                  sample_json_schema):
 
     config = ModelConfig(
@@ -57,8 +67,11 @@ async def test_guided_logits_processor_black_box(backend: str, sample_regex,
     token_ids = tokenizer.encode(
         f"Give an example IPv4 address with this regex: {sample_regex}")
     regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
-    regex_lp = await get_guided_decoding_logits_processor(
-        regex_request, tokenizer, config)
+
+    regex_lp = get_local_guided_decoding_logits_processor(
+            regex_request, tokenizer, config) if is_local else \
+            await get_guided_decoding_logits_processor(
+                    regex_request, tokenizer, config)
     assert regex_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
@@ -97,3 +110,16 @@ def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
     with pytest.raises(ValueError,
                        match="You can only use one kind of guided"):
         GuidedDecodingParams(json=sample_json_schema, grammar="test grammar")
+
+
+def test_pickle_xgrammar_tokenizer_data():
+
+    tokenizer_data = TokenizerData(vocab_type=xgr.VocabType.RAW)
+    pickled = pickle.dumps(tokenizer_data)
+
+    assert pickled is not None
+
+    depickled: TokenizerData = pickle.loads(pickled)
+
+    assert depickled is not None
+    assert depickled.vocab_type == xgr.VocabType.RAW
