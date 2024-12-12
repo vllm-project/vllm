@@ -97,8 +97,10 @@ class EngineCore:
             # Note that the cache here is mirrored with the client side of the
             # MM mapper, so anything that has a hash must have a HIT cache
             # entry here as well.
-            request.mm_inputs = self.mm_input_mapper_server.process_inputs(
-                request.mm_inputs, request.mm_hashes)
+            assert request.mm_inputs is not None
+            request.mm_inputs, request.mm_hashes = (
+                self.mm_input_mapper_server.process_inputs(
+                    request.mm_inputs, request.mm_hashes))
 
         req = Request.from_engine_core_request(request)
 
