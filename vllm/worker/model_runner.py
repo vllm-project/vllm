@@ -791,7 +791,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         is_mscp: bool = self.runner.scheduler_config.is_multi_step and \
                     self.runner.scheduler_config.chunked_prefill_enabled
         decode_only = self.decode_only or is_mscp
-        if not decode_only:
+        if not decode_only or self.runner.is_profile_run:
             # Early exit so we can treat num_seqs as the batch_size below.
             return -1
 
@@ -1028,6 +1028,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         self.has_inner_state = model_config.has_inner_state
 
+        self.is_profile_run = False
+
         # When using CUDA graph, the input block tables must be padded to
         # max_seq_len_to_capture. However, creating the block table in
         # Python can be expensive. To optimize this, we cache the block table
@@ -1230,6 +1232,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        self.is_profile_run = True
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
@@ -1331,6 +1334,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
+        self.is_profile_run = False
         return
 
     def remove_all_loras(self):
