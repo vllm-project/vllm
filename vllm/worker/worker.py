@@ -365,8 +365,10 @@ class Worker(LocalOrDistributedWorkerBase):
         )
 
     @torch.inference_mode()
-    def get_cache_engine(self, worker_input: WorkerInput) -> CacheEngine:
-        if (self.cache_engine is None):
+    def get_cache_engine(self, worker_input: WorkerInput) -> \
+            Optional[CacheEngine]:
+        if (not hasattr(self, "cache_engine")) or \
+                (self.cache_engine is None) or (len(self.cache_engine) == 0):
             return None
         return self.cache_engine[worker_input.virtual_engine]
 
