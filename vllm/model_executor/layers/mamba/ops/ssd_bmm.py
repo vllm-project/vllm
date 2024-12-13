@@ -2,21 +2,12 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/ssd_bmm.py
 
 # ruff: noqa: E501,SIM102
-"""We want triton==2.1.0 or 2.2.0 for this
-"""
 
 import math
 
 import torch
 import triton
 import triton.language as tl
-
-
-def init_to_zero(names):
-    return lambda nargs: [
-        nargs[name].zero_() for name in names if nargs[name] is not None
-    ]
-
 
 @triton.autotune(
     configs=[

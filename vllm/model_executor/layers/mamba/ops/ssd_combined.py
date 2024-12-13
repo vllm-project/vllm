@@ -2,8 +2,6 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/ssd_combined.py
 
 # ruff: noqa: E501
-"""We want triton==2.1.0 or 2.2.0 for this
-"""
 
 import torch
 import triton
@@ -17,12 +15,6 @@ from .ssd_chunk_state import (_chunk_cumsum_fwd, _chunk_state_fwd,
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
-
-
-def init_to_zero(names):
-    return lambda nargs: [
-        nargs[name].zero_() for name in names if nargs[name] is not None
-    ]
 
 
 def _mamba_chunk_scan_combined_fwd(x,

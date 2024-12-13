@@ -2,8 +2,6 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/ssd_chunk_scan.py
 
 # ruff: noqa: E501
-"""We want triton==2.1.0 or 2.2.0 for this
-"""
 
 import torch
 import triton
@@ -11,13 +9,6 @@ import triton.language as tl
 from packaging import version
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
-
-
-def init_to_zero(names):
-    return lambda nargs: [
-        nargs[name].zero_() for name in names if nargs[name] is not None
-    ]
-
 
 @triton.autotune(
     configs=[

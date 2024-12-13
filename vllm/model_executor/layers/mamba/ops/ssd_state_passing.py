@@ -2,8 +2,6 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/ssd_state_passing.py
 
 # ruff: noqa: E501
-"""We want triton==2.1.0 or 2.2.0 for this
-"""
 
 import torch
 import triton

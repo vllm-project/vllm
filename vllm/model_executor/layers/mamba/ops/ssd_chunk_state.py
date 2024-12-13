@@ -2,8 +2,6 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/ssd_chunk_state.py
 
 # ruff: noqa: E501
-"""We want triton==2.1.0 or 2.2.0 for this
-"""
 
 import math
 
@@ -11,14 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .softplus import softplus
-
-
-def init_to_zero(names):
-    return lambda nargs: [
-        nargs[name].zero_() for name in names if nargs[name] is not None
-    ]
-
+from .mamba_ssm import softplus
 
 @triton.autotune(
     configs=[
