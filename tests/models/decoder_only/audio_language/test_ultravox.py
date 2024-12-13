@@ -16,7 +16,7 @@ MODEL_NAME = "fixie-ai/ultravox-v0_3"
 
 AudioTuple = Tuple[np.ndarray, int]
 
-VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
+VLLM_PLACEHOLDER = "<|audio|>"
 HF_PLACEHOLDER = "<|audio|>"
 
 CHUNKED_PREFILL_KWARGS = {

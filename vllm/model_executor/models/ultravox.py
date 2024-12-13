@@ -39,6 +39,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings_from_map)
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
+_AUDIO_PLACEHOLDER_STR = "<|reserved_special_token_0|>"
 _AUDIO_TOKENS_PER_SECOND = 6.25
 
 
@@ -116,17 +117,33 @@ class UltravoxProcessor(BaseMultiModalProcessor):
 
     def _apply_hf_processor(self, prompt, mm_data, mm_processor_kwargs):
         tokenizer = self._get_tokenizer()
+        feature_extractor = whisper_feature_extractor(self.ctx)
         hf_inputs = defaultdict(list)
         for audio, sr in mm_data["audio"]:
+            if sr != feature_extractor.sampling_rate:
+                try:
+                    import librosa
+                except ImportError as exc:
+                    raise ImportError(
+                        "Please install vllm[audio] for audio support.") from exc
+                audio = librosa.resample(audio,
+                                        orig_sr=sr,
+                                        target_sr=feature_extractor.sampling_rate)
+                sr = feature_extractor.sampling_rate
             data = {"audio": audio, "sampling_rate": sr}
             processed_inputs = super()._apply_hf_processor(
                 prompt, data, mm_processor_kwargs)
             prompt = tokenizer.decode(processed_inputs["input_ids"][0],
-                                      skip_special_tokens=True)
+                                      skip_special_tokens=False)
             hf_inputs["audio_features"].append(
                 processed_inputs["audio_values"].squeeze(0))
         hf_inputs["input_ids"] = processed_inputs["input_ids"]
         return hf_inputs
+
+    def _get_hf_processor(self, **mm_processor_kwargs):
+        hf_processor = super()._get_hf_processor(**mm_processor_kwargs)
+        hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_STR
+        return hf_processor
 
     def _get_processor_data(self, mm_data):
         processor_data, passthrough_data = super()._get_processor_data(mm_data)
