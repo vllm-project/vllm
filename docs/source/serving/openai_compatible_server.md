@@ -1,13 +1,13 @@
 # OpenAI Compatible Server
 
-vLLM provides an HTTP server that implements OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
+vLLM provides an HTTP server that implements OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API, and more!
 
 You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](deploying_with_docker.rst):
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
 
-To call the server, you can use the official OpenAI Python client library, or any other HTTP client.
+To call the server, you can use the [official OpenAI Python client](https://github.com/openai/openai-python), or any other HTTP client.
 ```python
 from openai import OpenAI
 client = OpenAI(
@@ -42,9 +42,6 @@ We currently support the following OpenAI APIs:
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
   - Only applicable to [embedding models](../models/pooling_models.rst) (`--task embed`).
-  - If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as Chat Completions API)
-    which will be treated as a single prompt to the model.
-    - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
 
 In addition, we have the following custom APIs:
 
@@ -177,10 +174,10 @@ To use the above config file:
 $ vllm serve SOME_MODEL --config config.yaml
 ```
 
----
-**NOTE**
+```{note}
 In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
 The order of priorities is `command line > config file values > defaults`.
+```
 
 ## API Reference
 
@@ -235,6 +232,13 @@ The following extra parameters are supported:
 
 Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/embeddings) for more details.
 
+If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat Completions API](#chat-api))
+which will be treated as a single prompt to the model.
+
+```{tip}
+This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
+```
+
 #### Extra parameters
 
 The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
@@ -245,12 +249,20 @@ The following [pooling parameters (click through to see documentation)](../dev/p
 :end-before: end-embedding-pooling-params
 ```
 
-The following extra parameters are supported:
+The following extra parameters are supported by default:
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-embedding-extra-params
 :end-before: end-embedding-extra-params
+```
+
+For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-chat-embedding-extra-params
+:end-before: end-chat-embedding-extra-params
 ```
 
 (tokenizer-api)=
@@ -402,4 +414,22 @@ Response:
   ],
   "usage": {}
 }
+```
+
+#### Extra parameters
+
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-score-pooling-params
+:end-before: end-score-pooling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-score-extra-params
+:end-before: end-score-extra-params
 ```
