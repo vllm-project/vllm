@@ -2225,8 +2225,10 @@ class InductorHashCache:
     runtime_shape, and the value is a dict of graph_index to hash_str.
     """
 
-    def __init__(self, cache_file_path: str):
-        self.cache_file_path = cache_file_path
+    def __init__(self, cache_dir: str):
+        self.cache_dir = cache_dir
+        self.cache_file_path = os.path.join(cache_dir,
+                                            "inductor_hash_cache.py")
         self.cache: defaultdict = defaultdict(dict)
         if os.path.exists(self.cache_file_path):
             with open(self.cache_file_path) as f:
@@ -2247,6 +2249,10 @@ class InductorHashCache:
                 data.append((runtime_shape, graph_index, hash_str))
         printer = pprint.PrettyPrinter(indent=4)
         return printer.pformat(data)
+
+    def save_to_file(self):
+        with open(self.cache_file_path, "w") as f:
+            f.write(self.serialize())
 
     def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
         runtime_shape, graph_index = key
@@ -2407,7 +2413,6 @@ class CompilationConfig(BaseModel):
     compilation_time: float = PrivateAttr
     # should be InductorHashCache , but Pydantic does not support it
     inductor_hash_cache: Any = PrivateAttr
-    inductor_hash_cache_path: str = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
@@ -2486,10 +2491,7 @@ class CompilationConfig(BaseModel):
         self.cache_dir = os.path.join(
             self.cache_dir, f"rank_{vllm_config.parallel_config.rank}")
         os.makedirs(self.cache_dir, exist_ok=True)
-        self.inductor_hash_cache_path = os.path.join(self.cache_dir,
-                                                     "inductor_hash_cache.py")
-        self.inductor_hash_cache = InductorHashCache(
-            self.inductor_hash_cache_path)
+        self.inductor_hash_cache = InductorHashCache(self.cache_dir)
 
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)

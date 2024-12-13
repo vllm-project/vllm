@@ -559,10 +559,7 @@ class PiecewiseBackend:
             if self.is_last_graph and not self.to_be_compiled_sizes:
 
                 # save the hash of the inductor graph for the next run
-                with open(self.compilation_config.inductor_hash_cache_path,
-                          "w") as f:
-                    f.write(self.compilation_config.inductor_hash_cache.
-                            serialize())
+                self.compilation_config.inductor_hash_cache.save_to_file()
                 end_monitoring_torch_compile(self.vllm_config)
 
         if not entry.use_cudagraph:
