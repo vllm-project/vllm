@@ -157,9 +157,10 @@ class MPClient(EngineCoreClient):
         # Start EngineCore in background process.
         self.proc_handle = EngineCoreProc.make_engine_core_process(
             *args,
-            input_path=input_path,
-            output_path=output_path,
-            ready_path=ready_path,
+            input_path=
+            input_path,  # type: ignore[misc]  # MyPy incorrectly flags duplicate keywords
+            output_path=output_path,  # type: ignore[misc]
+            ready_path=ready_path,  # type: ignore[misc]
             **kwargs,
         )
         atexit.register(self.shutdown)
