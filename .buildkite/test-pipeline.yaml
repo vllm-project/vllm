@@ -181,14 +181,14 @@ steps:
   commands:
     - VLLM_USE_V1=1 pytest -v -s v1
 
-- label: Examples Test # 15min
+- label: Examples Test # 25min
   working_dir: "/vllm-workspace/examples"
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/entrypoints
   - examples/
   commands:
-    - pip install awscli tensorizer # for llava example and tensorizer test
+    - pip install tensorizer # for tensorizer test
     - python3 offline_inference.py
     - python3 cpu_offload.py
     - python3 offline_inference_chat.py
@@ -198,6 +198,9 @@ steps:
     - python3 offline_inference_vision_language_multi_image.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
+    - python3 offline_inference_classification.py
+    - python3 offline_inference_embedding.py
+    - python3 offline_inference_scoring.py
     - python3 offline_profile.py --model facebook/opt-125m
 
 - label: Prefix Caching Test # 9min
