@@ -233,6 +233,7 @@ def run_audio() -> None:
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from input audio:", result)
 
+
 example_function_map = {
     "text-only": run_text_only,
     "single-image": run_single_image,
