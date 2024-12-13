@@ -4,8 +4,8 @@ import queue
 import signal
 import threading
 import time
+from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
-from multiprocessing.sharedctypes import Synchronized
 from typing import List, Tuple, Type, Union
 
 import zmq
@@ -19,7 +19,7 @@ from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
-from vllm.v1.engine.mm_input_mapper import MMInputMapper
+from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
@@ -56,15 +56,14 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        # Set up multimodal input mapper (e.g., convert PIL images to tensors).
-        self.mm_input_mapper = MMInputMapper(vllm_config.model_config)
-
         # Setup scheduler.
         self.scheduler = Scheduler(vllm_config.scheduler_config,
                                    vllm_config.cache_config,
                                    vllm_config.lora_config)
 
         self._last_logging_time = time.time()
+
+        self.mm_input_mapper_server = MMInputMapperServer()
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -89,7 +88,18 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
+
+        if request.mm_hashes is not None:
+            # Here, if hash exists for an image, then it will be fetched
+            # from the cache, else it will be added to the cache.
+            # Note that the cache here is mirrored with the client side of the
+            # MM mapper, so anything that has a hash must have a HIT cache
+            # entry here as well.
+            request.mm_inputs = self.mm_input_mapper_server.process_inputs(
+                request.mm_inputs, request.mm_hashes)
+
         req = Request.from_engine_core_request(request)
+
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
@@ -120,6 +130,14 @@ class EngineCore:
         self.model_executor.profile(is_start)
 
 
+@dataclass
+class EngineCoreProcHandle:
+    proc: BaseProcess
+    ready_path: str
+    input_path: str
+    output_path: str
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -133,12 +151,8 @@ class EngineCoreProc(EngineCore):
         input_path: str,
         output_path: str,
         ready_path: str,
-        should_shutdown: Synchronized,
     ):
         super().__init__(vllm_config, executor_class, usage_context)
-
-        # Signal from main process to shutdown (multiprocessing.Value).
-        self.should_shutdown = should_shutdown
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -195,8 +209,7 @@ class EngineCoreProc(EngineCore):
         input_path: str,
         output_path: str,
         ready_path: str,
-        should_shutdown: Synchronized,
-    ) -> BaseProcess:
+    ) -> EngineCoreProcHandle:
         # The current process might have CUDA context,
         # so we need to spawn a new process.
         # NOTE(rob): this is a problem for using EngineCoreProc w/
@@ -210,7 +223,6 @@ class EngineCoreProc(EngineCore):
             "vllm_config": vllm_config,
             "executor_class": executor_class,
             "usage_context": usage_context,
-            "should_shutdown": should_shutdown
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=EngineCoreProc.run_engine_core,
@@ -219,7 +231,10 @@ class EngineCoreProc(EngineCore):
 
         # Wait for startup
         EngineCoreProc.wait_for_startup(proc, ready_path)
-        return proc
+        return EngineCoreProcHandle(proc=proc,
+                                    ready_path=ready_path,
+                                    input_path=input_path,
+                                    output_path=output_path)
 
     @staticmethod
     def run_engine_core(*args, **kwargs):
@@ -260,8 +275,8 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until we get a shutdown signal.
-        while not self.should_shutdown:
+        # Loop until process is sent a SIGINT or SIGTERM
+        while True:
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
@@ -272,8 +287,6 @@ class EngineCoreProc(EngineCore):
                     except queue.Empty:
                         self._log_stats()
                         logger.debug("EngineCore busy loop waiting.")
-                        if self.should_shutdown:
-                            return
                     except BaseException:
                         raise
 

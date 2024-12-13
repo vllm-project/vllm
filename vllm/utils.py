@@ -24,7 +24,6 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections import UserDict, defaultdict
 from collections.abc import Iterable, Mapping
 from functools import lru_cache, partial, wraps
-from platform import uname
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generic, Hashable, List, Literal, Optional,
                     OrderedDict, Set, Tuple, Type, TypeVar, Union, overload)
@@ -342,12 +341,6 @@ def get_cpu_memory() -> int:
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
-
-
-@lru_cache(maxsize=None)
-def in_wsl() -> bool:
-    # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(uname()).lower()
 
 
 def make_async(
@@ -729,25 +722,7 @@ def print_warning_once(msg: str) -> None:
 
 @lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
-
-    if in_wsl():
-        # Pinning memory in WSL is not supported.
-        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
-        return False
-    elif current_platform.is_xpu():
-        print_warning_once("Pin memory is not supported on XPU.")
-        return False
-    elif current_platform.is_neuron():
-        print_warning_once("Pin memory is not supported on Neuron.")
-        return False
-    elif current_platform.is_hpu():
-        print_warning_once("Pin memory is not supported on HPU.")
-        return False
-    elif current_platform.is_cpu() or current_platform.is_openvino():
-        return False
-    return True
+    return current_platform.is_pin_memory_available()
 
 
 class DeviceMemoryProfiler:

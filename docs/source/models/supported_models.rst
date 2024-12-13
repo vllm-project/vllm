@@ -203,6 +203,11 @@ Text Generation (``--task generate``)
     - :code:`ibm-granite/granite-3.0-1b-a400m-base`, :code:`ibm-granite/granite-3.0-3b-a800m-instruct`, :code:`ibm/PowerMoE-3b`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`GritLM`
+    - GritLM
+    - :code:`parasail-ai/GritLM-7B-vllm`.
+    - ✅︎
+    - ✅︎
   * - :code:`InternLMForCausalLM`
     - InternLM
     - :code:`internlm/internlm-7b`, :code:`internlm/internlm-chat-7b`, etc.
@@ -394,6 +399,11 @@ The following table lists those that are tested in vLLM.
     - Gemma2-based
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
     - 
+    - ✅︎
+  * - :code:`GritLM`
+    - GritLM
+    - :code:`parasail-ai/GritLM-7B-vllm`.
+    - ✅︎
     - ✅︎
   * - :code:`LlamaModel`, :code:`LlamaForCausalLM`, :code:`MistralModel`, etc.
     - Llama-based
@@ -654,9 +664,9 @@ Text Generation (``--task generate``)
     - ✅︎
     - ✅︎
   * - :code:`PaliGemmaForConditionalGeneration`
-    - PaliGemma
+    - PaliGemma, PaliGemma 2
     - T + I\ :sup:`E`
-    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
+    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, :code:`google/paligemma2-3b-ft-docci-448`, etc.
     - 
     - ✅︎
     - 
