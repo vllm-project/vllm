@@ -10,6 +10,7 @@ from vllm.attention import AttentionMetadata
 from vllm.attention.backends.xformers import XFormersImpl
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.pooler import PoolerHead
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
@@ -52,6 +53,8 @@ class GritLMPooler(nn.Module):
             ["<0x0A>", "<", "|", "embed", "|", ">", "<0x0A>"])
         self.embed_pattern_ids = tokens_to_ids(
             ["▁<", "|", "embed", "|", ">", "<0x0A>"])
+    
+        self.head = PoolerHead(normalize=True, softmax=False)
 
     def _find_array(self, arr: array, target: array, start_idx: int) -> int:
         """
@@ -169,7 +172,7 @@ class GritLMPooler(nn.Module):
         mean_embeddings = sum_embeddings / num_non_instruction_tokens.unsqueeze(
             1)
 
-        pooled_data = F.normalize(mean_embeddings, p=2, dim=1)
+        pooled_data = self.head(mean_embeddings)
 
         pooled_outputs = [
             PoolingSequenceGroupOutput(data) for data in pooled_data
