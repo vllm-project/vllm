@@ -8,10 +8,10 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.worker.embedding_model_runner import (
-    ModelInputForGPUWithPoolingMetadata)
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 from vllm.worker.multi_step_model_runner import StatefulModelInput
+from vllm.worker.pooling_model_runner import (
+    ModelInputForGPUWithPoolingMetadata)
 
 
 class MockAttentionBackend(AttentionBackend):

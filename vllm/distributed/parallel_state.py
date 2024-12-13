@@ -27,17 +27,23 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 from unittest.mock import patch
 
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
+import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_custom_op
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -904,6 +910,14 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
+_KV_TRANSFER: Optional[kv_transfer.KVTransferAgent] = None
+
+
+def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
+    assert _KV_TRANSFER is not None, (
+        "disaggregated KV cache transfer parallel group is not initialized")
+    return _KV_TRANSFER
+
 
 @contextmanager
 def graph_capture():
@@ -1052,6 +1066,26 @@ def initialize_model_parallel(
                                     group_name="pp")
 
 
+def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
+    """
+    Initialize KV cache transfer parallel group.
+    """
+
+    global _KV_TRANSFER
+
+    if vllm_config.kv_transfer_config is None:
+        return
+
+    if all([
+            vllm_config.kv_transfer_config.need_kv_parallel_group,
+            _KV_TRANSFER is None
+    ]):
+        _KV_TRANSFER = kv_transfer.KVTransferAgent(
+            rank=get_world_group().rank,
+            local_rank=get_world_group().local_rank,
+            config=vllm_config)
+
+
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
@@ -1158,24 +1192,30 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         torch.cuda.empty_cache()
 
 
-def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
+def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
+                        source_rank: int = 0) -> List[bool]:
     """
     This is a collective operation that returns if each rank is in the same node
     as the source rank. It tests if processes are attached to the same
     memory system (shared access to shared memory).
     """
-    assert torch.distributed.get_backend(
-        pg) != torch.distributed.Backend.NCCL, (
-            "in_the_same_node_as should be tested with a non-NCCL group.")
-    # local rank inside the group
-    rank = torch.distributed.get_rank(group=pg)
-    world_size = torch.distributed.get_world_size(group=pg)
+    if isinstance(pg, ProcessGroup):
+        assert torch.distributed.get_backend(
+            pg) != torch.distributed.Backend.NCCL, (
+                "in_the_same_node_as should be tested with a non-NCCL group.")
+        # local rank inside the group
+        rank = torch.distributed.get_rank(group=pg)
+        world_size = torch.distributed.get_world_size(group=pg)
+
+        # global ranks of the processes in the group
+        ranks = torch.distributed.get_process_group_ranks(pg)
+    else:
+        rank = pg.rank
+        world_size = pg.world_size
+        ranks = list(range(world_size))
 
     # local tensor in each process to store the result
     is_in_the_same_node = torch.tensor([0] * world_size, dtype=torch.int32)
-
-    # global ranks of the processes in the group
-    ranks = torch.distributed.get_process_group_ranks(pg)
 
     magic_message = b"magic_message"
     shm = None
@@ -1186,17 +1226,21 @@ def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
                 # create a shared memory segment
                 shm = shared_memory.SharedMemory(create=True, size=128)
                 shm.buf[:len(magic_message)] = magic_message
-                torch.distributed.broadcast_object_list([shm.name],
-                                                        src=ranks[source_rank],
-                                                        group=pg)
+                if isinstance(pg, ProcessGroup):
+                    torch.distributed.broadcast_object_list(
+                        [shm.name], src=ranks[source_rank], group=pg)
+                else:
+                    pg.broadcast_obj(shm.name, src=source_rank)
                 is_in_the_same_node[rank] = 1
             else:
                 # try to open the shared memory segment
-                recv = [None]
-                torch.distributed.broadcast_object_list(recv,
-                                                        src=ranks[source_rank],
-                                                        group=pg)
-                name = recv[0]
+                if isinstance(pg, ProcessGroup):
+                    recv = [None]
+                    torch.distributed.broadcast_object_list(
+                        recv, src=ranks[source_rank], group=pg)
+                    name = recv[0]
+                else:
+                    name = pg.broadcast_obj(None, src=source_rank)
                 # fix to https://stackoverflow.com/q/62748654/9191338
                 # Python incorrectly tracks shared memory even if it is not
                 # created by the process. The following patch is a workaround.
@@ -1211,12 +1255,23 @@ def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
         if shm:
             shm.close()
 
-    torch.distributed.barrier(group=pg)
+    if isinstance(pg, ProcessGroup):
+        torch.distributed.barrier(group=pg)
+    else:
+        pg.barrier()
 
     # clean up the shared memory segment
     with contextlib.suppress(OSError):
         if rank == source_rank and shm:
             shm.unlink()
-    torch.distributed.all_reduce(is_in_the_same_node, group=pg)
 
-    return [x == 1 for x in is_in_the_same_node.tolist()]
+    if isinstance(pg, ProcessGroup):
+        torch.distributed.all_reduce(is_in_the_same_node, group=pg)
+        aggregated_data = is_in_the_same_node
+    else:
+        aggregated_data = torch.zeros_like(is_in_the_same_node)
+        for i in range(world_size):
+            rank_data = pg.broadcast_obj(is_in_the_same_node, src=i)
+            aggregated_data += rank_data
+
+    return [x == 1 for x in aggregated_data.tolist()]

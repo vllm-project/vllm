@@ -9,7 +9,7 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -20,7 +20,7 @@ from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
@@ -30,7 +30,7 @@ class AsyncLLM(EngineClient):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[GPUExecutor],
+        executor_class: Type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -51,7 +51,7 @@ class AsyncLLM(EngineClient):
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            enable_lora=bool(vllm_config.lora_config))
+            lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
         # Request streams (map of request_id -> AsyncStream).
@@ -65,7 +65,12 @@ class AsyncLLM(EngineClient):
                                    input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
-        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
+        self.detokenizer = Detokenizer(
+            tokenizer_name=vllm_config.model_config.tokenizer,
+            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
+            trust_remote_code=vllm_config.model_config.trust_remote_code,
+            revision=vllm_config.model_config.tokenizer_revision,
+        )
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_client(
@@ -114,14 +119,24 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
 
-        self.engine_core.shutdown()
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown()
 
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig):
-        return GPUExecutor
+        distributed_executor_backend = (
+            vllm_config.parallel_config.distributed_executor_backend)
+        if distributed_executor_backend == "mp":
+            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+            executor_class = MultiprocExecutor
+        else:
+            assert (distributed_executor_backend is None)
+            from vllm.v1.executor.uniproc_executor import UniprocExecutor
+            executor_class = UniprocExecutor
+        return executor_class
 
     async def add_request(
         self,
@@ -133,11 +148,11 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
+    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
         """Add new request to the AsyncLLM."""
 
         if self.detokenizer.is_request_active(request_id):
-            raise KeyError(f"Request {request_id} already exists.")
+            raise ValueError(f"Request {request_id} already exists.")
 
         # 1) Create a new AsyncStream for the request.
         stream = self._add_request_to_streams(request_id)

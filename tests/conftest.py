@@ -5,7 +5,6 @@ from collections import UserList
 from enum import Enum
 from typing import (Any, Callable, Dict, List, Optional, Tuple, Type,
                     TypedDict, TypeVar, Union)
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -110,7 +109,7 @@ VIDEO_ASSETS = _VideoAssets()
 
 
 @pytest.fixture(params=[True, False])
-def run_with_both_engines(request):
+def run_with_both_engines(request, monkeypatch):
     # Automatically runs tests twice, once with V1 and once without
     use_v1 = request.param
     # Tests decorated with `@skip_v1` are only run without v1
@@ -119,11 +118,11 @@ def run_with_both_engines(request):
     if use_v1:
         if skip_v1:
             pytest.skip("Skipping test on vllm V1")
-        with patch('vllm.envs.VLLM_USE_V1', True):
-            yield
+        monkeypatch.setenv('VLLM_USE_V1', '1')
     else:
-        with patch('vllm.envs.VLLM_USE_V1', False):
-            yield
+        monkeypatch.setenv('VLLM_USE_V1', '0')
+
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -263,7 +262,6 @@ class HfRunner:
         dtype: str = "half",
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
-        is_embedding_model: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -657,6 +655,7 @@ class VllmRunner:
         model_name: str,
         task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
+        tokenizer_mode: str = "auto",
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
         max_model_len: int = 1024,
@@ -673,6 +672,7 @@ class VllmRunner:
             model=model_name,
             task=task,
             tokenizer=tokenizer_name,
+            tokenizer_mode=tokenizer_mode,
             trust_remote_code=True,
             dtype=dtype,
             swap_space=swap_space,
@@ -718,14 +718,6 @@ class VllmRunner:
                     inputs[i]["multi_modal_data"] = {"audio": audio}
 
         return inputs
-
-    def classify(self, prompts: List[str]) -> List[str]:
-        req_outputs = self.model.encode(prompts)
-        outputs = []
-        for req_output in req_outputs:
-            embedding = req_output.outputs.embedding
-            outputs.append(embedding)
-        return outputs
 
     def generate(
         self,
@@ -843,6 +835,7 @@ class VllmRunner:
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
         stop_token_ids: Optional[List[int]] = None,
+        stop: Optional[List[str]] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
@@ -850,7 +843,8 @@ class VllmRunner:
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=num_prompt_logprobs,
-            stop_token_ids=stop_token_ids)
+            stop_token_ids=stop_token_ids,
+            stop=stop)
 
         return self.generate_w_logprobs(prompts,
                                         greedy_logprobs_params,
@@ -895,6 +889,10 @@ class VllmRunner:
             returned_outputs.append((token_ids, texts))
         return returned_outputs
 
+    def classify(self, prompts: List[str]) -> List[List[float]]:
+        req_outputs = self.model.classify(prompts)
+        return [req_output.outputs.probs for req_output in req_outputs]
+
     def encode(
         self,
         prompts: List[str],
@@ -907,16 +905,16 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.encode(inputs)
+        req_outputs = self.model.embed(inputs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
     def score(
         self,
         text_1: Union[str, List[str]],
         text_2: Union[str, List[str]],
-    ) -> List[List[float]]:
+    ) -> List[float]:
         req_outputs = self.model.score(text_1, text_2)
-        return [req_output.outputs.embedding for req_output in req_outputs]
+        return [req_output.outputs.score for req_output in req_outputs]
 
     def __enter__(self):
         return self

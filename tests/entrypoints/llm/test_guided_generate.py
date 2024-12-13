@@ -77,6 +77,34 @@ def test_guided_json_completion(sample_json_schema, llm):
 
 
 @pytest.mark.skip_global_cleanup
+def test_guided_complex_json_completion(sample_complex_json_schema, llm):
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=1000,
+        guided_decoding=GuidedDecodingParams(json=sample_complex_json_schema))
+    outputs = llm.generate(prompts=[
+        f"Give an example JSON for an assignment grade "
+        f"that fits this schema: {sample_complex_json_schema}"
+    ] * 2,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
+
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json,
+                            schema=sample_complex_json_schema)
+
+
+@pytest.mark.skip_global_cleanup
 def test_guided_choice_completion(sample_guided_choice, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
@@ -159,3 +187,30 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
                      sampling_params=sampling_params,
                      use_tqdm=True,
                      guided_options_request=dict(guided_regex=sample_regex))
+
+
+@pytest.mark.skip_global_cleanup
+def test_guided_json_object(llm):
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=100,
+        guided_decoding=GuidedDecodingParams(json_object=True))
+
+    outputs = llm.generate(
+        prompts=("Generate a JSON object describing a person with name "
+                 "and age for John Smith who is 31 years old."),
+        sampling_params=sampling_params,
+        use_tqdm=True)
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+
+        generated_text = output.outputs[0].text
+        print(generated_text)
+        assert generated_text is not None
+
+        # Parse to verify it is valid JSON
+        parsed_json = json.loads(generated_text)
+        assert isinstance(parsed_json, dict)
