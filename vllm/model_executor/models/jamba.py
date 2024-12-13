@@ -420,7 +420,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        if self.scheduler_config is not None:
+        if self.scheduler_config is not None and \
+            not self.model_config.enforce_eager:
             if self.scheduler_config.max_num_seqs > \
                 vllm_config.compilation_config.max_capture_size:
                 self.max_batch_size = \

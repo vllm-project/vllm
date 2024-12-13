@@ -195,7 +195,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.backbone.make_empty_intermediate_tensors)
-        if self.scheduler_config is not None:
+        if self.scheduler_config is not None and \
+            not self.model_config.enforce_eager:
             if self.scheduler_config.max_num_seqs > \
                 vllm_config.compilation_config.max_capture_size:
                 self.max_batch_size = \
