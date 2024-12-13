@@ -41,12 +41,23 @@ class InductorHashCache:
     """
 
     def __init__(self, cache_dir: str, disabled: bool = False):
+        self.cache: defaultdict = defaultdict(dict)
         self.disabled = disabled
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir,
                                             "inductor_hash_cache.py")
-        self.cache: defaultdict = defaultdict(dict)
-        if os.path.exists(self.cache_file_path) and not disabled:
+        if disabled:
+            return
+        # set flags so that Inductor and Triton store their cache
+        # in the cache_dir, then users only need to copy the cache_dir
+        # to another machine to reuse the cache.
+        inductor_cache = os.path.join(cache_dir, "inductor_cache")
+        os.makedirs(inductor_cache, exist_ok=True)
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+        triton_cache = os.path.join(cache_dir, "triton_cache")
+        os.makedirs(triton_cache, exist_ok=True)
+        os.environ["TRITON_CACHE_DIR"] = triton_cache
+        if os.path.exists(self.cache_file_path):
             with open(self.cache_file_path) as f:
                 self.deserialize(f.read())
 
