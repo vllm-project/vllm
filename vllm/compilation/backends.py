@@ -139,8 +139,12 @@ def wrap_inductor(graph,
             return out
 
         def _check_can_cache(*args, **kwargs):
-            # no error means it can be cached
-            # vLLM computation graph can always be cached
+            # no error means it can be cached.
+            # Inductor refuses to cache the graph outside of Dynamo
+            # tracing context, and also disables caching for graphs
+            # with high-order ops.
+            # For vLLM, in either case, we want to cache the graph.
+            # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221 # noqa
             return
 
         def _get_shape_env():
