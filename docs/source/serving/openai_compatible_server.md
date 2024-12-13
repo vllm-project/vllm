@@ -49,144 +49,8 @@ In addition, we have the following custom APIs:
 - Tokenizer API (`/tokenize`, `/detokenize`)
   - For [HuggingFace tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer), this corresponds to calling `encode()` and `decode()` respectively.
 - Score API (`/score`)
-  - Apply a [cross-encoder model](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html) to predict a score for a sentence pair.
-  - Usually, the score refers to the similarity between the two sentences, on a scale of 0 to 1.
-
-### Example of usage for a pair of a string and a list of texts
-
-In this case, the model will compare the first given text to each of the texts containing the list.
-
-```bash
-curl -X 'POST' \
-  'http://127.0.0.1:8000/score' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "model": "BAAI/bge-reranker-v2-m3",
-  "text_1": "What is the capital of France?",
-  "text_2": [
-    "The capital of Brazil is Brasilia.",
-    "The capital of France is Paris."
-  ]
-}'
-```
-
-Response:
-
-```bash
-{
-  "id": "score-request-id",
-  "object": "list",
-  "created": 693570,
-  "model": "BAAI/bge-reranker-v2-m3",
-  "data": [
-    {
-      "index": 0,
-      "object": "score",
-      "score": [
-        0.001094818115234375
-      ]
-    },
-    {
-      "index": 1,
-      "object": "score",
-      "score": [
-        1
-      ]
-    }
-  ],
-  "usage": {}
-}
-```
-
-### Example of usage for a pair of two lists of texts
-
-In this case, the model will compare the one by one, making pairs by same index correspondent in each list.
-
-```bash
-curl -X 'POST' \
-  'http://127.0.0.1:8000/score' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "model": "BAAI/bge-reranker-v2-m3",
-  "encoding_format": "float",
-  "text_1": [
-    "What is the capital of Brazil?",
-    "What is the capital of France?"
-  ],
-  "text_2": [
-    "The capital of Brazil is Brasilia.",
-    "The capital of France is Paris."
-  ]
-}'
-```
-
-Response:
-
-```bash
-{
-  "id": "score-request-id",
-  "object": "list",
-  "created": 693447,
-  "model": "BAAI/bge-reranker-v2-m3",
-  "data": [
-    {
-      "index": 0,
-      "object": "score",
-      "score": [
-        1
-      ]
-    },
-    {
-      "index": 1,
-      "object": "score",
-      "score": [
-        1
-      ]
-    }
-  ],
-  "usage": {}
-}
-```
-
-### Example of usage for a pair of two strings
-
-In this case, the model will compare the strings of texts.
-
-```bash
-curl -X 'POST' \
-  'http://127.0.0.1:8000/score' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "model": "BAAI/bge-reranker-v2-m3",
-  "encoding_format": "float",
-  "text_1": "What is the capital of France?",
-  "text_2": "The capital of France is Paris."
-}'
-```
-
-Response:
-
-```bash
-{
-  "id": "score-request-id",
-  "object": "list",
-  "created": 693447,
-  "model": "BAAI/bge-reranker-v2-m3",
-  "data": [
-    {
-      "index": 0,
-      "object": "score",
-      "score": [
-        1
-      ]
-    }
-  ],
-  "usage": {}
-}
-```
+  - Apply a [cross-encoder model](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html) to predict scores for sentence pairs.
+  - Usually, score refers to the similarity between two sentences, on a scale of 0 to 1.
 
 ## Extra Parameters
 
@@ -330,6 +194,142 @@ the detected format, which can be one of:
 
 If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
 to override which format to use.
+
+## Score API Examples
+
+### Single inference
+
+You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
+
+Request:
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "encoding_format": "float",
+  "text_1": "What is the capital of France?",
+  "text_2": "The capital of France is Paris."
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693447,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": 1
+    }
+  ],
+  "usage": {}
+}
+```
+
+### Batch inference
+
+You can pass a string to `text_1` and a list to `text_2`, forming multiple sentence pairs
+where each pair is built from `text_1` and a string in `text_2`.
+The total number of pairs is `len(text_2)`.
+
+Request:
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "text_1": "What is the capital of France?",
+  "text_2": [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris."
+  ]
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693570,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": 0.001094818115234375
+    },
+    {
+      "index": 1,
+      "object": "score",
+      "score": 1
+    }
+  ],
+  "usage": {}
+}
+```
+
+You can pass a list to both `text_1` and `text_2`, forming multiple sentence pairs
+where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
+The total number of pairs is `len(text_2)`.
+
+Request:
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "encoding_format": "float",
+  "text_1": [
+    "What is the capital of Brazil?",
+    "What is the capital of France?"
+  ],
+  "text_2": [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris."
+  ]
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693447,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": 1
+    },
+    {
+      "index": 1,
+      "object": "score",
+      "score": 1
+    }
+  ],
+  "usage": {}
+}
+```
 
 ## Command line arguments for the server
 
