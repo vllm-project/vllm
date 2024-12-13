@@ -50,10 +50,10 @@ It returns the extracted hidden states directly, which is useful for reward mode
 .. code-block:: python
 
     llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", task="reward")
-    output, = llm.encode("Hello, my name is")
+    (output,) = llm.encode("Hello, my name is")
 
     data = output.outputs.data
-    print(f"Prompt: {prompt!r} | Data: {data!r}")
+    print(f"Data: {data!r}")
 
 ``LLM.embed``
 ^^^^^^^^^^^^^
@@ -64,7 +64,7 @@ It is primarily designed for embedding models.
 .. code-block:: python
 
     llm = LLM(model="intfloat/e5-mistral-7b-instruct", task="embed")
-    output, = llm.embed("Hello, my name is")
+    (output,) = llm.embed("Hello, my name is")
 
     embeds = output.outputs.embedding
     print(f"Embeddings: {embeds!r} (size={len(embeds)})")
@@ -80,7 +80,7 @@ It is primarily designed for classification models.
 .. code-block:: python
 
     llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", task="classify")
-    output, = llm.classify("Hello, my name is")
+    (output,) = llm.classify("Hello, my name is")
 
     probs = output.outputs.probs
     print(f"Class Probabilities: {probs!r} (size={len(probs)})")
@@ -102,8 +102,8 @@ These types of models serve as rerankers between candidate query-document pairs 
 .. code-block:: python
 
     llm = LLM(model="BAAI/bge-reranker-v2-m3", task="score")
-    output, = llm.score("What is the capital of France?",
-                        "The capital of Brazil is Brasilia.")
+    (output,) = llm.score("What is the capital of France?",
+                          "The capital of Brazil is Brasilia.")
 
     score = output.outputs.score
     print(f"Score: {score}")
@@ -119,7 +119,7 @@ Please click on the above link for more details on how to launch the server.
 Embeddings API
 ^^^^^^^^^^^^^^
 
-Our Embeddings API is similar to ``LLM.encode``, accepting both text and :ref:`multi-modal inputs <multimodal_inputs>`.
+Our Embeddings API is similar to ``LLM.embed``, accepting both text and :ref:`multi-modal inputs <multimodal_inputs>`.
 
 The text-only API is compatible with `OpenAI Embeddings API <https://platform.openai.com/docs/api-reference/embeddings>`__
 so that you can use OpenAI client to interact with it.

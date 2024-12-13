@@ -74,8 +74,8 @@ class PoolingOutput:
 
     @property
     def embedding(self) -> list[float]:
-        msg = ("`LLM.encode()` now returns raw outputs. "
-               "To return embeddings, use `LLM.embed()`. "
+        msg = ("`LLM.encode()` now stores raw outputs in the `data` "
+               "attribute. To return embeddings, use `LLM.embed()`. "
                "To return class probabilities, use `LLM.classify()` "
                "and access the `probs` attribute. ")
         warnings.warn(msg, DeprecationWarning, stacklevel=2)
