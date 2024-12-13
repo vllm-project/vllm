@@ -361,8 +361,7 @@ def main(args: argparse.Namespace):
         # TODO(vllm-project/vllm/issues/9778): Count molti-modal token length.
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
-          f"{total_output_tokens / elapsed_time:.2f} output tokens/s, "
-          f"{total_num_tokens=} | {total_output_tokens=}")
+          f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
 
     # Output JSON results if specified
     if args.output_json:

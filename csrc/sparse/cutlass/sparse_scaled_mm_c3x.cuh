@@ -20,20 +20,16 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
+#include "cutlass_extensions/cute_utils.cuh"
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
 #include "cutlass_extensions/common.hpp"
+#include "cutlass_extensions/torch_utils.hpp"
 
 using namespace cute;
 
 /*
    This file defines sparse quantized GEMM operations using the CUTLASS 3.x API,
    for NVIDIA GPUs with sm90a (Hopper) or later.
-
-   Epilogue functions can be defined to post-process the output before it is
-   written to GPU memory.
-   Epilogues must contain a public type named EVTCompute of type Sm90EVT,
-   as well as a static prepare_args function that constructs an
-   EVTCompute::Arguments struct.
 */
 
 namespace {
@@ -74,9 +70,16 @@ struct cutlass_sparse_3x_gemm {
 
   using Epilogue = Epilogue_<ElementAcc, ElementD, EpilogueDescriptor>;
 
-  using StrideD = Stride<Int<1>, int64_t, Int<0>>;
   using ElementC = void;
-  using StrideC = StrideD;
+  using LayoutC = cutlass::layout::RowMajor;
+  using LayoutD = LayoutC;
+  using StrideC = cutlass::detail::TagToStrideA_t<LayoutC>;
+  using StrideD = cutlass::detail::TagToStrideA_t<LayoutD>;
+
+  using LayoutC_Transpose =
+      typename cutlass::layout::LayoutTranspose<LayoutC>::type;
+  using LayoutD_Transpose =
+      typename cutlass::layout::LayoutTranspose<LayoutD>::type;
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
@@ -91,8 +94,8 @@ struct cutlass_sparse_3x_gemm {
       typename cutlass::epilogue::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAcc, ElementAcc, ElementC, StrideC, AlignmentCD, ElementD,
-          StrideD, AlignmentCD, EpilogueSchedule, EVTCompute>::CollectiveOp;
+          ElementAcc, ElementAcc, ElementC, LayoutC_Transpose, AlignmentCD, ElementD,
+          LayoutD_Transpose, AlignmentCD, EpilogueSchedule, EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
@@ -118,49 +121,49 @@ struct cutlass_sparse_3x_gemm {
 };
 
 template <typename Gemm, typename... EpilogueArgs>
-void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
-                                torch::Tensor const& e, torch::Tensor const& b,
+void cutlass_sparse_gemm_caller(torch::Tensor& out,
+                                torch::Tensor const& a,
+                                torch::Tensor const& bt_nzs,
+                                torch::Tensor const& bt_meta,
                                 EpilogueArgs&&... epilogue_params) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
-  int32_t m = a.size(0);
-  int32_t n = b.size(1);
-  int32_t k = b.size(0);
-
-  int64_t lda = a.stride(0);
-  int64_t ldb = b.stride(1);
-  int64_t ldc = out.stride(1);
-
-  using LayoutA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutA;
+  // Interface stride expected from the argument a (will get transposed)
+  using LayoutA = cutlass::layout::RowMajor;
+  using LayoutB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutA;
   using LayoutE = typename Gemm::GemmKernel::CollectiveMainloop::LayoutE;
-  using StrideB = typename Gemm::GemmKernel::StrideB;
-  using StrideC = typename Gemm::GemmKernel::StrideC;
-  using StrideD = typename Gemm::GemmKernel::StrideD;
+  using LayoutD = cutlass::layout::RowMajor;
 
-  StrideB b_stride{ldb, Int<1>{}, 0};
-  StrideC c_stride{Int<1>{}, ldc, Int<0>{}};
+  using StrideA = cutlass::detail::TagToStrideA_t<LayoutA>;
+  using StrideD = cutlass::detail::TagToStrideA_t<LayoutD>;
+
+  auto layout_A = make_cute_layout<StrideA>(a, "A");
+  auto layout_D = make_cute_layout<StrideD>(out, "D");
+
+  auto stride_At = layout_A.stride();
+  auto stride_Dt = permute_layout<1, 0, 2>(layout_D).stride();
 
   using GemmKernel = typename Gemm::GemmKernel;
-  typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
+  typename GemmKernel::ProblemShape prob_shape{(int) bt_nzs.size(0), (int) size<0>(layout_A), (int) size<1>(layout_A), 1};
 
   using ElementE = typename GemmKernel::CollectiveMainloop::ElementE;
   using SparseConfig = typename GemmKernel::CollectiveMainloop::SparseConfig;
 
-  LayoutA a_layout = SparseConfig::fill_layoutA(prob_shape);
+  LayoutB b_layout = SparseConfig::fill_layoutA(prob_shape);
   LayoutE e_layout = SparseConfig::fill_layoutE(prob_shape);
 
   auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
-  auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
-  auto e_ptr = static_cast<ElementE*>(e.data_ptr());
+  auto b_ptr = static_cast<ElementAB*>(bt_nzs.data_ptr());
+  auto e_ptr = static_cast<ElementE*>(bt_meta.data_ptr());
   typename GemmKernel::MainloopArguments mainloop_args{
-      a_ptr, a_layout, b_ptr, b_stride, e_ptr, e_layout};
+      b_ptr, b_layout, a_ptr, stride_At, e_ptr, e_layout};
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       Gemm::Epilogue::prepare_args(
           std::forward<EpilogueArgs>(epilogue_params)...),
-      c_ptr, c_stride, c_ptr, c_stride};
+      c_ptr, stride_Dt, c_ptr, stride_Dt};
 
   typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
                                       prob_shape, mainloop_args, epilogue_args};
@@ -195,7 +198,7 @@ struct sm90_config_default<half_t, OutType, Epilogue> {
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<half_t, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+                      KernelSchedule, EpilogueSchedule, float>;
 };
 
 template <typename OutType,
@@ -207,9 +210,8 @@ struct sm90_config_default<cutlass::bfloat16_t, OutType, Epilogue> {
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
-      cutlass_sparse_3x_gemm<cutlass::bfloat16_t, OutType, Epilogue, TileShape,
-                             ClusterShape, KernelSchedule, EpilogueSchedule,
-                             float>;
+      cutlass_sparse_3x_gemm<cutlass::bfloat16_t, OutType, Epilogue, TileShape, ClusterShape,
+                             KernelSchedule, EpilogueSchedule, float>;
 };
 
 //////////////////////// Cherry-Picking Kernels ////////////////////////
@@ -335,9 +337,8 @@ struct sm90_config_default<cutlass::float_e4m3_t, OutType, Epilogue> {
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_1, _2, _1>;
   using Cutlass3xGemm =
-      cutlass_sparse_3x_gemm<cutlass::float_e4m3_t, OutType, Epilogue,
-                             TileShape, ClusterShape, KernelSchedule,
-                             EpilogueSchedule, float>;
+      cutlass_sparse_3x_gemm<cutlass::float_e4m3_t, OutType, Epilogue, TileShape, ClusterShape,
+                             KernelSchedule, EpilogueSchedule, float>;
 };
 
 template <typename InType, typename OutType,

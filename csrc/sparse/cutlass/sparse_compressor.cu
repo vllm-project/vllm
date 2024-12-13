@@ -73,9 +73,6 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
-  // Just a dummy value
-  int32_t n = 128;
-
   int64_t lda = a.stride(0);
 
   using StrideA = Stride<int64_t, Int<1>, int64_t>;
@@ -85,7 +82,7 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   StrideA a_stride{lda, Int<1>{}, 0};
 
   using GemmKernel = typename Gemm::GemmKernel;
-  typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
+  typename GemmKernel::ProblemShape prob_shape{m, 1, k, 1};
 
   using LayoutA = typename GemmKernel::CollectiveMainloop::LayoutA;
   using LayoutE = typename GemmKernel::CollectiveMainloop::LayoutE;
@@ -155,7 +152,7 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   return true;
 }
 
-bool cutlass_compress_entry(torch::Tensor& a_compressed, torch::Tensor& e,
+bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
                             torch::Tensor const& a) {
   if (a.dtype() == torch::kBFloat16) {
     return sparsify_and_compress<cutlass::bfloat16_t>(a_compressed, e, a);

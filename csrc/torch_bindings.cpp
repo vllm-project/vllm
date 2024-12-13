@@ -317,16 +317,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // quantization, as well as bias
   ops.def(
       "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
-      "                         Tensor e,"
-      "                         Tensor b, Tensor a_scales,"
+      "                         Tensor b,"
+      "                         Tensor e, Tensor a_scales,"
       "                         Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
 
   // CUTLASS sparse matrix compressor
   ops.def(
-      "cutlass_compress_entry(Tensor! a_compressed, Tensor! e,"
+      "cutlass_sparse_compress(Tensor! a_compressed, Tensor! e,"
       " Tensor a) -> bool");
-  ops.impl("cutlass_compress_entry", &cutlass_compress_entry);
+  ops.impl("cutlass_sparse_compress", &cutlass_sparse_compress);
 
   // Mamba selective scan kernel
   ops.def(

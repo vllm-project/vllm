@@ -81,7 +81,7 @@ def make_rand_sparse_tensors(
     else:
         raise ValueError("unsupported dtype")
 
-    b_compressed, e = ops.cutlass_compress_entry(b.t())
+    b_compressed, e = ops.cutlass_sparse_compress(b.t())
 
     # Compressed B, Metadata, Original A, B
     return b_compressed, e, a, b

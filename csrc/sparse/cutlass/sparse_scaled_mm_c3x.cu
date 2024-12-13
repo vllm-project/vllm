@@ -36,13 +36,13 @@ template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
 void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
-                                    torch::Tensor const& e,
-                                    torch::Tensor const& b,
+                                    torch::Tensor const& bt_nzs,
+                                    torch::Tensor const& bt_meta,
                                     EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(e.dtype() == torch::kUInt8);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
+  TORCH_CHECK(bt_nzs.dtype() == torch::kFloat8_e4m3fn);
 
   using Cutlass3xGemmDefault =
       typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
@@ -72,68 +72,68 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   using Cutlass3xGemm8 =
       typename sm90_fp8_config_8<InType, OutType, Epilogue>::Cutlass3xGemm;
 
-  uint32_t const n = b.size(1);  // Batch size
-  uint32_t const m = a.size(0);
-  uint32_t const np2 =
-      std::max(static_cast<uint32_t>(64), next_pow_2(n));  // next power of 2
+  uint32_t const n = bt_nzs.size(0);
+  uint32_t const m = a.size(0);  // Batch size
+  uint32_t const mp2 =
+      std::max(static_cast<uint32_t>(64), next_pow_2(m));  // next power of 2
 
-  if (np2 <= 64) {
-    if (m == 28672) {
+  if (mp2 <= 64) {
+    if (n == 28672) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm2>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
-    } else if (m == 4096 || m == 6144) {
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
+    } else if (n == 4096 || n == 6144) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm1>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
     }
-  } else if (np2 <= 128) {
-    if (m == 4096) {
+  } else if (mp2 <= 128) {
+    if (n == 4096) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm3>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
-    } else if (m == 28672) {
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
+    } else if (n == 28672) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm5>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
-    } else if (m == 6144) {
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
+    } else if (n == 6144) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm4>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
     }
-  } else if (np2 <= 256) {
-    if (m == 4096) {
+  } else if (mp2 <= 256) {
+    if (n == 4096) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm6>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
-    } else if (m == 28672) {
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
+    } else if (n == 28672) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm8>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
-    } else if (m == 6144) {
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
+    } else if (n == 6144) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm7>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
     }
   } else {
-    if (m == 6144 || m == 28672) {
+    if (n == 6144 || n == 28672) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm8>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
-    } else if (m == 4096) {
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
+    } else if (n == 4096) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemm7>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
     }
   }
 
   // Otherwise the default heuristic
-  if (np2 <= 64) {
+  if (mp2 <= 64) {
     // n in [1, 64]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM64>(
-        out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (np2 <= 128) {
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
+  } else if (mp2 <= 128) {
     // n in (64, 128]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM128>(
-        out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (np2 <= 256) {
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
+  } else if (mp2 <= 256) {
     // n in (128, 256]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM256>(
-        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
   } else {
     // n in (256, inf)
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM512>(
-        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
   }
 }
 
@@ -141,53 +141,53 @@ template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
 void cutlass_gemm_sm90_fp16_dispatch(torch::Tensor& out, torch::Tensor const& a,
-                                     torch::Tensor const& e,
-                                     torch::Tensor const& b,
+                                     torch::Tensor const& bt_nzs,
+                                     torch::Tensor const& bt_meta,
                                      EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::half_t>());
   TORCH_CHECK(a.dtype() == torch::kFloat16);
-  TORCH_CHECK(e.dtype() == torch::kUInt8);
-  TORCH_CHECK(b.dtype() == torch::kFloat16);
+  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
+  TORCH_CHECK(bt_nzs.dtype() == torch::kFloat16);
 
   using Cutlass3xGemmDefault =
       typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
 
   // m in (128, inf)
   return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
-      out, a, e, b, std::forward<EpilogueArgs>(args)...);
+      out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
 }
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
 void cutlass_gemm_sm90_bf16_dispatch(torch::Tensor& out, torch::Tensor const& a,
-                                     torch::Tensor const& e,
-                                     torch::Tensor const& b,
+                                     torch::Tensor const& bt_nzs,
+                                     torch::Tensor const& bt_meta,
                                      EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::bfloat16_t>());
   TORCH_CHECK(a.dtype() == torch::kBFloat16);
-  TORCH_CHECK(e.dtype() == torch::kUInt8);
-  TORCH_CHECK(b.dtype() == torch::kBFloat16);
+  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
+  TORCH_CHECK(bt_nzs.dtype() == torch::kBFloat16);
 
   using Cutlass3xGemmDefault =
       typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
 
   // m in (128, inf)
   return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
-      out, a, e, b, std::forward<EpilogueArgs>(args)...);
+      out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
 }
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
 void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
-                                     torch::Tensor const& e,
-                                     torch::Tensor const& b,
+                                     torch::Tensor const& bt_nzs,
+                                     torch::Tensor const& bt_meta,
                                      EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, int8_t>());
   TORCH_CHECK(a.dtype() == torch::kInt8);
-  TORCH_CHECK(e.dtype() == torch::kUInt8);
-  TORCH_CHECK(b.dtype() == torch::kInt8);
+  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
+  TORCH_CHECK(bt_nzs.dtype() == torch::kInt8);
 
   using Cutlass3xGemmDefault =
       typename sm90_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
@@ -213,23 +213,23 @@ void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
     // m in [1, 32]
     if (is_small_n) {
       return cutlass_sparse_gemm_caller<Cutlass3xGemmM32NSmall>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
     } else {
       return cutlass_sparse_gemm_caller<Cutlass3xGemmM32NBig>(
-          out, a, e, b, std::forward<EpilogueArgs>(args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
     }
   } else if (mp2 <= 64) {
     // m in (32, 64]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM64>(
-        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 128) {
     // m in (64, 128]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM128>(
-        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
   } else {
     // m in (128, inf)
     return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
-        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+        out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(args)...);
   }
 }
 
@@ -237,68 +237,68 @@ template <template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
 void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
                                             torch::Tensor const& a,
-                                            torch::Tensor const& e,
-                                            torch::Tensor const& b,
+                                            torch::Tensor const& bt_nzs,
+                                            torch::Tensor const& bt_meta,
                                             EpilogueArgs&&... epilogue_args) {
-  TORCH_CHECK(e.dtype() == torch::kUInt8);
+  TORCH_CHECK(bt_meta.dtype() == torch::kUInt8);
   if (a.dtype() == torch::kInt8) {
-    TORCH_CHECK(b.dtype() == torch::kInt8);
+    TORCH_CHECK(bt_nzs.dtype() == torch::kInt8);
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
                                              Epilogue>(
-          out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t, Epilogue>(
-          out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else if (a.dtype() == torch::kFloat8_e4m3fn) {
-    TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+    TORCH_CHECK(bt_nzs.dtype() == torch::kFloat8_e4m3fn);
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                             cutlass::bfloat16_t, Epilogue>(
-          out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                             cutlass::half_t, Epilogue>(
-          out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else if (a.dtype() == torch::kFloat16) {
-    TORCH_CHECK(b.dtype() == torch::kFloat16);
+    TORCH_CHECK(bt_nzs.dtype() == torch::kFloat16);
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_fp16_dispatch<cutlass::half_t,
                                              cutlass::bfloat16_t, Epilogue>(
-          out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_fp16_dispatch<cutlass::half_t, cutlass::half_t,
                                              Epilogue>(
-          out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else {  // a.dtype() == torch::kBFloat16
     TORCH_CHECK(a.dtype() == torch::kBFloat16);
-    TORCH_CHECK(b.dtype() == torch::kBFloat16);
+    TORCH_CHECK(bt_nzs.dtype() == torch::kBFloat16);
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_bf16_dispatch<cutlass::bfloat16_t,
                                              cutlass::bfloat16_t, Epilogue>(
-          out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_bf16_dispatch<cutlass::bfloat16_t,
                                              cutlass::half_t, Epilogue>(
-          out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   }
 }
 
 void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
-                                   torch::Tensor const& e,
-                                   torch::Tensor const& b,
+                                   torch::Tensor const& bt_nzs,
+                                   torch::Tensor const& bt_meta,
                                    torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
                                    c10::optional<torch::Tensor> const& bias) {
@@ -308,10 +308,10 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
     TORCH_CHECK(bias->dtype() == out.dtype(),
                 "currently bias dtype must match output dtype ", out.dtype());
     return cutlass_scaled_sparse_mm_sm90_epilogue<c3x::ScaledEpilogueBias>(
-        out, a, e, b, a_scales, b_scales, *bias);
+        out, a, bt_nzs, bt_meta, a_scales, b_scales, *bias);
   } else {
     return cutlass_scaled_sparse_mm_sm90_epilogue<c3x::ScaledEpilogue>(
-        out, a, e, b, a_scales, b_scales);
+        out, a, bt_nzs, bt_meta, a_scales, b_scales);
   }
 }
 
