@@ -207,6 +207,31 @@ def run_audio() -> None:
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from base64 encoded audio:", result)
 
+    chat_completion_from_base64 = client.chat.completions.create(
+        messages=[{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What's in this audio?"
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        # Any format supported by librosa is supported
+                        "data": audio_base64,
+                        "format": "wav"
+                    },
+                },
+            ],
+        }],
+        model=model,
+        max_completion_tokens=64,
+    )
+
+    result = chat_completion_from_base64.choices[0].message.content
+    print("Chat completion output from input audio:", result)
 
 example_function_map = {
     "text-only": run_text_only,

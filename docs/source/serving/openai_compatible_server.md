@@ -34,9 +34,9 @@ We currently support the following OpenAI APIs:
 - [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
   - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
     - *Note: `image_url.detail` parameter is not supported.*
-  - We also support `audio_url` content type for audio files.
-    - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
-    - *TODO: Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
+  - We support two audio content types.
+    - Support `audio_url` content type for audio files. Refer to [here](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py#L51) for the exact schema.
+    - Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
   - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),

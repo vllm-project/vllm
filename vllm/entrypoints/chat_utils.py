@@ -747,7 +747,7 @@ def _parse_chat_message_content_mm_part(
         return part_type, content
 
     # Handle missing 'type' but provided direct URL fields.
-    # 'type' is required field by pydanic
+    # 'type' is required field by pydantic
     if part_type is None:
         if part.get("image_url") is not None:
             image_params = cast(CustomChatCompletionContentSimpleImageParam,
