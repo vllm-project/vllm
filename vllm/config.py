@@ -26,7 +26,8 @@ from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
-    get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
+    get_sentence_transformer_tokenizer_config, is_encoder_decoder,
+    try_get_generation_config, uses_mrope)
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, print_warning_once, random_uuid,
                         resolve_obj_by_qualname)
@@ -156,41 +157,42 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         override_pooler_config: Initialize non default pooling config or
             override default pooling config for the pooling model.
+        generation_config: Configuration parameter file for generation.
     """
 
-    def __init__(
-            self,
-            model: str,
-            task: Union[TaskOption, Literal["draft"]],
-            tokenizer: str,
-            tokenizer_mode: str,
-            trust_remote_code: bool,
-            dtype: Union[str, torch.dtype],
-            seed: int,
-            allowed_local_media_path: str = "",
-            revision: Optional[str] = None,
-            code_revision: Optional[str] = None,
-            rope_scaling: Optional[Dict[str, Any]] = None,
-            rope_theta: Optional[float] = None,
-            tokenizer_revision: Optional[str] = None,
-            max_model_len: Optional[int] = None,
-            spec_target_max_model_len: Optional[int] = None,
-            quantization: Optional[str] = None,
-            quantization_param_path: Optional[str] = None,
-            enforce_eager: Optional[bool] = None,
-            max_seq_len_to_capture: Optional[int] = None,
-            max_logprobs: int = 20,
-            disable_sliding_window: bool = False,
-            skip_tokenizer_init: bool = False,
-            served_model_name: Optional[Union[str, List[str]]] = None,
-            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-            use_async_output_proc: bool = True,
-            config_format: ConfigFormat = ConfigFormat.AUTO,
-            hf_overrides: Optional[HfOverrides] = None,
-            mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-            mm_cache_preprocessor: bool = False,
-            override_neuron_config: Optional[Dict[str, Any]] = None,
-            override_pooler_config: Optional["PoolerConfig"] = None) -> None:
+    def __init__(self,
+                 model: str,
+                 task: Union[TaskOption, Literal["draft"]],
+                 tokenizer: str,
+                 tokenizer_mode: str,
+                 trust_remote_code: bool,
+                 dtype: Union[str, torch.dtype],
+                 seed: int,
+                 allowed_local_media_path: str = "",
+                 revision: Optional[str] = None,
+                 code_revision: Optional[str] = None,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 rope_theta: Optional[float] = None,
+                 tokenizer_revision: Optional[str] = None,
+                 max_model_len: Optional[int] = None,
+                 spec_target_max_model_len: Optional[int] = None,
+                 quantization: Optional[str] = None,
+                 quantization_param_path: Optional[str] = None,
+                 enforce_eager: Optional[bool] = None,
+                 max_seq_len_to_capture: Optional[int] = None,
+                 max_logprobs: int = 20,
+                 disable_sliding_window: bool = False,
+                 skip_tokenizer_init: bool = False,
+                 served_model_name: Optional[Union[str, List[str]]] = None,
+                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+                 use_async_output_proc: bool = True,
+                 config_format: ConfigFormat = ConfigFormat.AUTO,
+                 hf_overrides: Optional[HfOverrides] = None,
+                 mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+                 mm_cache_preprocessor: bool = False,
+                 override_neuron_config: Optional[Dict[str, Any]] = None,
+                 override_pooler_config: Optional["PoolerConfig"] = None,
+                 generation_config: Optional[str] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -316,6 +318,8 @@ class ModelConfig:
         self.task: Final = task
 
         self.pooler_config = self._init_pooler_config(override_pooler_config)
+
+        self.generation_config = generation_config
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -781,6 +785,24 @@ class ModelConfig:
             raise ValueError("The model is not multimodal.")
 
         return self.multimodal_config
+
+    def try_get_generation_config(self) -> Dict[str, Any]:
+        if self.generation_config is None or self.generation_config == "auto":
+            config = try_get_generation_config(
+                self.model,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.revision,
+            )
+        else:
+            config = try_get_generation_config(
+                self.generation_config,
+                trust_remote_code=self.trust_remote_code,
+            )
+
+        if config is None:
+            return {}
+
+        return config.to_diff_dict()
 
     @property
     def is_encoder_decoder(self) -> bool:

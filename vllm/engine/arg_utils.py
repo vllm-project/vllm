@@ -198,6 +198,8 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
+    generation_config: Optional[str] = None
+
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
@@ -931,6 +933,15 @@ class EngineArgs:
             type=str,
             default="auto",
             help='The worker class to use for distributed execution.')
+
+        parser.add_argument(
+            "--generation-config",
+            type=nullable_str,
+            default=None,
+            help="The folder path to the generation config. If set to "
+            "'auto', the generation config will be automatically loaded "
+            "from the model's folder.",
+        )
 
         return parser
 

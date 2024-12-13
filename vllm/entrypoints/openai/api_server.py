@@ -352,7 +352,8 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@router.post("/v1/chat/completions")
+# Lazy include chat completion routes to make sure new sampling
+# parameters are included
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -372,7 +373,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/completions")
+# Lazy include chat completion routes to make sure new sampling
+# parameters are included
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -568,6 +570,35 @@ def init_app_state(
     resolved_chat_template = load_chat_template(args.chat_template)
     logger.info("Using supplied chat template:\n%s", resolved_chat_template)
 
+    if args.generation_config:
+        generation_config_fields = model_config.try_get_generation_config()
+        available_params = [
+            "repetition_penalty",
+            "temperature",
+            "top_k",
+            "top_p",
+            "min_p",
+        ]
+
+        if any(p in generation_config_fields for p in available_params):
+            overwrite_config = {
+                p: generation_config_fields.get(p, None)
+                for p in available_params
+            }
+            logger.info("Overwriting generation config with: %s",
+                        overwrite_config)
+            # Modify the ChatCompletionRequest to include the generation config
+            for k, v in overwrite_config.items():
+                if v is not None:
+                    ChatCompletionRequest.model_fields[k].default = v
+                    CompletionRequest.model_fields[k].default = v
+
+            # Rebuild the models to include the new fields
+            ChatCompletionRequest.model_rebuild(force=True)
+            CompletionRequest.model_rebuild(force=True)
+        else:
+            logger.warning("No generation config found.")
+
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -660,6 +691,15 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         model_config = await engine_client.get_model_config()
         init_app_state(engine_client, model_config, app.state, args)
+
+        # Lazy include chat completion routes to make sure new sampling
+        # parameters are included
+        app.add_api_route("/v1/chat/completions",
+                          create_chat_completion,
+                          methods=["POST"])
+        app.add_api_route("/v1/completions",
+                          create_completion,
+                          methods=["POST"])
 
         shutdown_task = await serve_http(
             app,

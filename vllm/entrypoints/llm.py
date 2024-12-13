@@ -230,6 +230,11 @@ class LLM:
 
         self.request_counter = Counter()
 
+        # Generation config fields
+        self.overwrite_default_sampling_params = (engine_args.generation_config
+                                                  is not None)
+        self.generation_config_fields = self.llm_engine.generation_config_fields
+
     @staticmethod
     def get_engine_class() -> Type[LLMEngine]:
         if envs.VLLM_USE_V1:
@@ -251,6 +256,27 @@ class LLM:
             tokenizer_group.tokenizer = tokenizer
         else:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+
+    def get_default_sampling_params(self) -> SamplingParams:
+        if self.overwrite_default_sampling_params:
+            available_params = [
+                "repetition_penalty",
+                "temperature",
+                "top_k",
+                "top_p",
+                "min_p",
+            ]
+            default_param_dict = {
+                param: self.generation_config_fields.get(param, None)
+                for param in available_params
+            }
+            # Filter the None values
+            default_param_dict = {
+                k: v
+                for k, v in default_param_dict.items() if v is not None
+            }
+            return SamplingParams.from_optional(**default_param_dict)
+        return SamplingParams()
 
     @overload
     def generate(
@@ -417,7 +443,7 @@ class LLM:
 
         if sampling_params is None:
             # Use default sampling params.
-            sampling_params = SamplingParams()
+            sampling_params = self.get_default_sampling_params()
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
