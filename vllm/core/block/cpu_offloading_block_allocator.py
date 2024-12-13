@@ -111,7 +111,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
           uncached: allocated blocks that didn't hit any cache
           cached: allocated blocks that are cached, either in GPU or in CPU
           free: the blocks are not allocated by block allocator
-        This implementation aims to transform uncacherd blocks to cached blocks
+        This implementation aims to transform uncached blocks to cached blocks
         by performing GPU to CPU copy when calling `get_and_reset_swaps`
         
         As block allocator will automatically track free blocks, and we don't 
