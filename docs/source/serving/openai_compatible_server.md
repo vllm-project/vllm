@@ -47,9 +47,10 @@ We currently support the following OpenAI APIs:
 In addition, we have the following custom APIs:
 
 - Tokenizer API (`/tokenize`, `/detokenize`)
-  - Corresponds to calling `encode()` and `decode()` on [HuggingFace tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
+  - For [HuggingFace tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer), this corresponds to calling `encode()` and `decode()` respectively.
 - Score API (`/score`)
-  - Use a [cross-encoder model](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html) to predict a score of label for a sentence pair. Usually, the score refers to the similarity between the two sentences on a scale of 0 to 1.
+  - Apply a [cross-encoder model](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html) to predict a score for a sentence pair.
+  - Usually, the score refers to the similarity between the two sentences, on a scale of 0 to 1.
 
 ### Example of usage for a pair of a string and a list of texts
 
