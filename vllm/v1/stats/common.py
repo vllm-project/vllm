@@ -151,6 +151,27 @@ class RequestStatsUpdate(msgspec.Struct,
                 raise ValueError(
                     f"Field {field} is required for update type {self.type}.")
 
+    @staticmethod
+    def check_valid_update(
+        update: "RequestStatsUpdate",
+        last_update_type: Optional[Type],
+        last_updated_ts_s: Optional[float],
+    ):
+        if last_update_type is None:
+            assert update.type == RequestStatsUpdate.Type.ARRIVED
+        else:
+            valid_cur_update_types = RequestStatsUpdate._VALID_TRANSITIONS[
+                last_update_type]
+            assert update.type in valid_cur_update_types, (
+                f"Invalid update type: {update.type} for last_update_type: "
+                f"{last_update_type}.")
+
+        if last_updated_ts_s is not None:
+            assert update.monotonic_ts_s >= last_updated_ts_s, (
+                "Update timestamp must be monotonically increasing, but "
+                f"last_updated_ts_s={last_updated_ts_s} and "
+                f"update.monotonic_ts_s={update.monotonic_ts_s}.")
+
 
 @dataclass
 class RequestStats:
@@ -305,7 +326,8 @@ class RequestStats:
         return self.finished_ts_s is not None
 
     def update_from(self, update: "RequestStatsUpdate"):
-        self._check_valid_update(update)
+        RequestStatsUpdate.check_valid_update(update, self.last_update_type,
+                                              self.last_updated_ts_s)
         ts = update.monotonic_ts_s
         self.last_updated_ts_s = ts
         self.last_update_type = update.type
@@ -335,22 +357,6 @@ class RequestStats:
             self.finish_reason = update.finish_reason
         else:
             raise ValueError(f"Unknown update type: {update.type}")
-
-    def _check_valid_update(self, update: "RequestStatsUpdate"):
-        if self.last_update_type is None:
-            assert update.type == RequestStatsUpdate.Type.ARRIVED
-        else:
-            valid_cur_update_types = RequestStatsUpdate._VALID_TRANSITIONS[
-                self.last_update_type]
-            assert update.type in valid_cur_update_types, (
-                f"Invalid update type: {update.type} for last_update_type: "
-                f"{self.last_update_type}.")
-
-        assert (self.last_updated_ts_s is None
-                or update.monotonic_ts_s >= self.last_updated_ts_s), (
-                    "Update timestamp must be monotonically increasing, but "
-                    f"last_updated_ts_s={self.last_updated_ts_s} and "
-                    f"update.monotonic_ts_s={update.monotonic_ts_s}.")
 
     def _record_detokenized_output(
         self,

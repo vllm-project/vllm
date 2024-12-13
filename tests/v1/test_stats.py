@@ -4,6 +4,31 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.stats.common import RequestStats, RequestStatsUpdate
 
 
+def make_update(
+    request_id: str,
+    update_type: RequestStatsUpdate.Type,
+    monotonic_ts_s: float,
+    **kwargs,
+):
+    if update_type == RequestStatsUpdate.Type.INPUT_PROCESSED:
+        kwargs.setdefault("sampling_params", SamplingParams(n=1))
+        kwargs.setdefault("num_prompt_tokens", 10)
+    elif update_type == RequestStatsUpdate.Type.PREFILLING:
+        kwargs.setdefault("num_computed_tokens", 10)
+        kwargs.setdefault("num_cached_tokens", 10)
+    elif update_type == RequestStatsUpdate.Type.DETOKENIZED:
+        kwargs.setdefault("num_new_tokens", 10)
+    elif update_type == RequestStatsUpdate.Type.FINISHED:
+        kwargs.setdefault("finish_reason", "test_reason")
+
+    return RequestStatsUpdate(
+        request_id=request_id,
+        type=update_type,
+        monotonic_ts_s=monotonic_ts_s,
+        **kwargs,
+    )
+
+
 def test_invalid_request_update():
     request_id = "test_request"
     update_specific_required_fields = {
@@ -34,6 +59,45 @@ def test_invalid_request_update():
                     type=update_type,
                     **copy_kwargs,
                 )
+
+
+def test_invalid_request_update_transition():
+    # Test invalid transition type.
+    for src in RequestStatsUpdate.Type:
+        for dst in RequestStatsUpdate.Type:
+            if dst not in RequestStatsUpdate._VALID_TRANSITIONS[src]:
+                with pytest.raises(AssertionError):
+                    RequestStatsUpdate.check_valid_update(
+                        make_update(
+                            update_type=dst,
+                            request_id="test_request",
+                            monotonic_ts_s=1,
+                        ),
+                        last_update_type=src,
+                        last_updated_ts_s=0,
+                    )
+            else:
+                RequestStatsUpdate.check_valid_update(
+                    make_update(
+                        request_id="test_request",
+                        update_type=dst,
+                        monotonic_ts_s=1,
+                    ),
+                    last_update_type=src,
+                    last_updated_ts_s=0,
+                )
+
+    # Test invalid timestamp.
+    with pytest.raises(AssertionError):
+        RequestStatsUpdate.check_valid_update(
+            make_update(
+                request_id="test_request",
+                update_type=RequestStatsUpdate.Type.ARRIVED,
+                monotonic_ts_s=1,
+            ),
+            last_update_type=None,
+            last_updated_ts_s=2,
+        )
 
 
 def test_lifecycle_updates():
