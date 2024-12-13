@@ -670,7 +670,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         patches_per_image = image_input["patches_per_image"]
         if len(patches_per_image) == 1:
-            image_embeds = image_embeds.unsqueeze(0)
+            image_embeds = image_embeds.view(
+                -1, self.config.text_config.hidden_size).unsqueeze(0)
             return image_embeds
 
         # NOTE: Image embeddings are split into separate tensors for each image
