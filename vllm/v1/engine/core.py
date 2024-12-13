@@ -14,6 +14,8 @@ from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
@@ -244,6 +246,9 @@ class EngineCoreProc(EngineCore):
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
         shutdown_requested = False
+
+        # Ensure we can serialize transformer config after spawning
+        maybe_register_config_serialize_by_value()
 
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
