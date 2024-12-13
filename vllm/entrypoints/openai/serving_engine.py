@@ -6,6 +6,7 @@ from http import HTTPStatus
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
                     Optional, Sequence, Tuple, TypedDict, Union)
 
+from fastapi import Request
 from pydantic import Field
 from starlette.datastructures import Headers
 from typing_extensions import Annotated
@@ -30,7 +31,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               ModelCard, ModelList,
-                                              ModelPermission,
+                                              ModelPermission, ScoreRequest,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               UnloadLoraAdapterRequest)
@@ -47,7 +48,7 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import AtomicCounter, is_list_of, make_async
+from vllm.utils import AtomicCounter, is_list_of, make_async, random_uuid
 
 logger = init_logger(__name__)
 
@@ -72,7 +73,7 @@ class LoRAModulePath:
 
 
 CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
-                              EmbeddingCompletionRequest,
+                              EmbeddingCompletionRequest, ScoreRequest,
                               TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
@@ -566,6 +567,16 @@ class OpenAIServing:
         return None
 
     @staticmethod
+    def _base_request_id(raw_request: Optional[Request],
+                         default: Optional[str] = None) -> Optional[str]:
+        """Pulls the request id to use from a header, if provided"""
+        default = default or random_uuid()
+        if raw_request is None:
+            return default
+
+        return raw_request.headers.get("X-Request-Id", default)
+
+    @staticmethod
     def _get_decoded_token(logprob: Logprob,
                            token_id: int,
                            tokenizer: AnyTokenizer,
@@ -652,3 +663,16 @@ class OpenAIServing:
 
     def _is_model_supported(self, model_name):
         return any(model.name == model_name for model in self.base_model_paths)
+
+    def _get_model_name(self, lora: Optional[LoRARequest]):
+        """
+        Returns the appropriate model name depending on the availability
+        and support of the LoRA or base model.
+        Parameters:
+        - lora: LoRARequest that contain a base_model_name.
+        Returns:
+        - str: The name of the base model or the first available model path.
+        """
+        if lora is not None:
+            return lora.lora_name
+        return self.base_model_paths[0].name

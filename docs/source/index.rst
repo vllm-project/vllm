@@ -82,6 +82,7 @@ Documentation
    serving/openai_compatible_server
    serving/deploying_with_docker
    serving/deploying_with_k8s
+   serving/deploying_with_helm
    serving/deploying_with_nginx
    serving/distributed_serving
    serving/metrics
@@ -93,6 +94,8 @@ Documentation
    :caption: Models
 
    models/supported_models
+   models/generative_models
+   models/pooling_models
    models/adding_model
    models/enabling_multimodal_inputs
 
@@ -102,6 +105,7 @@ Documentation
 
    usage/lora
    usage/multimodal_inputs
+   usage/tool_calling
    usage/structured_outputs
    usage/spec_decode
    usage/compatibility_matrix
