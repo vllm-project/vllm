@@ -6,7 +6,7 @@ Pooling Models
 vLLM also supports pooling models, including embedding, reranking and reward models.
 
 In vLLM, pooling models implement the :class:`~vllm.model_executor.models.VllmModelForPooling` interface.
-These models use a :class:`~vllm.model_executor.layers.Pooler` to aggregate the final hidden states of the input
+These models use a :class:`~vllm.model_executor.layers.Pooler` to extract the final hidden states of the input
 before returning them.
 
 .. note::
@@ -45,19 +45,47 @@ which takes priority over both the model's and Sentence Transformers's defaults.
 ^^^^^^^^^^^^^^
 
 The :class:`~vllm.LLM.encode` method is available to all pooling models in vLLM.
-It returns the aggregated hidden states directly.
+It returns the extracted hidden states directly, which is useful for reward models.
+
+.. code-block:: python
+
+    llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", task="reward")
+    output, = llm.encode("Hello, my name is")
+
+    data = output.outputs.data
+    print(f"Prompt: {prompt!r} | Data: {data!r}")
+
+``LLM.embed``
+^^^^^^^^^^^^^
+
+The :class:`~vllm.LLM.embed` method outputs an embedding vector for each prompt.
+It is primarily designed for embedding models.
 
 .. code-block:: python
 
     llm = LLM(model="intfloat/e5-mistral-7b-instruct", task="embed")
-    outputs = llm.encode("Hello, my name is")
+    output, = llm.embed("Hello, my name is")
 
-    outputs = model.encode(prompts)
-    for output in outputs:
-        embeddings = output.outputs.embedding
-        print(f"Prompt: {prompt!r}, Embeddings (size={len(embeddings)}: {embeddings!r}")
+    embeds = output.outputs.embedding
+    print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 
 A code example can be found in `examples/offline_inference_embedding.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_embedding.py>`_.
+
+``LLM.classify``
+^^^^^^^^^^^^^^^^
+
+The :class:`~vllm.LLM.classify` method outputs a probability vector for each prompt.
+It is primarily designed for classification models.
+
+.. code-block:: python
+
+    llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", task="classify")
+    output, = llm.classify("Hello, my name is")
+
+    probs = output.outputs.probs
+    print(f"Class Probabilities: {probs!r} (size={len(probs)})")
+
+A code example can be found in `examples/offline_inference_classification.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_classification.py>`_.
 
 ``LLM.score``
 ^^^^^^^^^^^^^
@@ -71,7 +99,16 @@ These types of models serve as rerankers between candidate query-document pairs 
     vLLM can only perform the model inference component (e.g. embedding, reranking) of RAG.
     To handle RAG at a higher level, you should use integration frameworks such as `LangChain <https://github.com/langchain-ai/langchain>`_.
 
-You can use `these tests <https://github.com/vllm-project/vllm/blob/main/tests/models/embedding/language/test_scoring.py>`_ as reference.
+.. code-block:: python
+
+    llm = LLM(model="BAAI/bge-reranker-v2-m3", task="score")
+    output, = llm.score("What is the capital of France?",
+                        "The capital of Brazil is Brasilia.")
+
+    score = output.outputs.score
+    print(f"Score: {score}")
+
+A code example can be found in `examples/offline_inference_scoring.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_scoring.py>`_.
 
 Online Inference
 ----------------

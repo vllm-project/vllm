@@ -900,7 +900,7 @@ class EmbeddingResponse(OpenAIBaseModel):
 class ScoreResponseData(OpenAIBaseModel):
     index: int
     object: str = "score"
-    score: Union[List[float], str]
+    score: float
 
 
 class ScoreResponse(OpenAIBaseModel):
