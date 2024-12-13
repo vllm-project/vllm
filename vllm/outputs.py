@@ -1,12 +1,11 @@
 import time
-import warnings
 from dataclasses import dataclass
 from typing import Dict, Generic, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
 import torch
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
@@ -73,13 +72,11 @@ class PoolingOutput:
             (self.data == other.data).all()))
 
     @property
+    @deprecated("`LLM.encode()` now stores raw outputs in the `data` "
+                "attribute. To return embeddings, use `LLM.embed()`. "
+                "To return class probabilities, use `LLM.classify()` "
+                "and access the `probs` attribute. ")
     def embedding(self) -> list[float]:
-        msg = ("`LLM.encode()` now returns raw outputs. "
-               "To return embeddings, use `LLM.embed()`. "
-               "To return class probabilities, use `LLM.classify()` "
-               "and access the `probs` attribute. ")
-        warnings.warn(msg, DeprecationWarning, stacklevel=2)
-
         return self.data.tolist()
 
 
@@ -491,11 +488,9 @@ class ScoringOutput:
         return f"ScoringOutput(score={self.score})"
 
     @property
+    @deprecated("`LLM.score()` now returns scalar scores. "
+                "Please access it via the `score` attribute. ")
     def embedding(self) -> list[float]:
-        msg = ("`LLM.score()` now returns scalar scores. "
-               "Please access it via the `score` attribute. ")
-        warnings.warn(msg, DeprecationWarning, stacklevel=2)
-
         return [self.score]
 
 
