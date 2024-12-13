@@ -729,7 +729,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         encoder_seq_len = 0
 
         if self.runner.model_config.is_encoder_decoder:
-            print(seq_group_metadata)
             encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
 
         inter_data = self.init_cached_inter_data(

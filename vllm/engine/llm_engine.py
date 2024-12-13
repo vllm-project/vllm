@@ -625,7 +625,6 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
-        print("PROCESSED INPUTS", processed_inputs)
         if is_encoder_decoder_inputs(processed_inputs):
             decoder_inputs = processed_inputs["decoder"]
             encoder_inputs = processed_inputs["encoder"]
@@ -639,8 +638,6 @@ class LLMEngine:
         encoder_seq = (None if encoder_inputs is None else Sequence(
             seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
             prompt_adapter_request))
-        
-        print("ENCODER_SEQ", encoder_seq.inputs.inputs)
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -1401,7 +1398,6 @@ class LLMEngine:
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
                 last_sampled_token_ids=last_sampled_token_ids)
-            print("STEP", execute_model_req)
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[

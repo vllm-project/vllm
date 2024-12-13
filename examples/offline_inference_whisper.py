@@ -2,6 +2,7 @@
 Demonstrate prompting of text-to-text
 encoder/decoder models, specifically BART
 '''
+import time
 
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
@@ -35,9 +36,7 @@ prompts = [
         ),
         decoder_prompt="<|startoftranscript|>",
     ),
-]
-
-print(prompts)
+] * 10
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
@@ -46,6 +45,8 @@ sampling_params = SamplingParams(
     min_tokens=0,
     max_tokens=200,
 )
+
+start = time.time()
 
 # Generate output tokens from the prompts. The output is a list of
 # RequestOutput objects that contain the prompt, generated
@@ -60,3 +61,7 @@ for output in outputs:
     print(f"Encoder prompt: {encoder_prompt!r}, "
           f"Decoder prompt: {prompt!r}, "
           f"Generated text: {generated_text!r}")
+
+duration = time.time() - start
+print("Duration:", duration)
+print("RPS:", len(prompts) / duration)

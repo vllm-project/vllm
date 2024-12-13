@@ -150,7 +150,6 @@ class WhisperEncoderAttention(WhisperAttention):
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
-        print(q.shape, k.shape, v.shape, hidden_states.shape)
 
         q = self._shape(q, -1, 1)
         k = self._shape(k, -1, 1)
@@ -442,7 +441,6 @@ class WhisperEncoder(nn.Module):
         self,
         input_features,
     ):
-        print(self.conv1.weight.dtype, self.conv1.bias.dtype, input_features.dtype)
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
@@ -487,7 +485,6 @@ class WhisperDecoder(nn.Module):
         attn_metadata: AttentionMetadata,
         past_key_values = None,
     ):
-        print(self.max_target_positions, positions, input_ids.shape, positions.shape)
         inputs_embeds = self.embed_tokens(input_ids)
         positions = self.embed_positions(positions)
         hidden_states = inputs_embeds + positions
@@ -534,7 +531,6 @@ class WhisperModel(nn.Module):
 
 def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
                                    mm_counts: Mapping[str, int]):
-    print("DUMMY DATA")
     assert mm_counts["audio"] == 1
     sample_rate = 16000
     return DummyData(
@@ -578,19 +574,13 @@ def get_whisper_processor(
 
 
 def input_processor_for_whisper(ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
-    print("input_processor_for_whisper", inputs)
     return inputs
-    return token_inputs(
-        prompt_token_ids=inputs["decoder"]["prompt_token_ids"],
-        multi_modal_data=inputs["encoder"]["multi_modal_data"],
-    )
 
 
 def input_mapper_for_whisper(
     ctx: InputContext,
     multi_modal_data: Union[np.ndarray, List[np.ndarray]],
 ) -> MultiModalKwargs:
-    print("input_mapper_for_whisper_audio", multi_modal_data)
     if not isinstance(multi_modal_data, list):
         multi_modal_data = [multi_modal_data]
 
@@ -612,7 +602,6 @@ def input_mapper_for_whisper(
                        return_tensors="pt")
     kwargs["input_features"] = kwargs["input_features"].squeeze(0)
 
-    print("input_mapper_for_whisper_audio", kwargs["input_features"].shape)
     return MultiModalKwargs(kwargs)
 
 
@@ -652,9 +641,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs,
-    ) -> torch.Tensor:
-        print("FORWARD", kwargs.keys())
-        
+    ) -> torch.Tensor:        
         decoder_outputs = self.model(
             input_features=kwargs["input_features"].to(torch.float16),
             input_ids=input_ids,
@@ -676,7 +663,6 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
-        print("SAMPLE", next_tokens)
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
