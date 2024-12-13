@@ -93,7 +93,6 @@ class Worker:
             gc.collect()
             torch.cuda.empty_cache()
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
-            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -203,7 +202,6 @@ class Worker:
     ) -> ModelRunnerOutput:
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.rank == 0 else None
-        return output
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
