@@ -181,6 +181,9 @@ def wrap_inductor(graph,
         # we compiled this graph before
         # so we can directly lookup the compiled graph via hash
         hash_str = cache_data[(runtime_shape, graph_index)]
+        logger.debug(
+            "directly lookup the %s-th graph for shape %s via hash %s",
+            graph_index, str(runtime_shape), hash_str)
         from torch._inductor.codecache import FxGraphCache
         with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                    lambda *args, **kwargs: AlwaysHitShapeEnv()):
@@ -222,6 +225,8 @@ def wrap_inductor(graph,
             # store the hash in the cache
             nonlocal cache_data
             cache_data[(runtime_shape, graph_index)] = out[0]
+            logger.debug("store the %s-th graph for shape %s via hash %s",
+                         graph_index, str(runtime_shape), out[0])
             return out
 
         def _check_can_cache(*args, **kwargs):
