@@ -92,6 +92,7 @@ class OpenAIServingChat(OpenAIServing):
                                 "been registered") from e
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        self._try_overwrite_sampling_param()
 
     async def create_chat_completion(
         self,
@@ -856,3 +857,12 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
         )
+
+    def _try_overwrite_sampling_param(self):
+        diff_sampling_param = self.model_config.get_diff_sampling_param()
+        if diff_sampling_param:
+            logger.info("Overwriting default chat sampling param with: %s",
+                    diff_sampling_param)
+            for k, v in diff_sampling_param.items():
+                ChatCompletionRequest.model_fields[k].default = v
+            ChatCompletionRequest.model_rebuild(force=True)

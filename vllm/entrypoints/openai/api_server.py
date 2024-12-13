@@ -570,35 +570,6 @@ def init_app_state(
     resolved_chat_template = load_chat_template(args.chat_template)
     logger.info("Using supplied chat template:\n%s", resolved_chat_template)
 
-    if args.generation_config:
-        generation_config_fields = model_config.try_get_generation_config()
-        available_params = [
-            "repetition_penalty",
-            "temperature",
-            "top_k",
-            "top_p",
-            "min_p",
-        ]
-
-        if any(p in generation_config_fields for p in available_params):
-            overwrite_config = {
-                p: generation_config_fields.get(p, None)
-                for p in available_params
-            }
-            logger.info("Overwriting generation config with: %s",
-                        overwrite_config)
-            # Modify the ChatCompletionRequest to include the generation config
-            for k, v in overwrite_config.items():
-                if v is not None:
-                    ChatCompletionRequest.model_fields[k].default = v
-                    CompletionRequest.model_fields[k].default = v
-
-            # Rebuild the models to include the new fields
-            ChatCompletionRequest.model_rebuild(force=True)
-            CompletionRequest.model_rebuild(force=True)
-        else:
-            logger.warning("No generation config found.")
-
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,

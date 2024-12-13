@@ -804,6 +804,38 @@ class ModelConfig:
 
         return config.to_diff_dict()
 
+    def get_diff_sampling_param(self) -> Dict[str, Any]:
+        """
+        This method returns a dictionary containing the parameters 
+        that differ from the default sampling parameters, but only 
+        if `generation_config` is set. If `generation_config` is not 
+        set, an empty dictionary is returned.
+
+        Returns:
+            Dict[str, Any]: A dictionary with the differing sampling 
+            parameters if `generation_config` is set, otherwise an 
+            empty dictionary.
+        """
+        if self.generation_config is None:
+            # When generation_config is not set
+            return {}
+        config = self.try_get_generation_config()
+        available_params = [
+            "repetition_penalty",
+            "temperature",
+            "top_k",
+            "top_p",
+            "min_p",
+        ]
+        if any(p in config for p in available_params):
+            diff_sampling_param = {
+                p: config.get(p, None)
+                for p in available_params
+            }
+        else:
+            diff_sampling_param = {}
+        return diff_sampling_param
+
     @property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""

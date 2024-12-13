@@ -55,6 +55,7 @@ class OpenAIServingCompletion(OpenAIServing):
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
+        self._try_overwrite_sampling_param()
 
     async def create_completion(
         self,
@@ -541,3 +542,13 @@ class OpenAIServingCompletion(OpenAIServing):
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
         )
+
+    def _try_overwrite_sampling_param(self):
+        diff_sampling_param = self.model_config.get_diff_sampling_param()
+        if diff_sampling_param:
+            logger.info(
+                "Overwriting default completion sampling param with: %s",
+                diff_sampling_param)
+            for k, v in diff_sampling_param.items():
+                CompletionRequest.model_fields[k].default = v
+            CompletionRequest.model_rebuild(force=True)
