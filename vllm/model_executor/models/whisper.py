@@ -31,7 +31,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import SequenceData
 from vllm.vllm_flash_attn import flash_attn_func
-from xformers import ops as xops
 
 from .interfaces import SupportsMultiModal
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
@@ -149,34 +148,20 @@ class WhisperEncoderAttention(WhisperAttention):
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
 
-        # q = self._shape(q, -1, 1)
-        # k = self._shape(k, -1, 1)
-        # v = self._shape(v, -1, 1)
-
         q = q.view(bsz, seq, self.num_heads, self.head_dim)
         k = k.view(bsz, seq, self.num_heads, self.head_dim)
         v = v.view(bsz, seq, self.num_heads, self.head_dim)
 
-        attn_output = xops.memory_efficient_attention_forward(
-            q,
-            k,
-            v,
-            attn_bias=None,
-            p=0.0,
-            scale=None,
-            op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0],
+        attn_output = flash_attn_func(
+            q=q,
+            k=k,
+            v=v,
+            softmax_scale=None,
+            causal=False,
+            window_size=(-1, -1),
+            alibi_slopes=None,
+            softcap=0,
         )
-
-        # attn_output = flash_attn_func(
-        #     q=q,
-        #     k=k,
-        #     v=v,
-        #     softmax_scale=None,
-        #     causal=False,
-        #     window_size=(-1, -1),
-        #     alibi_slopes=None,
-        #     softcap=0,
-        # )
 
         attn_output = attn_output.reshape(bsz, seq, self.embed_dim)
         output, _ = self.out_proj(attn_output)
@@ -271,14 +256,15 @@ class WhisperDecoderCrossAttention(WhisperAttention):
         k = k.view(bsz2, seq2, self.num_heads, self.head_dim)
         v = v.view(bsz2, seq2, self.num_heads, self.head_dim)
 
-        attn_output = xops.memory_efficient_attention_forward(
-            q,
-            k,
-            v,
-            attn_bias=None,
-            p=0.0,
-            scale=None,
-            op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0],
+        attn_output = flash_attn_func(
+            q=q,
+            k=k,
+            v=v,
+            softmax_scale=None,
+            causal=False,
+            window_size=(-1, -1),
+            alibi_slopes=None,
+            softcap=0,
         )
 
         # HACK
