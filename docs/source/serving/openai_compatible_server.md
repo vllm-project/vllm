@@ -30,8 +30,10 @@ print(completion.choices[0].message)
 We currently support the following OpenAI APIs:
 
 - [Completions API](https://platform.openai.com/docs/api-reference/completions) (`/v1/completions`)
+  - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`).
   - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/v1/chat/completions`)
+  - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`) with a chat template.
   - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
     - *Note: `image_url.detail` parameter is not supported.*
   - We also support `audio_url` content type for audio files.
@@ -39,6 +41,7 @@ We currently support the following OpenAI APIs:
     - *TODO: Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings) (`/v1/embeddings`)
+  - Only applicable to [embedding models](../models/pooling_models.rst) (`--task embed`).
   - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
     which will be treated as a single prompt to the model according to its chat template.
     - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
@@ -48,9 +51,8 @@ In addition, we have the following custom APIs:
 
 - Tokenizer API (`/tokenize`, `/detokenize`)
   - For [HuggingFace tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer), this corresponds to calling `encode()` and `decode()` respectively.
-- [Score API](#score-api-examples) (`/score`)
-  - Apply a [cross-encoder model](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html) to predict scores for sentence pairs.
-  - Usually, score refers to the similarity between two sentences, on a scale of 0 to 1.
+- [Score API](#score-api) (`/score`)
+  - Only applicable to [cross-encoder models](../models/pooling_models.rst) (`--task score`).
 
 ## Extra Parameters
 
@@ -195,7 +197,12 @@ the detected format, which can be one of:
 If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
 to override which format to use.
 
-## Score API Examples
+## Score API
+
+The Score API applies a cross-encoder model to predict scores for sentence pairs.
+Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
+
+You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
 ### Single inference
 
