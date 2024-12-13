@@ -1,5 +1,6 @@
 import pytest
 import torch
+from tests.kernels.utils import opcheck
 
 import vllm._custom_ops as ops
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -64,3 +65,4 @@ def test_silu_and_mul(
     assert ref_out.shape == ops_out.shape
     assert torch.allclose(ref_out.to(dtype=torch.float32),
                           ops_out.to(dtype=torch.float32))
+    opcheck(torch.ops._C.silu_and_mul_quant, (ops_out, x, scale))
