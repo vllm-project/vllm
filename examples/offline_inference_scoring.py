@@ -14,7 +14,7 @@ model = LLM(
     enforce_eager=True,
 )
 
-# Generate scores. The output is a list of ClassificationRequestOutputs.
+# Generate scores. The output is a list of ScoringRequestOutputs.
 outputs = model.score(text_1, texts_2)
 
 # Print the outputs.
