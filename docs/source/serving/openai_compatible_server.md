@@ -48,7 +48,7 @@ In addition, we have the following custom APIs:
 
 - Tokenizer API (`/tokenize`, `/detokenize`)
   - For [HuggingFace tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer), this corresponds to calling `encode()` and `decode()` respectively.
-- Score API (`/score`)
+- [Score API](#score-api-examples) (`/score`)
   - Apply a [cross-encoder model](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html) to predict scores for sentence pairs.
   - Usually, score refers to the similarity between two sentences, on a scale of 0 to 1.
 
