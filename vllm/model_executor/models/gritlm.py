@@ -53,7 +53,7 @@ class GritLMPooler(nn.Module):
             ["<0x0A>", "<", "|", "embed", "|", ">", "<0x0A>"])
         self.embed_pattern_ids = tokens_to_ids(
             ["▁<", "|", "embed", "|", ">", "<0x0A>"])
-    
+
         self.head = PoolerHead(normalize=True, softmax=False)
 
     def _find_array(self, arr: array, target: array, start_idx: int) -> int:
