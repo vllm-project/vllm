@@ -294,10 +294,10 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
     TORCH_CHECK(bias->dtype() == out.dtype(),
                 "currently bias dtype must match output dtype ", out.dtype());
     return cutlass_scaled_sparse_mm_sm90_epilogue<c3x::ScaledEpilogueBias>(
-        out, a, bt_nzs, bt_meta, a_scales, b_scales, *bias);
+        out, a, bt_nzs, bt_meta, b_scales, a_scales, *bias);
   } else {
     return cutlass_scaled_sparse_mm_sm90_epilogue<c3x::ScaledEpilogue>(
-        out, a, bt_nzs, bt_meta, a_scales, b_scales);
+        out, a, bt_nzs, bt_meta, b_scales, a_scales);
   }
 }
 
