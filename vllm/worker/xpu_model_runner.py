@@ -37,10 +37,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
-_BATCH_SIZE_ALIGNMENT = 8
-_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
-    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
-]
 
 TModelInputForXPU = TypeVar('TModelInputForXPU', bound="ModelInputForXPU")
 

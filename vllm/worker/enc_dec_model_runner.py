@@ -464,7 +464,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # We will be using CUDA graph replay for this decode.
                 max_len_of_block_table = self.get_max_block_per_batch()
                 batch_size = len(encoder_seq_lens)
-                graph_batch_size = self.vllm_config.get_graph_batch_size(
+                graph_batch_size = self.vllm_config.pad_for_cudagraph(
                     batch_size)
                 assert graph_batch_size >= batch_size
                 cuda_graph_pad_size = graph_batch_size - batch_size
