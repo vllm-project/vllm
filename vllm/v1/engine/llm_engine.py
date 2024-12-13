@@ -76,9 +76,6 @@ class LLMEngine:
             asyncio_mode=False,
         )
 
-        self.generation_config_fields = (
-            self.model_config.try_get_generation_config())
-
     @classmethod
     def from_engine_args(
         cls,
