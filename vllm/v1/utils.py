@@ -1,6 +1,8 @@
 from collections import OrderedDict
+from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Any, Generic, Iterator, List, TypeVar, Union, overload
+from typing import (Any, Generic, Iterator, List, Optional, TypeVar, Union,
+                    overload)
 
 import zmq
 
@@ -11,7 +13,7 @@ logger = init_logger(__name__)
 T = TypeVar("T")
 
 
-class ConstantList(Generic[T]):
+class ConstantList(Generic[T], Sequence):
 
     def __init__(self, x: List[T]) -> None:
         self._x = x
@@ -34,8 +36,12 @@ class ConstantList(Generic[T]):
     def clear(self):
         raise Exception("Cannot clear a constant list")
 
-    def index(self, item):
-        return self._x.index(item)
+    def index(self,
+              item: T,
+              start: int = 0,
+              stop: Optional[int] = None) -> int:
+        return self._x.index(item, start,
+                             stop if stop is not None else len(self._x))
 
     @overload
     def __getitem__(self, item: int) -> T:

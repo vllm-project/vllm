@@ -397,8 +397,7 @@ class KVCacheManager:
                 f"{request.request_id}({request})")
 
             # Compute the hash of the current block.
-            block_hash = hash_block_tokens(prev_block_hash_value,
-                                           tuple(block_tokens))
+            block_hash = hash_block_tokens(prev_block_hash_value, block_tokens)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
