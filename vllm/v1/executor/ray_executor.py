@@ -144,25 +144,18 @@ class RayExecutor:
                 "`HOST_IP` environment variable, make sure it is unique for"
                 " each node.")
 
-        # VLLM_INSTANCE_ID = get_vllm_instance_id()
-
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = [
-            (
-                {
-                    "CUDA_VISIBLE_DEVICES":
-                    ",".join(map(str, node_gpus[node_id])),
-                    # "VLLM_INSTANCE_ID":
-                    # VLLM_INSTANCE_ID,
-                    "VLLM_TRACE_FUNCTION":
-                    str(envs.VLLM_TRACE_FUNCTION),
-                    "VLLM_USE_V1":
-                    str(int(envs.VLLM_USE_V1)),
-                    **({
-                        "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
-                    } if envs.VLLM_ATTENTION_BACKEND is not None else {})
-                }, ) for (node_id, _) in worker_node_and_gpu_ids
-        ]
+        all_args_to_update_environment_variables = [({
+            "CUDA_VISIBLE_DEVICES":
+            ",".join(map(str, node_gpus[node_id])),
+            "VLLM_TRACE_FUNCTION":
+            str(envs.VLLM_TRACE_FUNCTION),
+            "VLLM_USE_V1":
+            str(int(envs.VLLM_USE_V1)),
+            **({
+                "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
+            } if envs.VLLM_ATTENTION_BACKEND is not None else {})
+        }, ) for (node_id, _) in worker_node_and_gpu_ids]
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
@@ -209,7 +202,9 @@ class RayExecutor:
             local_rank: int = 0,
             rank: int = 0,
             distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
-        """Return worker init args for a given rank."""
+        """
+        Return worker init args for a given rank.
+        """
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
@@ -231,10 +226,13 @@ class RayExecutor:
         )
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Determine the number of available KV blocks.
+        """
+        Determine the number of available KV blocks.
+        
         This invokes `determine_num_available_blocks` on each worker and takes
         the min of the results, guaranteeing that the selected cache sizes are
         compatible with all workers.
+        
         Returns:
             - tuple[num_gpu_blocks, num_cpu_blocks]
         """
@@ -248,7 +246,8 @@ class RayExecutor:
         return num_gpu_blocks, 0
 
     def initialize(self, num_gpu_blocks: int) -> None:
-        """Initialize the KV cache in all workers.
+        """
+        Initialize the KV cache in all workers.
         """
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
@@ -256,17 +255,6 @@ class RayExecutor:
         logger.info("# GPU blocks: %d", num_gpu_blocks)
         self._run_workers("initialize_cache", num_gpu_blocks)
         self._run_workers("compile_or_warm_up_model")
-
-    def save_sharded_state(
-        self,
-        path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
-    ) -> None:
-        self._run_workers("save_sharded_state",
-                          path=path,
-                          pattern=pattern,
-                          max_size=max_size)
 
     def _run_workers(
         self,
@@ -276,8 +264,10 @@ class RayExecutor:
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         **kwargs,
     ) -> Any:
-        """Runs the given method on all workers. Can be used in the following
+        """
+        Runs the given method on all workers. Can be used in the following
         ways:
+
         Args:
         - async_run_tensor_parallel_workers_only: If True the method will be
           run only in the remote TP workers, not the driver worker.
