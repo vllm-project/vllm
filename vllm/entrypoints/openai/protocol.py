@@ -161,27 +161,31 @@ LogitsProcessors = List[Union[str, LogitsProcessorConstructor]]
 def get_logits_processors(processors: Optional[LogitsProcessors],
                           pattern: Optional[str]) -> Optional[List[Any]]:
     if processors and pattern:
-        logits_processors, ignored_logits_processors = [
-            (resolve_obj_by_qualname(p)
-             if isinstance(p, str) else resolve_obj_by_qualname(p.qualname)(
-                 *p.args or [], **p.kwargs or {})) for p in processors
-            if re.match(p if isinstance(p, str) else p.qualname, pattern)
-        ], [
-            qualname for qualname in (p if isinstance(p, str) else p.qualname
-                                      for p in processors)
-            if not re.match(qualname, pattern)
-        ]
-        if ignored_logits_processors:
-            logger.warning(
-                "Ignoring the following disallowed logits processors: %s. "
-                "See --logits-processor-pattern engine arg for more "
-                "information.", ignored_logits_processors)
+        logits_processors = []
+        for processor in processors:
+            qualname = processor if isinstance(processor,
+                                               str) else processor.qualname
+            if not re.match(pattern, qualname):
+                raise ValueError(
+                    f"Logits processor '{qualname}' is not allowed by this "
+                    "server. See --logits-processor-pattern engine argument "
+                    "for more information.")
+            try:
+                logits_processor = resolve_obj_by_qualname(qualname)
+            except Exception as e:
+                raise ValueError(
+                    f"Logits processor '{qualname}' could not be resolved: {e}"
+                ) from e
+            if isinstance(processor, LogitsProcessorConstructor):
+                logits_processor = logits_processor(*processor.args or [],
+                                                    **processor.kwargs or {})
+            logits_processors.append(logits_processor)
         return logits_processors
     elif processors:
-        logger.warning(
-            "No logits processor pattern provided, so all processors will "
-            "be ignored. See --logits-processor-pattern engine arg for "
-            "more information.")
+        raise ValueError(
+            "The `logits_processors` argument is not supported by this "
+            "server. See --logits-processor-pattern engine argugment "
+            "for more information.")
     return None
 
 
