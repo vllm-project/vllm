@@ -98,14 +98,14 @@ def test_models(
     "model, distributed_executor_backend, attention_backend, "
     "test_suite",
     [
-        # ("facebook/opt-125m", "ray", "", "L4"),
-        # ("facebook/opt-125m", "mp", "", "L4"),
+        ("facebook/opt-125m", "ray", "", "L4"),
+        ("facebook/opt-125m", "mp", "", "L4"),
         ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
-        # ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
-        # ("facebook/opt-125m", "ray", "", "A100"),
-        # ("facebook/opt-125m", "mp", "", "A100"),
-        # ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
-        # ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
+        ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
+        ("facebook/opt-125m", "ray", "", "A100"),
+        ("facebook/opt-125m", "mp", "", "A100"),
+        ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
+        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
     ])
 def test_models_distributed(
     hf_runner,
@@ -127,11 +127,6 @@ def test_models_distributed(
 
     if attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
-
-    # Import VLLM_USE_V1 dynamically to handle patching
-    from vllm.envs import VLLM_USE_V1
-    if not VLLM_USE_V1 or distributed_executor_backend == "mp":
-        pytest.skip(f"Skip {distributed_executor_backend} for V0")
 
     dtype = "half"
     max_tokens = 5
