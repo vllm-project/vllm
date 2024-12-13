@@ -100,6 +100,10 @@ class InductorHashCache:
         # setitem for disabled cache is fine, because we
         # don't actually write to the disk
         runtime_shape, graph_index = key
+        if runtime_shape == 1:
+            # FIXME: it seems the cache only works for runtime_shape >= 2
+            # we need to investigate why
+            return
         self.cache[runtime_shape][graph_index] = value
 
 
