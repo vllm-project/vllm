@@ -42,15 +42,16 @@ We currently support the following OpenAI APIs:
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings) (`/v1/embeddings`)
   - Only applicable to [embedding models](../models/pooling_models.rst) (`--task embed`).
-  - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
-    which will be treated as a single prompt to the model according to its chat template.
+  - If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as Chat Completions API)
+    which will be treated as a single prompt to the model.
     - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
 In addition, we have the following custom APIs:
 
 - Tokenizer API (`/tokenize`, `/detokenize`)
-  - For [HuggingFace tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer), this corresponds to calling `encode()` and `decode()` respectively.
+  - For [HuggingFace tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer),
+    this corresponds to calling `encode()` and `decode()` respectively.
 - [Score API](#score-api) (`/score`)
   - Only applicable to [cross-encoder models](../models/pooling_models.rst) (`--task score`).
 
