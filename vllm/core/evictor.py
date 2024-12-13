@@ -123,8 +123,8 @@ class LRUEvictor(Evictor):
 
         for block_id, block in self.free_table.items():
             new_priority_queue.append(
-                (block.last_accessed, -block.num_hashed_tokens,
-                 block_id, block.content_hash))
+                (block.last_accessed, -block.num_hashed_tokens, block_id,
+                 block.content_hash))
         heapq.heapify(new_priority_queue)
 
         self.priority_queue = new_priority_queue
