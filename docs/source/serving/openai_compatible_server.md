@@ -53,6 +53,7 @@ In addition, we have the following custom APIs:
 - [Score API](#score-api) (`/score`)
   - Only applicable to [cross-encoder models](../models/pooling_models.rst) (`--task score`).
 
+(chat-template)=
 ## Chat Template
 
 In order for the language model to support chat protocol, vLLM requires the model to include
@@ -144,6 +145,7 @@ print(completion._request_id)
 
 ## CLI Reference
 
+(vllm-serve)=
 ### `vllm serve`
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
@@ -182,6 +184,7 @@ The order of priorities is `command line > config file values > defaults`.
 
 ## API Reference
 
+(completions-api)=
 ### Completions API
 
 Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/completions) for more details.
@@ -204,6 +207,7 @@ The following extra parameters are supported:
 :end-before: end-completion-extra-params
 ```
 
+(chat-api)=
 ### Chat Completions API
 
 Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/chat) for more details.
@@ -226,6 +230,7 @@ The following extra parameters are supported:
 :end-before: end-chat-completion-extra-params
 ```
 
+(embeddings-api)=
 ### Embeddings API
 
 Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/embeddings) for more details.
@@ -248,6 +253,7 @@ The following extra parameters are supported:
 :end-before: end-embedding-extra-params
 ```
 
+(tokenizer-api)=
 ### Tokenizer API
 
 The Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
@@ -256,6 +262,7 @@ It consists of two endpoints:
 - `/tokenize` corresponds to calling `tokenizer.encode()`.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
+(score-api)=
 ### Score API
 
 The Score API applies a cross-encoder model to predict scores for sentence pairs.
