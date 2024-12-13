@@ -318,7 +318,7 @@ class ModelConfig:
         self._verify_bnb_config()
 
     def compute_hash(self):
-        # summarize all the factors that affect the model compulation and
+        # summarize all the factors that affect the model computation and
         # hence model compilation, and use them to generate a hash
         factors: List[Any] = []
         factors.append(self.model)
