@@ -29,26 +29,27 @@ print(completion.choices[0].message)
 
 We currently support the following OpenAI APIs:
 
-- [Completions API](https://platform.openai.com/docs/api-reference/completions)
+- [Completions API](https://platform.openai.com/docs/api-reference/completions) (`/v1/completions`)
   - *Note: `suffix` parameter is not supported.*
-- [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
+- [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/v1/chat/completions`)
   - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
     - *Note: `image_url.detail` parameter is not supported.*
   - We also support `audio_url` content type for audio files.
     - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
     - *TODO: Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
-- [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
+- [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings) (`/v1/embeddings`)
   - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
     which will be treated as a single prompt to the model according to its chat template.
     - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
-## Score API for Cross Encoder Models
+In addition, we have the following custom APIs:
 
-vLLM supports *cross encoders models* at the **/v1/score** endpoint, which is not an OpenAI API standard endpoint. You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
-
-A ***Cross Encoder*** takes exactly two sentences / texts as input and either predicts a score or label for this sentence pair. It can for example predict the similarity of the sentence pair on a scale of 0 … 1.
+- Tokenizer API (`/tokenize`, `/detokenize`)
+  - Corresponds to calling `encode()` and `decode()` on [HuggingFace tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
+- Score API (`/score`)
+  - Use a [cross-encoder model](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html) to predict a score of label for a sentence pair. Usually, the score refers to the similarity between the two sentences on a scale of 0 to 1.
 
 ### Example of usage for a pair of a string and a list of texts
 
@@ -56,7 +57,7 @@ In this case, the model will compare the first given text to each of the texts c
 
 ```bash
 curl -X 'POST' \
-  'http://127.0.0.1:8000/v1/score' \
+  'http://127.0.0.1:8000/score' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -103,7 +104,7 @@ In this case, the model will compare the one by one, making pairs by same index 
 
 ```bash
 curl -X 'POST' \
-  'http://127.0.0.1:8000/v1/score' \
+  'http://127.0.0.1:8000/score' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -154,7 +155,7 @@ In this case, the model will compare the strings of texts.
 
 ```bash
 curl -X 'POST' \
-  'http://127.0.0.1:8000/v1/score' \
+  'http://127.0.0.1:8000/score' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{

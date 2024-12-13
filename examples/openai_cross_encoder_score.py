@@ -20,7 +20,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model", type=str, default="BAAI/bge-reranker-v2-m3")
     args = parser.parse_args()
-    api_url = f"http://{args.host}:{args.port}/v1/score"
+    api_url = f"http://{args.host}:{args.port}/score"
 
     model_name = args.model
 
