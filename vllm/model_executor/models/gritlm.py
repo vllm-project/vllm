@@ -3,7 +3,6 @@ from typing import List, Optional, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
 from vllm.attention import AttentionMetadata
