@@ -32,7 +32,7 @@ __global__ void act_and_mul_quant_kernel(
     FP8_TYPE* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const float* scale, const int d) {
-  const int32_t token_idx = blockIdx.x;
+  const int64_t token_idx = blockIdx.x;
   const int32_t blocks_per_token = gridDim.y;
 
   const int32_t elems_per_128bit_load = (128 / 8) / sizeof(scalar_t);
