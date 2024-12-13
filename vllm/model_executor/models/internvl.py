@@ -669,6 +669,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         image_embeds = self.extract_feature(image_input["data"])
 
         patches_per_image = image_input["patches_per_image"]
+
+        # Only one image in the current batch
         if len(patches_per_image) == 1:
             image_embeds = image_embeds.view(
                 -1, self.config.text_config.hidden_size).unsqueeze(0)
