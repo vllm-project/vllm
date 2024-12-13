@@ -246,6 +246,7 @@ def test_metric_spec_decode(
             "counter_spec_decode_num_draft_tokens": lambda v: v == k,
             "counter_spec_decode_num_emitted_tokens":
             lambda v: 0 <= v <= k + 1,
+            "gauge_spec_decode_mean_accepted_tokens": lambda v: 0 <= v <= k,
         }
 
         # Use one request to better inspect the metrics.
@@ -333,6 +334,7 @@ def test_metric_spec_decode_interval(
             "counter_spec_decode_num_draft_tokens": lambda v: v == k,
             "counter_spec_decode_num_emitted_tokens":
             lambda v: 0 <= v <= k + 1,
+            "gauge_spec_decode_mean_accepted_tokens": lambda v: 0 <= v <= k,
         }
 
         for metric_name, is_expected in metric_name_to_expected_fn.items():

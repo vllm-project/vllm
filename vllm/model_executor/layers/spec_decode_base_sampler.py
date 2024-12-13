@@ -28,6 +28,8 @@ class SpecDecodeBaseSampler(nn.Module):
 
         self.num_accepted_tokens: Optional[torch.Tensor] = None
         self.num_emitted_tokens: Optional[torch.Tensor] = None
+        self.num_invocation: Optional[torch.Tensor] = None
+        self.mean_accepted_tokens: Optional[torch.Tensor] = None
         self.num_draft_tokens: int = 0
 
     def init_gpu_tensors(self, device: Union[int, str]) -> None:
@@ -57,6 +59,10 @@ class SpecDecodeBaseSampler(nn.Module):
         self.num_emitted_tokens = torch.tensor(0,
                                                dtype=torch.long,
                                                device=device)
+        self.num_invocation = torch.tensor(0, dtype=torch.long, device=device)
+        self.mean_accepted_tokens = torch.tensor(0,
+                                                 dtype=torch.float,
+                                                 device=device)
 
     @property
     def probs_dtype(self):
@@ -126,6 +132,10 @@ class SpecDecodeBaseSampler(nn.Module):
 
         self.num_accepted_tokens += accepted.sum()
         self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
+        self.num_invocation += 1
+        self.mean_accepted_tokens = (
+            (self.mean_accepted_tokens *
+             (self.num_invocation - 1)) + accepted.sum()) / self.num_invocation
         self.num_draft_tokens += batch_size * k
 
         return output_with_bonus_tokens
