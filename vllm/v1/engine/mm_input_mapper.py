@@ -45,14 +45,14 @@ class MMInputMapperClient:
         self.mm_cache = LRUDictCache(MM_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
-        self.mm_debug_cache_hit_ratio_steps = None
+        self.mm_debug_cache_hit_ratio_steps = 32
         self.mm_cache_hits = 0
         self.mm_cache_total = 0
 
     def cache_hit_ratio(self, steps) -> float:
         if self.mm_cache_total > 0 and self.mm_cache_total % steps == 0:
-            logger.debug("MMInputMapper: cache_hit_ratio = %.2f ",
-                         self.mm_cache_hits / self.mm_cache_total)
+            print("MMInputMapper: cache_hit_ratio = %.2f ",
+                  self.mm_cache_hits / self.mm_cache_total)
 
     def process_inputs(
         self,

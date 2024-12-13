@@ -199,11 +199,36 @@ def sample_sonnet_requests(
     return sampled_requests
 
 
+class ImageRepeater:
+
+    def __init__(self, image_repeat_prob):
+        assert (image_repeat_prob <= 1.0 and image_repeat_prob >= 0)
+        self.no_yes = [0, 1]
+        self.probs = [1.0 - image_repeat_prob, image_repeat_prob]
+
+        self.prev_image = None
+        self.idx = 0
+
+    def process(self, image):
+        self.idx += 1
+
+        res = random.choices(self.no_yes, self.probs)[0]
+        if res == 0 or self.prev_image is None:
+            # No repeat => Use current/new image
+            self.prev_image = image
+        else:
+            # Repeat previous image
+            pass
+
+        return self.prev_image
+
+
 def sample_mmmu_pro_vision_requests(
     dataset,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
+    image_repeater: Optional[ImageRepeater] = None,
 ) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
     sampled_requests: List[Tuple[str, int, int, Dict[str,
                                                      Collection[str]]]] = []
@@ -233,6 +258,8 @@ def sample_mmmu_pro_vision_requests(
             Image), ("Input image format must be `PIL.Image.Image`, "
                      f"given {type(data['image'])}.")
         image: Image = data["image"]
+        if image_repeater is not None:
+            image = image_repeater.process(image)
         image = image.convert("RGB")
         image_data = io.BytesIO()
         image.save(image_data, format='JPEG')
@@ -257,7 +284,13 @@ def sample_hf_requests(
     tokenizer: PreTrainedTokenizerBase,
     random_seed: int,
     fixed_output_len: Optional[int] = None,
+    image_repeat_prob: Optional[float] = None,
 ) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
+
+    # Init image repeater (if specified)
+    image_repeater = None
+    if image_repeat_prob is not None:
+        image_repeater = ImageRepeater(image_repeat_prob)
 
     # Special case for MMMU-Pro vision dataset
     if dataset_path == 'MMMU/MMMU_Pro' and dataset_subset == 'vision':
@@ -270,8 +303,11 @@ def sample_hf_requests(
             "MMMU/MMMU_Pro vision dataset must have 'image' column.")
         filter_func = lambda x: isinstance(x["image"], Image)
         dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
-        return sample_mmmu_pro_vision_requests(dataset, num_requests,
-                                               tokenizer, fixed_output_len)
+        return sample_mmmu_pro_vision_requests(dataset,
+                                               num_requests,
+                                               tokenizer,
+                                               fixed_output_len,
+                                               image_repeater=image_repeater)
 
     dataset = load_dataset(dataset_path,
                            name=dataset_subset,
@@ -305,6 +341,8 @@ def sample_hf_requests(
 
         if "image" in data and isinstance(data["image"], Image):
             image: Image = data["image"]
+            if image_repeater is not None:
+                image = image_repeater.process(image)
             image = image.convert("RGB")
             image_data = io.BytesIO()
             image.save(image_data, format='JPEG')
@@ -322,6 +360,9 @@ def sample_hf_requests(
                 image_url = data["image"]
             else:
                 image_url = f"file://{data['image']}"
+
+            if image_repeater is not None:
+                image_url = image_repeater.process(image_url)
 
             mm_content = {
                 "type": "image_url",
@@ -854,6 +895,7 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             random_seed=args.seed,
             fixed_output_len=args.hf_output_len,
+            image_repeat_prob=args.image_repeat_prob,
         )
 
     elif args.dataset_name == "random":
@@ -1221,6 +1263,13 @@ if __name__ == "__main__":
         'fast tokenizer if available.\n* "slow" will '
         'always use the slow tokenizer. \n* '
         '"mistral" will always use the `mistral_common` tokenizer.')
+
+    parser.add_argument(
+        '--image-repeat-prob',
+        type=float,
+        default=None,
+        help='Simulates the hit-ratio for multi-modal preprocessor cache'
+        ' (if enabled)')
 
     args = parser.parse_args()
     main(args)
