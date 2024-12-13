@@ -7,9 +7,22 @@ is set to [1, 2, 4, 8, 16, 32, 64].
 import pytest
 import torch
 
-from vllm.lora.ops import (bgmv_expand, bgmv_expand_slice, bgmv_shrink,
-                           sgmv_expand, sgmv_expand_slice, sgmv_shrink)
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
+
+# Enable custom op register if we're using custom ops
+if HAS_TRITON:
+    from vllm.lora.ops.triton_ops.bgmv_expand import bgmv_expand
+    from vllm.lora.ops.triton_ops.bgmv_expand_slice import bgmv_expand_slice
+    from vllm.lora.ops.triton_ops.bgmv_shrink import bgmv_shrink
+    from vllm.lora.ops.triton_ops.sgmv_expand import sgmv_expand
+    from vllm.lora.ops.triton_ops.sgmv_expand_slice import sgmv_expand_slice
+    from vllm.lora.ops.triton_ops.sgmv_shrink import sgmv_shrink
+
+elif current_platform.is_cpu():
+    from vllm.lora.ops.torch_ops.lora_ops import (  # type: ignore
+        bgmv_expand, bgmv_expand_slice, bgmv_shrink, sgmv_expand,
+        sgmv_expand_slice, sgmv_shrink)
 
 from .utils import (generate_data, generate_data_for_expand_nslices,
                     ref_torch_groupgemm)

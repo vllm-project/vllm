@@ -2,8 +2,9 @@ from typing import Callable, Optional, Tuple, Union, final
 
 import torch
 
-from vllm.lora.ops import (bgmv_expand, bgmv_expand_slice, bgmv_shrink,
-                           sgmv_expand, sgmv_expand_slice, sgmv_shrink)
+from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
+                                     bgmv_shrink, sgmv_expand,
+                                     sgmv_expand_slice, sgmv_shrink)
 
 from .punica_base import PunicaWrapperBase
 
