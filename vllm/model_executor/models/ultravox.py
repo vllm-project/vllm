@@ -2,6 +2,7 @@
 """PyTorch Ultravox model."""
 
 import math
+from collections import defaultdict
 from functools import cached_property, lru_cache
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
@@ -112,6 +113,20 @@ class UltravoxProcessor(BaseMultiModalProcessor):
             ctx=ctx,
             metadata=create_metadata_for_ultravox(ctx),
         )
+
+    def _apply_hf_processor(self, prompt, mm_data, mm_processor_kwargs):
+        tokenizer = self._get_tokenizer()
+        hf_inputs = defaultdict(list)
+        for audio, sr in mm_data["audio"]:
+            data = {"audio": audio, "sampling_rate": sr}
+            processed_inputs = super()._apply_hf_processor(
+                prompt, data, mm_processor_kwargs)
+            prompt = tokenizer.decode(processed_inputs["input_ids"][0],
+                                      skip_special_tokens=True)
+            hf_inputs["audio_features"].append(
+                processed_inputs["audio_values"].squeeze(0))
+        hf_inputs["input_ids"] = processed_inputs["input_ids"]
+        return hf_inputs
 
     def _get_processor_data(self, mm_data):
         processor_data, passthrough_data = super()._get_processor_data(mm_data)
