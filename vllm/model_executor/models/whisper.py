@@ -30,6 +30,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import SequenceData
+from vllm.vllm_flash_attn import flash_attn_func
 from xformers import ops as xops
 
 from .interfaces import SupportsMultiModal
@@ -142,18 +143,19 @@ class WhisperEncoderAttention(WhisperAttention):
         self,
         hidden_states: torch.Tensor,
     ):
-        sizes = hidden_states.size()
-        if len(sizes) == 3:
-            bsz, tgt_len, _ = sizes
-        else:
-            tgt_len, _ = sizes
+        bsz, seq = hidden_states.size()[:2]
+
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
 
-        q = self._shape(q, -1, 1)
-        k = self._shape(k, -1, 1)
-        v = self._shape(v, -1, 1)
+        # q = self._shape(q, -1, 1)
+        # k = self._shape(k, -1, 1)
+        # v = self._shape(v, -1, 1)
+
+        q = q.view(bsz, seq, self.num_heads, self.head_dim)
+        k = k.view(bsz, seq, self.num_heads, self.head_dim)
+        v = v.view(bsz, seq, self.num_heads, self.head_dim)
 
         attn_output = xops.memory_efficient_attention_forward(
             q,
@@ -164,8 +166,19 @@ class WhisperEncoderAttention(WhisperAttention):
             scale=None,
             op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0],
         )
-        
-        attn_output = attn_output.reshape(-1, self.embed_dim)
+
+        # attn_output = flash_attn_func(
+        #     q=q,
+        #     k=k,
+        #     v=v,
+        #     softmax_scale=None,
+        #     causal=False,
+        #     window_size=(-1, -1),
+        #     alibi_slopes=None,
+        #     softcap=0,
+        # )
+
+        attn_output = attn_output.reshape(bsz, seq, self.embed_dim)
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -204,12 +217,6 @@ class WhisperDecoderAttention(WhisperAttention):
         kv_cache: torch.Tensor = None,
         attn_metadata: AttentionMetadata = None,
     ):
-        sizes = hidden_states.size()
-        if len(sizes) == 3:
-            bsz, tgt_len, _ = sizes
-        else:
-            tgt_len, _ = sizes
-
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
@@ -245,19 +252,24 @@ class WhisperDecoderCrossAttention(WhisperAttention):
         encoder_hidden_states: torch.Tensor,
         attn_metadata: AttentionMetadata = None,
     ):
-        sizes = hidden_states.size()
-        if len(sizes) == 3:
-            bsz, tgt_len, _ = sizes
-        else:
-            tgt_len, _ = sizes
+        # HACK
+        query_lens = attn_metadata.query_start_loc.diff().tolist()
+        hidden_states = list(hidden_states.split(query_lens))
+        padded_size = max(query_lens)
+        for i in range(len(hidden_states)):
+            hidden_states[i] = torch.nn.functional.pad(hidden_states[i], (0, 0, 0, padded_size - hidden_states[i].size(0)))
+        hidden_states = torch.stack(hidden_states, dim=0)
+
+        bsz, seq = hidden_states.size()[:2]
+        bsz2, seq2 = encoder_hidden_states.size()[:2]
 
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(encoder_hidden_states)
         v, _ = self.v_proj(encoder_hidden_states)
 
-        q = self._shape(q, -1, 1)
-        k = self._shape(k, -1, 1)
-        v = self._shape(v, -1, 1)
+        q = q.view(bsz, seq, self.num_heads, self.head_dim)
+        k = k.view(bsz2, seq2, self.num_heads, self.head_dim)
+        v = v.view(bsz2, seq2, self.num_heads, self.head_dim)
 
         attn_output = xops.memory_efficient_attention_forward(
             q,
@@ -268,6 +280,12 @@ class WhisperDecoderCrossAttention(WhisperAttention):
             scale=None,
             op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0],
         )
+
+        # HACK
+        attn_output = list(torch.unbind(attn_output))
+        for i in range(len(attn_output)):
+            attn_output[i] = attn_output[i][:query_lens[i], :]
+        attn_output = torch.cat(attn_output, dim=0)
 
         attn_output = attn_output.reshape(-1, self.embed_dim)
         output, _ = self.out_proj(attn_output)
@@ -448,7 +466,7 @@ class WhisperEncoder(nn.Module):
         embed_pos = self.embed_positions.weight
 
         hidden_states = inputs_embeds + embed_pos
-        for idx, encoder_layer in enumerate(self.layers):
+        for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
         
         hidden_states = self.layer_norm(hidden_states)
@@ -481,9 +499,8 @@ class WhisperDecoder(nn.Module):
         input_ids,
         positions: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        past_key_values = None,
     ):
         inputs_embeds = self.embed_tokens(input_ids)
         positions = self.embed_positions(positions)
@@ -527,6 +544,10 @@ class WhisperModel(nn.Module):
             attn_metadata=attn_metadata,
         )
         return decoder_outputs
+
+
+def get_max_whisper_audio_tokens(ctx: InputContext) -> int:
+    return ctx.model_config.hf_config.max_source_positions
 
 
 def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
@@ -605,6 +626,7 @@ def input_mapper_for_whisper(
     return MultiModalKwargs(kwargs)
 
 
+#@MULTIMODAL_REGISTRY.register_max_multimodal_tokens("audio", get_max_whisper_audio_tokens)
 @INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_whisper)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_whisper)
 @MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_whisper)

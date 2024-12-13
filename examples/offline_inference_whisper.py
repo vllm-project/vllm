@@ -16,7 +16,7 @@ dtype = "float"
 llm = LLM(
     model="openai/whisper-large-v3",
     max_model_len=448,
-    max_num_seqs=1,
+    max_num_seqs=64,
     enforce_eager=True,
     limit_mm_per_prompt={"audio": 1}
 )
@@ -36,7 +36,7 @@ prompts = [
         ),
         decoder_prompt="<|startoftranscript|>",
     ),
-] * 10
+] * 1000
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
