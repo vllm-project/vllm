@@ -2,7 +2,8 @@ from array import array
 from typing import List, Optional, Union
 
 import torch
-from torch import nn
+import torch.nn as nn
+import torch.nn.functional as F
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
 from vllm.attention import AttentionMetadata
@@ -13,8 +14,8 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (EmbeddingSequenceGroupOutput, IntermediateTensors,
-                           PoolerOutput)
+from vllm.sequence import (IntermediateTensors, PoolerOutput,
+                           PoolingSequenceGroupOutput)
 
 logger = init_logger(__name__)
 
@@ -75,7 +76,7 @@ class GritLMPooler(nn.Module):
                 return i
         return -1
 
-    def _get_instruction_len(self, prompt_token_ids: array) -> bool:
+    def _get_instruction_len(self, prompt_token_ids: array) -> int:
         """
         Get the length of the instruction in the prompt.
 
@@ -168,10 +169,10 @@ class GritLMPooler(nn.Module):
         mean_embeddings = sum_embeddings / num_non_instruction_tokens.unsqueeze(
             1)
 
-        pooled_data = nn.functional.normalize(mean_embeddings, p=2, dim=1)
+        pooled_data = F.normalize(mean_embeddings, p=2, dim=1)
 
         pooled_outputs = [
-            EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data
+            PoolingSequenceGroupOutput(data) for data in pooled_data
         ]
 
         return PoolerOutput(outputs=pooled_outputs)
