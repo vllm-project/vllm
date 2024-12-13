@@ -313,7 +313,8 @@ class CrossEncodingPooler(nn.Module):
         if self.pooler is not None:
             # apply classifier once on the full batch if possible
             pooled_output = self.classifier(pooled_output)
-        logits = self.default_activation_function(pooled_output)
 
-        pooled_outputs = [PoolingSequenceGroupOutput(data) for data in logits]
+        scores = self.default_activation_function(pooled_output).squeeze(-1)
+
+        pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
         return PoolerOutput(outputs=pooled_outputs)
