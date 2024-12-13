@@ -3,11 +3,11 @@ import torch
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
+from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.fusion import (FUSED_OPS, FusionPass, QuantKey,
                                      kFp8DynamicTokenSym, kFp8StaticTensorSym)
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
-from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.reshapes import RedundantReshapesPass
 from vllm.config import CompilationConfig
 
