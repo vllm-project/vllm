@@ -33,6 +33,11 @@ class InductorHashCache:
 
     In-memory format: a defaultdict of dict, where the key is
     runtime_shape, and the value is a dict of graph_index to hash_str.
+
+    The data is essentially `Dict[Optional[int], Dict[int, str]]`,
+    we don't use json here because json doesn't support int as key.
+
+    TODO: better off-the-shelf solution to serialize the data?
     """
 
     def __init__(self, cache_dir: str):
