@@ -2800,12 +2800,18 @@ class VllmConfig:
         vllm_factors: List[Any] = []
         from vllm import __version__
         vllm_factors.append(__version__)
-        vllm_factors.append(self.model_config.compute_hash())
-        vllm_factors.append(self.cache_config.compute_hash())
-        vllm_factors.append(self.parallel_config.compute_hash())
-        vllm_factors.append(self.scheduler_config.compute_hash())
-        vllm_factors.append(self.device_config.compute_hash())
-        vllm_factors.append(self.load_config.compute_hash())
+        if self.model_config:
+            vllm_factors.append(self.model_config.compute_hash())
+        if self.cache_config:
+            vllm_factors.append(self.cache_config.compute_hash())
+        if self.parallel_config:
+            vllm_factors.append(self.parallel_config.compute_hash())
+        if self.scheduler_config:
+            vllm_factors.append(self.scheduler_config.compute_hash())
+        if self.device_config:
+            vllm_factors.append(self.device_config.compute_hash())
+        if self.load_config:
+            vllm_factors.append(self.load_config.compute_hash())
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
         if self.speculative_config:
@@ -2818,8 +2824,10 @@ class VllmConfig:
             vllm_factors.append(self.prompt_adapter_config.compute_hash())
         if self.quant_config:
             pass  # should be captured by model_config.quantization
-        vllm_factors.append(self.compilation_config.compute_hash())
-        vllm_factors.append(self.kv_transfer_config.compute_hash())
+        if self.compilation_config:
+            vllm_factors.append(self.compilation_config.compute_hash())
+        if self.kv_transfer_config:
+            vllm_factors.append(self.kv_transfer_config.compute_hash())
 
         factors.append(vllm_factors)
 
