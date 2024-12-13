@@ -437,7 +437,7 @@ class ClassificationOutput:
     """The output data of one classification output of a request.
 
     Args:
-        logits: The probability vector, which is a list of floats.
+        probs: The probability vector, which is a list of floats.
         Its length depends on the number of classes.
     """
     probs: list[float]
