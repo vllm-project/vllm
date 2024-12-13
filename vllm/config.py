@@ -2403,19 +2403,6 @@ class CompilationConfig(BaseModel):
 
     __str__ = __repr__
 
-    def __repr__(self) -> str:
-        exclude = {
-            "static_forward_context",
-            "enabled_custom_ops",
-            "disabled_custom_ops",
-            "compilation_time",
-            "bs_to_padded_graph_size",
-            "pass_config",
-        }
-        return self.model_dump_json(exclude=exclude, exclude_unset=True)
-
-    __str__ = __repr__
-
     def compute_hash(self) -> str:
         factors: List[Any] = []
         factors.append(self.level)
