@@ -420,9 +420,16 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        self.max_batch_size = (vllm_config.pad_for_cudagraph(
-            self.scheduler_config.max_num_seqs)
-                               if self.scheduler_config else 8192 + 2)
+        if self.scheduler_config is not None:
+            if self.scheduler_config.max_num_seqs > \
+                vllm_config.compilation_config.max_capture_size:
+                self.max_batch_size = \
+                    vllm_config.compilation_config.max_capture_size
+            else:
+                self.max_batch_size = vllm_config.pad_for_cudagraph(
+                    self.scheduler_config.max_num_seqs)
+        else:
+            self.max_batch_size = 8192 + 2
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
