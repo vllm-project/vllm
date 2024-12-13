@@ -196,6 +196,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
+  "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
@@ -300,7 +301,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   #
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
-  cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS 
+  cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
     "7.5;8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})

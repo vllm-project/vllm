@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
@@ -15,6 +15,7 @@ from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
 
@@ -476,13 +477,19 @@ class MessageQueue:
             return self.dequeue()
 
     @staticmethod
-    def create_from_process_group(pg: ProcessGroup,
+    def create_from_process_group(pg: Union[ProcessGroup,
+                                            StatelessProcessGroup],
                                   max_chunk_bytes,
                                   max_chunks,
                                   writer_rank=0) -> "MessageQueue":
-        group_rank = dist.get_rank(pg)
-        group_world_size = dist.get_world_size(pg)
-        global_ranks = dist.get_process_group_ranks(pg)
+        if isinstance(pg, ProcessGroup):
+            group_rank = dist.get_rank(pg)
+            group_world_size = dist.get_world_size(pg)
+            global_ranks = dist.get_process_group_ranks(pg)
+        else:
+            group_rank = pg.rank
+            group_world_size = pg.world_size
+            global_ranks = list(range(pg.world_size))
 
         from vllm.distributed.parallel_state import in_the_same_node_as
         status = in_the_same_node_as(pg, source_rank=writer_rank)
@@ -500,15 +507,21 @@ class MessageQueue:
                 max_chunks=max_chunks,
             )
             handle = buffer_io.export_handle()
-            dist.broadcast_object_list([handle],
-                                       src=global_ranks[writer_rank],
-                                       group=pg)
+            if isinstance(pg, ProcessGroup):
+                dist.broadcast_object_list([handle],
+                                           src=global_ranks[writer_rank],
+                                           group=pg)
+            else:
+                pg.broadcast_obj(handle, writer_rank)
         else:
-            recv = [None]
-            dist.broadcast_object_list(recv,
-                                       src=global_ranks[writer_rank],
-                                       group=pg)
-            handle = recv[0]  # type: ignore
+            if isinstance(pg, ProcessGroup):
+                recv = [None]
+                dist.broadcast_object_list(recv,
+                                           src=global_ranks[writer_rank],
+                                           group=pg)
+                handle = recv[0]  # type: ignore
+            else:
+                handle = pg.broadcast_obj(None, writer_rank)
             buffer_io = MessageQueue.create_from_handle(handle, group_rank)
         buffer_io.wait_until_ready()
         return buffer_io

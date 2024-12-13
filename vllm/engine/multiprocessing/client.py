@@ -527,7 +527,7 @@ class MQLLMEngineClient(EngineClient):
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from an embedding model.
+        """Generate outputs for a request from a pooling model.
 
         Generate outputs for a request. This method is a coroutine. It adds the
         request into the waiting queue of the LLMEngine and streams the outputs
@@ -575,6 +575,10 @@ class MQLLMEngineClient(EngineClient):
         # If already dead, error out.
         if self._errored_with is not None:
             raise ENGINE_DEAD_ERROR(self._errored_with)
+
+        # Ensure the request id is unique among running requests
+        if request_id in self.output_queues:
+            raise ValueError(f"Request {request_id} already exists")
 
         # Constructing guided decoding logits processors is expensive, so we do
         # it here to avoid contending with cpu resources and the GIL on the
