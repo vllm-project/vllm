@@ -938,10 +938,11 @@ class EngineArgs:
             "--generation-config",
             type=nullable_str,
             default=None,
-            help="The folder path to the generation config. If set to "
-            "'auto', the generation config will be automatically loaded "
-            "from the model's folder.",
-        )
+            help="The folder path to the generation config. "
+            "Defaults to None, will use the default generation config in vLLM. "
+            "If set to 'auto', the generation config will be automatically loaded "
+            "from model. If set to a folder path, the generation config "
+            "will be loaded from the specified folder path.")
 
         return parser
 

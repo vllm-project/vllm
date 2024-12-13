@@ -230,10 +230,9 @@ class LLM:
 
         self.request_counter = Counter()
 
-        # Generation config fields
+        # Overwrite default sampling when generation config is set
         self.overwrite_default_sampling_params = (engine_args.generation_config
                                                   is not None)
-        self.generation_config_fields = self.llm_engine.generation_config_fields
 
     @staticmethod
     def get_engine_class() -> Type[LLMEngine]:
@@ -259,6 +258,7 @@ class LLM:
 
     def get_default_sampling_params(self) -> SamplingParams:
         if self.overwrite_default_sampling_params:
+            generation_config_fields = self.llm_engine.generation_config_fields
             available_params = [
                 "repetition_penalty",
                 "temperature",
@@ -267,7 +267,7 @@ class LLM:
                 "min_p",
             ]
             default_param_dict = {
-                param: self.generation_config_fields.get(param, None)
+                param: generation_config_fields.get(param, None)
                 for param in available_params
             }
             # Filter the None values
