@@ -111,7 +111,27 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_input,
         )
 
-    def _expand_slice_decode(
+    def _apply_expand_prefill(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: Tuple[torch.Tensor, ...],
+        offset_start: int,
+        add_input: bool,
+    ):
+        #No LoRA request, so return directly
+        if self.no_lora:
+            return
+        sgmv_expand_slice(
+            x,
+            w_t_all,
+            y,
+            *self.prefill_metadata,
+            offset_start,
+            add_input,
+        )
+
+    def _apply_expand_decode(
         self,
         y: torch.Tensor,
         x: torch.Tensor,
@@ -140,7 +160,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         expand_slice_fun: Callable = (self._expand_slice_prefill
                                       if self.is_prefill else
-                                      self._expand_slice_decode)
+                                      self._apply_expand_decode)
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_input)
 
     def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor,
@@ -158,6 +178,21 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         shrink_fun: Callable = (self._shrink_prefill
                                 if self.is_prefill else self._shrink_decode)
         shrink_fun(y, x, w_t_all, scale)
+        y = y.view_as(y_org)
+
+    def _apply_shrink_nslices_prefill(self, y: torch.Tensor, x: torch.Tensor,
+                                      w_t_all: torch.Tensor, scale: float):
+        """
+        Perform the ` y+=x@w_t_all` computation, which is suitable for the
+        GEMM of lora'a.
+        When `is_prefill is` true, it indicates that it is currently the
+        prefill stage, and the `_shrink_prefill` function should be called.
+        Otherwise, it is the decode stage, and the _shrink_decode function
+        should be called.
+        """
+        y_org = y
+
+        self._shrink_prefill(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
@@ -183,9 +218,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         x = x.view(-1, x.shape[-1])
         # TODO fuse these kernels
-        for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
-                               scale)
+        if self.is_prefill:
+            # NOTE fused kernel
+            self._apply_shrink_nslices_prefill(y, x, lora_a_stacked, scale)
+        else:
+            for slice_idx in range(len(lora_a_stacked)):
+                self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
+                                   scale)
 
     def add_expand(self,
                    y: torch.Tensor,
@@ -217,20 +256,27 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        offset_left = offset_start
         if lora_bias_stacked is not None:
             self._apply_bias(self.token_lora_indices, y, output_slices,
                              lora_bias_stacked)
-        for slice_idx in range(len(lora_b_stacked)):
-            self._apply_expand(
-                y,
-                x[slice_idx],
-                lora_b_stacked[slice_idx],
-                offset_left,
-                output_slices[slice_idx],
-                add_input=add_input,
-            )
-            offset_left += output_slices[slice_idx]
+        if self.is_prefill:
+            # NOTE fused kernel
+            self._apply_expand_prefill(y,
+                                       x,
+                                       lora_b_stacked,
+                                       offset_start,
+                                       add_input=True)
+        else:
+            for slice_idx in range(len(lora_b_stacked)):
+                self._apply_expand_decode(
+                    y,
+                    x[slice_idx],
+                    lora_b_stacked[slice_idx],
+                    offset_start,
+                    output_slices[slice_idx],
+                    add_input=add_input,
+                )
+                offset_start += output_slices[slice_idx]
         y = y.view_as(y_org)
 
     def add_lora_embedding(self,
@@ -301,10 +347,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default ,refer to:
             # https://github.com/triton-lang/triton/issues/1387
-            buffer = tuple(
-                torch.zeros(
-                    (x.size(0), r), dtype=torch.float32, device=x.device)
-                for _ in range(len(output_slices)))
+            buffer = torch.zeros(
+                (len(output_slices), x.size(0), r),
+                dtype=torch.float32,
+                device=x.device,
+            )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y,
                         buffer,
@@ -313,6 +360,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                         output_slices,
                         add_input=True,
                         **kwargs)
+        pass
 
     def add_lora_logits(self,
                         y: torch.Tensor,
