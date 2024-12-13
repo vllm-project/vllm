@@ -230,10 +230,6 @@ class LLM:
 
         self.request_counter = Counter()
 
-        # Overwrite default sampling when generation config is set
-        self.overwrite_default_sampling_params = (engine_args.generation_config
-                                                  is not None)
-
     @staticmethod
     def get_engine_class() -> Type[LLMEngine]:
         if envs.VLLM_USE_V1:
@@ -257,7 +253,11 @@ class LLM:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
-        if self.overwrite_default_sampling_params:
+        # Overwrite default sampling when generation config is set
+        overwrite_default_sampling_params = (
+            self.llm_engine.model_config.generation_config is not None
+        )
+        if overwrite_default_sampling_params:
             generation_config_fields = self.llm_engine.generation_config_fields
             available_params = [
                 "repetition_penalty",
