@@ -1074,7 +1074,8 @@ class EngineArgs:
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and model_config.runner_type != "pooling"):
+                        and model_config.runner_type != "pooling"
+                        and not current_platform.is_rocm()):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
