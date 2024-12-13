@@ -1,5 +1,6 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import re
 import time
 from argparse import Namespace
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -152,6 +153,36 @@ class LogitsProcessorConstructor(BaseModel):
     qualname: str
     args: Optional[List[Any]] = None
     kwargs: Optional[Dict[str, Any]] = None
+
+
+LogitsProcessors = List[Union[str, LogitsProcessorConstructor]]
+
+
+def get_logits_processors(processors: Optional[LogitsProcessors],
+                          pattern: Optional[str]) -> Optional[List[Any]]:
+    if processors and pattern:
+        logits_processors, ignored_logits_processors = [
+            (resolve_obj_by_qualname(p)
+             if isinstance(p, str) else resolve_obj_by_qualname(p.qualname)(
+                 *p.args or [], **p.kwargs or {})) for p in processors
+            if re.match(p if isinstance(p, str) else p.qualname, pattern)
+        ], [
+            qualname for qualname in (p if isinstance(p, str) else p.qualname
+                                      for p in processors)
+            if not re.match(qualname, pattern)
+        ]
+        if ignored_logits_processors:
+            logger.warning(
+                "Ignoring the following disallowed logits processors: %s. "
+                "See --logits-processor-pattern engine arg for more "
+                "information.", ignored_logits_processors)
+        return logits_processors
+    elif processors:
+        logger.warning(
+            "No logits processor pattern provided, so all processors will "
+            "be ignored. See --logits-processor-pattern engine arg for "
+            "more information.")
+    return None
 
 
 class ChatCompletionRequest(OpenAIBaseModel):
@@ -332,7 +363,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output)
 
-    def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
+    def to_sampling_params(
+            self, default_max_tokens: int,
+            logits_processor_pattern: Optional[str]) -> SamplingParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
@@ -341,14 +374,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
-
-        if self.logits_processors:
-            logits_processors = [(resolve_obj_by_qualname(p) if isinstance(
-                p, str) else resolve_obj_by_qualname(p.qualname)(
-                    *p.args or [], **p.kwargs or {}))
-                                 for p in self.logits_processors]
-        else:
-            logits_processors = None
 
         guided_json_object = None
         if self.response_format is not None:
@@ -390,7 +415,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
-            logits_processors=logits_processors,
+            logits_processors=get_logits_processors(self.logits_processors,
+                                                    logits_processor_pattern),
             include_stop_str_in_output=self.include_stop_str_in_output,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
@@ -658,7 +684,9 @@ class CompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output)
 
-    def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
+    def to_sampling_params(
+            self, default_max_tokens: int,
+            logits_processor_pattern: Optional[str]) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
@@ -668,14 +696,6 @@ class CompletionRequest(OpenAIBaseModel):
             prompt_logprobs = self.logprobs
 
         echo_without_generation = self.echo and self.max_tokens == 0
-
-        if self.logits_processors:
-            logits_processors = [(resolve_obj_by_qualname(p) if isinstance(
-                p, str) else resolve_obj_by_qualname(p.qualname)(
-                    *p.args or [], **p.kwargs or {}))
-                                 for p in self.logits_processors]
-        else:
-            logits_processors = None
 
         guided_json_object = None
         if (self.response_format is not None
@@ -712,7 +732,8 @@ class CompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            logits_processors=logits_processors,
+            logits_processors=get_logits_processors(self.logits_processors,
+                                                    logits_processor_pattern),
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
