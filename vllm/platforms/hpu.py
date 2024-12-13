@@ -2,12 +2,16 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from vllm.logger import init_logger
+
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+logger = init_logger(__name__)
 
 
 class HpuPlatform(Platform):
@@ -43,3 +47,8 @@ class HpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
+
+    @classmethod
+    def is_pin_memory_available(cls):
+        logger.warning("Pin memory is not supported on HPU.")
+        return False

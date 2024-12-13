@@ -1,11 +1,15 @@
 from typing import TYPE_CHECKING, Optional
 
+from vllm.logger import init_logger
+
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+logger = init_logger(__name__)
 
 
 class NeuronPlatform(Platform):
@@ -28,3 +32,8 @@ class NeuronPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = \
                 "vllm.worker.neuron_worker.NeuronWorker"
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        logger.warning("Pin memory is not supported on Neuron.")
+        return False
