@@ -375,8 +375,8 @@ class KVCacheManager:
             prev_block: The previous block in the chain.
         """
         # Update the new blocks with the block hashes through the chain.
-        prev_block_hash = (prev_block.block_hash
-                           if prev_block is not None else None)
+        prev_block_hash_value = (prev_block.block_hash.hash_value
+                                 if prev_block is not None else None)
         for i, blk in enumerate(full_blocks):
             blk_idx = blk_start_idx + i
 
@@ -390,10 +390,10 @@ class KVCacheManager:
                 f"{request.request_id}({request})")
 
             # Compute the hash of the current block.
-            block_hash = hash_block_tokens(prev_block_hash,
+            block_hash = hash_block_tokens(prev_block_hash_value,
                                            tuple(block_tokens))
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
-            prev_block_hash = block_hash
+            prev_block_hash_value = block_hash.hash_value
