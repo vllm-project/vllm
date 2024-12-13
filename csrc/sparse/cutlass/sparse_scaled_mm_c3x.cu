@@ -3,31 +3,9 @@
 #include <cudaTypedefs.h>
 
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
-
-#include <torch/all.h>
-
-#include <ATen/cuda/CUDAContext.h>
-
-#include <iostream>
-#include <sstream>
-#include <vector>
-
-#include "cutlass/cutlass.h"
-
-#include "cute/tensor.hpp"
-#include "cute/atom/mma_atom.hpp"
-#include "cutlass/numeric_types.h"
-
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
-#include "cutlass/gemm/collective/collective_builder.hpp"
-
+#include "sparse_scaled_mm_c3x.cuh"
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-#include "cutlass_extensions/common.hpp"
 // clang-format on
-
-  #include "sparse_scaled_mm_c3x.cuh"
 
 using namespace cute;
 using namespace vllm;
@@ -247,11 +225,13 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
                                              Epilogue>(
-          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta,
+          std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t, Epilogue>(
-          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta,
+          std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else if (a.dtype() == torch::kFloat8_e4m3fn) {
     TORCH_CHECK(bt_nzs.dtype() == torch::kFloat8_e4m3fn);
@@ -259,12 +239,14 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                             cutlass::bfloat16_t, Epilogue>(
-          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta,
+          std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                             cutlass::half_t, Epilogue>(
-          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta,
+          std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else if (a.dtype() == torch::kFloat16) {
     TORCH_CHECK(bt_nzs.dtype() == torch::kFloat16);
@@ -272,12 +254,14 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_fp16_dispatch<cutlass::half_t,
                                              cutlass::bfloat16_t, Epilogue>(
-          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta,
+          std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_fp16_dispatch<cutlass::half_t, cutlass::half_t,
                                              Epilogue>(
-          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta,
+          std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else {  // a.dtype() == torch::kBFloat16
     TORCH_CHECK(a.dtype() == torch::kBFloat16);
@@ -286,12 +270,14 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out,
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_bf16_dispatch<cutlass::bfloat16_t,
                                              cutlass::bfloat16_t, Epilogue>(
-          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta,
+          std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_bf16_dispatch<cutlass::bfloat16_t,
                                              cutlass::half_t, Epilogue>(
-          out, a, bt_nzs, bt_meta, std::forward<EpilogueArgs>(epilogue_args)...);
+          out, a, bt_nzs, bt_meta,
+          std::forward<EpilogueArgs>(epilogue_args)...);
     }
   }
 }

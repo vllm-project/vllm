@@ -1,29 +1,24 @@
+// clang-format will break include orders
+// clang-format off
 #include <cudaTypedefs.h>
 
 #include <torch/all.h>
 
 #include <ATen/cuda/CUDAContext.h>
 
-#include <iostream>
-#include <sstream>
-#include <vector>
-
 #include "cutlass/cutlass.h"
-
-#include "cute/tensor.hpp"
-#include "cute/atom/mma_atom.hpp"
-#include "cutlass/numeric_types.h"
 
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
-#include "cutlass/gemm/kernel/tile_scheduler_params.h"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
 #include "cutlass_extensions/cute_utils.cuh"
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
+#include "core/math.hpp"
 #include "cutlass_extensions/common.hpp"
 #include "cutlass_extensions/torch_utils.hpp"
+// clang-format on
 
 using namespace cute;
 
@@ -94,8 +89,9 @@ struct cutlass_sparse_3x_gemm {
       typename cutlass::epilogue::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAcc, ElementAcc, ElementC, LayoutC_Transpose, AlignmentCD, ElementD,
-          LayoutD_Transpose, AlignmentCD, EpilogueSchedule, EVTCompute>::CollectiveOp;
+          ElementAcc, ElementAcc, ElementC, LayoutC_Transpose, AlignmentCD,
+          ElementD, LayoutD_Transpose, AlignmentCD, EpilogueSchedule,
+          EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
@@ -121,8 +117,7 @@ struct cutlass_sparse_3x_gemm {
 };
 
 template <typename Gemm, typename... EpilogueArgs>
-void cutlass_sparse_gemm_caller(torch::Tensor& out,
-                                torch::Tensor const& a,
+void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& bt_nzs,
                                 torch::Tensor const& bt_meta,
                                 EpilogueArgs&&... epilogue_params) {
@@ -145,7 +140,8 @@ void cutlass_sparse_gemm_caller(torch::Tensor& out,
   auto stride_Dt = permute_layout<1, 0, 2>(layout_D).stride();
 
   using GemmKernel = typename Gemm::GemmKernel;
-  typename GemmKernel::ProblemShape prob_shape{(int) bt_nzs.size(0), (int) size<0>(layout_A), (int) size<1>(layout_A), 1};
+  typename GemmKernel::ProblemShape prob_shape{
+      (int)bt_nzs.size(0), (int)size<0>(layout_A), (int)size<1>(layout_A), 1};
 
   using ElementE = typename GemmKernel::CollectiveMainloop::ElementE;
   using SparseConfig = typename GemmKernel::CollectiveMainloop::SparseConfig;
@@ -198,7 +194,7 @@ struct sm90_config_default<half_t, OutType, Epilogue> {
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
       cutlass_sparse_3x_gemm<half_t, OutType, Epilogue, TileShape, ClusterShape,
-                      KernelSchedule, EpilogueSchedule, float>;
+                             KernelSchedule, EpilogueSchedule, float>;
 };
 
 template <typename OutType,
@@ -210,8 +206,9 @@ struct sm90_config_default<cutlass::bfloat16_t, OutType, Epilogue> {
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
   using Cutlass3xGemm =
-      cutlass_sparse_3x_gemm<cutlass::bfloat16_t, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+      cutlass_sparse_3x_gemm<cutlass::bfloat16_t, OutType, Epilogue, TileShape,
+                             ClusterShape, KernelSchedule, EpilogueSchedule,
+                             float>;
 };
 
 //////////////////////// Cherry-Picking Kernels ////////////////////////
@@ -337,8 +334,9 @@ struct sm90_config_default<cutlass::float_e4m3_t, OutType, Epilogue> {
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_1, _2, _1>;
   using Cutlass3xGemm =
-      cutlass_sparse_3x_gemm<cutlass::float_e4m3_t, OutType, Epilogue, TileShape, ClusterShape,
-                             KernelSchedule, EpilogueSchedule, float>;
+      cutlass_sparse_3x_gemm<cutlass::float_e4m3_t, OutType, Epilogue,
+                             TileShape, ClusterShape, KernelSchedule,
+                             EpilogueSchedule, float>;
 };
 
 template <typename InType, typename OutType,

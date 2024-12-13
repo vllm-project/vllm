@@ -162,7 +162,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
                               c10::optional<torch::Tensor> const& bias);
 
 bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
-                            torch::Tensor const& a);
+                             torch::Tensor const& a);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

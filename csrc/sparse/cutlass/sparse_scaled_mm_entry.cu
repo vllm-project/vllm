@@ -36,9 +36,10 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(b_scales.numel() == 1 || b_scales.numel() == bt_nzs.size(0));
 
   // Check for strides and alignment
-  TORCH_CHECK(a.stride(1) == 1 && bt_nzs.stride(1) == 1 && c.stride(1) == 1);  // Row-major
-  TORCH_CHECK(c.stride(0) % 16 == 0);                      // 16 Byte Alignment
-  TORCH_CHECK(bt_nzs.stride(0) % 16 == 0);                 // 16 Byte Alignment
+  TORCH_CHECK(a.stride(1) == 1 && bt_nzs.stride(1) == 1 &&
+              c.stride(1) == 1);            // Row-major
+  TORCH_CHECK(c.stride(0) % 16 == 0);       // 16 Byte Alignment
+  TORCH_CHECK(bt_nzs.stride(0) % 16 == 0);  // 16 Byte Alignment
   TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   if (bias) {
@@ -52,7 +53,8 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
   // Guard against compilation issues for sm90 kernels
 #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
   if (version_num >= 90) {
-    cutlass_scaled_sparse_mm_sm90(c, a, bt_nzs, bt_meta, a_scales, b_scales, bias);
+    cutlass_scaled_sparse_mm_sm90(c, a, bt_nzs, bt_meta, a_scales, b_scales,
+                                  bias);
     return;
   }
 #endif

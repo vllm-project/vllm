@@ -1,46 +1,22 @@
+// clang-format will break include orders
+// clang-format off
 #include <cudaTypedefs.h>
 
-#include <torch/all.h>
-
-#include <ATen/cuda/CUDAContext.h>
-
-#include <iostream>
-#include <sstream>
-#include <vector>
-
-#include "cutlass/cutlass.h"
+#include "sparse_scaled_mm_c3x.cuh"
 
 #include "cute/tensor.hpp"
-#include "cute/atom/mma_atom.hpp"
 #include "cutlass/numeric_types.h"
 #include "cutlass/numeric_conversion.h"
-#include "cutlass/detail/dependent_false.hpp"
-
-#include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
-#include "cutlass_extensions/common.hpp"
 
 #include "cutlass/transform/device/transform_universal_adapter.hpp"
 #include "cutlass/transform/kernel/sparse_gemm_compressor.hpp"
-
 #include "cutlass/epilogue/collective/default_epilogue.hpp"
-#include "cutlass/epilogue/thread/linear_combination.h"
-#include "cutlass/gemm/collective/collective_builder.hpp"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
-
-#include <iostream>
-
-#include "cutlass/cutlass.h"
-
-#include "cutlass/tensor_ref.h"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
-#include "cutlass/gemm/dispatch_policy.hpp"
 
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/util/packed_stride.hpp"
 
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-#include "sparse_scaled_mm_c3x.cuh"
+// clang-format on
 
 using namespace cute;
 using namespace vllm;
@@ -153,7 +129,7 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
 }
 
 bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
-                            torch::Tensor const& a) {
+                             torch::Tensor const& a) {
   if (a.dtype() == torch::kBFloat16) {
     return sparsify_and_compress<cutlass::bfloat16_t>(a_compressed, e, a);
   } else if (a.dtype() == torch::kFloat16) {
