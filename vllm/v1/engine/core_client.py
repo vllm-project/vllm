@@ -159,10 +159,16 @@ class MPClient(EngineCoreClient):
         atexit.register(self.shutdown)
 
     def shutdown(self):
+        # During final garbage collection in process shutdown, atexit may be
+        # None.
+        if atexit:
+            # in case shutdown gets called via __del__ first
+            atexit.unregister(self.shutdown)
+
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
 
-        if hasattr(self, "proc_handle"):
+        if hasattr(self, "proc_handle") and self.proc_handle:
             # Shutdown the process if needed.
             if self.proc_handle.proc.is_alive():
                 self.proc_handle.proc.terminate()
@@ -178,8 +184,9 @@ class MPClient(EngineCoreClient):
             ]
             for ipc_socket in ipc_sockets:
                 socket_file = ipc_socket.replace("ipc://", "")
-                if os.path.exists(socket_file):
+                if os and os.path.exists(socket_file):
                     os.remove(socket_file)
+            self.proc_handle = None
 
     def __del__(self):
         self.shutdown()
