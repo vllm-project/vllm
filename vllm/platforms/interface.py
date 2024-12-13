@@ -1,6 +1,7 @@
 import enum
 import platform
 import random
+from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
@@ -14,6 +15,11 @@ else:
     VllmConfig = None
 
 logger = init_logger(__name__)
+
+
+def in_wsl() -> bool:
+    # Reference: https://github.com/microsoft/WSL/issues/4071
+    return "microsoft" in " ".join(uname()).lower()
 
 
 class _Backend(enum.Enum):
@@ -220,6 +226,17 @@ class Platform:
             return CpuArchEnum.POWERPC
 
         return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        """Checks whether pin memory is available on the current platform."""
+        if in_wsl():
+            # Pinning memory in WSL is not supported.
+            # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+            logger.warning("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
+            return False
+        return True
 
 
 class UnspecifiedPlatform(Platform):
