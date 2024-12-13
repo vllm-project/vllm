@@ -104,6 +104,10 @@ def wrap_inductor(graph,
                    lambda *args, **kwargs: AlwaysHitShapeEnv()):
             inductor_compiled_graph = FxGraphCache._lookup_graph(
                 hash_str, example_inputs, True, False)
+            assert inductor_compiled_graph is not None, (
+                "Inductor cache lookup failed. Please remove"
+                f"the cache file {compilation_config.inductor_hash_cache.cache_file_path} and try again."  # noqa
+            )
 
         # Inductor calling convention (function signature):
         # f(list) -> tuple
