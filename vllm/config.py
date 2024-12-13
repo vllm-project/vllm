@@ -2798,6 +2798,8 @@ class VllmConfig:
 
         # summarize vllm config
         vllm_factors: List[Any] = []
+        from vllm import __version__
+        vllm_factors.append(__version__)
         vllm_factors.append(self.model_config.compute_hash())
         vllm_factors.append(self.cache_config.compute_hash())
         vllm_factors.append(self.parallel_config.compute_hash())
