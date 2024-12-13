@@ -11,6 +11,7 @@ import triton.language as tl
 
 from .mamba_ssm import softplus
 
+
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_H': 1}),

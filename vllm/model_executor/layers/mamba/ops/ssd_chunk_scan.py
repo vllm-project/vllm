@@ -10,6 +10,7 @@ from packaging import version
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
+
 @triton.autotune(
     configs=[
         triton.Config(

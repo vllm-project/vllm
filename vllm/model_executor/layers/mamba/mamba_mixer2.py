@@ -249,6 +249,10 @@ class MambaMixer2(CustomOp):
         intemediate_settings = (intermediate_size, 0, 1)
         head_setings = (self.num_heads, 0, 1)
 
+        # - the weight already has a "weight_loader" attribute
+        #   which set_weight_attrs will raise if we do not
+        #   delete before trying to override it
+        # - ditto for the otther two weights below
         delattr(self.conv1d.bias, "weight_loader")
         set_weight_attrs(
             self.conv1d.bias, {
@@ -450,7 +454,6 @@ class MambaMixer2(CustomOp):
             hidden_states = scan_output.view(seq_len, -1)
         else:
 
-            # NOTE: can be optimized?
             n_groups = self.n_groups // self.tp_size
             A = self.A[:, None, ...][:, :, None].expand(
                 -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
