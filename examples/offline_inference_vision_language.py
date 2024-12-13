@@ -137,6 +137,18 @@ def run_paligemma(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# PaliGemma 2
+def run_paligemma2(question: str, modality: str):
+    assert modality == "image"
+
+    # PaliGemma 2 has special prompt format for VQA
+    prompt = "caption en"
+    llm = LLM(model="google/paligemma2-3b-ft-docci-448",
+              mm_cache_preprocessor=args.mm_cache_preprocessor)
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 # Chameleon
 def run_chameleon(question: str, modality: str):
     assert modality == "image"
@@ -473,6 +485,7 @@ model_example_map = {
     "fuyu": run_fuyu,
     "phi3_v": run_phi3v,
     "paligemma": run_paligemma,
+    "paligemma2": run_paligemma2,
     "chameleon": run_chameleon,
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
