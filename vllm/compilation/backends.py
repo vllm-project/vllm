@@ -40,12 +40,13 @@ class InductorHashCache:
     TODO: better off-the-shelf solution to serialize the data?
     """
 
-    def __init__(self, cache_dir: str):
+    def __init__(self, cache_dir: str, disabled: bool = False):
+        self.disabled = disabled
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir,
                                             "inductor_hash_cache.py")
         self.cache: defaultdict = defaultdict(dict)
-        if os.path.exists(self.cache_file_path):
+        if os.path.exists(self.cache_file_path) and not disabled:
             with open(self.cache_file_path) as f:
                 self.deserialize(f.read())
 
@@ -66,19 +67,27 @@ class InductorHashCache:
         return printer.pformat(data)
 
     def save_to_file(self):
+        if self.disabled:
+            return
         with open(self.cache_file_path, "w") as f:
             f.write(self.serialize())
 
     def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
+        if self.disabled:
+            return False
         runtime_shape, graph_index = key
         return runtime_shape in self.cache and graph_index in self.cache[
             runtime_shape]
 
     def __getitem__(self, key: Tuple[Optional[int], int]) -> str:
+        if self.disabled:
+            raise KeyError("cannot read from disabled cache")
         runtime_shape, graph_index = key
         return self.cache[runtime_shape][graph_index]
 
     def __setitem__(self, key: Tuple[Optional[int], int], value: str):
+        # setitem for disabled cache is fine, because we
+        # don't actually write to the disk
         runtime_shape, graph_index = key
         self.cache[runtime_shape][graph_index] = value
 

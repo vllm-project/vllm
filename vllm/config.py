@@ -2693,13 +2693,27 @@ class CompilationConfig(BaseModel):
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
 
-        # every rank writes to its own cache dir
-        self.cache_dir = os.path.join(
-            self.cache_dir, f"rank_{vllm_config.parallel_config.rank}")
-        os.makedirs(self.cache_dir, exist_ok=True)
-        from vllm.compilation.backends import InductorHashCache
-        self.inductor_hash_cache: InductorHashCache = InductorHashCache(
-            self.cache_dir)
+        if vllm_config.model_config is not None and \
+            not self.cache_dir:
+            # no provided cache dir, generate one based on the known factors
+            # that affects the compilation. if none of the factors change,
+            # the cache dir will be the same so that we can reuse the compiled
+            # graph.
+            hash_key = vllm_config.compute_hash()
+            cache_dir = os.path.join(
+                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key,
+                f"rank_{vllm_config.parallel_config.rank}")
+            os.makedirs(cache_dir, exist_ok=True)
+            self.cache_dir = cache_dir
+
+            disabled = envs.VLLM_DISABLE_COMPILE_CACHE
+            from vllm.compilation.backends import InductorHashCache
+            self.inductor_hash_cache: InductorHashCache = InductorHashCache(
+                self.cache_dir, disabled=disabled)
+            if not disabled:
+                logger.info(
+                    "Using cache directory: %s for vLLM's torch.compile",
+                    self.cache_dir)
 
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
@@ -2948,21 +2962,6 @@ class VllmConfig:
             logger.warning("LoRA is not supported with `torch.compile` yet. "
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
-        if self.model_config is not None and \
-            self.compilation_config.level == CompilationLevel.PIECEWISE and \
-            not self.compilation_config.cache_dir:
-            # no provided cache dir, generate one based on the known factors
-            # that affects the compilation. if none of the factors change,
-            # the cache dir will be the same so that we can reuse the compiled
-            # graph.
-            hash_key = self.compute_hash()
-            cache_dir = os.path.join(envs.VLLM_CACHE_ROOT,
-                                     "torch_compile_cache", hash_key)
-            os.makedirs(cache_dir, exist_ok=True)
-            self.compilation_config.cache_dir = cache_dir
-            logger.info("Using cache directory: %s for vLLM's torch.compile",
-                        self.compilation_config.cache_dir)
 
         current_platform.check_and_update_config(self)
 
