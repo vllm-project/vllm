@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -459,7 +459,7 @@ class GPUModelRunner:
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
-            num_input_tokens = self._get_padded_batch_size(
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
         else:
             # Eager mode.
@@ -641,10 +641,3 @@ class GPUModelRunner:
                 torch.zeros(kv_cache_shape,
                             dtype=self.kv_cache_dtype,
                             device=self.device))
-
-    def _get_padded_batch_size(self, batch_size: int) -> Optional[int]:
-        # TODO: Optimize this?
-        for size in self.cudagraph_batch_sizes:
-            if batch_size <= size:
-                return size
-        return None

@@ -4,11 +4,11 @@ import torch
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import (FusionPass, find_auto_fn,
-                                     find_auto_fn_maybe)
+from vllm.compilation.fusion import (FUSED_OPS, FusionPass, QuantKey,
+                                     kFp8DynamicTokenSym, kFp8StaticTensorSym)
+from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.reshapes import RedundantReshapesPass
-from vllm.compilation.vllm_inductor_pass import is_func
 from vllm.config import CompilationConfig
 
 from .backend import TestBackend
@@ -19,13 +19,6 @@ OPS_IN_MODEL = [
 ]
 
 RMS_OP = torch.ops._C.rms_norm.default
-
-RMS_QUANT_OPS = {
-    "static_fp8": [
-        torch.ops._C.rms_norm_static_fp8_quant.default,
-        torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
-    ],
-}
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
@@ -42,12 +35,16 @@ prompts = [
 ]
 
 
-@pytest.mark.parametrize("model",
-                         ["nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"])
+@pytest.mark.parametrize(
+    "model, quant_key",
+    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e", kFp8StaticTensorSym),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8_DYNAMIC-e2e",
+      kFp8DynamicTokenSym)])
 @pytest.mark.parametrize("do_fusion", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
                     reason="Only test on CUDA")
-def test_fix_functionalization(model: str, do_fusion: bool):
+def test_fix_functionalization(model: str, quant_key: QuantKey,
+                               do_fusion: bool):
     torch.set_default_device("cuda")
 
     config = CompilationConfig.PassConfig(enable_fusion=do_fusion,
@@ -96,10 +93,12 @@ def test_fix_functionalization(model: str, do_fusion: bool):
 
     # OPS_IN_MODEL always appear. RMS_OP is fused away if we run fusion,
     # and replaced by fused quantized ops in RMS_QUANT_OPS.
-    rms_ops = RMS_QUANT_OPS["static_fp8"] if do_fusion else [RMS_OP]
-    silu_mul_ops = SILU_MUL_QUANT_OPS["static_fp8"] if do_fusion else [
-        SILU_MUL_OP
-    ]
+    rms_ops = [FUSED_OPS[(quant_key, True)], FUSED_OPS[(quant_key, False)]
+               ] if do_fusion else [RMS_OP]
+    silu_mul_ops = SILU_MUL_QUANT_OPS[
+        "static_fp8"] if do_fusion and quant_key == kFp8StaticTensorSym else [
+            SILU_MUL_OP
+        ]
 
     ops = OPS_IN_MODEL + rms_ops + silu_mul_ops
 
