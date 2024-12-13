@@ -22,7 +22,6 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.executor.ray_executor import RayExecutor
 
 logger = init_logger(__name__)
 
@@ -114,7 +113,8 @@ class LLMEngine:
             vllm_config.parallel_config.distributed_executor_backend)
         if distributed_executor_backend == "ray":
             initialize_ray_cluster(vllm_config.parallel_config)
-            return RayExecutor
+            from vllm.v1.executor.ray_executor import RayExecutor
+            executor_class = RayExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
@@ -124,9 +124,6 @@ class LLMEngine:
             executor_class = UniprocExecutor
 
         return executor_class
-
-    def stop_remote_worker_execution_loop(self) -> None:
-        raise NotImplementedError("TP not implemented yet.")
 
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
