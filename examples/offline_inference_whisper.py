@@ -36,7 +36,7 @@ prompts = [
         ),
         decoder_prompt="<|startoftranscript|>",
     ),
-] * 128
+] #* 128
 
 # Create a sampling params object.
 sampling_params = SamplingParams(

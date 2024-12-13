@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from transformers import WhisperConfig, WhisperProcessor
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -137,34 +137,49 @@ class WhisperEncoderAttention(WhisperAttention):
             cache_config=cache_config,
             prefix=prefix,
         )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
         
     def forward(
         self,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ):
         bsz, seq = hidden_states.size()[:2]
 
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+                                attn_type=AttentionType.ENCODER)
 
-        q = q.view(bsz, seq, self.num_heads, self.head_dim)
-        k = k.view(bsz, seq, self.num_heads, self.head_dim)
-        v = v.view(bsz, seq, self.num_heads, self.head_dim)
-
-        attn_output = flash_attn_func(
-            q=q,
-            k=k,
-            v=v,
-            softmax_scale=None,
-            causal=False,
-            window_size=(-1, -1),
-            alibi_slopes=None,
-            softcap=0,
-        )
-
-        attn_output = attn_output.reshape(bsz, seq, self.embed_dim)
         output, _ = self.out_proj(attn_output)
+
+        # q = q.view(bsz, seq, self.num_heads, self.head_dim)
+        # k = k.view(bsz, seq, self.num_heads, self.head_dim)
+        # v = v.view(bsz, seq, self.num_heads, self.head_dim)
+
+        # attn_output = flash_attn_func(
+        #     q=q,
+        #     k=k,
+        #     v=v,
+        #     softmax_scale=None,
+        #     causal=False,
+        #     window_size=(-1, -1),
+        #     alibi_slopes=None,
+        #     softcap=0,
+        # )
+
+        # attn_output = attn_output.reshape(bsz, seq, self.embed_dim)
+        # output, _ = self.out_proj(attn_output)
         return output
 
 
@@ -315,11 +330,15 @@ class WhisperEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states
         residual = hidden_states
@@ -444,16 +463,23 @@ class WhisperEncoder(nn.Module):
     def forward(
         self,
         input_features,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ):
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
+        print("INPUTS EMBEDS", inputs_embeds.size())
     
         embed_pos = self.embed_positions.weight
 
         hidden_states = inputs_embeds + embed_pos
-        for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states)
+        for idx, encoder_layer in enumerate(self.layers):
+            hidden_states = encoder_layer(
+                hidden_states,
+                kv_cache=kv_caches[idx],
+                attn_metadata=attn_metadata,
+            )
         
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
@@ -485,7 +511,7 @@ class WhisperDecoder(nn.Module):
         input_ids,
         positions: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        kv_caches: torch.Tensor,
+        kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
         inputs_embeds = self.embed_tokens(input_ids)
@@ -520,7 +546,11 @@ class WhisperModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor: 
-        encoder_outputs = self.encoder(input_features)
+        encoder_outputs = self.encoder(
+            input_features,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+        )
 
         decoder_outputs = self.decoder(
             input_ids=input_ids,
@@ -581,6 +611,7 @@ def get_whisper_processor(
 
 
 def input_processor_for_whisper(ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
+    inputs["encoder"]["prompt_token_ids"] = [0] * ctx.model_config.hf_config.max_source_positions
     return inputs
 
 
@@ -612,10 +643,10 @@ def input_mapper_for_whisper(
     return MultiModalKwargs(kwargs)
 
 
-#@MULTIMODAL_REGISTRY.register_max_multimodal_tokens("audio", get_max_whisper_audio_tokens)
 @INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_whisper)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_whisper)
 @MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_whisper)
+@MULTIMODAL_REGISTRY.register_max_multimodal_tokens("audio", get_max_whisper_audio_tokens)
 class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -627,15 +658,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
         self.unpadded_vocab_size = config.vocab_size
-        # self.proj_out = RowParallelLinear(
-        #     input_size = config.d_model,
-        #     output_size = config.vocab_size,
-        #     bias = False,
-        #     quant_config=quant_config,
-        # )
         self.proj_out = ParallelLMHead(config.vocab_size,
-                                          config.d_model,
-                                          quant_config=quant_config)
+                                       config.d_model,
+                                       quant_config=quant_config)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
@@ -649,7 +674,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs,
-    ) -> torch.Tensor:        
+    ) -> torch.Tensor:
+        print(attn_metadata.encoder_seq_lens, attn_metadata.encoder_seq_start_loc)
         decoder_outputs = self.model(
             input_features=kwargs["input_features"].to(torch.float16),
             input_ids=input_ids,
