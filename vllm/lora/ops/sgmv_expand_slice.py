@@ -204,9 +204,9 @@ def _sgmv_expand_slice(
     # TODO tuning this config
     N, K = lora_b_stacked[0].shape[-2:]  # K= rank,N=hidden_size
 
-    BLOCK_M = 32
-    BLOCK_N = 32
-    BLOCK_K = 16
+    BLOCK_M = 64
+    BLOCK_N = 64
+    BLOCK_K = 32
     EVEN_K = K % BLOCK_K == 0
     ADD_INPUTS = add_inputs
     CAST_TYPE = False
