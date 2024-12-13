@@ -812,16 +812,19 @@ class ScoreRequest(OpenAIBaseModel):
     text_2: Union[List[str], str]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
 
-    # doc: begin-chat-embedding-pooling-params
+    # doc: begin-score-pooling-params
     additional_data: Optional[Any] = None
-    # doc: end-chat-embedding-pooling-params
+    # doc: end-score-pooling-params
 
+    # doc: begin-score-extra-params
     priority: int = Field(
         default=0,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
+
+    # doc: end-score-extra-params
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)

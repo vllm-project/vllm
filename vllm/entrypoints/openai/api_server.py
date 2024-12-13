@@ -406,7 +406,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/score")
+@router.post("/score")
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
@@ -421,6 +421,15 @@ async def create_score(request: ScoreRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
+
+
+@router.post("/v1/score")
+async def create_score_v1(request: ScoreRequest, raw_request: Request):
+    logger.warning(
+        "To indicate that Score API is not part of standard OpenAI API, we "
+        "have moved it to `/score`. Please update your client accordingly.")
+
+    return await create_score(request, raw_request)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
