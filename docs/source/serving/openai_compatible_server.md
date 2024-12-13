@@ -33,7 +33,7 @@ We currently support the following OpenAI APIs:
   - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`).
   - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/v1/chat/completions`)
-  - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`) with a chat template.
+  - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`) with a [chat template](#chat-template).
   - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
     - *Note: `image_url.detail` parameter is not supported.*
   - We also support `audio_url` content type for audio files.
