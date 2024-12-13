@@ -78,7 +78,7 @@ def wrap_inductor(graph: fx.GraphModule,
 
     compilation_counter.num_inductor_compilations += 1
 
-    logger.info("Inputs: %s", ", ".join([str((inp.shape, inp.dtype) if isinstance(inp, torch.Tensor) else inp) for inp in example_inputs][0:3]))
+    #logger.info("Inputs: %s", ", ".join([str((inp.shape, inp.dtype) if isinstance(inp, torch.Tensor) else inp) for inp in example_inputs][0:3]))
 
     from torch._inductor import config
     from torch._inductor.compile_fx import compile_fx
@@ -324,7 +324,7 @@ def split_graph(graph: fx.GraphModule,
     # sort by intetger graph_id, rather than string name
     outputs.sort(key=lambda x: x.graph_id)
 
-    add_residual_args(split_gm)
+    #add_residual_args(split_gm)
 
     return split_gm, outputs
 

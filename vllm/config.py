@@ -2722,6 +2722,8 @@ class CompilationConfig(BaseModel):
         - dump_graph_dir: directory to dump the graphs. Default is .
         - enable_collective_fusion: whether to enable the custom collective
              communication fusion pass.
+        - enable_dynamic_collective_fusion: whether to enable the custom collective
+             communication fusion pass for general shapes.
         - enable_fusion: whether to enable the custom fusion pass.
         - enable_reshape: whether to enable the custom reshape elimination pass.
             TODO better pass enabling system.
@@ -2729,8 +2731,10 @@ class CompilationConfig(BaseModel):
         dump_graph_stages: List[str] = Field(default_factory=list)
         dump_graph_dir: Path = Field(default=Path("."))
         enable_collective_fusion: bool = True
+        enable_dynamic_collective_fusion: bool = True
         enable_fusion: bool = True
         enable_reshape: bool = True
+        max_num_batched_tokens: int = field(default=None)  # type: ignore
 
         def uuid(self):
             """
@@ -2739,9 +2743,13 @@ class CompilationConfig(BaseModel):
             Do not include dump_graph_* in the hash - they don't affect
             compilation.
             """
-            dict_ = self.model_dump(include={
-                "enable_collective_fusion", "enable_fusion", "enable_reshape"
-            })
+            dict_ = self.model_dump(
+                include={
+                    "enable_collective_fusion",
+                    "enable_dynamic_collective_fusion", "enable_fusion",
+                    "enable_reshape",
+                    "max_num_batched_tokens",
+                })
             encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
             return hashlib.sha256(encoded).digest()
 
@@ -3168,6 +3176,10 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
+
+        self.compilation_config.pass_config.max_num_batched_tokens = \
+            self.scheduler_config.max_num_batched_tokens
+
         if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
@@ -3178,6 +3190,7 @@ class VllmConfig:
             self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_collective_fusion = False
+            self.compilation_config.pass_config.enable_dynamic_collective_fusion = False
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
@@ -3198,6 +3211,9 @@ class VllmConfig:
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        assert (not self.compilation_config.pass_config.enable_dynamic_collective_fusion) or \
+            self.compilation_config.pass_config.enable_dynamic_collective_fusion
+
         if self.compilation_config.pass_config.enable_collective_fusion:
             n_slices = self.parallel_config.world_size
             max_tokens = self.scheduler_config.max_num_batched_tokens
@@ -3207,10 +3223,14 @@ class VllmConfig:
                      "size %d is too small."), max_tokens)
                 self.compilation_config.pass_config.enable_collective_fusion = \
                     False
+                self.compilation_config.pass_config.enable_dynamic_collective_fusion = \
+                    False
             if n_slices == 1:
                 logger.info("Disabling collective fusion pass since tensor "
                             "parallelism is not enabled.")
                 self.compilation_config.pass_config.enable_collective_fusion = \
+                    False
+                self.compilation_config.pass_config.enable_dynamic_collective_fusion = \
                     False
 
         current_platform.check_and_update_config(self)

@@ -1525,8 +1525,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
+                    # TODO: put warmup loop here?
                     with set_forward_context(attn_metadata, self.vllm_config):
-                        graph_runner.capture(**capture_inputs, warmup=True)
+                        graph_runner.capture(**capture_inputs)
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
 
@@ -1723,11 +1724,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
         if prefill_meta is None and decode_meta.use_cuda_graph:
+            #print(f"DECODE {model_input.input_tokens.shape}")
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
         else:
+            #print(f"PREFILL {model_input.input_tokens.shape}")
             model_executable = self.model
 
         # Receive KV cache in distributed KV cache transfer setting
@@ -1937,8 +1940,7 @@ class CUDAGraphRunner(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         memory_pool: Optional[Tuple[int, int]],
-        stream: torch.cuda.Stream,
-        warmup: bool = False,
+        stream: Optional[torch.cuda.Stream],
         **kwargs,
     ):
         assert self._graph is None
@@ -1947,10 +1949,8 @@ class CUDAGraphRunner(nn.Module):
         # kernel launches for initial benchmarking (e.g., Triton autotune).
         # Note one iteration is not enough for torch.compile
 
-        if warmup:
-            # memory_pool and stream will be None here, use instead of warmup flag
+        if memory_pool is None and stream is None:
             for i in range(_NUM_WARMUP_ITERS):
-                print(f"WARMUP {i}")
                 self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -1960,8 +1960,6 @@ class CUDAGraphRunner(nn.Module):
                     **kwargs,
                 )
             return
-
-        print(f"CAPTURE")
 
         # Wait for the warm up operations to finish before proceeding with
         # Graph Capture.
