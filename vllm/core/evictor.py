@@ -91,7 +91,7 @@ class LRUEvictor(Evictor):
 
         while self.priority_queue:
             # Lazy deletion algorithm is applied.
-            last_accessed, _, content_hash, block_id = heapq.heappop(
+            last_accessed, _, block_id, content_hash = heapq.heappop(
                 self.priority_queue)
             if (block_id in self.free_table and
                     self.free_table[block_id].last_accessed == last_accessed):
@@ -107,7 +107,7 @@ class LRUEvictor(Evictor):
                                                   last_accessed)
         heapq.heappush(
             self.priority_queue,
-            (last_accessed, -num_hashed_tokens, content_hash, block_id))
+            (last_accessed, -num_hashed_tokens, block_id, content_hash))
         self._cleanup_if_necessary()
 
     def update(self, block_id: int, last_accessed: float):
@@ -124,7 +124,7 @@ class LRUEvictor(Evictor):
         for block_id, block in self.free_table.items():
             new_priority_queue.append(
                 (block.last_accessed, -block.num_hashed_tokens,
-                 block.content_hash, block_id))
+                 block_id, block.content_hash))
         heapq.heapify(new_priority_queue)
 
         self.priority_queue = new_priority_queue
