@@ -823,6 +823,7 @@ class ScoreRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
+
     # doc: end-score-extra-params
 
     def to_pooling_params(self):
