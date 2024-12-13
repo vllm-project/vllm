@@ -29,10 +29,10 @@ print(completion.choices[0].message)
 
 We currently support the following OpenAI APIs:
 
-- [Completions API](https://platform.openai.com/docs/api-reference/completions) (`/v1/completions`)
+- [Completions API](#completions-api) (`/v1/completions`)
   - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`).
   - *Note: `suffix` parameter is not supported.*
-- [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/v1/chat/completions`)
+- [Chat Completions API](#chat-api) (`/v1/chat/completions`)
   - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`) with a [chat template](#chat-template).
   - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
     - *Note: `image_url.detail` parameter is not supported.*
@@ -40,7 +40,7 @@ We currently support the following OpenAI APIs:
     - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
     - *TODO: Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
-- [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings) (`/v1/embeddings`)
+- [Embeddings API](#embeddings-api) (`/v1/embeddings`)
   - Only applicable to [embedding models](../models/pooling_models.rst) (`--task embed`).
   - If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as Chat Completions API)
     which will be treated as a single prompt to the model.
