@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import importlib
 import inspect
 import multiprocessing
@@ -175,8 +176,8 @@ async def build_async_engine_client_from_engine_args(
 
         # Select random path for IPC.
         ipc_path = get_open_zmq_ipc_path()
-        logger.info("Multiprocessing frontend to use %s for IPC Path.",
-                    ipc_path)
+        logger.debug("Multiprocessing frontend to use %s for IPC Path.",
+                     ipc_path)
 
         # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
@@ -195,6 +196,14 @@ async def build_async_engine_client_from_engine_args(
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
         logger.info("Started engine process with PID %d", engine_pid)
+
+        def _cleanup_ipc_path():
+            socket_path = ipc_path.replace("ipc://", "")
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
+
+        # Ensure we clean up the local IPC socket file on exit.
+        atexit.register(_cleanup_ipc_path)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
         engine_config = engine_args.create_engine_config()
@@ -249,8 +258,8 @@ def mount_metrics(app: FastAPI):
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
-        logger.info("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
-                    prometheus_multiproc_dir_path)
+        logger.debug("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
+                     prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
 
@@ -305,7 +314,7 @@ async def health(raw_request: Request) -> Response:
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_tokenize(request)
+    generator = await handler.create_tokenize(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -319,7 +328,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_detokenize(request)
+    generator = await handler.create_detokenize(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -573,7 +582,7 @@ def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -582,7 +591,7 @@ def init_app_state(
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -590,13 +599,13 @@ def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embedding" else None
+    ) if model_config.runner_type == "pooling" else None
     state.openai_serving_scores = OpenAIServingScores(
         engine_client,
         model_config,
         base_model_paths,
         request_logger=request_logger
-    ) if (model_config.task == "embedding" \
+    ) if (model_config.runner_type == "pooling" \
           and model_config.is_cross_encoder) else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,

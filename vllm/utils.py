@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 import ipaddress
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -24,9 +25,9 @@ from collections import UserDict, defaultdict
 from collections.abc import Iterable, Mapping
 from functools import lru_cache, partial, wraps
 from platform import uname
-from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
-                    Type, TypeVar, Union, overload)
+from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
+                    Dict, Generic, Hashable, List, Literal, Optional,
+                    OrderedDict, Set, Tuple, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np
@@ -43,11 +44,14 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
 logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# Reminder: Please update docs/source/usage/compatibility_matrix.rst
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -164,6 +168,11 @@ ALL_PINNED_SENTINEL = _Sentinel()
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
+
+
+class LayerBlockType(enum.Enum):
+    attention = "attention"
+    mamba = "mamba"
 
 
 class Counter:
@@ -333,17 +342,6 @@ def get_cpu_memory() -> int:
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
-
-
-@lru_cache(maxsize=None)
-def get_vllm_instance_id() -> str:
-    """
-    If the environment variable VLLM_INSTANCE_ID is set, return it.
-    Otherwise, return a random UUID.
-    Instance id represents an instance of the VLLM. All processes in the same
-    instance should have the same instance id.
-    """
-    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
 
 
 @lru_cache(maxsize=None)
@@ -997,7 +995,7 @@ def find_nccl_library() -> str:
     return so_file
 
 
-def enable_trace_function_call_for_thread() -> None:
+def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
@@ -1009,7 +1007,8 @@ def enable_trace_function_call_for_thread() -> None:
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
                     f"at_{datetime.datetime.now()}.log").replace(" ", "_")
-        log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+        log_path = os.path.join(tmp_dir, "vllm",
+                                f"vllm-instance-{vllm_config.instance_id}",
                                 filename)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
@@ -1540,9 +1539,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[type[T], _V]):
+class ClassRegistry(UserDict[Type[T], _V]):
 
-    def __getitem__(self, key: type[T]) -> _V:
+    def __getitem__(self, key: Type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -1635,7 +1634,7 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if is_in_doc_build():
+    if is_in_doc_build() or not supports_custom_op():
         return
     import torch.library
     if hasattr(torch.library, "infer_schema"):
@@ -1659,3 +1658,28 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
+
+
+def kill_process_tree(pid: int):
+    """
+    Kills all descendant processes of the given pid by sending SIGKILL.
+
+    Args:
+        pid (int): Process ID of the parent process
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    # Get all children recursively
+    children = parent.children(recursive=True)
+
+    # Send SIGKILL to all children first
+    for child in children:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child.pid, signal.SIGKILL)
+
+    # Finally kill the parent
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
