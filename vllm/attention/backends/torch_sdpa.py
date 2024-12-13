@@ -619,7 +619,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 value[None, :, start_kv:end_kv, :],
                 attn_mask=mask,
                 dropout_p=0.0,
-                is_causal=causal_attn and not self.need_mask,
+                is_causal=causal_attn and mask is None,
                 scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
             output[start_q:end_q, :, :] = sub_out
             start_q, start_kv = end_q, end_kv
