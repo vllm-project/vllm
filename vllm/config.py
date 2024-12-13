@@ -159,6 +159,26 @@ class ModelConfig:
             override default pooling config for the pooling model.
     """
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: List[Any] = []
+        factors.append(self.model)
+        factors.append(self.dtype)
+        factors.append(self.quantization)
+        factors.append(self.quantization_param_path)
+        factors.append(self.revision)
+        factors.append(self.code_revision)
+        factors.append(self.trust_remote_code)
+        factors.append(self.rope_scaling)
+        factors.append(self.rope_theta)
+        return hashlib.sha256(str(factors).encode()).hexdigest()
+
     def __init__(
             self,
             model: str,
@@ -200,6 +220,8 @@ class ModelConfig:
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
+        self.rope_scaling = rope_scaling
+        self.rope_theta = rope_theta
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -321,15 +343,6 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
-
-    def compute_hash(self):
-        # summarize all the factors that affect the model computation and
-        # hence model compilation, and use them to generate a hash
-        factors: List[Any] = []
-        factors.append(self.model)
-        factors.append(self.dtype)
-        factors.append(self.quantization)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
@@ -837,6 +850,20 @@ class CacheConfig:
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
     """
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: List[Any] = []
+        factors.append(self.cache_dtype)
+        # `cpu_offload_gb` does not use `torch.compile` yet.
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
+
     def __init__(
         self,
         block_size: int,
@@ -933,6 +960,20 @@ class TokenizerPoolConfig:
     pool_type: Union[str, Type["BaseTokenizerGroup"]]
     extra_config: dict
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
+
     def __post_init__(self):
         if self.pool_type not in ("ray", ) and not isinstance(
                 self.pool_type, type):
@@ -1015,6 +1056,20 @@ class LoadConfig:
         default_factory=dict)
     ignore_patterns: Optional[Union[List[str], str]] = None
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
+
     def __post_init__(self):
         model_loader_extra_config = self.model_loader_extra_config or {}
         if isinstance(model_loader_extra_config, str):
@@ -1079,6 +1134,13 @@ class ParallelConfig:
     rank: int = 0
 
     def compute_hash(self):
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
         factors: List[Any] = []
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
@@ -1220,6 +1282,20 @@ class SchedulerConfig:
 
     chunked_prefill_enabled: bool = field(init=False)
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
+
     def __post_init__(self) -> None:
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
@@ -1297,6 +1373,21 @@ class DeviceConfig:
     device: Optional[torch.device]
     device_type: str
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # the device/platform information will be summarized
+        # by torch/vllm automatically.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
+
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
@@ -1323,6 +1414,20 @@ class SpeculativeConfig:
     The configuration is currently specialized to draft-model speculative
     decoding with top-1 proposals.
     """
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # spec decode does not use `torch.compile` yet.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
 
     @staticmethod
     def maybe_create_spec_config(
@@ -1764,6 +1869,20 @@ class LoRAConfig:
     long_lora_scaling_factors: Optional[Tuple[float]] = None
     bias_enabled: bool = False
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # LoRA is not compatible with `torch.compile` .
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
+
     def __post_init__(self):
         # Setting the maximum rank to 256 should be able to satisfy the vast
         # majority of applications.
@@ -1813,6 +1932,20 @@ class PromptAdapterConfig:
     max_cpu_prompt_adapters: Optional[int] = None
     prompt_adapter_dtype: Optional[torch.dtype] = None
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
+
     def __post_init__(self):
 
         if self.max_prompt_adapters < 1:
@@ -1840,6 +1973,20 @@ class MultiModalConfig:
     The maximum number of multi-modal input instances allowed per prompt
     for each :class:`~vllm.multimodal.MultiModalPlugin`.
     """
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
 
     # TODO: Add configs to init vision tower or not.
 
@@ -1879,6 +2026,20 @@ class PoolerConfig:
     such as the token IDs of ``good_token`` and ``bad_token`` in the
     ``math-shepherd-mistral-7b-prm`` model.
     """
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
 
     @staticmethod
     def from_json(json_str: str) -> "PoolerConfig":
@@ -2114,6 +2275,20 @@ class DecodingConfig:
     # 'outlines' / 'lm-format-enforcer' / 'xgrammar'
     guided_decoding_backend: str = 'xgrammar'
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
+
     def __post_init__(self):
         valid_guided_backends = ['outlines', 'lm-format-enforcer', 'xgrammar']
         backend = self.guided_decoding_backend
@@ -2134,6 +2309,20 @@ class ObservabilityConfig:
 
     # If set, collects the model execute time for the request.
     collect_model_execute_time: bool = False
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
 
     def __post_init__(self):
         if not is_otel_available() and self.otlp_traces_endpoint is not None:
@@ -2175,6 +2364,20 @@ class KVTransferConfig(BaseModel):
 
     # The KV connector port, used to build distributed connection
     kv_port: int = 14579
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: List[Any] = []
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+        return hash_str
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVTransferConfig":
@@ -2390,6 +2593,25 @@ class CompilationConfig(BaseModel):
     # Map from layer name to the attention cls
     static_forward_context: Dict[str, Any] = PrivateAttr
 
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: List[Any] = []
+        factors.append(self.level)
+        factors.append(self.backend)
+        factors.append(self.custom_ops)
+        factors.append(self.splitting_ops)
+        factors.append(self.use_inductor)
+        factors.append(self.inductor_compile_config)
+        factors.append(self.inductor_passes)
+        factors.append(self.pass_config.uuid())
+        return hashlib.sha256(str(factors).encode()).hexdigest()
+
     def __repr__(self) -> str:
         exclude = {
             "static_forward_context",
@@ -2402,18 +2624,6 @@ class CompilationConfig(BaseModel):
         return self.model_dump_json(exclude=exclude, exclude_unset=True)
 
     __str__ = __repr__
-
-    def compute_hash(self) -> str:
-        factors: List[Any] = []
-        factors.append(self.level)
-        factors.append(self.backend)
-        factors.append(self.custom_ops)
-        factors.append(self.splitting_ops)
-        factors.append(self.use_inductor)
-        factors.append(self.inductor_compile_config)
-        factors.append(self.inductor_passes)
-        factors.append(self.pass_config.uuid())
-        return hashlib.sha256(str(factors).encode()).hexdigest()
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
@@ -2566,6 +2776,53 @@ class VllmConfig:
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
     instance_id: str = ""
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: List[Any] = []
+        # summarize system state
+        from torch._inductor.codecache import CacheBase
+        system_factors = CacheBase.get_system()
+        factors.append(system_factors)
+
+        # summarize pytorch state
+        from torch._inductor.codecache import torch_key
+        torch_factors = torch_key()
+        factors.append(torch_factors)
+
+        # summarize vllm config
+        vllm_factors: List[Any] = []
+        vllm_factors.append(self.model_config.compute_hash())
+        vllm_factors.append(self.cache_config.compute_hash())
+        vllm_factors.append(self.parallel_config.compute_hash())
+        vllm_factors.append(self.scheduler_config.compute_hash())
+        vllm_factors.append(self.device_config.compute_hash())
+        vllm_factors.append(self.load_config.compute_hash())
+        if self.lora_config:
+            vllm_factors.append(self.lora_config.compute_hash())
+        if self.speculative_config:
+            vllm_factors.append(self.speculative_config.compute_hash())
+        if self.decoding_config:
+            vllm_factors.append(self.decoding_config.compute_hash())
+        if self.observability_config:
+            vllm_factors.append(self.observability_config.compute_hash())
+        if self.prompt_adapter_config:
+            vllm_factors.append(self.prompt_adapter_config.compute_hash())
+        if self.quant_config:
+            pass  # should be captured by model_config.quantization
+        vllm_factors.append(self.compilation_config.compute_hash())
+        vllm_factors.append(self.kv_transfer_config.compute_hash())
+
+        factors.append(vllm_factors)
+
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+        return hash_str
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
         # if batch_size > self.compilation_config.max_capture_size,
@@ -2765,32 +3022,6 @@ class VllmConfig:
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
-
-    def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the configs
-        that affect the model execution, and therefore the compilation.
-        """
-        factors: List[Any] = []
-        # summarize system state
-        from torch._inductor.codecache import CacheBase
-        system_factors = CacheBase.get_system()
-        factors.append(system_factors)
-
-        # summarize pytorch state
-        from torch._inductor.codecache import torch_key
-        torch_factors = torch_key()
-        factors.append(torch_factors)
-
-        # summarize vllm config
-        model_hash = self.model_config.compute_hash()
-        parallel_hash = self.parallel_config.compute_hash()
-        compile_hash = self.compilation_config.compute_hash()
-        vllm_factors = (model_hash, parallel_hash, compile_hash)
-        factors.append(vllm_factors)
-
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
-        return hash_str
 
     def __str__(self):
         return (
