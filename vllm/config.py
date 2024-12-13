@@ -317,6 +317,15 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
+    def compute_hash(self):
+        # summarize all the factors that affect the model compulation and
+        # hence model compilation, and use them to generate a hash
+        factors: List[Any] = []
+        factors.append(self.model)
+        factors.append(self.dtype)
+        factors.append(self.quantization)
+        return hashlib.sha256(str(factors).encode()).hexdigest()
+
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
     ) -> Optional["MultiModalConfig"]:
@@ -1063,6 +1072,12 @@ class ParallelConfig:
     world_size: int = field(init=False)
 
     rank: int = 0
+
+    def compute_hash(self):
+        factors: List[Any] = []
+        factors.append(self.pipeline_parallel_size)
+        factors.append(self.tensor_parallel_size)
+        return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
         self.world_size = self.pipeline_parallel_size * \
@@ -2364,6 +2379,18 @@ class CompilationConfig(BaseModel):
     # Map from layer name to the attention cls
     static_forward_context: Dict[str, Any] = PrivateAttr
 
+    def compute_hash(self) -> str:
+        factors: List[Any] = []
+        factors.append(self.level)
+        factors.append(self.backend)
+        factors.append(self.custom_ops)
+        factors.append(self.splitting_ops)
+        factors.append(self.use_inductor)
+        factors.append(self.inductor_compile_config)
+        factors.append(self.inductor_passes)
+        factors.append(self.pass_config.uuid())
+        return hashlib.sha256(str(factors).encode()).hexdigest()
+
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
         """Parse the CLI value for the compilation config."""
@@ -2676,25 +2703,17 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         if self.model_config is not None and \
+            self.compilation_config.level == CompilationLevel.PIECEWISE and \
             not self.compilation_config.cache_dir:
-            # generate a cache directory based on the model information
-            # TODO: consider more factors that will affect model forward,
-            # and hence affect the compilation.
-            model = self.model_config.model
-            assert self.parallel_config is not None
-            tp_size = self.parallel_config.tensor_parallel_size
-            pp_size = self.parallel_config.pipeline_parallel_size
-            splitting_ops = sorted(self.compilation_config.splitting_ops)
-            compilation_factors = (tp_size, pp_size, model, splitting_ops)
-            import hashlib
-            hash_str = hashlib.md5(
-                str(compilation_factors).encode()).hexdigest()[:10]
+            # no provided cache dir, generate one based on the known factors
+            # that affects the compilation. if none of the factors change,
+            # the cache dir will be the same so that we can reuse the compiled
+            # graph.
+            hash_key = self.compute_hash()
             cache_dir = os.path.join(envs.VLLM_CACHE_ROOT,
-                                     "torch_compile_cache", hash_str)
+                                     "torch_compile_cache", hash_key)
             os.makedirs(cache_dir, exist_ok=True)
             self.compilation_config.cache_dir = cache_dir
-
-        if self.compilation_config.level == CompilationLevel.PIECEWISE:
             logger.info("Using cache directory: %s for vLLM's torch.compile",
                         self.compilation_config.cache_dir)
 
@@ -2702,6 +2721,32 @@ class VllmConfig:
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+    def compute_hash(self) -> str:
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the model execution, and therefore the compilation.
+        """
+        factors: List[Any] = []
+        # summarize system state
+        from torch._inductor.codecache import CacheBase
+        system_factors = CacheBase.get_system()
+        factors.append(system_factors)
+
+        # summarize pytorch state
+        from torch._inductor.codecache import torch_key
+        torch_factors = torch_key()
+        factors.append(torch_factors)
+
+        # summarize vllm config
+        model_hash = self.model_config.compute_hash()
+        parallel_hash = self.parallel_config.compute_hash()
+        compile_hash = self.compilation_config.compute_hash()
+        vllm_factors = (model_hash, parallel_hash, compile_hash)
+        factors.append(vllm_factors)
+
+        hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+        return hash_str
 
     def __str__(self):
         return (
