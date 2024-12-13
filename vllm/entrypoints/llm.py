@@ -27,7 +27,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest, LLMGuidedOptions)
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
-                          PoolingRequestOutput, RequestOutput)
+                          PoolingRequestOutput, RequestOutput,
+                          ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -949,7 +950,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> List[ClassificationRequestOutput]:
+    ) -> List[ScoringRequestOutput]:
         """Generate similarity scores for all pairs ``<text,text_pair>``.
 
         The inputs can be ``1 -> 1``, ``1 -> N`` or ``N -> N``.
@@ -972,7 +973,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of ``ClassificationRequestOutput`` objects containing the
+            A list of ``ScoringRequestOutput`` objects containing the
             generated scores in the same order as the input prompts.
         """
         runner_type = self.llm_engine.model_config.runner_type
@@ -1067,7 +1068,7 @@ class LLM:
         items = self.engine_class.validate_outputs(outputs,
                                                    PoolingRequestOutput)
 
-        return [ClassificationRequestOutput.from_base(item) for item in items]
+        return [ScoringRequestOutput.from_base(item) for item in items]
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()

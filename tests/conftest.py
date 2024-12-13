@@ -912,9 +912,9 @@ class VllmRunner:
         self,
         text_1: Union[str, List[str]],
         text_2: Union[str, List[str]],
-    ) -> List[List[float]]:
+    ) -> List[float]:
         req_outputs = self.model.score(text_1, text_2)
-        return [req_output.outputs.probs for req_output in req_outputs]
+        return [req_output.outputs.score for req_output in req_outputs]
 
     def __enter__(self):
         return self

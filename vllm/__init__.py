@@ -10,7 +10,8 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.outputs import (ClassificationOutput, ClassificationRequestOutput,
                           CompletionOutput, EmbeddingOutput,
                           EmbeddingRequestOutput, PoolingOutput,
-                          PoolingRequestOutput, RequestOutput)
+                          PoolingRequestOutput, RequestOutput, ScoringOutput,
+                          ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
@@ -33,6 +34,8 @@ __all__ = [
     "EmbeddingRequestOutput",
     "ClassificationOutput",
     "ClassificationRequestOutput",
+    "ScoringOutput",
+    "ScoringRequestOutput",
     "LLMEngine",
     "EngineArgs",
     "AsyncLLMEngine",

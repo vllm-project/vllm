@@ -31,7 +31,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               ModelCard, ModelList,
-                                              ModelPermission,
+                                              ModelPermission, ScoreRequest,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               UnloadLoraAdapterRequest)
@@ -73,7 +73,7 @@ class LoRAModulePath:
 
 
 CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
-                              EmbeddingCompletionRequest,
+                              EmbeddingCompletionRequest, ScoreRequest,
                               TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,

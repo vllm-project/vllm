@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, ScoreRequest,
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import ClassificationRequestOutput, PoolingRequestOutput
+from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import make_async, merge_async_iterators
 
@@ -26,10 +26,10 @@ def request_output_to_score_response(
     data: List[ScoreResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
-        classify_res = ClassificationRequestOutput.from_base(final_res)
+        classify_res = ScoringRequestOutput.from_base(final_res)
 
         score_data = ScoreResponseData(index=idx,
-                                       score=classify_res.outputs.probs)
+                                       score=classify_res.outputs.score)
         data.append(score_data)
 
     usage = UsageInfo(

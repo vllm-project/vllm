@@ -105,8 +105,8 @@ These types of models serve as rerankers between candidate query-document pairs 
     output, = llm.score("What is the capital of France?",
                         "The capital of Brazil is Brasilia.")
 
-    probs = output.outputs.probs
-    print(f"Scores: {probs!r} (size={len(probs)})")
+    score = output.outputs.score
+    print(f"Score: {score}")
 
 A code example can be found in `examples/offline_inference_scoring.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_scoring.py>`_.
 

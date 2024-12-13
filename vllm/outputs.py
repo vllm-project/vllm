@@ -74,9 +74,10 @@ class PoolingOutput:
 
     @property
     def embedding(self) -> list[float]:
-        msg = ("LLM.encode() now returns raw outputs. "
-               "To return embeddings, use LLM.embed() instead. "
-               "To return class logits, use LLM.classify() instead. ")
+        msg = ("`LLM.encode()` now returns raw outputs. "
+               "To return embeddings, use `LLM.embed()`. "
+               "To return class probabilities, use `LLM.classify()` "
+               "and access the `probs` attribute. ")
         warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
         return self.data.tolist()
@@ -464,6 +465,47 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
         return ClassificationRequestOutput(
             request_id=request_output.request_id,
             outputs=ClassificationOutput.from_base(request_output.outputs),
+            prompt_token_ids=request_output.prompt_token_ids,
+            finished=request_output.finished,
+        )
+
+
+@dataclass
+class ScoringOutput:
+    """The output data of one scoring output of a request.
+
+    Args:
+        score: The similarity score, which is a scalar value.
+    """
+    score: float
+
+    @staticmethod
+    def from_base(pooling_output: PoolingOutput):
+        pooled_data = pooling_output.data
+        if pooled_data.ndim != 0:
+            raise ValueError("pooled_data should be a scalar score")
+
+        return ScoringOutput(pooled_data.item())
+
+    def __repr__(self) -> str:
+        return f"ScoringOutput(score={self.score})"
+
+    @property
+    def embedding(self) -> list[float]:
+        msg = ("`LLM.score()` now returns scalar scores. "
+               "Please access it via the `score` attribute. ")
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
+        return [self.score]
+
+
+class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
+
+    @staticmethod
+    def from_base(request_output: PoolingRequestOutput):
+        return ScoringRequestOutput(
+            request_id=request_output.request_id,
+            outputs=ScoringOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
             finished=request_output.finished,
         )

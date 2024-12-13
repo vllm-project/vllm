@@ -19,8 +19,5 @@ outputs = model.score(text_1, texts_2)
 
 # Print the outputs.
 for text_2, output in zip(texts_2, outputs):
-    scores = output.outputs.probs
-    scores_trimmed = ((str(scores[:16])[:-1] +
-                       ", ...]") if len(scores) > 16 else scores)
-    print(f"Pair: {[text_1, text_2]!r} | "
-          f"Scores: {scores_trimmed} (size={len(scores)})")
+    score = output.outputs.score
+    print(f"Pair: {[text_1, text_2]!r} | Score: {score}")
