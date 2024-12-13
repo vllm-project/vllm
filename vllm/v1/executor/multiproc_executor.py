@@ -64,7 +64,7 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
-        self.workers: Optional[List[WorkerProcHandle]] = []
+        self.workers: List[WorkerProcHandle] = []
         for rank in range(self.world_size):
             worker = WorkerProc.make_worker_process(vllm_config, rank, rank,
                                                     distributed_init_method,
@@ -125,7 +125,6 @@ class MultiprocExecutor(Executor):
             self.rpc_broadcast_mq.enqueue((method, args, kwargs))
 
             responses = [None] * self.world_size
-            assert self.workers is not None
             for w in self.workers:
                 dequeue_timeout = timeout - (time.monotonic() - start_time
                                              ) if timeout is not None else None
@@ -177,7 +176,6 @@ class MultiprocExecutor(Executor):
             return False
 
         # Send SIGTERM if still running
-        assert self.workers is not None
         active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
         for p in active_procs:
             p.terminate()
@@ -188,10 +186,8 @@ class MultiprocExecutor(Executor):
                 p.kill()
 
         self._cleanup_sockets()
-        self.workers = None
 
     def _cleanup_sockets(self):
-        assert self.workers is not None
         for w in self.workers:
             # Remove the zmq ipc socket file
             socket_path = w.ready_path.replace("ipc://", "")
@@ -204,7 +200,8 @@ class MultiprocExecutor(Executor):
             # again
             atexit.unregister(self.shutdown)
         """Properly shut down the executor and its workers"""
-        if (hasattr(self, 'workers') and self.workers is not None):
+        if getattr(self, 'shutting_down', False):
+            self.shutting_down = True
             for w in self.workers:  #TODO: not sure if needed
                 w.worker_response_mq = None
             self._ensure_worker_termination()
