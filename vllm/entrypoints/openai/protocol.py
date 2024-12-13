@@ -334,18 +334,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."))
-    logits_processors: Optional[List[Union[
-        str, LogitsProcessorConstructor]]] = Field(
-            default=None,
-            description=
-            ("A list of either qualified names of logits processors, or "
-             "constructor objects, to apply when sampling. A constructor is "
-             "a JSON object with a required 'qualname' field specifying the "
-             "qualified name of the processor class/factory, and optional "
-             "'args' and 'kwargs' fields containing positional and keyword "
-             "arguments. For example: {'qualname': "
-             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-             "{'param': 'value'}}."))
+    logits_processors: Optional[LogitsProcessors] = Field(
+        default=None,
+        description=(
+            "A list of either qualified names of logits processors, or "
+            "constructor objects, to apply when sampling. A constructor is "
+            "a JSON object with a required 'qualname' field specifying the "
+            "qualified name of the processor class/factory, and optional "
+            "'args' and 'kwargs' fields containing positional and keyword "
+            "arguments. For example: {'qualname': "
+            "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
+            "{'param': 'value'}}."))
 
     # doc: end-chat-completion-extra-params
 
@@ -656,18 +655,17 @@ class CompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
-    logits_processors: Optional[List[Union[
-        str, LogitsProcessorConstructor]]] = Field(
-            default=None,
-            description=
-            ("A list of either qualified names of logits processors, or "
-             "constructor objects, to apply when sampling. A constructor is "
-             "a JSON object with a required 'qualname' field specifying the "
-             "qualified name of the processor class/factory, and optional "
-             "'args' and 'kwargs' fields containing positional and keyword "
-             "arguments. For example: {'qualname': "
-             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-             "{'param': 'value'}}."))
+    logits_processors: Optional[LogitsProcessors] = Field(
+        default=None,
+        description=(
+            "A list of either qualified names of logits processors, or "
+            "constructor objects, to apply when sampling. A constructor is "
+            "a JSON object with a required 'qualname' field specifying the "
+            "qualified name of the processor class/factory, and optional "
+            "'args' and 'kwargs' fields containing positional and keyword "
+            "arguments. For example: {'qualname': "
+            "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
+            "{'param': 'value'}}."))
 
     # doc: end-completion-extra-params
 
