@@ -181,7 +181,7 @@ steps:
   commands:
     - VLLM_USE_V1=1 pytest -v -s v1
 
-- label: Examples Test # 20min
+- label: Examples Test # 25min
   working_dir: "/vllm-workspace/examples"
   #mirror_hardwares: [amd]
   source_file_dependencies:
