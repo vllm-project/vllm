@@ -2710,7 +2710,9 @@ class CompilationConfig(BaseModel):
             from vllm.compilation.backends import InductorHashCache
             self.inductor_hash_cache: InductorHashCache = InductorHashCache(
                 self.cache_dir, disabled=disabled)
-            if not disabled:
+            if disabled:
+                logger.info("vLLM's torch.compile cache is disabled.")
+            else:
                 logger.info(
                     "Using cache directory: %s for vLLM's torch.compile",
                     self.cache_dir)
