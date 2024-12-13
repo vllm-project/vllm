@@ -131,7 +131,7 @@ def wrap_inductor(graph,
         # it to get the hash of the compiled graph directly.
         from torch._inductor.codecache import compiled_fx_graph_hash
 
-        def mocked_compiled_fx_graph_hash(*args, **kwargs):
+        def hijack_compiled_fx_graph_hash(*args, **kwargs):
             out = compiled_fx_graph_hash(*args, **kwargs)
             # store the hash in the cache
             nonlocal cache_data
@@ -152,7 +152,7 @@ def wrap_inductor(graph,
 
         with patch(# for hijacking the hash of the compiled graph
                 "torch._inductor.codecache.compiled_fx_graph_hash",
-                mocked_compiled_fx_graph_hash), \
+                hijack_compiled_fx_graph_hash), \
             patch(# for providing a dummy shape environment
                 "torch._inductor.codecache.FxGraphCache._get_shape_env",
                  _get_shape_env), \
