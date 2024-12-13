@@ -81,8 +81,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_input: bool,
     ):
         #No LoRA request, so return directly
@@ -103,8 +103,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_input: bool,
     ):
         bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
@@ -115,8 +115,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_input: bool = True,
     ):
         """
