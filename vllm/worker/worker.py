@@ -204,9 +204,10 @@ class Worker(LocalOrDistributedWorkerBase):
 
         self._assert_memory_footprint_increased_during_profiling()
 
-        available_kv_cache_memory = (
-            total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            result.non_kv_cache_memory_in_bytes)
+        memory_for_current_instance = total_gpu_memory * \
+            self.cache_config.gpu_memory_utilization
+        available_kv_cache_memory = (memory_for_current_instance -
+                                     result.non_kv_cache_memory_in_bytes)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -228,6 +229,8 @@ class Worker(LocalOrDistributedWorkerBase):
                f"{(total_gpu_memory / GiB_bytes):.2f}GiB\n"
                "gpu_memory_utilization\t"
                f"{self.cache_config.gpu_memory_utilization:.2f}\n"
+               "the current vLLM instance can use\t"
+               f"{(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
                "model weights take\t"
                f"{(result.weights_memory_in_bytes / GiB_bytes):.2f}GiB\n"
                "non_torch_memory\t"
