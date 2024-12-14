@@ -1767,6 +1767,9 @@ def memory_profiling(
 
     yield result
 
+    gc.collect()
+    torch.cuda.empty_cache()
+
     result.after_profile.measure()
 
     diff = result.after_profile - result.before_profile
@@ -1776,6 +1779,3 @@ def memory_profiling(
     result.non_torch_increase_in_bytes = current_cuda_memory_bytes - baseline_memory_in_bytes - weights_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
     result.profile_time = diff.timestamp
     result.non_kv_cache_memory_in_bytes = result.non_torch_increase_in_bytes + result.torch_peak_increase_in_bytes + result.weights_memory_in_bytes  # noqa
-
-    gc.collect()
-    torch.cuda.empty_cache()
