@@ -350,15 +350,11 @@ def get_max_phi3v_image_tokens(ctx: InputContext) -> int:
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L181
 def get_phi3v_image_feature_size(
-    hf_config: PretrainedConfig,
     *,
     input_height: int,
     input_width: int,
-    num_crops: Optional[int],
+    num_crops: int,
 ) -> int:
-    if num_crops is None:
-        num_crops = hf_config.get("num_crops", 16)
-
     new_width, new_height = _calc_hd_transform_size(width=input_width,
                                                     height=input_height,
                                                     hd_num=num_crops)
@@ -400,8 +396,6 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         hf_inputs: BatchFeature,
         mm_processor_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
-        hf_config = self.ctx.get_hf_config()
-
         hf_processor = self._get_hf_processor()
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
@@ -411,10 +405,9 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         def get_replacement_phi3v(item_idx: int):
             image_size = mm_items.get_image_size(item_idx)
             num_tokens = get_phi3v_image_feature_size(
-                hf_config,
                 input_width=image_size.width,
                 input_height=image_size.height,
-                num_crops=mm_processor_kwargs.get("num_crops"),
+                num_crops=mm_processor_kwargs.get("num_crops", 16),
             )
 
             return [_IMAGE_TOKEN_ID] * num_tokens
