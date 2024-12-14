@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import numpy as np
 import torch
@@ -193,9 +193,9 @@ class GPUModelRunner:
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
-        for req_data in scheduler_output.scheduled_new_reqs:
-            req_id = req_data.req_id
-            sampling_params = req_data.sampling_params
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            req_id = new_req_data.req_id
+            sampling_params = new_req_data.sampling_params
             if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
@@ -204,25 +204,25 @@ class GPUModelRunner:
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
-                prompt_token_ids=req_data.prompt_token_ids,
-                prompt=req_data.prompt,
-                mm_inputs=req_data.mm_inputs,
-                mm_positions=req_data.mm_positions,
+                prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt=new_req_data.prompt,
+                mm_inputs=new_req_data.mm_inputs,
+                mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
                 generator=generator,
-                block_ids=req_data.block_ids,
-                num_computed_tokens=req_data.num_computed_tokens,
+                block_ids=new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
             )
             req_ids_to_add.append(req_id)
 
         # Update the cached states of the resumed requests.
-        for req_data in scheduler_output.scheduled_resumed_reqs:
-            req_id = req_data.req_id
+        for res_req_data in scheduler_output.scheduled_resumed_reqs:
+            req_id = res_req_data.req_id
             req_state = self.requests[req_id]
 
-            req_state.block_ids = req_data.block_ids
-            req_state.num_computed_tokens = req_data.num_computed_tokens
+            req_state.block_ids = res_req_data.block_ids
+            req_state.num_computed_tokens = res_req_data.num_computed_tokens
             req_ids_to_add.append(req_id)
 
         # Add the new or resumed requests to the persistent batch.
@@ -259,6 +259,7 @@ class GPUModelRunner:
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
@@ -373,7 +374,7 @@ class GPUModelRunner:
 
         # Batch the multi-modal inputs.
         mm_inputs: List[MultiModalKwargs] = []
-        req_input_ids: List[Tuple[int, int]] = []
+        req_input_ids: List[Tuple[str, int]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:
@@ -406,6 +407,7 @@ class GPUModelRunner:
         encoder_outputs: List[torch.Tensor] = []
         num_reqs = self.input_batch.num_reqs
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -514,6 +516,7 @@ class GPUModelRunner:
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            assert req_id is not None
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -539,8 +542,15 @@ class GPUModelRunner:
             logprobs = None
         else:
             logprobs = sampler_output.logprobs.cpu()
+
+        # num_reqs entries should be non-None
+        assert all(
+            req_id is not None for req_id in
+            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
+        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
+
         model_runner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
