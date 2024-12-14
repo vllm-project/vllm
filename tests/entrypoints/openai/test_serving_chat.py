@@ -31,6 +31,9 @@ class MockModelConfig:
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
 
+    def get_diff_sampling_param(self):
+        return {}
+
 
 @dataclass
 class MockEngine:
@@ -93,3 +96,38 @@ def test_serving_chat_should_set_correct_max_tokens():
         asyncio.run(serving_chat.create_chat_completion(req))
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+
+def test_serving_chat_could_load_correct_generation_config():
+
+    mock_model_config = MagicMock(spec=MockModelConfig)
+    mock_model_config.get_diff_sampling_param.return_value = {
+        "temperature": 0.5,
+        "repetition_penalty": 1.05
+    }
+
+    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+
+    # Initialize the serving chat
+    OpenAIServingChat(mock_engine,
+                      mock_model_config,
+                      BASE_MODEL_PATHS,
+                      response_role="assistant",
+                      chat_template=CHAT_TEMPLATE,
+                      chat_template_content_format="auto",
+                      lora_modules=None,
+                      prompt_adapters=None,
+                      request_logger=None)
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "what is 1+1?"
+        }],
+        guided_decoding_backend="outlines",
+    )
+
+    assert req.temperature == 0.5
+    assert req.repetition_penalty == 1.05
