@@ -120,7 +120,7 @@ Text Generation (``--task generate``)
     - ✅︎
   * - :code:`CohereForCausalLM`
     - Command-R
-    - :code:`CohereForAI/c4ai-command-r-v01`, etc.
+    - :code:`CohereForAI/c4ai-command-r-v01`, :code:`CohereForAI/c4ai-command-r7b-12-2024`, etc.
     - ✅︎
     - ✅︎
   * - :code:`DbrxForCausalLM`
