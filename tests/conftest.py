@@ -719,14 +719,6 @@ class VllmRunner:
 
         return inputs
 
-    def classify(self, prompts: List[str]) -> List[str]:
-        req_outputs = self.model.encode(prompts)
-        outputs = []
-        for req_output in req_outputs:
-            embedding = req_output.outputs.embedding
-            outputs.append(embedding)
-        return outputs
-
     def generate(
         self,
         prompts: List[str],
@@ -897,6 +889,10 @@ class VllmRunner:
             returned_outputs.append((token_ids, texts))
         return returned_outputs
 
+    def classify(self, prompts: List[str]) -> List[List[float]]:
+        req_outputs = self.model.classify(prompts)
+        return [req_output.outputs.probs for req_output in req_outputs]
+
     def encode(
         self,
         prompts: List[str],
@@ -909,16 +905,16 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.encode(inputs)
+        req_outputs = self.model.embed(inputs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
     def score(
         self,
         text_1: Union[str, List[str]],
         text_2: Union[str, List[str]],
-    ) -> List[List[float]]:
+    ) -> List[float]:
         req_outputs = self.model.score(text_1, text_2)
-        return [req_output.outputs.embedding for req_output in req_outputs]
+        return [req_output.outputs.score for req_output in req_outputs]
 
     def __enter__(self):
         return self
