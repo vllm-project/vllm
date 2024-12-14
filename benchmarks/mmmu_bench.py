@@ -45,7 +45,9 @@ async def sample_mmmu_pro_vision_requests(
     for data in dataset:
         if len(sampled_requests) == num_requests:
             break
-
+        
+        # MMMU-Pro vision direct prompt
+        # Ref: https://github.com/MMMU-Benchmark/MMMU/blob/6ce42f4d8f70c1841c67867152648974415b5cac/mmmu-pro/prompts.yaml#L5
         prompt = (
             "Answer with the option letter from the given choices directly. "
             "The last line of your response should be of the following "
