@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import memory_profiling
+from vllm.utils import GiB_bytes, memory_profiling
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -195,17 +195,18 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling() as result:
+        with memory_profiling(baseline_memory_in_bytes=total_gpu_memory -
+                              self.init_gpu_memory,
+                              weights_memory_in_bytes=self.model_runner.
+                              model_memory_usage) as result:
             self.model_runner.profile_run()
             torch.cuda.synchronize()
-            gc.collect()
-            torch.cuda.empty_cache()
 
         self._assert_memory_footprint_increased_during_profiling()
 
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            result.peak_memory_in_this_process_in_bytes)
+            result.non_kv_cache_memory_in_bytes)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -220,29 +221,23 @@ class Worker(LocalOrDistributedWorkerBase):
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
-        logger.info(
-            "Memory profiling results:\n"
-            "duration\t%.2f seconds\n"
-            "total_gpu_memory (GPU level)\t%.2fGiB\n"
-            "gpu_memory_utilization (current process)\t%.2f\n"
-            "initial_memory_usage (GPU level)\t%.2fGiB\n"
-            "initial_torch_memory (current process)\t%.2fGiB\n"
-            "post_profile_memory_usage (GPU level)\t%.2fGiB\n"
-            "post_profile_torch_memory (current process)\t%.2fGiB\n"
-            "peak_torch_memory (current process)\t%.2fGiB\n"
-            "non_torch_memory (current process)\t%.2fGiB\n"
-            "kv_cache_size (current process)\t%.2fGiB\n",
-            result.profile_time,
-            total_gpu_memory / (1024**3),
-            self.cache_config.gpu_memory_utilization,
-            (result.before_profile.cuda_memory_in_bytes) / (1024**3),
-            (result.before_profile.torch_memory_in_bytes) / (1024**3),
-            (result.after_profile.cuda_memory_in_bytes) / (1024**3),
-            (result.after_profile.torch_memory_in_bytes) / (1024**3),
-            result.torch_peak_memory_in_bytes / (1024**3),
-            result.non_torch_memory_in_bytes / (1024**3),
-            available_kv_cache_memory / (1024**3),
-        )
+        msg = ("Memory profiling results:\n"
+               "duration\t"
+               f"{result.profile_time:.2f} seconds\n"
+               "total_gpu_memory\t"
+               f"{(total_gpu_memory / GiB_bytes):.2f}GiB\n"
+               "gpu_memory_utilization\t"
+               f"{self.cache_config.gpu_memory_utilization:.2f}\n"
+               "model weights take\t"
+               f"{(result.weights_memory_in_bytes / GiB_bytes):.2f}GiB\n"
+               "non_torch_memory\t"
+               f"{(result.non_torch_increase_in_bytes / GiB_bytes):.2f}GiB\n"
+               "PyTorch activation peak memory\t"
+               f"{(result.torch_peak_increase_in_bytes / GiB_bytes):.2f}GiB\n"
+               "available_kv_cache_memory\t"
+               f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB\n")
+
+        logger.info(msg)
 
         # Final cleanup
         if self.model_runner.lora_manager:
