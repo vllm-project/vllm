@@ -808,12 +808,15 @@ class BaseMultiModalProcessor(ABC):
 
         total_len = len(prompt_token_ids)
         if total_len > seq_len:
-            raise RuntimeError(
-                f"The current seq_len ({seq_len=}) is too short to contain "
-                "the embeddings of the multi-modal data in the worst case "
-                f"({total_placeholders_by_modality=}, {total_len=}). "
-                "To fix this, you should increase `max_model_len`, "
-                "reduce `max_num_seqs`, and/or reduce `mm_counts`.")
+            logger.warning(
+                "The context length (%d) of the model is too short "
+                "to hold the multi-modal embeddings in the worst case "
+                "(%d tokens in total, out of which %s are reserved for "
+                "multi-modal embeddings). This may cause certain multi-modal "
+                "inputs to fail during inference, even when the input text is "
+                "short. To avoid this, you should increase `max_model_len`, "
+                "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
+                total_len, total_placeholders_by_modality)
 
         prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
 
