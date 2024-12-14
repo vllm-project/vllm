@@ -197,6 +197,10 @@ class _BoundPromptReplacement(Generic[_T]):
     _replacement: Union[Callable[[list[_T], BatchFeature, int], _PromptSeq],
                         _PromptSeq] = field(repr=False)
 
+    def __post_init__(self) -> None:
+        self._replacement_cache = dict[tuple[int, int, int],
+                                       _BoundPromptSequence]()
+
     @property
     def target(self) -> _BoundPromptSequence:
         target = self._target
@@ -215,13 +219,26 @@ class _BoundPromptReplacement(Generic[_T]):
     ) -> _BoundPromptSequence:
         replacement = self._replacement
         if callable(replacement):
-            replacement = replacement(mm_items, hf_inputs, item_idx)
+            # We assume that the same mm_items and hf_inputs are used
+            # throughout processing
+            cache_key = (id(mm_items), id(hf_inputs), item_idx)
+            if cache_key in self._replacement_cache:
+                return self._replacement_cache[cache_key]
 
-        return _BoundPromptSequence(
+            replacement = replacement(mm_items, hf_inputs, item_idx)
+        else:
+            cache_key = None
+
+        bound_replacement = _BoundPromptSequence(
             tokenizer=self.tokenizer,
             _text=replacement if isinstance(replacement, str) else None,
             _token_ids=replacement if isinstance(replacement, list) else None,
         )
+
+        if cache_key is not None:
+            self._replacement_cache[cache_key] = bound_replacement
+
+        return bound_replacement
 
 
 def to_multi_format(data: MultiModalDataDict) -> dict[str, list[Any]]:
@@ -827,9 +844,8 @@ class BaseMultiModalProcessor(ABC):
                 f"The current seq_len ({seq_len=}) is too short to contain "
                 "the embeddings of the multi-modal data in the worst case "
                 f"({total_placeholders_by_modality=}, {total_len=}). "
-                "This may result in OOM at inference time for certain inputs. "
-                "You can avoid this issue by increase `max_model_len`, "
-                "reducing `max_num_seqs`, and/or reducing `mm_counts`.")
+                "To fix this, you should increase `max_model_len`, "
+                "reduce `max_num_seqs`, and/or reduce `mm_counts`.")
 
         prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
 
