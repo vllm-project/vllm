@@ -1,6 +1,6 @@
 import atexit
 import os
-from typing import List
+from typing import List, Optional
 
 import msgspec
 import zmq
@@ -11,7 +11,8 @@ from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
-from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.core import (EngineCore, EngineCoreProc,
+                                 EngineCoreProcHandle)
 from vllm.v1.serial_utils import PickleEncoder
 
 logger = init_logger(__name__)
@@ -155,6 +156,7 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
+        self.proc_handle: Optional[EngineCoreProcHandle]
         self.proc_handle = EngineCoreProc.make_engine_core_process(
             *args,
             input_path=
