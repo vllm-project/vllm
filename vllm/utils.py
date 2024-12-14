@@ -1736,12 +1736,12 @@ def memory_profiling(
     During profiling (peak):
         category 1: 1 GiB
         category 2: 4 GiB (peak activation tensors take 2 GiB)
-        category 3: 1 GiB (memory used by NCCL + potentially other laziy allocated memory)
+        category 3: 1 GiB (memory used by NCCL + buffers for some attention backends)
 
     After profiling:
         category 1: 1 GiB
         category 2: 3 GiB (after garbage-collecting activation tensors)
-        category 3: 1 GiB (memory used by NCCL + potentially other laziy allocated memory)
+        category 3: 1 GiB (memory used by NCCL + buffers for some attention backends)
 
     In this case, non-kv cache takes 5 GiB in total, including:
     a. 2 GiB used by the model weights (category 2)
