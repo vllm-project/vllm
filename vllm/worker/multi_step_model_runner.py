@@ -645,9 +645,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return model_input
 
     def load_model(self) -> None:
-        output = self._base_model_runner.load_model()
+        self._base_model_runner.load_model()
         self.model_memory_usage = self._base_model_runner.model_memory_usage
-        return output
 
     def save_sharded_state(
         self,
