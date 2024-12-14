@@ -274,7 +274,20 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
+def _check_multiproc_method():
+    if (cuda_is_initialized()
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
+        logger.warning("CUDA was previously initialized. We must use "
+                       "the `spawn` multiprocessing start method. Setting "
+                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                       "See https://docs.vllm.ai/en/latest/getting_started/"
+                       "debugging.html#python-multiprocessing "
+                       "for more information.")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
 def get_mp_context():
+    _check_multiproc_method()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
 
@@ -284,12 +297,7 @@ def set_multiprocessing_worker_envs(parallel_config):
     in a multiprocessing environment. This should be called by the parent 
     process before worker processes are created"""
 
-    if (cuda_is_initialized()
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-        logger.warning("CUDA was previously initialized. We must use "
-                       "the `spawn` multiprocessing start method. Setting "
-                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.")
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    _check_multiproc_method()
 
     # Configure thread parallelism if OMP_NUM_THREADS isn't set
     #

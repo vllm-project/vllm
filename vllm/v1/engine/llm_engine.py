@@ -196,3 +196,10 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown()
