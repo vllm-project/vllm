@@ -46,7 +46,7 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
     global forward_start_time
     need_to_track_batchsize = track_batchsize and context is not None
     if need_to_track_batchsize:
-        forward_start_time = time.monotonic()
+        forward_start_time = time.perf_counter()
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
@@ -70,7 +70,7 @@ def set_forward_context(context: Any, vllm_config: VllmConfig):
             # adding a sync point here should not affect
             # scheduling of the next batch
             torch.cuda.synchronize()
-            now = time.monotonic()
+            now = time.perf_counter()
             # time measurement is in milliseconds
             batchsize_forward_time[batchsize].append(
                 (now - forward_start_time) * 1000)
