@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         InputProcessingContext,
                                         ModalityProcessingMetadata,
@@ -115,33 +115,6 @@ def get_max_llava_image_tokens(ctx: InputContext):
         return num_image_tokens
     else:
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
-
-def dummy_mm_kwargs_for_llava(ctx: InputProcessingContext,
-                              mm_counts: Mapping[str, int]):
-    hf_config = ctx.get_hf_config(LlavaConfig)
-    vision_config = hf_config.vision_config
-    num_images = mm_counts["image"]
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        data = dummy_image_for_clip(vision_config, num_images)
-    elif isinstance(vision_config, SiglipVisionConfig):
-        data = dummy_image_for_siglip(vision_config, num_images)
-    elif isinstance(vision_config, PixtralVisionConfig):
-        data = dummy_image_for_pixtral_hf(vision_config, num_images)
-    else:
-        msg = f"Unsupported vision config: {type(vision_config)}"
-        raise NotImplementedError(msg)
-
-    hf_processor = ctx.get_hf_processor()
-    image_processor = hf_processor.image_processor  # type: ignore
-    hf_inputs = image_processor.preprocess(data['image'], return_tensors="pt")
-    is_pixtral = isinstance(hf_processor, PixtralProcessor)
-
-    return MultiModalKwargs(
-        **hf_inputs,
-        is_pixtral=torch.tensor(is_pixtral),
-    )
 
 
 def create_metadata_for_llava(
