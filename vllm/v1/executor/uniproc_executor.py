@@ -26,8 +26,7 @@ class UniprocExecutor(Executor):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
-        self.worker: Optional[Worker] = self._create_worker()
-        assert self.worker is not None
+        self.worker: Worker = self._create_worker()
         self.worker.initialize()
         self.worker.load_model()
 
@@ -54,7 +53,6 @@ class UniprocExecutor(Executor):
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        assert self.worker is not None
         return self.worker.determine_num_available_blocks()
 
     def initialize(self, num_gpu_blocks: int) -> None:
@@ -64,7 +62,6 @@ class UniprocExecutor(Executor):
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# GPU blocks: %d", num_gpu_blocks)
-        assert self.worker is not None
         self.worker.initialize_cache(num_gpu_blocks)
         self.worker.compile_or_warm_up_model()
 
@@ -72,16 +69,14 @@ class UniprocExecutor(Executor):
         self,
         scheduler_output,
     ) -> ModelRunnerOutput:
-        assert self.worker is not None
         output = self.worker.execute_model(scheduler_output)
         return output
 
     def profile(self, is_start: bool = True):
-        assert self.worker is not None
         self.worker.profile(is_start)
 
     def shutdown(self):
-        self.worker = None
+        pass
 
     def check_health(self) -> None:
         # UniprocExecutor will always be healthy as long as
