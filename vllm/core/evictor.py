@@ -76,9 +76,9 @@ class LRUEvictor(Evictor):
     highest num_hashed_tokens value, then one will be chose arbitrarily
     """
 
-    # CLEANUP_THRESHOLD determines the maximum allowable size of the priority queue
-    # relative to the free table size. When this threshold is exceeded, a cleanup
-    # operation is triggered to reduce memory usage.
+    # CLEANUP_THRESHOLD determines the maximum allowable size of the priority
+    # queue relative to the free table size. When this threshold is exceeded,
+    # a cleanup operation is triggered to reduce memory usage.
     CLEANUP_THRESHOLD = 50
 
     def __init__(self):
@@ -94,8 +94,9 @@ class LRUEvictor(Evictor):
 
         while self.priority_queue:
             # Lazy deletion algorithm is applied here. We do not remove outdated
-            # entries from the priority queue at the time of updating the last_accessed
-            # timestamp. Instead, outdated entries are filtered out during eviction.
+            # entries from the priority queue at the time of updating the
+            # last_accessed timestamp.
+            # Instead, outdated entries are filtered out during eviction.
             last_accessed, _, block_id, content_hash = heapq.heappop(
                 self.priority_queue)
             if (block_id in self.free_table and
