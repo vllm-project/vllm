@@ -32,7 +32,9 @@ def run_ultravox(question: str, audio_count: int):
                                            tokenize=False,
                                            add_generation_prompt=True)
 
-    llm = LLM(model=model_name, limit_mm_per_prompt={"audio": audio_count})
+    llm = LLM(model=model_name,
+              trust_remote_code=True,
+              limit_mm_per_prompt={"audio": audio_count})
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
