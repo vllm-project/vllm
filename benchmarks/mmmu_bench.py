@@ -16,8 +16,10 @@ import argparse
 import base64
 import dataclasses
 import io
+import math
 import random
 import time
+from itertools import chain
 
 from datasets import load_dataset
 from PIL import Image
@@ -77,6 +79,10 @@ def sample_mmmu_pro_vision_requests(
             ],
         }]
         sampled_requests.append(messages)
+
+    n = math.ceil(num_requests / num_unique_images)
+    sampled_requests = list(
+        chain.from_iterable([x] * n for x in sampled_requests))[:num_requests]
 
     return sampled_requests
 
