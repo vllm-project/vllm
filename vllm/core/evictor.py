@@ -93,10 +93,10 @@ class LRUEvictor(Evictor):
             raise ValueError("No usable cache memory left")
 
         while self.priority_queue:
-            # Lazy deletion algorithm is applied here. We do not remove outdated
-            # entries from the priority queue at the time of updating the
-            # last_accessed timestamp.
-            # Instead, outdated entries are filtered out during eviction.
+            # We do not remove outdated entries from the priority queue at the
+            # time of updating the last_accessed timestamp. Instead, outdated
+            # entries are filtered out here during eviction. Outdated entries would
+            # either not in the free table, or have older last accessed time.
             last_accessed, _, block_id, content_hash = heapq.heappop(
                 self.priority_queue)
             if (block_id in self.free_table and
