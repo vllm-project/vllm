@@ -1,11 +1,11 @@
 from typing import cast
 
 import pytest
-from transformers import BatchFeature
 
-from vllm.multimodal.processing import (PromptReplacement, _PlaceholderInfo,
-                                        find_text_matches, find_token_matches,
-                                        iter_placeholders, iter_token_matches,
+from vllm.multimodal.processing import (MultiModalDataItems, PromptReplacement,
+                                        _PlaceholderInfo, find_text_matches,
+                                        find_token_matches, iter_placeholders,
+                                        iter_token_matches,
                                         replace_text_matches,
                                         replace_token_matches)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -136,7 +136,7 @@ def test_find_token_matches(prompt, target_by_key, expected_by_key):
     mock_tokenizer = cast(AnyTokenizer, object())
 
     prompt_repls = [
-        PromptReplacement(target, []).bind(key, mock_tokenizer)
+        PromptReplacement(key, target, []).bind(mock_tokenizer)
         for key, target in target_by_key.items()
     ]
     result = find_token_matches(prompt, prompt_repls)
@@ -243,7 +243,7 @@ def test_find_text_matches(prompt, target_by_key, expected_by_key):
     mock_tokenizer = cast(AnyTokenizer, object())
 
     prompt_repls = [
-        PromptReplacement(target, []).bind(key, mock_tokenizer)
+        PromptReplacement(key, target, []).bind(mock_tokenizer)
         for key, target in target_by_key.items()
     ]
     result = find_text_matches(prompt, prompt_repls)
@@ -280,8 +280,8 @@ def test_find_text_matches(prompt, target_by_key, expected_by_key):
                 "pattern_1": "<image><image>",
                 # Test empty replacement
                 "pattern_2": "",
-                # Test regular replacement
-                "pattern_3": "??",
+                # Test dynamic replacement (beyond the form of `unit * count`)
+                "pattern_3": "?!?",
             },
         ),
     ]
@@ -290,8 +290,8 @@ def test_find_text_matches(prompt, target_by_key, expected_by_key):
     ("mm_count", "expected"),
     [
         (0, "Image:<image>Image:<image><image>!"),
-        (1, "<image><image>Image:<image><image>??"),
-        (2, "<image><image><image><image><image>??"),
+        (1, "<image><image>Image:<image><image>?!?"),
+        (2, "<image><image><image><image><image>?!?"),
     ]
 )
 # yapf: enable
@@ -306,7 +306,7 @@ def test_find_replace_text(
     mock_tokenizer = cast(AnyTokenizer, object())
 
     prompt_repls = [
-        PromptReplacement(target, repl_by_key[key]).bind(key, mock_tokenizer)
+        PromptReplacement(key, target, repl_by_key[key]).bind(mock_tokenizer)
         for key, target in target_by_key.items()
     ]
     matches = find_text_matches(prompt, prompt_repls)
@@ -314,9 +314,8 @@ def test_find_replace_text(
     result = replace_text_matches(
         prompt,
         matches,
-        {key: [None] * mm_count
-         for key in repl_by_key},
-        BatchFeature(),
+        MultiModalDataItems({key: [None] * mm_count
+                             for key in repl_by_key}),
     )
 
     # Only displayed on error
@@ -347,8 +346,8 @@ def test_find_replace_text(
                 "pattern_1": [32000, 32000],
                 # Test empty replacement
                 "pattern_2": [],
-                # Test regular replacement
-                "pattern_3": [1550, 1550],
+                # Test dynamic replacement (beyond the form of `unit * count`)
+                "pattern_3": [1550, 918, 1550],
             },
         ),
     ]
@@ -357,8 +356,8 @@ def test_find_replace_text(
     ("mm_count", "expected"),
     [
         (0, [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918]),
-        (1, [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 1550]),
-        (2, [1, 32000, 32000, 32000, 32000, 32000, 1550, 1550]),
+        (1, [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 918, 1550]),
+        (2, [1, 32000, 32000, 32000, 32000, 32000, 1550, 918, 1550]),
     ]
 )
 # yapf: enable
@@ -373,7 +372,7 @@ def test_find_replace_tokens(
     mock_tokenizer = cast(AnyTokenizer, object())
 
     prompt_repls = [
-        PromptReplacement(target, repl_by_key[key]).bind(key, mock_tokenizer)
+        PromptReplacement(key, target, repl_by_key[key]).bind(mock_tokenizer)
         for key, target in target_by_key.items()
     ]
     matches = find_token_matches(prompt, prompt_repls)
@@ -381,9 +380,8 @@ def test_find_replace_tokens(
     result = replace_token_matches(
         prompt,
         matches,
-        {key: [None] * mm_count
-         for key in repl_by_key},
-        BatchFeature(),
+        MultiModalDataItems({key: [None] * mm_count
+                             for key in repl_by_key}),
     )
 
     # Only displayed on error
@@ -401,7 +399,7 @@ def test_find_replace_tokens(
         {
             "pattern_1": [32000, 32000],
             "pattern_2": [],
-            "pattern_3": [1550, 1550],
+            "pattern_3": [1550, 918, 1550],
         },
     ],
 )
@@ -419,7 +417,7 @@ def test_find_replace_tokens(
             ],
         ),
         (
-            [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 1550],
+            [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 918, 1550],
             [
                 _PlaceholderInfo(
                     modality="pattern_1",
@@ -434,12 +432,12 @@ def test_find_replace_tokens(
                 _PlaceholderInfo(
                     modality="pattern_3",
                     start_idx=7,
-                    replacement=[1550, 1550],
+                    replacement=[1550, 918, 1550],
                 ),
             ],
         ),
         (
-            [1, 32000, 32000, 32000, 32000, 32000, 1550, 1550],
+            [1, 32000, 32000, 32000, 32000, 32000, 1550, 918, 1550],
             [
                 _PlaceholderInfo(
                     modality="pattern_1",
@@ -454,7 +452,7 @@ def test_find_replace_tokens(
                 _PlaceholderInfo(
                     modality="pattern_3",
                     start_idx=6,
-                    replacement=[1550, 1550],
+                    replacement=[1550, 918, 1550],
                 ),
             ],
         ),
@@ -469,7 +467,7 @@ def test_iter_placeholders(
     mock_tokenizer = cast(AnyTokenizer, object())
 
     prompt_repls = [
-        PromptReplacement([], repl).bind(key, mock_tokenizer)
+        PromptReplacement(key, [], repl).bind(mock_tokenizer)
         for key, repl in repl_by_key.items()
     ]
 
@@ -478,8 +476,7 @@ def test_iter_placeholders(
             prompt_repls,
             prompt,
             # Effectively match all occurrences in the prompt
-            {key: [None] * 3 for key in repl_by_key},
-            BatchFeature(),
+            MultiModalDataItems({key: [None] * 3 for key in repl_by_key}),
          ))
 
     # Only displayed on error
