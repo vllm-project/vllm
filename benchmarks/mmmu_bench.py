@@ -31,9 +31,16 @@ from vllm.utils import FlexibleArgumentParser
 def sample_mmmu_pro_vision_requests(
     dataset,
     num_requests: int,
+    image_hit_rate: float,
 ):
 
     sampled_requests = []
+
+    num_unique_images = int(num_requests * (1 - image_hit_rate))
+    print(
+        f"Total {num_requests} requests with {num_unique_images} unique images"
+    )
+    dataset = dataset.take(num_unique_images)
 
     for data in dataset:
         if len(sampled_requests) == num_requests:
@@ -78,6 +85,7 @@ def sample_mmmu_pro_vision_requests(
 def sample_hf_requests(
     num_requests: int,
     random_seed: int,
+    image_hit_rate: float,
 ):
 
     dataset = load_dataset('MMMU/MMMU_Pro',
@@ -85,14 +93,16 @@ def sample_hf_requests(
                            split="test",
                            streaming=True)
     dataset = dataset.shuffle(seed=random_seed)
-    return sample_mmmu_pro_vision_requests(dataset, num_requests)
+    return sample_mmmu_pro_vision_requests(dataset, num_requests,
+                                           image_hit_rate)
 
 
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
     engine_args = EngineArgs.from_cli_args(args)
-    sampled = sample_hf_requests(args.num_prompts, args.seed)
+    sampled = sample_hf_requests(args.num_prompts, args.seed,
+                                 args.image_hit_rate)
     llm = LLM(**dataclasses.asdict(engine_args))
     sampling_params = SamplingParams(max_tokens=args.output_len, temperature=0)
     st = time.perf_counter()
@@ -121,6 +131,10 @@ if __name__ == "__main__":
                         type=int,
                         default=1000,
                         help="Number of prompts to process.")
+    parser.add_argument("--image-hit-rate",
+                        type=float,
+                        default=0.0,
+                        help="Image hit rate between 0 and 1.")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     if args.tokenizer is None:
