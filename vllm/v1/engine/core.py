@@ -1,4 +1,3 @@
-import multiprocessing
 import pickle
 import queue
 import signal
@@ -13,6 +12,7 @@ import zmq.asyncio
 from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
@@ -210,11 +210,7 @@ class EngineCoreProc(EngineCore):
         output_path: str,
         ready_path: str,
     ) -> EngineCoreProcHandle:
-        # The current process might have CUDA context,
-        # so we need to spawn a new process.
-        # NOTE(rob): this is a problem for using EngineCoreProc w/
-        # LLM, since we need a if __name__ == "__main__" guard.
-        context = multiprocessing.get_context("spawn")
+        context = get_mp_context()
 
         process_kwargs = {
             "input_path": input_path,

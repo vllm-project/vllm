@@ -163,6 +163,10 @@ class MultiprocExecutor:
         termination and kill signals if needed."""
 
         def wait_for_termination(procs, timeout):
+            if not time:
+                # If we are in late stage shutdown, the interpreter may replace
+                # `time` with `None`.
+                return all(not proc.is_alive() for proc in procs)
             start_time = time.time()
             while time.time() - start_time < timeout:
                 if all(not proc.is_alive() for proc in procs):
@@ -187,10 +191,14 @@ class MultiprocExecutor:
         for w in self.workers:
             # Remove the zmq ipc socket file
             socket_path = w.ready_path.replace("ipc://", "")
-            if os.path.exists(socket_path):
+            if os and os.path.exists(socket_path):
                 os.remove(socket_path)
 
     def shutdown(self):
+        if atexit:
+            # in case shutdown was called explicitly, we don't need to call it
+            # again
+            atexit.unregister(self.shutdown)
         """Properly shut down the executor and its workers"""
         if (hasattr(self, 'workers') and self.workers is not None):
             for w in self.workers:  #TODO: not sure if needed
