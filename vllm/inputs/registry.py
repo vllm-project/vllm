@@ -74,11 +74,17 @@ class InputContext:
 
         return mm_config
 
-    def get_hf_processor(self, **kwargs) -> ProcessorMixin:
+    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+        base_kwargs = self.model_config.mm_processor_kwargs
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        merged_kwargs = {**base_kwargs, **kwargs}
+
         return cached_get_processor(
             self.model_config.model,
             trust_remote_code=self.model_config.trust_remote_code,
-            **kwargs,
+            **merged_kwargs,
         )
 
 
