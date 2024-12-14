@@ -63,7 +63,7 @@ class PunicaWrapperABC(ABC):
         lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
         output_slices: Tuple[int, ...],
         offset_start: int = 0,
-        add_input=True,
+        add_inputs=True,
         **kwargs,
     ) -> None:
         """
@@ -77,7 +77,7 @@ class PunicaWrapperABC(ABC):
         y: torch.Tensor,
         x: torch.Tensor,
         lora_b_stacked: torch.Tensor,
-        add_input: bool = True,
+        add_inputs: bool = True,
         **kwargs,
     ) -> None:
         """
@@ -367,12 +367,13 @@ class PunicaWrapperBase(PunicaWrapperABC):
                    lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
                    output_slices: Tuple[int, ...],
                    offset_start: int = 0,
-                   add_input=True,
+                   add_inputs=True,
                    **kwargs) -> None:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
       
         Semantics:
+            offset = offset_start
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
                 y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] + 
@@ -386,7 +387,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
             lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): 
                 bias's weight
             output_slices (Tuple[int, ...]): Every slice's size
-            add_input (bool):  Defaults to True.
+            offset_start (int): The starting position of y, defaults to 0
+            add_inputs (bool):  Defaults to True.
 
         """
         # TODO: implement it based on torch ops
@@ -397,7 +399,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                            y: torch.Tensor,
                            x: torch.Tensor,
                            lora_b_stacked: torch.Tensor,
-                           add_input: bool = True,
+                           add_inputs: bool = True,
                            **kwargs) -> None:
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
@@ -409,7 +411,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
-            add_input (bool): Default to True.
+            add_inputs (bool): Default to True.
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
