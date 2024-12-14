@@ -25,10 +25,8 @@ def run_ultravox(question: str, audio_count: int):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{
-        'role':
-        'user',
-        'content':
-        "<|reserved_special_token_0|>\n" * audio_count + question
+        'role': 'user',
+        'content': "<|audio|>\n" * audio_count + question
     }]
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
