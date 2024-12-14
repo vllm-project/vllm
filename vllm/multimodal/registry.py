@@ -299,9 +299,9 @@ class MultiModalRegistry:
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._processor_factories:
+            if self._processor_factories.contains(model_cls, strict=True):
                 logger.warning(
-                    "Model class %s already has an input mapper "
+                    "Model class %s already has a multi-modal processor "
                     "registered to %s. It is overwritten by the new one.",
                     model_cls, self)
 

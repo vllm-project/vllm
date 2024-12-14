@@ -72,7 +72,7 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     image_token_id = mm_encoder.special_ids.img
 
-    mm_config = ctx.model_config.multimodal_config
+    mm_config = ctx.get_mm_config()
     num_images = mm_config.limit_per_prompt.get("image", 1)
 
     # dummy size
