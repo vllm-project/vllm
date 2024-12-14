@@ -578,6 +578,11 @@ class BaseMultiModalProcessor(ABC):
         """
         Given the original multi-modal items for this modality
         and HF-processed data, output the replacements to perform.
+
+        Note:
+            Even when the HF processor already performs replacement for us,
+            we still use this replacement information to determine
+            the placeholder token positions for each multi-modal item.
         """
         raise NotImplementedError
 
