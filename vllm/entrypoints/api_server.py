@@ -17,7 +17,6 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
@@ -32,14 +31,12 @@ engine = None
 
 
 @app.get("/health")
-@with_cancellation
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
 
 
 @app.post("/generate")
-@with_cancellation
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
 

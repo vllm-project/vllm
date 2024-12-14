@@ -305,7 +305,6 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/health")
-@with_cancellation
 async def health(raw_request: Request) -> Response:
     """Health check."""
     await engine_client(raw_request).check_health()
@@ -343,7 +342,6 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
 
 
 @router.get("/v1/models")
-@with_cancellation
 async def show_available_models(raw_request: Request):
     handler = base(raw_request)
 
@@ -352,7 +350,6 @@ async def show_available_models(raw_request: Request):
 
 
 @router.get("/version")
-@with_cancellation
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
