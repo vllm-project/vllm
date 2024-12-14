@@ -3,14 +3,11 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <cmath>
+#include "fp8/common.cuh"
 #include "../core/math.hpp"
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
 
-using FP8_TYPE = c10::Float8_e4m3fn;
-C10_HOST_DEVICE constexpr auto FP8_E4M3_MAX =
-    std::numeric_limits<FP8_TYPE>::max();
-// using FP8_TYPE = c10::Float8_e4m3fnuz;
 namespace vllm {
 
 template <typename T>

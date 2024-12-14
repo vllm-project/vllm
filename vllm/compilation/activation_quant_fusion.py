@@ -99,7 +99,6 @@ class ActivationQuantFusionPass(VllmInductorPass):
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns in ActivationQuantFusionPass",
                      count)
-        self.dump_graph(graph, "after_pattern_match")
 
         self.dump_graph(graph, "after_act_quant_fusion")
         self.end_and_log()
