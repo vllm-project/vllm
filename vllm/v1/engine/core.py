@@ -321,7 +321,7 @@ class EngineCoreProc(EngineCore):
         if isinstance(request, EngineCoreRequest):
             self.add_request(request)
         elif isinstance(request, EngineCoreProfile):
-            self.model_executor.worker.profile(request.is_start)
+            self.model_executor.profile(request.is_start)
         else:
             # TODO: make an EngineCoreAbort wrapper
             assert isinstance(request, list)
