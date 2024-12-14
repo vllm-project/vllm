@@ -199,9 +199,13 @@ class Scheduler:
                 if num_new_tokens == 0:
                     # The happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
-                    # the last token.
-                    num_computed_tokens -= 1
-                    num_new_tokens = 1
+                    # the last block. Note that we have to re-compute an entire
+                    # block because allocate_slots() assumes num_computed_tokens
+                    # is always a multiple of the block size. This limitation
+                    # can potentially be removed in the future to slightly
+                    # improve the performance.
+                    num_computed_tokens -= self.block_size
+                    num_new_tokens = self.block_size
                     computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
