@@ -7,13 +7,15 @@ from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
 from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
+                             MultiModalRegistry)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
+from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 
 
 class Processor:
@@ -39,6 +41,13 @@ class Processor:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
+        # Multi-modal (huggingface) input mapper
+        self.mm_input_mapper_client = MMInputMapperClient(model_config)
+
+        # Multi-modal hasher (for images)
+        self.mm_hasher = MMHasher(
+        ) if model_config.mm_cache_preprocessor else None
+
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
     # This ideally should releases the GIL, so we should not block the
     # asyncio loop while this is running.
@@ -54,7 +63,7 @@ class Processor:
         priority: int = 0,
     ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
 
-        # TODO(woosuk): Support embedding mode.
+        # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Check max_logprobs
         # TODO(woosuk): Support encoder-decoder models.
 
@@ -65,6 +74,11 @@ class Processor:
             arrival_time = time.time()
         assert priority == 0, "vLLM V1 does not support priority at the moment."
         assert trace_headers is None, "vLLM V1 does not support tracing yet."
+
+        # Compute MM hashes (if enabled)
+        mm_hashes = None
+        if self.mm_hasher is not None:
+            mm_hashes = self.mm_hasher.hash(prompt)
 
         # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(
@@ -96,6 +110,18 @@ class Processor:
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
 
+        # For merged preprocessor, mm_data is already mm_inputs
+        precomputed_mm_inputs = None
+        if isinstance(decoder_inputs.multi_modal_data, MultiModalKwargs):
+            precomputed_mm_inputs = [decoder_inputs.multi_modal_data]
+
+        # Apply MM mapper
+        mm_inputs = None
+        if len(decoder_inputs.multi_modal_data) > 0:
+            mm_inputs, mm_hashes = self.mm_input_mapper_client.process_inputs(
+                decoder_inputs.multi_modal_data, mm_hashes,
+                decoder_inputs.mm_processor_kwargs, precomputed_mm_inputs)
+
         # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
             request_id,
@@ -113,9 +139,9 @@ class Processor:
             request_id,
             decoder_inputs.prompt,
             decoder_inputs.prompt_token_ids,
-            decoder_inputs.multi_modal_data,
+            mm_inputs,
+            mm_hashes,
             decoder_inputs.multi_modal_placeholders,
-            decoder_inputs.mm_processor_kwargs,
             sampling_params,
             eos_token_id,
             arrival_time,

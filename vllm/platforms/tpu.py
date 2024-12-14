@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -16,6 +16,10 @@ logger = init_logger(__name__)
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
+    device_name: str = "tpu"
+    device_type: str = "tpu"
+    dispatch_key: str = "XLA"
+    supported_quantization: list[str] = ["tpu_int8"]
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -30,6 +34,10 @@ class TpuPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         raise NotImplementedError
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return True
 
     @classmethod
     def inference_mode(cls):
@@ -47,3 +55,15 @@ class TpuPlatform(Platform):
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
+
+        assert vllm_config.speculative_config is None, \
+            "TPU does not support speculative decoding"
+
+        parallel_config = vllm_config.parallel_config
+        scheduler_config = vllm_config.scheduler_config
+        if parallel_config.worker_cls == "auto":
+            if scheduler_config.is_multi_step:
+                parallel_config.worker_cls = \
+                    "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"

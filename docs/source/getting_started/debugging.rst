@@ -86,7 +86,6 @@ If GPU/CPU communication cannot be established, you can use the following Python
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
     pynccl = PyNcclCommunicator(group=gloo_group, device=local_rank)
-    pynccl.disabled = False
 
     s = torch.cuda.Stream()
     with torch.cuda.stream(s):
@@ -136,6 +135,62 @@ If the test script hangs or crashes, usually it means the hardware/drivers are b
     - In the second node, run ``NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 1 --master_addr $MASTER_ADDR test.py``.
 
     Adjust ``--nproc-per-node``, ``--nnodes``, and ``--node-rank`` according to your setup, being sure to execute different commands (with different ``--node-rank``) on different nodes.
+
+Python multiprocessing
+----------------------
+
+`RuntimeError` Exception
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+If you have seen a warning in your logs like this:
+
+.. code-block:: console
+
+    WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
+        initialized. We must use the `spawn` multiprocessing start method. Setting
+        VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
+        https://docs.vllm.ai/en/latest/getting_started/debugging.html#python-multiprocessing
+        for more information.
+
+or an error from Python that looks like this:
+
+.. code-block:: console
+
+    RuntimeError:
+            An attempt has been made to start a new process before the
+            current process has finished its bootstrapping phase.
+
+            This probably means that you are not using fork to start your
+            child processes and you have forgotten to use the proper idiom
+            in the main module:
+
+                if __name__ == '__main__':
+                    freeze_support()
+                    ...
+
+            The "freeze_support()" line can be omitted if the program
+            is not going to be frozen to produce an executable.
+
+            To fix this issue, refer to the "Safe importing of main module"
+            section in https://docs.python.org/3/library/multiprocessing.html
+
+then you must update your Python code to guard usage of ``vllm`` behind a ``if
+__name__ == '__main__':`` block. For example, instead of this:
+
+.. code-block:: python
+
+    import vllm
+
+    llm = vllm.LLM(...)
+
+try this instead:
+
+.. code-block:: python
+
+    if __name__ == '__main__':
+        import vllm
+
+        llm = vllm.LLM(...)
 
 Known Issues
 ----------------------------------------

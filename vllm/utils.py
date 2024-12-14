@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import concurrent
 import contextlib
 import datetime
 import enum
@@ -9,6 +10,7 @@ import importlib.util
 import inspect
 import ipaddress
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -19,13 +21,14 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
-from collections.abc import Mapping
+from collections import UserDict, defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
-from platform import uname
-from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generator,
-                    Generic, Hashable, List, Literal, Optional, OrderedDict,
-                    Set, Tuple, Type, TypeVar, Union, overload)
+from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
+                    Dict, Generator, Generic, Hashable, List, Literal,
+                    Optional, OrderedDict, Set, Tuple, Type, TypeVar, Union,
+                    overload)
 from uuid import uuid4
 
 import numpy as np
@@ -42,11 +45,14 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
 logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# Reminder: Please update docs/source/usage/compatibility_matrix.rst
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -163,6 +169,11 @@ ALL_PINNED_SENTINEL = _Sentinel()
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
+
+
+class LayerBlockType(enum.Enum):
+    attention = "attention"
+    mamba = "mamba"
 
 
 class Counter:
@@ -334,24 +345,10 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-@lru_cache(maxsize=None)
-def get_vllm_instance_id() -> str:
-    """
-    If the environment variable VLLM_INSTANCE_ID is set, return it.
-    Otherwise, return a random UUID.
-    Instance id represents an instance of the VLLM. All processes in the same
-    instance should have the same instance id.
-    """
-    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
-
-
-@lru_cache(maxsize=None)
-def in_wsl() -> bool:
-    # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(uname()).lower()
-
-
-def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
+def make_async(
+    func: Callable[P, T],
+    executor: Optional[concurrent.futures.Executor] = None
+) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
@@ -362,7 +359,7 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
-        return loop.run_in_executor(executor=None, func=p_func)
+        return loop.run_in_executor(executor=executor, func=p_func)
 
     return _async_wrapper
 
@@ -467,6 +464,13 @@ async def collect_from_async_generator(
 
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
+    if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
+        logger.warning(
+            "The environment variable HOST_IP is deprecated and ignored, as"
+            " it is often used by Docker and other software to"
+            "interact with the container's network stack. Please"
+            "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
+            " to communicate with each other.")
     if host_ip:
         return host_ip
 
@@ -707,6 +711,12 @@ def create_kv_caches_with_random(
 
 
 @lru_cache
+def print_info_once(msg: str) -> None:
+    # Set the stacklevel to 2 to print the caller's line info
+    logger.info(msg, stacklevel=2)
+
+
+@lru_cache
 def print_warning_once(msg: str) -> None:
     # Set the stacklevel to 2 to print the caller's line info
     logger.warning(msg, stacklevel=2)
@@ -714,25 +724,7 @@ def print_warning_once(msg: str) -> None:
 
 @lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
-
-    if in_wsl():
-        # Pinning memory in WSL is not supported.
-        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
-        return False
-    elif current_platform.is_xpu():
-        print_warning_once("Pin memory is not supported on XPU.")
-        return False
-    elif current_platform.is_neuron():
-        print_warning_once("Pin memory is not supported on Neuron.")
-        return False
-    elif current_platform.is_hpu():
-        print_warning_once("Pin memory is not supported on HPU.")
-        return False
-    elif current_platform.is_cpu() or current_platform.is_openvino():
-        return False
-    return True
+    return current_platform.is_pin_memory_available()
 
 
 class DeviceMemoryProfiler:
@@ -900,6 +892,23 @@ def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     return [item for sublist in lists for item in sublist]
 
 
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
+
+
+def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
+    """
+    Unlike :class:`itertools.groupby`, groups are not broken by
+    non-contiguous data.
+    """
+    groups = defaultdict[_K, list[_V]](list)
+
+    for value in values:
+        groups[key(value)].append(value)
+
+    return groups.items()
+
+
 # TODO: This function can be removed if transformer_modules classes are
 # serialized by value when communicating between processes
 def init_cached_hf_modules() -> None:
@@ -963,7 +972,7 @@ def find_nccl_library() -> str:
     return so_file
 
 
-def enable_trace_function_call_for_thread() -> None:
+def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
@@ -975,7 +984,8 @@ def enable_trace_function_call_for_thread() -> None:
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
                     f"at_{datetime.datetime.now()}.log").replace(" ", "_")
-        log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+        log_path = os.path.join(tmp_dir, "vllm",
+                                f"vllm-instance-{vllm_config.instance_id}",
                                 filename)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
@@ -1187,6 +1197,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 else:
                     processed_args.append('--' +
                                           arg[len('--'):].replace('_', '-'))
+            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
+                # allow -O flag to be used without space, e.g. -O3
+                processed_args.append('-O')
+                processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
 
@@ -1479,13 +1493,13 @@ class AtomicCounter:
 
 
 # Adapted from: https://stackoverflow.com/a/47212782/5082708
-class LazyDict(Mapping, Generic[T]):
+class LazyDict(Mapping[str, T], Generic[T]):
 
     def __init__(self, factory: Dict[str, Callable[[], T]]):
         self._factory = factory
         self._dict: Dict[str, T] = {}
 
-    def __getitem__(self, key) -> T:
+    def __getitem__(self, key: str) -> T:
         if key not in self._dict:
             if key not in self._factory:
                 raise KeyError(key)
@@ -1502,13 +1516,20 @@ class LazyDict(Mapping, Generic[T]):
         return len(self._factory)
 
 
-def combine_fx_passes(passes: List[Callable]) -> Callable:
+class ClassRegistry(UserDict[Type[T], _V]):
 
-    def combined_fx(graph) -> None:
-        for fx in passes:
-            fx(graph)
+    def __getitem__(self, key: Type[T]) -> _V:
+        for cls in key.mro():
+            if cls in self.data:
+                return self.data[cls]
 
-    return combined_fx
+        raise KeyError(key)
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, type):
+            return False
+
+        return any(cls in self.data for cls in key.mro())
 
 
 def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -1573,6 +1594,7 @@ def direct_register_custom_op(
     mutates_args: List[str],
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
+    dispatch_key: str = "CUDA",
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1589,7 +1611,7 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if is_in_doc_build():
+    if is_in_doc_build() or not supports_custom_op():
         return
     import torch.library
     if hasattr(torch.library, "infer_schema"):
@@ -1601,7 +1623,7 @@ def direct_register_custom_op(
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
-    my_lib.impl(op_name, op_func, "CUDA")
+    my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
 
@@ -1613,6 +1635,31 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
+
+
+def kill_process_tree(pid: int):
+    """
+    Kills all descendant processes of the given pid by sending SIGKILL.
+
+    Args:
+        pid (int): Process ID of the parent process
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    # Get all children recursively
+    children = parent.children(recursive=True)
+
+    # Send SIGKILL to all children first
+    for child in children:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child.pid, signal.SIGKILL)
+
+    # Finally kill the parent
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
 
 
 @dataclass

@@ -25,8 +25,7 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput,
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
-                                      ModelInputForGPUWithSamplingMetadata,
-                                      _get_graph_batch_size)
+                                      ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
@@ -176,7 +175,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        with set_forward_context(model_input.attn_metadata):
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -465,7 +464,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # We will be using CUDA graph replay for this decode.
                 max_len_of_block_table = self.get_max_block_per_batch()
                 batch_size = len(encoder_seq_lens)
-                graph_batch_size = _get_graph_batch_size(batch_size)
+                graph_batch_size = self.vllm_config.pad_for_cudagraph(
+                    batch_size)
                 assert graph_batch_size >= batch_size
                 cuda_graph_pad_size = graph_batch_size - batch_size
                 # extend the cross_block_tables and encoder_seq_lens to match

@@ -150,7 +150,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         attn_metadata: PallasMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 

@@ -165,7 +165,7 @@ def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     # Stop tokens for InternVL
     # models variants may have different stop tokens
     # please refer to the model card for the correct "stop words":
-    # https://huggingface.co/OpenGVLab/InternVL2-2B#service
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
     stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
@@ -321,6 +321,25 @@ def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_aria(question, image_urls: List[str]) -> ModelRequestData:
+    model_name = "rhymes-ai/Aria"
+    llm = LLM(model=model_name,
+              tokenizer_mode="slow",
+              trust_remote_code=True,
+              dtype="bfloat16",
+              limit_mm_per_prompt={"image": len(image_urls)})
+    placeholders = "<fim_prefix><|img|><fim_suffix>\n" * len(image_urls)
+    prompt = (f"<|im_start|>user\n{placeholders}{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+    stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None)
+
+
 model_example_map = {
     "phi3_v": load_phi3v,
     "h2ovl_chat": load_h2onvl,
@@ -330,6 +349,7 @@ model_example_map = {
     "qwen_vl_chat": load_qwenvl_chat,
     "mllama": load_mllama,
     "idefics3": load_idefics3,
+    "aria": load_aria,
 }
 
 

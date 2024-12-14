@@ -1,12 +1,19 @@
 """KV-Cache Utilities."""
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import List, NamedTuple, Optional, Tuple
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-BlockHashType = Tuple[int, Tuple[int]]
+
+class BlockHashType(NamedTuple):
+    """Hash value of a block and the token IDs in the block.
+    The reason we keep a tuple of token IDs is to make sure no hash
+    collision happens when the hash value is the same.
+    """
+    hash_value: int
+    token_ids: Tuple[int]
 
 
 @dataclass
@@ -16,27 +23,34 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
-    # Token IDs in the block. When the block is full, the type of token_ids
-    # should be Tuple[int] for fast matching.
-    token_ids: Union[List[int], Tuple[int]] = field(default_factory=list)
     # The hash of the block composed of (block hash, tuple of token IDs).
     # It is only available when the block is full.
-    block_hash: Optional[BlockHashType] = None
-    # The number of hashed tokens. More hashed tokens means the block
-    # is closer to the end of a prompt and more likely to be evicted.
-    num_hashed_tokens: int = 0
+    _block_hash: Optional[BlockHashType] = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
 
-    def reset(self):
-        """Reset the block metadata."""
-        self.ref_cnt = 0
-        self.token_ids = []
-        self.block_hash = None
-        self.num_hashed_tokens = 0
+    def incr_ref(self):
+        self.ref_cnt += 1
+
+    def decr_ref(self):
+        self.ref_cnt -= 1
+
+    @property
+    def block_hash(self) -> Optional[BlockHashType]:
+        return self._block_hash
+
+    @block_hash.setter
+    def block_hash(self, block_hash: BlockHashType):
+        assert self.block_hash is None, (
+            "The block already has a hash. This should not happen.")
+        self._block_hash = block_hash
+
+    def reset_hash(self):
+        """Reset the block hash when the block is evicted."""
+        self._block_hash = None
 
 
 class FreeKVCacheBlockQueue:
@@ -164,8 +178,8 @@ def hash_block_tokens(parent_block_hash: Optional[int],
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
-    return (hash(
-        (parent_block_hash, *curr_block_token_ids)), curr_block_token_ids)
+    return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
+                         curr_block_token_ids)
 
 
 def hash_request_tokens(block_size: int,
@@ -181,14 +195,15 @@ def hash_request_tokens(block_size: int,
         The list of computed hash values.
     """
     ret = []
-    parent_block_hash = None
+    parent_block_hash_value = None
     for start in range(0, len(token_ids), block_size):
         end = start + block_size
         block_token_ids = tuple(token_ids[start:end])
         # Do not hash the block if it is not full.
         if len(block_token_ids) < block_size:
             break
-        block_hash = hash_block_tokens(parent_block_hash, block_token_ids)
+        block_hash = hash_block_tokens(parent_block_hash_value,
+                                       block_token_ids)
         ret.append(block_hash)
-        parent_block_hash = block_hash
+        parent_block_hash_value = block_hash.hash_value
     return ret

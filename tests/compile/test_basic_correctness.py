@@ -55,10 +55,20 @@ test_settings = [
     # embedding model
     TestSetting(
         model="BAAI/bge-multilingual-gemma2",
-        model_args=["--task", "embedding"],
+        model_args=["--task", "embed"],
         pp_size=1,
         tp_size=1,
         attn_backend="FLASHINFER",
+        method="encode",
+        fullgraph=True,
+    ),
+    # encoder-based embedding model (BERT)
+    TestSetting(
+        model="BAAI/bge-base-en-v1.5",
+        model_args=["--task", "embed"],
+        pp_size=1,
+        tp_size=1,
+        attn_backend="XFORMERS",
         method="encode",
         fullgraph=True,
     ),
@@ -103,7 +113,7 @@ def test_compile_correctness(test_setting: TestSetting):
             CompilationLevel.NO_COMPILATION,
             CompilationLevel.PIECEWISE,
     ]:
-        all_args.append(final_args + ["-O", str(level)])
+        all_args.append(final_args + [f"-O{level}"])
         all_envs.append({})
 
     # inductor will change the output, so we only compare if the output
@@ -121,7 +131,7 @@ def test_compile_correctness(test_setting: TestSetting):
             CompilationLevel.DYNAMO_AS_IS,
             CompilationLevel.DYNAMO_ONCE,
     ]:
-        all_args.append(final_args + ["-O", str(level)])
+        all_args.append(final_args + [f"-O{level}"])
         all_envs.append({})
         if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
             # "DYNAMO_ONCE" will always use fullgraph
