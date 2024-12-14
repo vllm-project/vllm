@@ -15,8 +15,7 @@ from typing_extensions import assert_never
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import (flatten_2d_lists, full_groupby, is_list_of,
-                        resolve_mm_processor_kwargs)
+from vllm.utils import flatten_2d_lists, full_groupby, is_list_of
 
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
                      MultiModalInputsV2, MultiModalKwargs, PlaceholderRange,
@@ -599,17 +598,7 @@ class BaseMultiModalProcessor(ABC):
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        base_processor_kwargs = self.ctx.model_config.mm_processor_kwargs
-        if base_processor_kwargs is None:
-            base_processor_kwargs = {}
-
-        # some mm_processor_kwargs may be used in processor initialization
-        # instead of processor call
-        processor_init_kwargs = {
-            **base_processor_kwargs,
-            **mm_processor_kwargs,
-        }
-        hf_processor = self._get_hf_processor(**processor_init_kwargs)
+        hf_processor = self._get_hf_processor(**mm_processor_kwargs)
 
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
@@ -629,12 +618,10 @@ class BaseMultiModalProcessor(ABC):
             else:
                 processor_data[k] = v
 
-        # filter mm_processor_kwargs used in processor call
         assert callable(hf_processor)
-        mm_processor_kwargs = resolve_mm_processor_kwargs(
-            base_processor_kwargs,
-            mm_processor_kwargs,
+        mm_processor_kwargs = self.ctx.resolve_hf_processor_call_kwargs(
             hf_processor,
+            mm_processor_kwargs,
         )
 
         try:

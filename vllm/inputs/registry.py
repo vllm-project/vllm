@@ -2,7 +2,7 @@ import functools
 from collections import UserDict
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, NamedTuple,
-                    Optional, Protocol, Type, cast)
+                    Optional, Protocol, Type)
 
 from torch import nn
 from transformers import PretrainedConfig, ProcessorMixin
@@ -87,12 +87,35 @@ class InputProcessingContext(InputContext):
     tokenizer: AnyTokenizer
     """The tokenizer used to tokenize the inputs."""
 
-    def get_hf_processor(self, **kwargs) -> ProcessorMixin:
+    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+        base_kwargs = self.model_config.mm_processor_kwargs
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        merged_kwargs = {**base_kwargs, **kwargs}
+
         return cached_get_processor(
             self.model_config.model,
             tokenizer=self.tokenizer,  # Override the tokenizer with ours
             trust_remote_code=self.model_config.trust_remote_code,
-            **kwargs,
+            **merged_kwargs,
+        )
+
+    def resolve_hf_processor_call_kwargs(
+        self,
+        hf_processor: ProcessorMixin,
+        inference_kwargs: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        assert callable(hf_processor)
+
+        base_kwargs = self.model_config.mm_processor_kwargs
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        return resolve_mm_processor_kwargs(
+            base_kwargs,
+            inference_kwargs,
+            hf_processor,
         )
 
 
@@ -379,7 +402,7 @@ class InputRegistry:
         # If it's empty, it'll fall back to the default kwarg values
         mm_processor_kwargs = resolve_mm_processor_kwargs(
             model_config.mm_processor_kwargs,
-            cast(Dict[str, Any], inputs.get("mm_processor_kwargs")),
+            inputs.get("mm_processor_kwargs", {}),
             processor,
         )
 

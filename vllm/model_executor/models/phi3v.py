@@ -399,6 +399,11 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor = self._get_hf_processor()
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
+        hf_kwargs = self.ctx.resolve_hf_processor_call_kwargs(
+            hf_processor,
+            mm_processor_kwargs,
+        )
+
         mm_config = self.ctx.get_mm_config()
         max_images = mm_config.limit_per_prompt.get("image", 1)
 
@@ -407,7 +412,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
             num_tokens = get_phi3v_image_feature_size(
                 input_width=image_size.width,
                 input_height=image_size.height,
-                num_crops=mm_processor_kwargs.get("num_crops", 16),
+                num_crops=hf_kwargs.get("num_crops", 16),
             )
 
             return [_IMAGE_TOKEN_ID] * num_tokens
