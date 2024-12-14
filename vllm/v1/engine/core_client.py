@@ -1,6 +1,6 @@
 import atexit
 import os
-from typing import List, Union
+from typing import List, Optional
 
 import msgspec
 import zmq
@@ -10,8 +10,9 @@ from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType)
-from vllm.v1.engine.core import EngineCore, EngineCoreProc
+                            EngineCoreRequestType, EngineCoreRequestUnion)
+from vllm.v1.engine.core import (EngineCore, EngineCoreProc,
+                                 EngineCoreProcHandle)
 from vllm.v1.serial_utils import PickleEncoder
 
 logger = init_logger(__name__)
@@ -59,7 +60,7 @@ class EngineCoreClient:
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    async def profile(self, is_start=True) -> None:
+    def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
     def abort_requests(self, request_ids: List[str]) -> None:
@@ -69,6 +70,9 @@ class EngineCoreClient:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        raise NotImplementedError
+
+    async def profile_async(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -105,7 +109,7 @@ class InprocClient(EngineCoreClient):
     def __del__(self):
         self.shutdown()
 
-    def profile(self, is_start=True) -> None:
+    def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
 
 
@@ -133,7 +137,10 @@ class MPClient(EngineCoreClient):
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.
-        self.ctx = (zmq.asyncio.Context() if asyncio_mode else zmq.Context())
+        if asyncio_mode:
+            self.ctx = zmq.asyncio.Context()
+        else:
+            self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
         # Path for IPC.
         ready_path = get_open_zmq_ipc_path()
@@ -149,11 +156,13 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
+        self.proc_handle: Optional[EngineCoreProcHandle]
         self.proc_handle = EngineCoreProc.make_engine_core_process(
             *args,
-            input_path=input_path,
-            output_path=output_path,
-            ready_path=ready_path,
+            input_path=
+            input_path,  # type: ignore[misc]  # MyPy incorrectly flags duplicate keywords
+            output_path=output_path,  # type: ignore[misc]
+            ready_path=ready_path,  # type: ignore[misc]
             **kwargs,
         )
         atexit.register(self.shutdown)
@@ -204,10 +213,8 @@ class SyncMPClient(MPClient):
         engine_core_outputs = self.decoder.decode(frame.buffer).outputs
         return engine_core_outputs
 
-    def _send_input(
-        self, request_type: EngineCoreRequestType,
-        request: Union[EngineCoreRequest, EngineCoreProfile,
-                       List[str]]) -> None:
+    def _send_input(self, request_type: EngineCoreRequestType,
+                    request: EngineCoreRequestUnion) -> None:
 
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
@@ -219,7 +226,7 @@ class SyncMPClient(MPClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def profile(self, is_start=True) -> None:
+    def profile(self, is_start: bool = True) -> None:
         self._send_input(EngineCoreRequestType.PROFILE,
                          EngineCoreProfile(is_start))
 
@@ -237,10 +244,8 @@ class AsyncMPClient(MPClient):
 
         return engine_core_outputs
 
-    async def _send_input(
-        self, request_type: EngineCoreRequestType,
-        request: Union[EngineCoreRequest, EngineCoreProfile,
-                       List[str]]) -> None:
+    async def _send_input(self, request_type: EngineCoreRequestType,
+                          request: EngineCoreRequestUnion) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
@@ -252,6 +257,6 @@ class AsyncMPClient(MPClient):
         if len(request_ids) > 0:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    async def profile(self, is_start=True) -> None:
+    async def profile_async(self, is_start: bool = True) -> None:
         await self._send_input(EngineCoreRequestType.PROFILE,
                                EngineCoreProfile(is_start))

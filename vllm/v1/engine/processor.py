@@ -56,7 +56,7 @@ class Processor:
         request_id: str,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
-        arrival_time: float,
+        arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,

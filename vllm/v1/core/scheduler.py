@@ -152,6 +152,7 @@ class Scheduler:
                     break
             if not can_schedule:
                 break
+            assert new_blocks is not None
 
             # Schedule the request.
             scheduled_running_reqs.append(request)

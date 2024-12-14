@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -97,7 +97,7 @@ class IncrementalDetokenizer:
         self,
         new_token_ids: List[int],
         finish_reason: Optional[str],
-        stop_reason: Optional[str],
+        stop_reason: Optional[Union[int, str, None]],
     ) -> Optional[RequestOutput]:
         """
         Update RequestState for the request_id by:

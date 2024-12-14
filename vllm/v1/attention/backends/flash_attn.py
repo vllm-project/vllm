@@ -135,6 +135,8 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
+        assert output is not None, "Output tensor must be provided."
+
         if attn_metadata is None:
             # Profiling run.
             return output

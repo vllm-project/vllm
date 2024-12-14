@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -263,12 +263,13 @@ class KVCacheManager:
         """
         # Default to [] in case a request is freed (aborted) before alloc.
         blocks = self.req_to_blocks.pop(request.request_id, [])
+        ordered_blocks: Iterable[KVCacheBlock] = blocks
         if self.enable_caching:
             # Free blocks in reverse order so that the tail blocks are
             # freed first.
-            blocks = reversed(blocks)
+            ordered_blocks = reversed(blocks)
 
-        for block in blocks:
+        for block in ordered_blocks:
             block.decr_ref()
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
@@ -396,8 +397,7 @@ class KVCacheManager:
                 f"{request.request_id}({request})")
 
             # Compute the hash of the current block.
-            block_hash = hash_block_tokens(prev_block_hash_value,
-                                           tuple(block_tokens))
+            block_hash = hash_block_tokens(prev_block_hash_value, block_tokens)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash

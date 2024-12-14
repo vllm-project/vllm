@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple
+from typing import Tuple
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -28,7 +28,7 @@ class Executor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def profile(self, is_start=True):
+    def profile(self, is_start: bool = True):
         raise NotImplementedError
 
     @abstractmethod
@@ -37,12 +37,4 @@ class Executor(ABC):
 
     @abstractmethod
     def check_health(self) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def collective_rpc(self,
-                       method: str,
-                       timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> []:
         raise NotImplementedError
