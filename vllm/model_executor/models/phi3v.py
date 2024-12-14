@@ -16,7 +16,6 @@ from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
@@ -303,41 +302,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
 
-# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
-def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
-    target_height = int(np.ceil(height / padding_unit) * padding_unit)
-    top_padding = int((target_height - height) / 2)
-    bottom_padding = target_height - height - top_padding
-    padded_width = width
-    padded_height = height + top_padding + bottom_padding
-    return padded_width, padded_height
-
-
-# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L90
-def _calc_hd_transform_size(*, width: int, height: int, hd_num: int):
-    transposed = False
-    if width < height:
-        width, height = height, width
-        transposed = True
-
-    ratio = width / height
-    scale = 1
-    while scale * np.ceil(scale / ratio) <= hd_num:
-        scale += 1
-    scale -= 1
-
-    new_width = int(scale * 336)
-    new_height = int(new_width / ratio)
-
-    padded_width, padded_height = _calc_padded_size(width=new_width,
-                                                    height=new_height)
-
-    if transposed:
-        padded_width, padded_height = padded_height, padded_width
-
-    return padded_width, padded_height
-
-
 def get_max_phi3v_image_tokens(ctx: InputContext) -> int:
     processor = ctx.get_hf_processor()
     image_processor = processor.image_processor  # type: ignore
@@ -346,21 +310,6 @@ def get_max_phi3v_image_tokens(ctx: InputContext) -> int:
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
-
-
-# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L181
-def get_phi3v_image_feature_size(
-    *,
-    input_height: int,
-    input_width: int,
-    num_crops: int,
-) -> int:
-    new_width, new_height = _calc_hd_transform_size(width=input_width,
-                                                    height=input_height,
-                                                    hd_num=num_crops)
-
-    return (new_height // 336 * new_width // 336 + 1) * 144 + 1 \
-        + (new_height // 336 + 1) * 12
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
@@ -398,21 +347,16 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
-
-        hf_kwargs = self.ctx.resolve_hf_processor_call_kwargs(
-            hf_processor,
-            mm_processor_kwargs,
-        )
+        image_processor = hf_processor.image_processor  # type: ignore
 
         mm_config = self.ctx.get_mm_config()
         max_images = mm_config.limit_per_prompt.get("image", 1)
 
         def get_replacement_phi3v(item_idx: int):
             image_size = mm_items.get_image_size(item_idx)
-            num_tokens = get_phi3v_image_feature_size(
-                input_width=image_size.width,
-                input_height=image_size.height,
-                num_crops=hf_kwargs.get("num_crops", 16),
+            num_tokens = image_processor.calc_num_image_tokens_from_image_size(
+                width=image_size.width,
+                height=image_size.height,
             )
 
             return [_IMAGE_TOKEN_ID] * num_tokens
