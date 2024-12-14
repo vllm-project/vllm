@@ -1370,8 +1370,8 @@ def supports_kw(
 
 
 def resolve_mm_processor_kwargs(
-    init_kwargs: Optional[Dict[str, Any]],
-    inference_kwargs: Optional[Dict[str, Any]],
+    init_kwargs: Optional[Mapping[str, object]],
+    inference_kwargs: Optional[Mapping[str, object]],
     callable: Callable[..., object],
     allow_var_kwargs: bool = False,
 ) -> Dict[str, Any]:
@@ -1405,7 +1405,7 @@ def resolve_mm_processor_kwargs(
 
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
-    overrides: Optional[Dict[str, Any]],
+    overrides: Optional[Mapping[str, object]],
     allow_var_kwargs: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -1524,8 +1524,14 @@ class ClassRegistry(UserDict[Type[T], _V]):
         raise KeyError(key)
 
     def __contains__(self, key: object) -> bool:
+        return self.contains(key)
+
+    def contains(self, key: object, *, strict: bool = False) -> bool:
         if not isinstance(key, type):
             return False
+
+        if strict:
+            return key in self.data
 
         return any(cls in self.data for cls in key.mro())
 
