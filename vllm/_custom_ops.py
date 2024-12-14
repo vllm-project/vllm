@@ -580,7 +580,7 @@ def cutlass_sparse_compress(a: torch.Tensor) \
                          dtype=torch.uint8,
                          device=a.device)
 
-    if not (torch.ops._C.cutlass_sparse_compress(a_nzs, a_meta, a)):
+    if not (torch.ops._C.cutlass_sparse_compress_entry(a_nzs, a_meta, a)):
         raise ValueError
 
     assert (a_nzs.is_contiguous())

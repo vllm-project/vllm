@@ -4,60 +4,89 @@
 
 #include "sparse_scaled_mm_c3x.cuh"
 
-#include "cute/tensor.hpp"
-#include "cutlass/numeric_types.h"
 #include "cutlass/numeric_conversion.h"
-
 #include "cutlass/transform/device/transform_universal_adapter.hpp"
 #include "cutlass/transform/kernel/sparse_gemm_compressor.hpp"
 #include "cutlass/epilogue/collective/default_epilogue.hpp"
 
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/util/packed_stride.hpp"
-
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 // clang-format on
 
 using namespace cute;
 using namespace vllm;
 
 /// Make A structured sparse by replacing elements with 0 and compress it
-template <typename ElementA_>
-bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
-                           torch::Tensor const& a) {
+template <typename ElementA_, typename ElementAcc_>
+bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
+                             torch::Tensor const& a) {
   // Checks for conformality
   TORCH_CHECK(a.dtype() == torch::kInt8 || a.dtype() == torch::kFloat8_e4m3fn ||
               a.dtype() == torch::kFloat16 || a.dtype() == torch::kBFloat16);
   TORCH_CHECK(a.dim() == 2)
   // Check for strides and alignment
+  TORCH_CHECK(a.stride(0) % 4 == 0)  // Required for semi-structured sparsity
   TORCH_CHECK(a.stride(1) == 1)
 
   int m = a.size(0);
   int k = a.size(1);
 
-  using ProblemShape = Shape<int, int, int, int>;
+  // Sparse kernel setup; this kernel is not used for matmul,
+  // but just for setting up the compressor utility
+  // A matrix configuration
   using ElementA = ElementA_;
   using LayoutTagA = cutlass::layout::RowMajor;
+  constexpr int AlignmentA = 128 / cutlass::sizeof_bits<ElementA>::value;
+  // B matrix configuration
+  using ElementB = ElementA;
+  using LayoutTagB = cutlass::layout::ColumnMajor;
+  constexpr int AlignmentB = 128 / cutlass::sizeof_bits<ElementB>::value;
+  // C/D matrix configuration
+  using ElementC = float;
+  using LayoutTagC = cutlass::layout::ColumnMajor;
+  constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
+  // Core kernel configurations
+  using ElementAccumulator = ElementAcc_;
+  using TileShape = Shape<_128, _128, _128>;
+  using TileShapeRef = Shape<_128, _128, _64>;
+  using ClusterShape = Shape<_1, _2, _1>;
+  using KernelSchedule = typename std::conditional<
+      std::is_same_v<ElementA, cutlass::float_e4m3_t>,
+      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum,
+      cutlass::gemm::KernelTmaWarpSpecialized>::type;
 
-  // Layouts for reference (non-sparse) tensors
+  using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized;
+  using ProblemShape = Shape<int, int, int, int>;
+
+  using CollectiveEpilogue =
+      typename cutlass::epilogue::collective::CollectiveBuilder<
+          cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
+          ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
+          ElementAccumulator, ElementAccumulator, ElementC, LayoutTagC,
+          AlignmentC, ElementC, LayoutTagC, AlignmentC,
+          EpilogueSchedule>::CollectiveOp;
+
+  using CollectiveMainloop =
+      typename cutlass::gemm::collective::CollectiveBuilder<
+          cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp, ElementA,
+          LayoutTagA, AlignmentA, ElementB, LayoutTagB, AlignmentB,
+          ElementAccumulator, TileShape, ClusterShape,
+          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+              sizeof(typename CollectiveEpilogue::SharedStorage))>,
+          KernelSchedule>::CollectiveOp;
+
+  using GemmKernel =
+      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop,
+                                           CollectiveEpilogue>;
+
+  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
   using StrideA = cutlass::gemm::TagToStrideA_t<LayoutTagA>;
   using StrideE = StrideA;
 
-  using Gemm = typename sm90_config_default<ElementA, cutlass::half_t,
-                                            c3x::ScaledEpilogue>::Cutlass3xGemm;
-
-  using ElementAB = typename Gemm::ElementAB;
-  using ElementD = typename Gemm::ElementD;
-
-  int64_t lda = a.stride(0);
-
   using StrideA = Stride<int64_t, Int<1>, int64_t>;
-  using StrideB = Stride<int64_t, Int<1>, int64_t>;
-  using StrideC = typename Gemm::StrideC;
 
-  StrideA a_stride{lda, Int<1>{}, 0};
-
-  using GemmKernel = typename Gemm::GemmKernel;
+  // The n (=1) dimension does not matter for the compressor
   typename GemmKernel::ProblemShape prob_shape{m, 1, k, 1};
 
   using LayoutA = typename GemmKernel::CollectiveMainloop::LayoutA;
@@ -65,9 +94,6 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
 
   using ElementE = typename GemmKernel::CollectiveMainloop::ElementE;
   using SparseConfig = typename GemmKernel::CollectiveMainloop::SparseConfig;
-
-  LayoutA a_layout = SparseConfig::fill_layoutA(prob_shape);
-  LayoutE e_layout = SparseConfig::fill_layoutE(prob_shape);
 
   // Offline compressor kernel
   using CompressorUtility =
@@ -85,9 +111,6 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   auto [M, N, K, L] = prob_shape;
 
   StrideA stride_A;
-  StrideA stride_A_compressed;
-  StrideE stride_E;
-
   stride_A =
       cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, L));
 
@@ -102,11 +125,6 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   auto a_compressed_ptr = static_cast<ElementA*>(a_compressed.data_ptr());
   auto e_ptr =
       static_cast<typename Gemm::CollectiveMainloop::ElementE*>(e.data_ptr());
-
-  stride_A_compressed =
-      cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, KC, L));
-  stride_E =
-      cutlass::make_cute_packed_stride(StrideE{}, cute::make_shape(ME, KE, L));
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = 0;
@@ -128,16 +146,18 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   return true;
 }
 
-bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
-                             torch::Tensor const& a) {
+bool cutlass_sparse_compress_entry(torch::Tensor& a_compressed,
+                                   torch::Tensor& e, torch::Tensor const& a) {
   if (a.dtype() == torch::kBFloat16) {
-    return sparsify_and_compress<cutlass::bfloat16_t>(a_compressed, e, a);
+    return cutlass_sparse_compress<cutlass::bfloat16_t, float>(a_compressed, e,
+                                                               a);
   } else if (a.dtype() == torch::kFloat16) {
-    return sparsify_and_compress<cutlass::half_t>(a_compressed, e, a);
+    return cutlass_sparse_compress<cutlass::half_t, float>(a_compressed, e, a);
   } else if (a.dtype() == torch::kFloat8_e4m3fn) {
-    return sparsify_and_compress<cutlass::float_e4m3_t>(a_compressed, e, a);
+    return cutlass_sparse_compress<cutlass::float_e4m3_t, float>(a_compressed,
+                                                                 e, a);
   } else if (a.dtype() == torch::kInt8) {
-    return sparsify_and_compress<int8_t>(a_compressed, e, a);
+    return cutlass_sparse_compress<int8_t, int32_t>(a_compressed, e, a);
   }
   return false;
 }

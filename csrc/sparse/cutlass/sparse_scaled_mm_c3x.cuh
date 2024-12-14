@@ -9,13 +9,12 @@
 #include "cutlass/cutlass.h"
 
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
-#include "cutlass_extensions/cute_utils.cuh"
-#include "cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp"
 #include "core/math.hpp"
+#include "cutlass_extensions/cute_utils.cuh"
+#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "cutlass_extensions/common.hpp"
 #include "cutlass_extensions/torch_utils.hpp"
 // clang-format on

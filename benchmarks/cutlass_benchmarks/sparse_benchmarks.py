@@ -54,6 +54,8 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
         print("Incorrect results")
         print(out)
         print(out_ref)
+    else:
+        print("Correct results")
 
     timers = []
     # pytorch impl - bfloat16
@@ -100,9 +102,9 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     assert dtype == torch.float8_e4m3fn
     b_compressed, e, a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, m, n,
                                                      k)
-    scale_a = (torch.randn((m, 1), device="cuda", dtype=torch.float32))
-    scale_b = (torch.randn((1, n), device="cuda", dtype=torch.float32))
-    bias = torch.rand((n, ), device="cuda", dtype=torch.bfloat16) * 10
+    scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
 
     out = ops.cutlass_scaled_sparse_mm(a, b_compressed, e, scale_a, scale_b,
                                        torch.bfloat16)
@@ -112,6 +114,8 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
         print("Incorrect results")
         print(out)
         print(out_ref)
+    else:
+        print("Correct results")
 
     timers = []
 

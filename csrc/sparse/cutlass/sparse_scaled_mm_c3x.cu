@@ -4,7 +4,6 @@
 
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
 #include "sparse_scaled_mm_c3x.cuh"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 // clang-format on
 
 using namespace cute;
