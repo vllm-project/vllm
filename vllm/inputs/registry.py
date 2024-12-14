@@ -402,7 +402,7 @@ class InputRegistry:
         # If it's empty, it'll fall back to the default kwarg values
         mm_processor_kwargs = resolve_mm_processor_kwargs(
             model_config.mm_processor_kwargs,
-            inputs.get("mm_processor_kwargs", {}),
+            inputs.get("mm_processor_kwargs", {}),  # type: ignore
             processor,
         )
 
