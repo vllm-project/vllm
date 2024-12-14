@@ -97,9 +97,6 @@ def run_phi3v(question: str, modality: str):
     # max_model_len (128k) for this model may cause OOM.
     # You may lower either to run this example on lower-end GPUs.
 
-    # In this example, we override max_num_seqs to 5 while
-    # keeping the original context length of 128k.
-
     # num_crops is an override kwarg to the multimodal image processor;
     # For some models, e.g., Phi-3.5-vision-instruct, it is recommended
     # to use 16 for single frame scenarios, and 4 for multi-frame.
@@ -113,7 +110,7 @@ def run_phi3v(question: str, modality: str):
     # https://huggingface.co/microsoft/Phi-3.5-vision-instruct#loading-the-model-locally
     # https://huggingface.co/microsoft/Phi-3.5-vision-instruct/blob/main/processing_phi3_v.py#L194
     llm = LLM(
-        model="microsoft/Phi-3-vision-128k-instruct",
+        model="microsoft/Phi-3.5-vision-instruct",
         trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=2,
