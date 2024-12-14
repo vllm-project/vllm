@@ -115,22 +115,28 @@ class UltravoxProcessor(BaseMultiModalProcessor):
             metadata=create_metadata_for_ultravox(ctx),
         )
 
-    def _apply_hf_processor(self, prompt, mm_data, mm_processor_kwargs):
-        tokenizer = self._get_tokenizer()
+    def _resample_audio(self, audio, sr):
+        # resample audio to the model's sampling rate
         feature_extractor = whisper_feature_extractor(self.ctx)
+        if sr != feature_extractor.sampling_rate:
+            try:
+                import librosa
+            except ImportError as exc:
+                raise ImportError(
+                    "Please install vllm[audio] for audio support.") from exc
+            audio = librosa.resample(audio,
+                                     orig_sr=sr,
+                                     target_sr=feature_extractor.sampling_rate)
+            sr = feature_extractor.sampling_rate
+        return {"audio": audio, "sampling_rate": sr}
+
+    def _apply_hf_processor(self, prompt, mm_data, mm_processor_kwargs):
+        # Ultravox processor doesn't support multiple inputs,
+        # therefore we need to input text and audio one by one
+        tokenizer = self._get_tokenizer()
         hf_inputs = defaultdict(list)
         for audio, sr in mm_data["audio"]:
-            if sr != feature_extractor.sampling_rate:
-                try:
-                    import librosa
-                except ImportError as exc:
-                    raise ImportError(
-                        "Please install vllm[audio] for audio support.") from exc
-                audio = librosa.resample(audio,
-                                        orig_sr=sr,
-                                        target_sr=feature_extractor.sampling_rate)
-                sr = feature_extractor.sampling_rate
-            data = {"audio": audio, "sampling_rate": sr}
+            data = self._resample_audio(audio, sr)
             processed_inputs = super()._apply_hf_processor(
                 prompt, data, mm_processor_kwargs)
             prompt = tokenizer.decode(processed_inputs["input_ids"][0],
@@ -141,11 +147,14 @@ class UltravoxProcessor(BaseMultiModalProcessor):
         return hf_inputs
 
     def _get_hf_processor(self, **mm_processor_kwargs):
+        # Ultravox processor use eot_token_id as the audio placeholder token,
+        # we replace it with <|reserved_special_token_0|> for convenience.
         hf_processor = super()._get_hf_processor(**mm_processor_kwargs)
         hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_STR
         return hf_processor
 
     def _get_processor_data(self, mm_data):
+        # Ultravox uses "audio" instead of "audios" as calling keyword
         processor_data, passthrough_data = super()._get_processor_data(mm_data)
         if "audios" in processor_data:
             processor_data["audio"] = processor_data.pop("audios")
