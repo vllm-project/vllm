@@ -17,11 +17,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, iterate_with_cancellation,
-                        random_uuid)
+from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -32,12 +32,14 @@ engine = None
 
 
 @app.get("/health")
+@with_cancellation
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
 
 
 @app.post("/generate")
+@with_cancellation
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
 
@@ -54,8 +56,6 @@ async def generate(request: Request) -> Response:
 
     assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
-    results_generator = iterate_with_cancellation(
-        results_generator, is_cancelled=request.is_disconnected)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
