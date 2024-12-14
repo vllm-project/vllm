@@ -5,7 +5,6 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Protocol, Set,
 
 import torch
 import torch.nn as nn
-from PIL.Image import Image
 from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
                           PixtralVisionConfig, PretrainedConfig,
                           ProcessorMixin, SiglipVisionConfig)
@@ -24,10 +23,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        InputProcessingContext,
-                                        ModalityProcessingMetadata,
-                                        MultiModalProcessingMetadata,
-                                        ProcessorInputs, PromptReplacement)
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement)
 from vllm.sequence import IntermediateTensors
 
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
@@ -117,67 +114,7 @@ def get_max_llava_image_tokens(ctx: InputContext):
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
 
-def create_metadata_for_llava(
-        ctx: InputProcessingContext) -> MultiModalProcessingMetadata:
-    hf_config = ctx.get_hf_config(LlavaConfig)
-    image_token_id = hf_config.image_token_index
-
-    processor = ctx.get_hf_processor()
-    if isinstance(processor, PixtralProcessor):
-        image_token = processor.image_token
-        image_break_token = processor.image_break_token
-        image_end_token = processor.image_end_token
-
-        vision_config = hf_config.vision_config
-        assert isinstance(vision_config, PixtralVisionConfig)
-
-        def get_replacement_pixtral(
-            mm_items: list[Image],
-            hf_inputs: BatchFeature,
-            item_idx: int,
-        ):
-            w, h = mm_items[item_idx].size
-            (
-                num_width_tokens,
-                num_height_tokens,
-            ) = get_pixtral_hf_image_feature_size(vision_config,
-                                                  image_width=w,
-                                                  image_height=h)
-
-            tokens = ([image_token] * num_width_tokens +
-                      [image_break_token]) * num_height_tokens
-            tokens[-1] = image_end_token
-
-            return "".join(tokens)
-
-        return {
-            "image":
-            ModalityProcessingMetadata(prompt_repls=[
-                PromptReplacement(
-                    target=[image_token_id],
-                    replacement=get_replacement_pixtral,
-                ),
-            ]),
-        }
-
-    return {
-        "image":
-        ModalityProcessingMetadata(prompt_repls=[
-            PromptReplacement(
-                target=[image_token_id],
-                replacement=[image_token_id] * get_max_llava_image_tokens(ctx),
-            ),
-        ]),
-    }
-
-
 class LlavaMultiModalProcessor(BaseMultiModalProcessor):
-
-    def __init__(self, ctx: InputProcessingContext) -> None:
-        super().__init__(
-            ctx=ctx,
-            metadata=create_metadata_for_llava(ctx),
-        )
 
     def _patch_pixtral_processor(self, hf_processor: PixtralProcessor):
         if getattr(hf_processor, "__is_patched__", False):
@@ -203,6 +140,59 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
             self._patch_pixtral_processor(hf_processor)
 
         return hf_processor
+
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_inputs: BatchFeature,
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> list[PromptReplacement]:
+        hf_config = self.ctx.get_hf_config(LlavaConfig)
+        image_token_id = hf_config.image_token_index
+
+        processor = self._get_hf_processor()
+        if isinstance(processor, PixtralProcessor):
+            image_token = processor.image_token
+            image_break_token = processor.image_break_token
+            image_end_token = processor.image_end_token
+
+            vision_config = hf_config.vision_config
+            assert isinstance(vision_config, PixtralVisionConfig)
+
+            def get_replacement_pixtral(item_idx: int):
+                image_size = mm_items.get_image_size(item_idx)
+                (
+                    num_width_tokens,
+                    num_height_tokens,
+                ) = get_pixtral_hf_image_feature_size(
+                    vision_config,
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                )
+
+                tokens = ([image_token] * num_width_tokens +
+                          [image_break_token]) * num_height_tokens
+                tokens[-1] = image_end_token
+
+                return "".join(tokens)
+
+            return [
+                PromptReplacement(
+                    modality="image",
+                    target=[image_token_id],
+                    replacement=get_replacement_pixtral,
+                ),
+            ]
+
+        max_image_tokens = get_max_llava_image_tokens(self.ctx)
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=[image_token_id] * max_image_tokens,
+            )
+        ]
 
     def _get_dummy_mm_inputs(
         self,

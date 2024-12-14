@@ -47,7 +47,6 @@ class InputContext:
         Raises:
             TypeError: If the model is not of the specified type.
         """
-
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, hf_config_type):
             raise TypeError("Invalid type of HuggingFace config. "
@@ -60,8 +59,27 @@ class InputContext:
         """
         Get the HuggingFace image processor configuration of the model.
         """
-
         return self.model_config.hf_image_processor_config
+
+    def get_mm_config(self):
+        """
+        Get the multimodal config of the model.
+
+        Raises:
+            RuntimeError: If the model is not a multimodal model.
+        """
+        mm_config = self.model_config.multimodal_config
+        if mm_config is None:
+            raise RuntimeError("Not a multimodal model")
+
+        return mm_config
+
+    def get_hf_processor(self, **kwargs) -> ProcessorMixin:
+        return cached_get_processor(
+            self.model_config.model,
+            trust_remote_code=self.model_config.trust_remote_code,
+            **kwargs,
+        )
 
 
 @dataclass(frozen=True)
@@ -71,10 +89,11 @@ class InputProcessingContext(InputContext):
 
     def get_hf_processor(self, **kwargs) -> ProcessorMixin:
         return cached_get_processor(
-            self.model_config.tokenizer,
+            self.model_config.model,
             tokenizer=self.tokenizer,  # Override the tokenizer with ours
             trust_remote_code=self.model_config.trust_remote_code,
-            **kwargs)
+            **kwargs,
+        )
 
 
 N = TypeVar("N", bound=Type[nn.Module])

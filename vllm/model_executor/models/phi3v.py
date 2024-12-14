@@ -16,6 +16,7 @@ from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
@@ -32,14 +33,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        InputProcessingContext,
-                                        ModalityProcessingMetadata,
                                         MultiModalDataDict,
-                                        MultiModalProcessingMetadata,
-                                        ProcessorInputs, PromptReplacement)
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -305,48 +303,71 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
 
-def get_max_phi3v_image_tokens(ctx: InputContext,
-                               *,
-                               num_crops: Optional[int] = None):
-    mm_processor_kwargs = {}
-    if num_crops is not None:
-        mm_processor_kwargs["num_crops"] = num_crops
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
+def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
+    target_height = int(np.ceil(height / padding_unit) * padding_unit)
+    top_padding = int((target_height - height) / 2)
+    bottom_padding = target_height - height - top_padding
+    padded_width = width
+    padded_height = height + top_padding + bottom_padding
+    return padded_width, padded_height
 
-    model_config = ctx.model_config
-    image_processor = cached_get_image_processor(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        **mm_processor_kwargs,
-    )
 
-    num_tokens = image_processor.calc_num_image_tokens_from_image_size(
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L90
+def _calc_hd_transform_size(*, width: int, height: int, hd_num: int):
+    transposed = False
+    if width < height:
+        width, height = height, width
+        transposed = True
+
+    ratio = width / height
+    scale = 1
+    while scale * np.ceil(scale / ratio) <= hd_num:
+        scale += 1
+    scale -= 1
+
+    new_width = int(scale * 336)
+    new_height = int(new_width / ratio)
+
+    padded_width, padded_height = _calc_padded_size(width=new_width,
+                                                    height=new_height)
+
+    if transposed:
+        padded_width, padded_height = padded_height, padded_width
+
+    return padded_width, padded_height
+
+
+def get_max_phi3v_image_tokens(ctx: InputContext) -> int:
+    processor = ctx.get_hf_processor()
+    image_processor = processor.image_processor  # type: ignore
+
+    return image_processor.calc_num_image_tokens_from_image_size(
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
-    return num_tokens
 
 
-def create_metadata_for_phi3v(
-        ctx: InputProcessingContext) -> MultiModalProcessingMetadata:
-    return {
-        "image":
-        ModalityProcessingMetadata(prompt_repls=[
-            PromptReplacement(
-                target=[_IMAGE_TOKEN_ID],
-                replacement=[_IMAGE_TOKEN_ID] *
-                get_max_phi3v_image_tokens(ctx),
-            ),
-        ]),
-    }
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L181
+def get_phi3v_image_feature_size(
+    hf_config: PretrainedConfig,
+    *,
+    input_height: int,
+    input_width: int,
+    num_crops: Optional[int],
+) -> int:
+    if num_crops is None:
+        num_crops = hf_config.get("num_crops", 16)
+
+    new_width, new_height = _calc_hd_transform_size(width=input_width,
+                                                    height=input_height,
+                                                    hd_num=num_crops)
+
+    return (new_height // 336 * new_width // 336 + 1) * 144 + 1 \
+        + (new_height // 336 + 1) * 12
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
-
-    def __init__(self, ctx: InputProcessingContext) -> None:
-        super().__init__(
-            ctx=ctx,
-            metadata=create_metadata_for_phi3v(ctx),
-        )
 
     def _get_hf_processor(
         self,
@@ -373,6 +394,39 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         processed_outputs['input_ids'] = token_ids
         return processed_outputs
 
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_inputs: BatchFeature,
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> list[PromptReplacement]:
+        hf_config = self.ctx.get_hf_config()
+
+        hf_processor = self._get_hf_processor()
+        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+
+        mm_config = self.ctx.get_mm_config()
+        max_images = mm_config.limit_per_prompt.get("image", 1)
+
+        def get_replacement_phi3v(item_idx: int):
+            image_size = mm_items.get_image_size(item_idx)
+            num_tokens = get_phi3v_image_feature_size(
+                hf_config,
+                input_width=image_size.width,
+                input_height=image_size.height,
+                num_crops=mm_processor_kwargs.get("num_crops"),
+            )
+
+            return [_IMAGE_TOKEN_ID] * num_tokens
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=image_token,
+                replacement=get_replacement_phi3v,
+            ) for image_token in image_tokens[:max_images]
+        ]
+
     def _get_dummy_mm_inputs(
         self,
         mm_counts: Mapping[str, int],
@@ -387,10 +441,10 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         )
 
         hf_processor = self._get_hf_processor()
-        image_tokens = hf_processor.img_tokens  # type: ignore
+        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
         return ProcessorInputs(
-            prompt_text=image_tokens[:num_images],
+            prompt_text="".join(image_tokens[:num_images]),
             mm_data=data,
             mm_processor_kwargs={},
         )
