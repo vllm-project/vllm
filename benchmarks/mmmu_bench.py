@@ -2,7 +2,7 @@ r"""Benchmark offline inference throughput with MMMU-PRO Vision
 e.g, 
 python3 benchmarks/mmmu_bench.py \
     --model mistralai/Pixtral-12B-2409 \
-    --tokenizer-model mistral \
+    --tokenizer-mode mistral \
     --num-prompts 1000 \
     --image-hit-rate 0.5
 
@@ -13,6 +13,7 @@ python3 benchmarks/mmmu_bench.py \
     --num-prompts 1000
 """
 import argparse
+import asyncio
 import base64
 import dataclasses
 import io
@@ -29,14 +30,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
-def sample_mmmu_pro_vision_requests(
+async def sample_mmmu_pro_vision_requests(
     dataset,
     num_requests: int,
     image_hit_rate: float,
 ):
-
     sampled_requests = []
-
     num_unique_images = int(num_requests * (1 - image_hit_rate))
     print(
         f"Total {num_requests} requests with {num_unique_images} unique images"
@@ -47,8 +46,6 @@ def sample_mmmu_pro_vision_requests(
         if len(sampled_requests) == num_requests:
             break
 
-        # MMMU-Pro vision direct prompt
-        # Ref: https://github.com/MMMU-Benchmark/MMMU/blob/6ce42f4d8f70c1841c67867152648974415b5cac/mmmu-pro/prompts.yaml#L5
         prompt = (
             "Answer with the option letter from the given choices directly. "
             "The last line of your response should be of the following "
@@ -87,36 +84,44 @@ def sample_mmmu_pro_vision_requests(
     return sampled_requests
 
 
-def sample_hf_requests(
+async def sample_hf_requests(
     num_requests: int,
     random_seed: int,
     image_hit_rate: float,
 ):
-
     dataset = load_dataset('MMMU/MMMU_Pro',
                            name='vision',
                            split="test",
                            streaming=True)
     dataset = dataset.shuffle(seed=random_seed)
-    return sample_mmmu_pro_vision_requests(dataset, num_requests,
-                                           image_hit_rate)
+    return await sample_mmmu_pro_vision_requests(dataset, num_requests,
+                                                 image_hit_rate)
 
 
-def main(args: argparse.Namespace):
+async def initialize_llm(engine_args):
+    return LLM(**dataclasses.asdict(engine_args))
+
+
+async def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
     engine_args = EngineArgs.from_cli_args(args)
-    sampled = sample_hf_requests(args.num_prompts, args.seed,
-                                 args.image_hit_rate)
-    llm = LLM(**dataclasses.asdict(engine_args))
+
     sampling_params = SamplingParams(max_tokens=args.output_len, temperature=0)
+
+    # Concurrently initialize the LLM and sample data
+    sampling_task = asyncio.create_task(
+        sample_hf_requests(args.num_prompts, args.seed, args.image_hit_rate))
+    llm_task = asyncio.create_task(initialize_llm(engine_args))
+
+    sampled, llm = await asyncio.gather(sampling_task, llm_task)
+
     st = time.perf_counter()
     outputs = llm.chat(sampled, sampling_params=sampling_params)
     duration = time.perf_counter() - st
 
-    total_generated_tokens = 0
-    for output in outputs:
-        total_generated_tokens += len(output.outputs[0].token_ids)
+    total_generated_tokens = sum(
+        len(output.outputs[0].token_ids) for output in outputs)
 
     print(f"Request throughput: {args.num_prompts / duration:.2f} req/s")
     print(f"Total generated tokens: {total_generated_tokens}")
@@ -144,4 +149,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
-    main(args)
+
+    asyncio.run(main(args))
