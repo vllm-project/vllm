@@ -33,13 +33,13 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         InputProcessingContext,
                                         ModalityProcessingMetadata,
                                         MultiModalDataDict,
                                         MultiModalProcessingMetadata,
-                                        PromptReplacement)
+                                        ProcessorInputs, PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -326,37 +326,21 @@ def get_max_phi3v_image_tokens(ctx: InputContext,
     return num_tokens
 
 
-def dummy_mm_kwargs_for_phi3v(ctx: InputProcessingContext,
-                              mm_counts: Mapping[str, int]):
-    num_images = mm_counts["image"]
-
-    data = dummy_image_for_clip(
-        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        num_images,
-        image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-        image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
-    )
-
-    hf_processor = ctx.get_hf_processor()
-    image_processor = hf_processor.image_processor  # type: ignore
-    hf_inputs = image_processor.preprocess(data['image'], return_tensors="pt")
-
-    return MultiModalKwargs(**hf_inputs)
-
-
 def create_metadata_for_phi3v(
         ctx: InputProcessingContext) -> MultiModalProcessingMetadata:
     return {
         "image":
         ModalityProcessingMetadata(prompt_repls=[
-            PromptReplacement(target=[_IMAGE_TOKEN_ID],
-                              repl_unit=[_IMAGE_TOKEN_ID],
-                              repl_count=get_max_phi3v_image_tokens(ctx)),
+            PromptReplacement(
+                target=[_IMAGE_TOKEN_ID],
+                replacement=[_IMAGE_TOKEN_ID] *
+                get_max_phi3v_image_tokens(ctx),
+            ),
         ]),
     }
 
 
-class Phi3VProcessor(BaseMultiModalProcessor):
+class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
 
     def __init__(self, ctx: InputProcessingContext) -> None:
         super().__init__(
@@ -389,15 +373,31 @@ class Phi3VProcessor(BaseMultiModalProcessor):
         processed_outputs['input_ids'] = token_ids
         return processed_outputs
 
-    def _get_dummy_mm_kwargs(
+    def _get_dummy_mm_inputs(
         self,
         mm_counts: Mapping[str, int],
-    ) -> MultiModalKwargs:
-        return dummy_mm_kwargs_for_phi3v(self.ctx, mm_counts)
+    ) -> ProcessorInputs:
+        num_images = mm_counts["image"]
+
+        data = dummy_image_for_clip(
+            CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+            num_images,
+            image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+            image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        )
+
+        hf_processor = self._get_hf_processor()
+        image_tokens = hf_processor.img_tokens  # type: ignore
+
+        return ProcessorInputs(
+            prompt_text=image_tokens[:num_images],
+            mm_data=data,
+            mm_processor_kwargs={},
+        )
 
 
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
-@MULTIMODAL_REGISTRY.register_processor(Phi3VProcessor)
+@MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

@@ -171,7 +171,8 @@ class InputRegistry:
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._dummy_factories_by_model_type:
+            if self._dummy_factories_by_model_type.contains(model_cls,
+                                                            strict=True):
                 logger.warning(
                     "Model class %s already has dummy data "
                     "registered to %s. It is overwritten by the new one.",
@@ -195,7 +196,8 @@ class InputRegistry:
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._dummy_encoder_factories_by_model_type:
+            if self._dummy_encoder_factories_by_model_type.contains(
+                    model_cls, strict=True):
                 logger.warning(
                     "Model class %s already has dummy encoder data "
                     "registered to %s. It is overwritten by the new one.",
@@ -305,7 +307,8 @@ class InputRegistry:
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._input_processors_by_model_type:
+            if self._input_processors_by_model_type.contains(model_cls,
+                                                             strict=True):
                 logger.warning(
                     "Model class %s already has input processor "
                     "registered to %s. It is overwritten by the new one.",
