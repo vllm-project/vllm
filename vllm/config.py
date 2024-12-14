@@ -27,8 +27,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
-from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once, random_uuid,
+from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
+                        get_cpu_memory, print_warning_once, random_uuid,
                         resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
@@ -45,13 +45,27 @@ else:
 
 logger = init_logger(__name__)
 
-_EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+_POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-TaskOption = Literal["auto", "generate", "embedding"]
+TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
+                     "score", "reward"]
 
-# "draft" is only used internally for speculative decoding
-_Task = Literal["generate", "embedding", "draft"]
+_ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
+                        "draft"]
+
+RunnerType = Literal["generate", "pooling", "draft"]
+
+_RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
+    "generate": ["generate"],
+    "pooling": ["embed", "classify", "score", "reward"],
+    "draft": ["draft"],
+}
+
+_TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
+    task: runner
+    for runner, tasks in _RUNNER_TASKS.items() for task in tasks
+}
 
 HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
@@ -133,46 +147,54 @@ class ModelConfig:
             HuggingFace config.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
+        mm_cache_preprocessor: If true, then enables caching of the multi-modal 
+            preprocessor/mapper. Otherwise, the mapper executes each time, and 
+            for better performance consider enabling frontend process.
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
             can not be gathered from the vllm arguments.
         override_pooler_config: Initialize non default pooling config or
-            override default pooling config for the embedding model.
+            override default pooling config for the pooling model.
+        logits_processor_pattern: Optional regex pattern specifying valid
+            logits processor qualified names that can be passed with the
+            `logits_processors` extra completion argument. Defaults to None, 
+            which allows no processors.
     """
 
-    def __init__(
-            self,
-            model: str,
-            task: Union[TaskOption, _Task],
-            tokenizer: str,
-            tokenizer_mode: str,
-            trust_remote_code: bool,
-            dtype: Union[str, torch.dtype],
-            seed: int,
-            allowed_local_media_path: str = "",
-            revision: Optional[str] = None,
-            code_revision: Optional[str] = None,
-            rope_scaling: Optional[Dict[str, Any]] = None,
-            rope_theta: Optional[float] = None,
-            tokenizer_revision: Optional[str] = None,
-            max_model_len: Optional[int] = None,
-            spec_target_max_model_len: Optional[int] = None,
-            quantization: Optional[str] = None,
-            quantization_param_path: Optional[str] = None,
-            enforce_eager: Optional[bool] = None,
-            max_seq_len_to_capture: Optional[int] = None,
-            max_logprobs: int = 20,
-            disable_sliding_window: bool = False,
-            skip_tokenizer_init: bool = False,
-            served_model_name: Optional[Union[str, List[str]]] = None,
-            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-            use_async_output_proc: bool = True,
-            config_format: ConfigFormat = ConfigFormat.AUTO,
-            hf_overrides: Optional[HfOverrides] = None,
-            mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-            override_neuron_config: Optional[Dict[str, Any]] = None,
-            override_pooler_config: Optional["PoolerConfig"] = None) -> None:
+    def __init__(self,
+                 model: str,
+                 task: Union[TaskOption, Literal["draft"]],
+                 tokenizer: str,
+                 tokenizer_mode: str,
+                 trust_remote_code: bool,
+                 dtype: Union[str, torch.dtype],
+                 seed: int,
+                 allowed_local_media_path: str = "",
+                 revision: Optional[str] = None,
+                 code_revision: Optional[str] = None,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 rope_theta: Optional[float] = None,
+                 tokenizer_revision: Optional[str] = None,
+                 max_model_len: Optional[int] = None,
+                 spec_target_max_model_len: Optional[int] = None,
+                 quantization: Optional[str] = None,
+                 quantization_param_path: Optional[str] = None,
+                 enforce_eager: Optional[bool] = None,
+                 max_seq_len_to_capture: Optional[int] = None,
+                 max_logprobs: int = 20,
+                 disable_sliding_window: bool = False,
+                 skip_tokenizer_init: bool = False,
+                 served_model_name: Optional[Union[str, List[str]]] = None,
+                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+                 use_async_output_proc: bool = True,
+                 config_format: ConfigFormat = ConfigFormat.AUTO,
+                 hf_overrides: Optional[HfOverrides] = None,
+                 mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+                 mm_cache_preprocessor: bool = False,
+                 override_neuron_config: Optional[Dict[str, Any]] = None,
+                 override_pooler_config: Optional["PoolerConfig"] = None,
+                 logits_processor_pattern: Optional[str] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -237,6 +259,7 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
+        self.mm_cache_preprocessor = mm_cache_preprocessor
 
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:
@@ -284,6 +307,7 @@ class ModelConfig:
             self._verify_tokenizer_mode()
 
         self.is_attention_free = self._init_attention_free()
+        self.is_hybrid = self._init_is_hybrid()
         self.has_inner_state = self._init_has_inner_state()
 
         if current_platform.is_neuron():
@@ -294,7 +318,9 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+
         self.pooler_config = self._init_pooler_config(override_pooler_config)
+        self.logits_processor_pattern = logits_processor_pattern
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -322,7 +348,7 @@ class ModelConfig:
         override_pooler_config: Optional["PoolerConfig"],
     ) -> Optional["PoolerConfig"]:
 
-        if self.task == "embedding":
+        if self.runner_type == "pooling":
             user_config = override_pooler_config or PoolerConfig()
 
             base_config = get_pooling_config(self.model, self.revision)
@@ -340,6 +366,10 @@ class ModelConfig:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_attention_free_model(architectures)
 
+    def _init_is_hybrid(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_hybrid_model(architectures)
+
     def _init_has_inner_state(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.model_has_inner_state(architectures)
@@ -352,60 +382,90 @@ class ModelConfig:
                 "either 'auto', 'slow' or 'mistral'.")
         self.tokenizer_mode = tokenizer_mode
 
+    def _get_preferred_task(
+        self,
+        architectures: List[str],
+        supported_tasks: Set[_ResolvedTask],
+    ) -> Optional[_ResolvedTask]:
+        model_id = self.model
+        if get_pooling_config(model_id, self.revision):
+            return "embed"
+        if ModelRegistry.is_cross_encoder_model(architectures):
+            return "score"
+
+        suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
+            # Other models follow this pattern
+            ("ForCausalLM", "generate"),
+            ("ForConditionalGeneration", "generate"),
+            ("ForSequenceClassification", "classify"),
+            ("ChatModel", "generate"),
+            ("LMHeadModel", "generate"),
+            ("EmbeddingModel", "embed"),
+            ("RewardModel", "reward"),
+        ]
+        _, arch = ModelRegistry.inspect_model_cls(architectures)
+
+        for suffix, pref_task in suffix_to_preferred_task:
+            if arch.endswith(suffix) and pref_task in supported_tasks:
+                return pref_task
+
+        return None
+
     def _resolve_task(
         self,
-        task_option: Union[TaskOption, _Task],
+        task_option: Union[TaskOption, Literal["draft"]],
         hf_config: PretrainedConfig,
-    ) -> Tuple[Set[_Task], _Task]:
+    ) -> Tuple[Set[_ResolvedTask], _ResolvedTask]:
         if task_option == "draft":
             return {"draft"}, "draft"
 
         architectures = getattr(hf_config, "architectures", [])
 
-        task_support: Dict[_Task, bool] = {
+        runner_support: Dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
             "generate": ModelRegistry.is_text_generation_model(architectures),
-            "embedding": ModelRegistry.is_pooling_model(architectures),
+            "pooling": ModelRegistry.is_pooling_model(architectures),
         }
-        supported_tasks_lst: List[_Task] = [
-            task for task, is_supported in task_support.items() if is_supported
+        supported_runner_types_lst: List[RunnerType] = [
+            runner_type
+            for runner_type, is_supported in runner_support.items()
+            if is_supported
+        ]
+
+        supported_tasks_lst: List[_ResolvedTask] = [
+            task for runner_type in supported_runner_types_lst
+            for task in _RUNNER_TASKS[runner_type]
         ]
         supported_tasks = set(supported_tasks_lst)
 
         if task_option == "auto":
             selected_task = next(iter(supported_tasks_lst))
 
-            if len(supported_tasks) > 1:
-                suffix_to_preferred_task: List[Tuple[str, _Task]] = [
-                    # Hardcode the models that are exceptions
-                    ("AquilaModel", "generate"),
-                    ("ChatGLMModel", "generate"),
-                    # Other models follow this pattern
-                    ("ForCausalLM", "generate"),
-                    ("ForConditionalGeneration", "generate"),
-                    ("ChatModel", "generate"),
-                    ("LMHeadModel", "generate"),
-                    ("EmbeddingModel", "embedding"),
-                    ("RewardModel", "embedding"),
-                    ("ForSequenceClassification", "embedding"),
-                ]
-                info, arch = ModelRegistry.inspect_model_cls(architectures)
-
-                for suffix, pref_task in suffix_to_preferred_task:
-                    if arch.endswith(suffix) and pref_task in supported_tasks:
-                        selected_task = pref_task
-                        break
-                else:
-                    if (arch.endswith("Model")
-                            and info.architecture.endswith("ForCausalLM")
-                            and "embedding" in supported_tasks):
-                        selected_task = "embedding"
+            if len(supported_tasks_lst) > 1:
+                preferred_task = self._get_preferred_task(
+                    architectures, supported_tasks)
+                if preferred_task is not None:
+                    selected_task = preferred_task
 
                 logger.info(
                     "This model supports multiple tasks: %s. "
                     "Defaulting to '%s'.", supported_tasks, selected_task)
         else:
+            # Aliases
+            if task_option == "embedding":
+                preferred_task = self._get_preferred_task(
+                    architectures, supported_tasks)
+                if preferred_task != "embed":
+                    msg = ("The 'embedding' task will be restricted to "
+                           "embedding models in a future release. Please "
+                           "pass `--task classify`, `--task score`, or "
+                           "`--task reward` explicitly for other pooling "
+                           "models.")
+                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
+                task_option = preferred_task or "embed"
+
             if task_option not in supported_tasks:
                 msg = (
                     f"This model does not support the '{task_option}' task. "
@@ -526,9 +586,9 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Async postprocessor is not necessary with embedding mode
+        # Async postprocessor is not necessary for pooling models
         # since there is no token generation
-        if self.task == "embedding":
+        if self.runner_type == "pooling":
             self.use_async_output_proc = False
 
         # Reminder: Please update docs/source/usage/compatibility_matrix.rst
@@ -669,26 +729,51 @@ class ModelConfig:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
 
-    def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+    def get_layers_start_end_indices(
+            self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
         pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
+        return start, end
+
+    def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+        start, end = self.get_layers_start_end_indices(parallel_config)
         return end - start
 
-    def get_num_attention_layers(self,
-                                 parallel_config: "ParallelConfig") -> int:
-        if self.is_attention_free:
-            return 0
+    def get_num_layers_by_block_type(
+        self,
+        parallel_config: "ParallelConfig",
+        block_type: LayerBlockType = LayerBlockType.attention,
+    ) -> int:
+        # This function relies on 'layers_block_type' in hf_config,
+        # for w/o this attribute, we will need to have workarounds like so
+        attn_block_type = block_type == LayerBlockType.attention
+        is_transformer = not self.is_hybrid and not self.is_attention_free
+        start, end = self.get_layers_start_end_indices(parallel_config)
 
-        num_layers = self.get_num_layers(parallel_config)
+        if is_transformer:
+            # Handle the basic case first
+            return end - start if attn_block_type else 0
+        elif self.is_attention_free:
+            # Attention free
+            # Note that this code assumes there
+            # is only one type of attention-free block type.
+            return 0 if attn_block_type else end - start
+        else:
+            # Hybrid model
+            layers_block_type_value = getattr(self.hf_config,
+                                              "layers_block_type", None)
+            if layers_block_type_value is None:
+                raise ValueError("The model is an hybrid without a"
+                                 "layers_block_type in the hf_config,"
+                                 "cannot determine the num of "
+                                 f"{block_type.value} layers")
 
-        # Transformers supports layers_block_type @property
-        layers = getattr(self.hf_config, "layers_block_type",
-                         ["attention"] * num_layers)
-        return len([t for t in layers if t == "attention"])
+            return sum(t == block_type.value
+                       for t in layers_block_type_value[start:end])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
@@ -719,6 +804,14 @@ class ModelConfig:
     def is_cross_encoder(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_cross_encoder_model(architectures)
+
+    @property
+    def supported_runner_types(self) -> Set[RunnerType]:
+        return {_TASK_RUNNER[task] for task in self.supported_tasks}
+
+    @property
+    def runner_type(self) -> RunnerType:
+        return _TASK_RUNNER[self.task]
 
 
 class CacheConfig:
@@ -1066,7 +1159,7 @@ class ParallelConfig:
 class SchedulerConfig:
     """Scheduler configuration."""
 
-    task: str = "generate"  # The task to use the model for.
+    runner_type: str = "generate"  # The runner type to launch for the model.
 
     # Maximum number of tokens to be processed in a single iteration.
     max_num_batched_tokens: int = field(default=None)  # type: ignore
@@ -1134,11 +1227,11 @@ class SchedulerConfig:
                 # for higher throughput.
                 self.max_num_batched_tokens = max(self.max_model_len, 2048)
 
-            if self.task == "embedding":
-                # For embedding, choose specific value for higher throughput
+            if self.runner_type == "pooling":
+                # Choose specific value for higher throughput
                 self.max_num_batched_tokens = max(
                     self.max_num_batched_tokens,
-                    _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS,
+                    _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
             if self.is_multimodal_model:
                 # The value needs to be at least the number of multimodal tokens
@@ -1698,7 +1791,8 @@ class LoRAConfig:
         # Reminder: Please update docs/source/usage/compatibility_matrix.rst
         # If the feature combo become valid
         if scheduler_config.chunked_prefill_enabled:
-            raise ValueError("LoRA is not supported with chunked prefill yet.")
+            logger.warning("LoRA with chunked prefill is still experimental "
+                           "and may be unstable.")
 
 
 @dataclass
@@ -1741,11 +1835,11 @@ class MultiModalConfig:
 
 @dataclass
 class PoolerConfig:
-    """Controls the behavior of output pooling in embedding models."""
+    """Controls the behavior of output pooling in pooling models."""
 
     pooling_type: Optional[str] = None
     """
-    The pooling method of the embedding model. This should be a key in
+    The pooling method of the pooling model. This should be a key in
     :class:`vllm.model_executor.layers.pooler.PoolingType`.
     """
 
@@ -2138,6 +2232,7 @@ class CompilationConfig(BaseModel):
             - 1: dynamo as is.
             - 2: dynamo once.
             - 3: piecewise compilation.
+        - debug_dump_path: the path to dump the debug information.
         - backend: the backend for compilation. It needs to be a string.
             - "" (empty string): use the default backend.
             - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
@@ -2205,6 +2300,7 @@ class CompilationConfig(BaseModel):
         certain small batchsizes, where inductor is good at optimizing.
     """ # noqa
     level: int = 0
+    debug_dump_path: str = ""
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
     splitting_ops: List[str] = Field(default_factory=lambda: [
@@ -2263,6 +2359,12 @@ class CompilationConfig(BaseModel):
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
+    max_capture_size: int = PrivateAttr
+    # optimization:
+    # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
+    # since we know all keys are in a range [0, max_capture_size],
+    # we can optimize it to List[int] for better lookup performance.
+    bs_to_padded_graph_size: List[int] = PrivateAttr
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
@@ -2273,6 +2375,19 @@ class CompilationConfig(BaseModel):
     # Mainly used to store attention cls
     # Map from layer name to the attention cls
     static_forward_context: Dict[str, Any] = PrivateAttr
+
+    def __repr__(self) -> str:
+        exclude = {
+            "static_forward_context",
+            "enabled_custom_ops",
+            "disabled_custom_ops",
+            "compilation_time",
+            "bs_to_padded_graph_size",
+            "pass_config",
+        }
+        return self.model_dump_json(exclude=exclude, exclude_unset=True)
+
+    __str__ = __repr__
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
@@ -2310,7 +2425,7 @@ class CompilationConfig(BaseModel):
         self.static_forward_context = {}
         self.compilation_time = 0.0
 
-    def init_backend(self) -> Union[str, Callable]:
+    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -2329,7 +2444,7 @@ class CompilationConfig(BaseModel):
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
         from vllm.compilation.backends import VllmBackend
-        return VllmBackend(self)
+        return VllmBackend(vllm_config)
 
     def init_with_cudagraph_sizes(self, sizes_to_specialize: List[int]):
         """To complete the initialization of config,
@@ -2359,18 +2474,22 @@ class CompilationConfig(BaseModel):
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
+        self.max_capture_size = self.capture_sizes[
+            0] if self.capture_sizes else 0
 
-
-_BATCH_SIZE_ALIGNMENT = 8
-# all the token sizes that **can** be captured by cudagraph.
-# they can be arbitrarily large.
-# currently it includes: 1, 2, 4, 8, 16, 24, 32, 40, ..., 8192.
-# the actual sizes to capture will be determined by the model,
-# depending on the model's max_num_seqs.
-# NOTE: get_graph_batch_size needs to be updated if this list is changed.
-_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
-    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 1025)
-]
+        # pre-compute the mapping from batch size to padded graph size
+        self.bs_to_padded_graph_size = [
+            0 for i in range(self.max_capture_size + 1)
+        ]
+        for end, start in zip(self.capture_sizes,
+                              self.capture_sizes[1:] + [0]):
+            for bs in range(start, end):
+                if bs == start:
+                    self.bs_to_padded_graph_size[bs] = start
+                else:
+                    self.bs_to_padded_graph_size[bs] = end
+        self.bs_to_padded_graph_size[
+            self.max_capture_size] = self.max_capture_size
 
 
 @dataclass
@@ -2400,40 +2519,12 @@ class VllmConfig:
                                                  init=True)  # type: ignore
     instance_id: str = ""
 
-    @staticmethod
-    def get_graph_batch_size(batch_size: int) -> int:
-        """Returns the padded batch size given actual batch size.
-
-        Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
-        2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
-        """
-        if batch_size <= 2:
-            return batch_size
-        elif batch_size <= 4:
-            return 4
-        else:
-            return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
-                    _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-    @staticmethod
-    def get_max_graph_batch_size(max_num_seqs: int) -> int:
-        """
-        max_num_seqs: Maximum number of sequences in a batch.
-        _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
-
-        pad the max_num_seqs if necessary by calling get_graph_batch_size,
-        which will deal with some edge cases like 1, 2, 4.
-
-        if the padded size is in _BATCH_SIZES_TO_CAPTURE, return the padded
-        size. if not, it means the padded size is larger than the largest size
-        in _BATCH_SIZES_TO_CAPTURE, return the largest size in
-        _BATCH_SIZES_TO_CAPTURE.
-        """
-        padded_size = VllmConfig.get_graph_batch_size(max_num_seqs)
-        if padded_size in _BATCH_SIZES_TO_CAPTURE:
-            return padded_size
-        assert padded_size > _BATCH_SIZES_TO_CAPTURE[-1]
-        return _BATCH_SIZES_TO_CAPTURE[-1]
+    def pad_for_cudagraph(self, batch_size: int) -> int:
+        # if batch_size > self.compilation_config.max_capture_size,
+        # it should raise an IndexError.
+        # the caller should make sure the batch_size is within the range,
+        # i.e., batch_size <= self.compilation_config.max_capture_size
+        return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
     @staticmethod
     def _get_quantization_config(
@@ -2527,27 +2618,7 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
 
-        if not envs.VLLM_USE_V1:
-            max_batchsize_to_capture = 0
-            if self.scheduler_config is not None and \
-                self.model_config is not None and \
-                    not self.model_config.enforce_eager:
-                max_batchsize_to_capture = \
-                    self.get_max_graph_batch_size(
-                    self.scheduler_config.max_num_seqs)
-            batch_size_capture_list = [
-                size for size in _BATCH_SIZES_TO_CAPTURE
-                if size <= max_batchsize_to_capture
-            ]
-        else:
-            batch_size_capture_list = []
-            if self.model_config is not None and \
-                not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
-
-        self.compilation_config.init_with_cudagraph_sizes(
-            batch_size_capture_list)
+        self._set_cudagraph_sizes()
 
         if self.cache_config is not None and \
             self.cache_config.cpu_offload_gb > 0 and \
@@ -2567,6 +2638,70 @@ class VllmConfig:
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+    def _set_cudagraph_sizes(self):
+        """
+        cudagraph batchsize padding logic:
+
+        `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
+        batch sizes that cudagraph will capture.
+
+        Depending on the engine's configuration of `max_num_seqs`, the
+        candidate batch sizes to capture cudagraph will shrink to the subset
+        which just cover the range of `[1, max_num_seqs]`. In the common case,
+        `max_num_seqs` is 256, and the cudagraph batch sizes will be
+        `[1, 2, 4, 8, 16, 24, 32, 40, ..., 256]`.
+
+        However, if users specify the cudagraph capture sizes through
+        compilation config, we will use the specified sizes instead.
+
+        In the end, `vllm_config.compilation_config.capture_sizes` will be the
+        final sizes to capture cudagraph (in descending order).
+
+        During runtime, if batchsize is larger than
+        `vllm_config.compilation_config.capture_sizes`,
+        no cudagraph will be used.
+        If the batch size is no larger than
+        `vllm_config.compilation_config.capture_sizes`,
+        we can quickly find the padded graph size for a given batch size by
+        looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
+        """
+
+        # calculate the default `batch_size_capture_list`
+        if not envs.VLLM_USE_V1:
+            batch_size_capture_list = []
+            max_batchsize_to_capture = 0
+            if self.scheduler_config is not None and \
+                self.model_config is not None and \
+                    not self.model_config.enforce_eager:
+
+                possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
+                # find the minimum size that is larger than max_num_seqs,
+                # which then becomes the max_batchsize_to_capture
+                larger_sizes = [
+                    x for x in possible_sizes
+                    if x >= self.scheduler_config.max_num_seqs
+                ]
+                if larger_sizes:
+                    max_batchsize_to_capture = larger_sizes[0]
+                else:
+                    max_batchsize_to_capture = possible_sizes[-1]
+
+                # filter out the sizes that are
+                # larger than max_batchsize_to_capture
+                batch_size_capture_list = [
+                    size for size in possible_sizes
+                    if size <= max_batchsize_to_capture
+                ]
+        else:
+            batch_size_capture_list = []
+            if self.model_config is not None and \
+                not self.model_config.enforce_eager:
+                batch_size_capture_list = [1, 2, 4
+                                           ] + [i for i in range(8, 513, 8)]
+
+        self.compilation_config.init_with_cudagraph_sizes(
+            batch_size_capture_list)
 
     def __str__(self):
         return (
@@ -2600,9 +2735,10 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
+            f"mm_cache_preprocessor={self.model_config.mm_cache_preprocessor!r}, "  # noqa
             f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
-            f"pooler_config={self.model_config.pooler_config!r},"
-            f" compilation_config={self.compilation_config!r}")
+            f"pooler_config={self.model_config.pooler_config!r}, "
+            f"compilation_config={self.compilation_config!r}")
 
 
 _current_vllm_config: Optional[VllmConfig] = None

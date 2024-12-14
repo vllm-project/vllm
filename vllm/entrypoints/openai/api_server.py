@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import importlib
 import inspect
 import multiprocessing
@@ -195,6 +196,14 @@ async def build_async_engine_client_from_engine_args(
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
         logger.info("Started engine process with PID %d", engine_pid)
+
+        def _cleanup_ipc_path():
+            socket_path = ipc_path.replace("ipc://", "")
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
+
+        # Ensure we clean up the local IPC socket file on exit.
+        atexit.register(_cleanup_ipc_path)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
         engine_config = engine_args.create_engine_config()
@@ -397,7 +406,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/score")
+@router.post("/score")
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
@@ -412,6 +421,15 @@ async def create_score(request: ScoreRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
+
+
+@router.post("/v1/score")
+async def create_score_v1(request: ScoreRequest, raw_request: Request):
+    logger.warning(
+        "To indicate that Score API is not part of standard OpenAI API, we "
+        "have moved it to `/score`. Please update your client accordingly.")
+
+    return await create_score(request, raw_request)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -573,7 +591,7 @@ def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -582,7 +600,7 @@ def init_app_state(
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -590,13 +608,13 @@ def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embedding" else None
+    ) if model_config.runner_type == "pooling" else None
     state.openai_serving_scores = OpenAIServingScores(
         engine_client,
         model_config,
         base_model_paths,
         request_logger=request_logger
-    ) if (model_config.task == "embedding" \
+    ) if (model_config.runner_type == "pooling" \
           and model_config.is_cross_encoder) else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,

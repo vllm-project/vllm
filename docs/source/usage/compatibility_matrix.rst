@@ -39,13 +39,13 @@ Feature x Feature
      - :abbr:`prmpt adptr (Prompt Adapter)`
      - :ref:`SD <spec_decode>`
      - CUDA graph
-     - :abbr:`emd (Embedding Models)`
+     - :abbr:`pooling (Pooling Models)`
      - :abbr:`enc-dec (Encoder-Decoder Models)`
      - :abbr:`logP (Logprobs)`
      - :abbr:`prmpt logP (Prompt Logprobs)`
      - :abbr:`async output (Async Output Processing)`
      - multi-step
-     - :abbr:`mm (Multimodal)`
+     - :abbr:`mm (Multimodal Inputs)`
      - best-of
      - beam-search
      - :abbr:`guided dec (Guided Decoding)`
@@ -151,7 +151,7 @@ Feature x Feature
      - 
      - 
      - 
-   * - :abbr:`emd (Embedding Models)`
+   * - :abbr:`pooling (Pooling Models)`
      - ✗
      - ✗
      - ✗ 
@@ -253,7 +253,7 @@ Feature x Feature
      - 
      - 
      - 
-   * - :abbr:`mm (Multimodal)`
+   * - :abbr:`mm (Multimodal Inputs)`
      - ✅
      -  `✗ <https://github.com/vllm-project/vllm/pull/8348>`__ 
      -  `✗ <https://github.com/vllm-project/vllm/pull/7199>`__ 
@@ -386,7 +386,7 @@ Feature x Hardware
      - ✅
      - ✗
      - ✅
-   * - :abbr:`emd (Embedding Models)`
+   * - :abbr:`pooling (Pooling Models)`
      - ✅
      - ✅
      - ✅
@@ -402,7 +402,7 @@ Feature x Hardware
      - ✅
      - ✅
      - ✗
-   * - :abbr:`mm (Multimodal)`
+   * - :abbr:`mm (Multimodal Inputs)`
      - ✅
      - ✅
      - ✅
