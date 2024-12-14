@@ -237,9 +237,7 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
 
 def to_multi_format(data: MultiModalDataDict) -> MultiModalDataItems:
     """
-    Convert a :class:`MultiModalDataDict` containing single data items
-    to a :class:`MultiModalMultiDataDict` containing multiple data items
-    per entry.
+    Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`.
     """
     multi_data = MultiModalDataItems()
 
