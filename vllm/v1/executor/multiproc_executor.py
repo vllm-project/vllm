@@ -104,7 +104,7 @@ class MultiprocExecutor(Executor):
                        method: str,
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> Any:
+                       kwargs: Optional[Dict] = None) -> List[Any]:
         """
         Execute an RPC call on workers.
         
