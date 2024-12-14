@@ -352,7 +352,7 @@ Then, you can use the OpenAI client as follows:
         return result
     audio_base64 = encode_base64_content_from_url(audio_url)
 
-    chat_completion_from_url = client.chat.completions.create(
+    chat_completion_from_base64 = client.chat.completions.create(
         messages=[{
             "role": "user",
             "content": [
@@ -373,7 +373,7 @@ Then, you can use the OpenAI client as follows:
         max_completion_tokens=64,
     )
 
-    result = chat_completion_from_url.choices[0].message.content
+    result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from input audio:", result)
 
     chat_completion_from_url = client.chat.completions.create(
