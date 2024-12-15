@@ -835,8 +835,8 @@ class ModelConfig:
         ]
         if any(p in config for p in available_params):
             diff_sampling_param = {
-                p: config.get(p, None)
-                for p in available_params
+                p: config.get(p)
+                for p in available_params if config.get(p) is not None
             }
         else:
             diff_sampling_param = {}

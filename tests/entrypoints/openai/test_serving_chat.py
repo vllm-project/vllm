@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import Optional
 from unittest.mock import MagicMock
 
 from vllm.config import MultiModalConfig
@@ -31,7 +32,7 @@ class MockModelConfig:
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
     logits_processor_pattern = None
-    diff_sampling_param = None
+    diff_sampling_param: Optional[dict] = None
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -135,4 +136,13 @@ def test_serving_chat_could_load_correct_generation_config():
         asyncio.run(serving_chat.create_chat_completion(req))
 
     assert mock_engine.generate.call_args.args[1].temperature == 0.5
+    assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
+
+    # Test the param when user set it
+    req.temperature = 0.1
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].temperature == 0.1
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05

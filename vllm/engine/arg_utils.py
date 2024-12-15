@@ -996,7 +996,8 @@ class EngineArgs:
             mm_cache_preprocessor=self.mm_cache_preprocessor,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
-            logits_processor_pattern=self.logits_processor_pattern)
+            logits_processor_pattern=self.logits_processor_pattern,
+            generation_config=self.generation_config)
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(
