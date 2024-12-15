@@ -609,8 +609,8 @@ class GPUModelRunner:
         ]
 
         # Profile with multimodal encoder & encoder cache.
-        # TODO (ywang96): generalize this beyond image modality.
-        # since mm_input_mapper only supports image inputs.
+        # TODO (ywang96): generalize this beyond image modality since
+        # mm_input_mapper only supports image inputs.
         if self.is_multimodal_model:
 
             # Create dummy batch of multimodal inputs.
@@ -634,6 +634,9 @@ class GPUModelRunner:
                 self.max_num_encoder_input_tokens,
                 self.encoder_cache_size) // max_tokens_per_mm_item
 
+            # Dummy data definition in V0 may contain multiple items for
+            # a single request, therefore here we always replicate first
+            # item by max_num_mm_items times.
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs[0] for _ in range(max_num_mm_items)])
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
