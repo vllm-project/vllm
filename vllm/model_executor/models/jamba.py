@@ -7,7 +7,7 @@ from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import _BATCH_SIZES_TO_CAPTURE, CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -105,9 +105,11 @@ class JambaMambaDecoderLayer(nn.Module):
                  layer_idx: int,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "") -> None:
+                 is_lora_enabled: Optional[bool] = False,
+                 **kwargs) -> None:
         super().__init__()
         self.config = config
+        self.is_lora_enabled = is_lora_enabled
         self.mamba = MambaMixer(hidden_size= config.hidden_size,
                                 ssm_state_size = config.mamba_d_state,
                                 conv_kernel_size = config.mamba_d_conv,
@@ -118,7 +120,9 @@ class JambaMambaDecoderLayer(nn.Module):
                                 use_bias = config.mamba_proj_bias,
                                 use_rms_norm=True,
                                 rms_norm_eps=config.rms_norm_eps,
-                                activation=config.hidden_act)
+                                activation=config.hidden_act,
+                                is_lora_enabled = self.is_lora_enabled
+                                )
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
@@ -154,14 +158,13 @@ class JambaMambaDecoderLayer(nn.Module):
 
 class JambaAttentionDecoderLayer(nn.Module):
 
-    def __init__(
-        self,
-        config: JambaConfig,
-        layer_idx: int,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self,
+                 config: JambaConfig,
+                 layer_idx: int,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 **kwargs) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -285,17 +288,18 @@ class JambaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
 
+        extra_kwargs = {"is_lora_enabled": bool(vllm_config)}
+
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = ALL_DECODER_LAYER_TYPES[
                 config.layers_block_type[layer_idx]]
-            return layer_class(
-                config,
-                layer_idx,
-                cache_config,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
+            return layer_class(config,
+                               layer_idx,
+                               cache_config,
+                               quant_config=quant_config,
+                               prefix=prefix,
+                               **extra_kwargs)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
@@ -373,10 +377,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "embed_tokens",
-        "lm_head",
+        "qkv_proj", "o_proj", "embed_tokens", "lm_head", "up_proj",
+        "down_proj", "gate_proj", "out_proj", "in_proj", "x_proj"
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -420,17 +422,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        if self.scheduler_config is not None and \
-            not self.model_config.enforce_eager:
-            if self.scheduler_config.max_num_seqs > \
-                vllm_config.compilation_config.max_capture_size:
-                self.max_batch_size = \
-                    vllm_config.compilation_config.max_capture_size
-            else:
-                self.max_batch_size = vllm_config.pad_for_cudagraph(
-                    self.scheduler_config.max_num_seqs)
-        else:
-            self.max_batch_size = 8192 + 2
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -444,12 +435,15 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
+            max_batch_size = (VllmConfig.get_graph_batch_size(
+                self.scheduler_config.max_num_seqs) if self.scheduler_config
+                              else max(_BATCH_SIZES_TO_CAPTURE) + 2)
 
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
             self.mamba_cache = MambaCacheManager(
-                self.lm_head.weight.dtype, num_mamba_layers,
-                self.max_batch_size, *self._get_mamba_cache_shape())
+                self.lm_head.weight.dtype, num_mamba_layers, max_batch_size,
+                *self._get_mamba_cache_shape())
         (
             mamba_cache_tensors,
             state_indices_tensor,
@@ -579,10 +573,34 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     if is_pp_missing_parameter(name, self):
                         continue
 
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                    if "in_proj" in name:
+                        #  To support LoRA, in_proj weight needs to be split to
+                        #  two separate tensors, and here we load it manually
+                        #  manually splits in_proj_lin and in_proj_gate
+                        name_lin = name.replace("in_proj", "in_proj_lin")
+                        name_gate = name.replace("in_proj", "in_proj_gate")
+
+                        #   need to split the loaded weight of in_proj
+                        param = params_dict[name_lin]
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+
+                        weight_loader(param,
+                                      loaded_weight[:loaded_weight.shape[0] //
+                                                    2, :])  # the lin split
+
+                        param = params_dict[name_gate]
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+
+                        weight_loader(param,
+                                      loaded_weight[loaded_weight.shape[0] //
+                                                    2:, :])  # the lin split
+                    else:
+                        param = params_dict[name]
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+                        weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 

@@ -8,7 +8,6 @@ from vllm.distributed.parallel_state import (
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
@@ -42,12 +41,14 @@ class MambaMixer(CustomOp):
                  use_rms_norm: bool,
                  rms_norm_has_weight: bool = True,
                  rms_norm_eps: float = 1e-5,
-                 activation="silu"):
+                 activation="silu",
+                 is_lora_enabled: bool = False):
         super().__init__()
         self.time_step_rank = time_step_rank
         self.ssm_state_size = ssm_state_size
         self.use_rms_norm = use_rms_norm
         self.activation = activation
+        self.is_lora_enabled = is_lora_enabled
 
         self.conv1d = ColumnParallelLinear(
             input_size=conv_kernel_size,
@@ -60,9 +61,13 @@ class MambaMixer(CustomOp):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        self.in_proj = MergedColumnParallelLinear(hidden_size,
-                                                  [intermediate_size] * 2,
-                                                  bias=use_bias)
+        self.in_proj_lin = ColumnParallelLinear(hidden_size,
+                                                intermediate_size,
+                                                bias=use_bias)
+        self.in_proj_gate = ColumnParallelLinear(hidden_size,
+                                                 intermediate_size,
+                                                 bias=use_bias)
+
         # selective projection used to make dt, B and C input dependent
         self.x_proj = RowParallelLinear(
             intermediate_size,
@@ -134,8 +139,8 @@ class MambaMixer(CustomOp):
                      mamba_cache_params: MambaCacheParams):
 
         # 1. Gated MLP's linear projection
-        projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
-        hidden_states, gate = projected_states.chunk(2, dim=-2)
+        gate = self.in_proj_gate(hidden_states)[0].transpose(-2, -1)
+        hidden_states = self.in_proj_lin(hidden_states)[0].transpose(-2, -1)
 
         # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
@@ -170,7 +175,13 @@ class MambaMixer(CustomOp):
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
-        ssm_parameters = self.x_proj(hidden_states.transpose(-2, -1))[0]
+
+        if self.is_lora_enabled:
+            #   lora kernel requires contiguous tensor
+            ssm_parameters = self.x_proj(
+                hidden_states.transpose(-2, -1).contiguous())[0]
+        else:
+            ssm_parameters = self.x_proj(hidden_states.transpose(-2, -1))[0]
 
         time_step, B, C = torch.split(
             ssm_parameters,
@@ -222,6 +233,11 @@ class MambaMixer(CustomOp):
             scan_outputs = scan_outputs.transpose(0, 1)
 
         # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(-2,
-                                                                     -1))[0]
+        if self.is_lora_enabled:
+            #  lora kernel requires contiguous tensor
+            contextualized_states = self.out_proj(
+                scan_outputs.transpose(-2, -1).contiguous())[0]
+        else:
+            contextualized_states = self.out_proj(
+                scan_outputs.transpose(-2, -1))[0]
         return contextualized_states
