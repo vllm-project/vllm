@@ -135,6 +135,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
+    "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
@@ -176,6 +177,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-v1.6-mistral-7b-hf"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo("llava-hf/LLaVA-NeXT-Video-7B-hf"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
+    "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3"),  # noqa: E501
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",

@@ -52,10 +52,9 @@ class Request:
         else:
             self.mm_positions = []
         # Output of the mm input mapper (e.g., image tensors).
+        self.mm_inputs: List[MultiModalKwargs] = []
         if self.inputs.multi_modal_inputs:
             self.mm_inputs = self.inputs.multi_modal_inputs
-        else:
-            self.mm_inputs: List[MultiModalKwargs] = []
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
