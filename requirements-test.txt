@@ -37,7 +37,7 @@ audioread==3.0.1
     # via librosa
 awscli==1.35.23
     # via -r requirements-test.in
-bitsandbytes==0.44.1
+bitsandbytes>=0.45.0
     # via -r requirements-test.in
 black==24.10.0
     # via datamodel-code-generator
