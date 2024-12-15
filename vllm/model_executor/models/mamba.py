@@ -306,18 +306,16 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
 
-                weight_loader(param,
-                              loaded_weight[:loaded_weight.shape[0] //
-                                             2, :])  # the lin split
+                weight_loader(param, loaded_weight[:loaded_weight.shape[0] //
+                                                   2, :])  # the lin split
 
                 loaded_params.add(name_lin)
                 param = params_dict[name_gate]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
 
-                weight_loader(param,
-                              loaded_weight[loaded_weight.shape[0] //
-                                            2:, :])  # the lin split
+                weight_loader(param, loaded_weight[loaded_weight.shape[0] //
+                                                   2:, :])  # the lin split
                 loaded_params.add(name_gate)
             else:
                 param = params_dict[name]
