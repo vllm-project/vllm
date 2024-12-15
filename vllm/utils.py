@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 import ipaddress
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -23,7 +24,6 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections import UserDict, defaultdict
 from collections.abc import Iterable, Mapping
 from functools import lru_cache, partial, wraps
-from platform import uname
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generic, Hashable, List, Literal, Optional,
                     OrderedDict, Set, Tuple, Type, TypeVar, Union, overload)
@@ -167,6 +167,11 @@ ALL_PINNED_SENTINEL = _Sentinel()
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
+
+
+class LayerBlockType(enum.Enum):
+    attention = "attention"
+    mamba = "mamba"
 
 
 class Counter:
@@ -336,12 +341,6 @@ def get_cpu_memory() -> int:
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
-
-
-@lru_cache(maxsize=None)
-def in_wsl() -> bool:
-    # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(uname()).lower()
 
 
 def make_async(
@@ -723,25 +722,7 @@ def print_warning_once(msg: str) -> None:
 
 @lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
-
-    if in_wsl():
-        # Pinning memory in WSL is not supported.
-        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
-        return False
-    elif current_platform.is_xpu():
-        print_warning_once("Pin memory is not supported on XPU.")
-        return False
-    elif current_platform.is_neuron():
-        print_warning_once("Pin memory is not supported on Neuron.")
-        return False
-    elif current_platform.is_hpu():
-        print_warning_once("Pin memory is not supported on HPU.")
-        return False
-    elif current_platform.is_cpu() or current_platform.is_openvino():
-        return False
-    return True
+    return current_platform.is_pin_memory_available()
 
 
 class DeviceMemoryProfiler:
@@ -1389,8 +1370,8 @@ def supports_kw(
 
 
 def resolve_mm_processor_kwargs(
-    init_kwargs: Optional[Dict[str, Any]],
-    inference_kwargs: Optional[Dict[str, Any]],
+    init_kwargs: Optional[Mapping[str, object]],
+    inference_kwargs: Optional[Mapping[str, object]],
     callable: Callable[..., object],
     allow_var_kwargs: bool = False,
 ) -> Dict[str, Any]:
@@ -1424,7 +1405,7 @@ def resolve_mm_processor_kwargs(
 
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
-    overrides: Optional[Dict[str, Any]],
+    overrides: Optional[Mapping[str, object]],
     allow_var_kwargs: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -1543,8 +1524,14 @@ class ClassRegistry(UserDict[Type[T], _V]):
         raise KeyError(key)
 
     def __contains__(self, key: object) -> bool:
+        return self.contains(key)
+
+    def contains(self, key: object, *, strict: bool = False) -> bool:
         if not isinstance(key, type):
             return False
+
+        if strict:
+            return key in self.data
 
         return any(cls in self.data for cls in key.mro())
 
@@ -1652,3 +1639,28 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
+
+
+def kill_process_tree(pid: int):
+    """
+    Kills all descendant processes of the given pid by sending SIGKILL.
+
+    Args:
+        pid (int): Process ID of the parent process
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    # Get all children recursively
+    children = parent.children(recursive=True)
+
+    # Send SIGKILL to all children first
+    for child in children:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child.pid, signal.SIGKILL)
+
+    # Finally kill the parent
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)

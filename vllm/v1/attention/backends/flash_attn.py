@@ -56,6 +56,7 @@ class FlashAttentionMetadata:
     seq_start_loc: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    num_input_tokens: int = 0  # Number of tokens including padding.
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -133,6 +134,8 @@ class FlashAttentionImpl(AttentionImpl):
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
+
+        assert output is not None, "Output tensor must be provided."
 
         if attn_metadata is None:
             # Profiling run.

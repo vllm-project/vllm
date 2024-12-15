@@ -20,7 +20,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
@@ -33,7 +33,7 @@ class LLMEngine:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[GPUExecutor],
+        executor_class: Type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -103,11 +103,19 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig):
-        return GPUExecutor
+    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
+        executor_class: Type[Executor]
+        distributed_executor_backend = (
+            vllm_config.parallel_config.distributed_executor_backend)
+        if distributed_executor_backend == "mp":
+            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+            executor_class = MultiprocExecutor
+        else:
+            assert (distributed_executor_backend is None)
+            from vllm.v1.executor.uniproc_executor import UniprocExecutor
+            executor_class = UniprocExecutor
 
-    def stop_remote_worker_execution_loop(self) -> None:
-        raise NotImplementedError("TP not implemented yet.")
+        return executor_class
 
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
@@ -189,3 +197,10 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown()
