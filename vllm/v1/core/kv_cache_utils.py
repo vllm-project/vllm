@@ -1,12 +1,19 @@
 """KV-Cache Utilities."""
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-BlockHashType = Tuple[int, Tuple[int]]
+
+class BlockHashType(NamedTuple):
+    """Hash value of a block and the token IDs in the block.
+    The reason we keep a tuple of token IDs is to make sure no hash
+    collision happens when the hash value is the same.
+    """
+    hash_value: int
+    token_ids: Tuple[int]
 
 
 @dataclass
@@ -171,8 +178,8 @@ def hash_block_tokens(parent_block_hash: Optional[int],
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
-    return (hash(
-        (parent_block_hash, *curr_block_token_ids)), curr_block_token_ids)
+    return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
+                         curr_block_token_ids)
 
 
 def hash_request_tokens(block_size: int,
@@ -188,14 +195,15 @@ def hash_request_tokens(block_size: int,
         The list of computed hash values.
     """
     ret = []
-    parent_block_hash = None
+    parent_block_hash_value = None
     for start in range(0, len(token_ids), block_size):
         end = start + block_size
         block_token_ids = tuple(token_ids[start:end])
         # Do not hash the block if it is not full.
         if len(block_token_ids) < block_size:
             break
-        block_hash = hash_block_tokens(parent_block_hash, block_token_ids)
+        block_hash = hash_block_tokens(parent_block_hash_value,
+                                       block_token_ids)
         ret.append(block_hash)
-        parent_block_hash = block_hash
+        parent_block_hash_value = block_hash.hash_value
     return ret
