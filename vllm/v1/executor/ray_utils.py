@@ -142,7 +142,9 @@ def ray_is_available() -> bool:
 
 
 def assert_ray_available():
-    """Raise an exception if Ray is not available."""
+    """
+    Raise an exception if Ray is not available.
+    """
     if ray is None:
         raise ValueError("Failed to import Ray, please install Ray with "
                          "`pip install ray`.") from ray_import_err
@@ -150,11 +152,17 @@ def assert_ray_available():
 
 def _verify_bundles(placement_group: "PlacementGroup",
                     parallel_config: ParallelConfig, device_str: str):
-    """Verify a given placement group has bundles located in the right place.
+    """
+    Verify a given placement group has bundles located in the right place.
 
     There are 2 rules.
     - Warn if all tensor parallel workers cannot fit in a single node.
     - Fail if driver node is not included in a placement group.
+
+    Args:
+        placement_group: The placement group to verify.
+        parallel_config: The parallel configuration.
+        device_str: The required device.
     """
     assert ray.is_initialized(), (
         "Ray is not initialized although distributed-executor-backend is ray.")
