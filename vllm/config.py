@@ -1186,9 +1186,9 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
 
-    # Multimodal encoder run compute budget, only used in V1
     # FIXME(woosuk & ywang96): Below are placeholder values. We need to
     # calculate the actual values from the configurations.
+    # Multimodal encoder run compute budget, only used in V1
     max_num_encoder_input_tokens = 16384
 
     # Multimodal encoder cache size, only used in V1
