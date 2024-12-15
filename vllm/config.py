@@ -2651,7 +2651,15 @@ class CompilationConfig(BaseModel):
             else:
                 # v0 can use full graph compilation without splitting,
                 # splitting is optional.
-                self.splitting_ops = []
+                # right now we still need it. kv cache shape
+                # will be included in the graph if we don't split
+                # the graph.
+                # TODO: hide kv cache in static forward context
+                # so that inductor does not see it.
+                self.splitting_ops = [
+                    "vllm.unified_attention",
+                    "vllm.unified_attention_with_output",
+                ]
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
