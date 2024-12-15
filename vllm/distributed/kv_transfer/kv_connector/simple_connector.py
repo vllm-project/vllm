@@ -17,7 +17,6 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
-from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import PyNcclPipe
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -39,6 +38,8 @@ class SimpleConnector(KVConnectorBase):
         self.config = config.kv_transfer_config
 
         if self.config.kv_connector == "PyNcclConnector":
+            from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
+                PyNcclPipe)
             logger.info(
                 "Initializing PyNcclConfig under kv_transfer_config %s",
                 self.config)
