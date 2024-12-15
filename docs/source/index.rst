@@ -173,6 +173,7 @@ Documentation
    design/input_processing/model_inputs_index
    design/kernel/paged_attention
    design/multimodal/multimodal_index
+   design/multiprocessing
 
 .. For Developers: contributing to the vLLM project
 

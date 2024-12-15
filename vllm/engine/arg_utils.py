@@ -170,6 +170,7 @@ class EngineArgs:
     enable_chunked_prefill: Optional[bool] = None
 
     guided_decoding_backend: str = 'xgrammar'
+    logits_processor_pattern: Optional[str] = None
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     speculative_model_quantization: Optional[str] = None
@@ -374,6 +375,14 @@ class EngineArgs:
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.')
+        parser.add_argument(
+            '--logits-processor-pattern',
+            type=nullable_str,
+            default=None,
+            help='Optional regex pattern specifying valid logits processor '
+            'qualified names that can be passed with the `logits_processors` '
+            'extra completion argument. Defaults to None, which allows no '
+            'processors.')
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
@@ -975,7 +984,7 @@ class EngineArgs:
             mm_cache_preprocessor=self.mm_cache_preprocessor,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
-        )
+            logits_processor_pattern=self.logits_processor_pattern)
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(

@@ -1,4 +1,5 @@
 """KV-Cache Utilities."""
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import List, NamedTuple, Optional, Tuple
 
@@ -13,7 +14,7 @@ class BlockHashType(NamedTuple):
     collision happens when the hash value is the same.
     """
     hash_value: int
-    token_ids: Tuple[int]
+    token_ids: Tuple[int, ...]
 
 
 @dataclass
@@ -79,8 +80,8 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks = len(blocks)
 
         # Initialize the doubly linked list of free blocks.
-        self.free_list_head = blocks[0]
-        self.free_list_tail = blocks[-1]
+        self.free_list_head: Optional[KVCacheBlock] = blocks[0]
+        self.free_list_tail: Optional[KVCacheBlock] = blocks[-1]
         for i in range(self.num_free_blocks):
             if i > 0:
                 blocks[i].prev_free_block = blocks[i - 1]
@@ -159,7 +160,7 @@ class FreeKVCacheBlockQueue:
 
 
 def hash_block_tokens(parent_block_hash: Optional[int],
-                      curr_block_token_ids: Tuple[int]) -> BlockHashType:
+                      curr_block_token_ids: Sequence[int]) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
@@ -171,7 +172,7 @@ def hash_block_tokens(parent_block_hash: Optional[int],
     Args:
         parent_block_hash: The hash of the parent block. None
             if this is the first block.
-        curr_block_token_ids: A tuple of token ids in the current
+        curr_block_token_ids: A list of token ids in the current
             block. The current block is assumed to be full.
 
     Returns:
@@ -179,11 +180,11 @@ def hash_block_tokens(parent_block_hash: Optional[int],
         The entire tuple is used as the hash key of the block.
     """
     return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
-                         curr_block_token_ids)
+                         tuple(curr_block_token_ids))
 
 
 def hash_request_tokens(block_size: int,
-                        token_ids: List[int]) -> List[BlockHashType]:
+                        token_ids: Sequence[int]) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
@@ -198,7 +199,7 @@ def hash_request_tokens(block_size: int,
     parent_block_hash_value = None
     for start in range(0, len(token_ids), block_size):
         end = start + block_size
-        block_token_ids = tuple(token_ids[start:end])
+        block_token_ids = token_ids[start:end]
         # Do not hash the block if it is not full.
         if len(block_token_ids) < block_size:
             break
