@@ -160,47 +160,28 @@ def _support_torch_compile(
         self.do_not_compile = False
         compilation_counter.num_models_seen += 1
         self.num_runs = 0
-        self.compiled_callable = torch.compile(self.forward, backend=simple_backend)
+        self.compiled_callable = torch.compile(self.forward, backend=simple_backend, dynamic=False)
+        self.seen_bs = set()
 
     cls.__init__ = __init__
 
     def __call__(self, *args, **kwargs):
         self.num_runs += 1
-        # torch.compiler.is_compiling() means we are inside the compilation
-        # e.g. TPU has the compilation logic in model runner, so we don't
-        # need to compile the model inside.
         if self.num_runs <= 1:
             # profile run, skip compilation
             return self.forward(*args, **kwargs)
 
-        # the first compilation needs to have dynamic shapes marked
-        if self.num_runs == 2:
-            sig = inspect.signature(self.__class__.forward)
-            bound_args = sig.bind(self, *args, **kwargs)
-            bound_args.apply_defaults()
-            for k, dims in dynamic_arg_dims.items():
-                arg = bound_args.arguments.get(k)
-                if arg is not None:
-                    if isinstance(arg, torch.Tensor):
-                        torch._dynamo.mark_dynamic(arg, dims)
-                    elif isinstance(arg, IntermediateTensors):
-                        for tensor in arg.tensors.values():
-                            torch._dynamo.mark_dynamic(tensor, dims)
-                    else:
-                        raise ValueError(
-                            "Unsupported dynamic dimensions"
-                            f" {dims} for argument {k} with type {type(arg)}.")
-            # here, it is the starting point of the `torch.compile` process
-            start_monitoring_torch_compile(self.vllm_config)
-
-        if self.num_runs >= 3:
+        input_ids = kwargs.get("input_ids")
+        bs = input_ids.size(0)
+        # if bs not in self.seen_bs, it means we are seeing a new batch size
+        # and we need to compile the forward method for this batch size.
+        # only measure the dynamo overhead for the following runs
+        if bs in self.seen_bs:
             before_dynamo_time = time.perf_counter()
-
         output = self.compiled_callable(*args, **kwargs)
-
-        if self.num_runs >= 3:
+        if bs in self.seen_bs:
             logger.info("Time taken for dynamo guard evaluation: %f (ms)", (after_dynamo_time - before_dynamo_time) * 1000)
-
+        self.seen_bs.add(bs)
         return output
 
     cls.__call__ = __call__
