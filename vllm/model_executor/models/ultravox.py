@@ -100,11 +100,15 @@ class UltravoxProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        audio_data = mm_data["audio"]
+        if not isinstance(audio_data, list):
+            audio_data = [audio_data]
+
         # Ultravox processor doesn't support multiple inputs,
         # therefore we need to input text and audio one by one
         tokenizer = self._get_tokenizer()
         hf_inputs = defaultdict(list)
-        for audio, sr in mm_data["audio"]:
+        for audio, sr in audio_data:
             data = self._resample_audio(audio, sr)
             processed_inputs = super()._apply_hf_processor(
                 prompt, data, mm_processor_kwargs)
