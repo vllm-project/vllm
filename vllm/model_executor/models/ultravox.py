@@ -146,11 +146,14 @@ class UltravoxProcessor(BaseMultiModalProcessor):
         encoder_ds_factor = hf_processor.encoder_ds_factor
 
         def get_replacement_ultravox(item_idx: int):
-            audio_data, _ = mm_items.audio[item_idx]
-            audio_len = audio_data.shape[-1]
+            audio_data, sr = mm_items.audio[item_idx]
+            audio_data = self._resample_audio(audio_data, sr)["audio"]
+            audio_len = audio_data.shape[0]
             nb_encoder_frames = int(round(audio_len / encoder_ds_factor +
                                           1e-4))
             audio_token_len = int(np.ceil(nb_encoder_frames / stack_factor))
+            max_audio_token_len = get_ultravox_max_audio_tokens(self.ctx)
+            audio_token_len = min(audio_token_len, max_audio_token_len)
             return [_AUDIO_PLACEHOLDER_TOKEN] * audio_token_len
 
         return [
