@@ -124,12 +124,11 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
             audio_token_len.append(
                 processed_inputs.pop("audio_token_len").item())
 
-        hf_inputs = dict(
+        return dict(
             **processed_inputs,
             audio_features=audio_features,
             audio_token_len=audio_token_len,
         )
-        return hf_inputs
 
     def _get_processor_data(
         self,
