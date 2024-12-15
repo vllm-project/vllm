@@ -98,3 +98,8 @@ class CpuPlatform(Platform):
                     "vllm.worker.cpu_worker.CPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        logger.warning("Pin memory is not supported on CPU.")
+        return False

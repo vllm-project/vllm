@@ -147,12 +147,15 @@ class ModelConfig:
             HuggingFace config.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
+        mm_cache_preprocessor: If true, then enables caching of the multi-modal 
+            preprocessor/mapper. Otherwise, the mapper executes each time, and 
+            for better performance consider enabling frontend process.
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
             can not be gathered from the vllm arguments.
         override_pooler_config: Initialize non default pooling config or
-            override default pooling config for the embedding model.
+            override default pooling config for the pooling model.
     """
 
     def __init__(
@@ -185,6 +188,7 @@ class ModelConfig:
             config_format: ConfigFormat = ConfigFormat.AUTO,
             hf_overrides: Optional[HfOverrides] = None,
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+            mm_cache_preprocessor: bool = False,
             override_neuron_config: Optional[Dict[str, Any]] = None,
             override_pooler_config: Optional["PoolerConfig"] = None) -> None:
         self.model = model
@@ -251,6 +255,7 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
+        self.mm_cache_preprocessor = mm_cache_preprocessor
 
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:
@@ -576,7 +581,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Async postprocessor is not necessary with embedding mode
+        # Async postprocessor is not necessary for pooling models
         # since there is no token generation
         if self.runner_type == "pooling":
             self.use_async_output_proc = False
@@ -1834,11 +1839,11 @@ class MultiModalConfig:
 
 @dataclass
 class PoolerConfig:
-    """Controls the behavior of output pooling in embedding models."""
+    """Controls the behavior of output pooling in pooling models."""
 
     pooling_type: Optional[str] = None
     """
-    The pooling method of the embedding model. This should be a key in
+    The pooling method of the pooling model. This should be a key in
     :class:`vllm.model_executor.layers.pooler.PoolingType`.
     """
 
@@ -2231,6 +2236,7 @@ class CompilationConfig(BaseModel):
             - 1: dynamo as is.
             - 2: dynamo once.
             - 3: piecewise compilation.
+        - debug_dump_path: the path to dump the debug information.
         - backend: the backend for compilation. It needs to be a string.
             - "" (empty string): use the default backend.
             - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
@@ -2298,6 +2304,7 @@ class CompilationConfig(BaseModel):
         certain small batchsizes, where inductor is good at optimizing.
     """ # noqa
     level: int = 0
+    debug_dump_path: str = ""
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
     splitting_ops: List[str] = Field(default_factory=lambda: [
@@ -2356,6 +2363,12 @@ class CompilationConfig(BaseModel):
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
+    max_capture_size: int = PrivateAttr
+    # optimization:
+    # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
+    # since we know all keys are in a range [0, max_capture_size],
+    # we can optimize it to List[int] for better lookup performance.
+    bs_to_padded_graph_size: List[int] = PrivateAttr
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
@@ -2366,6 +2379,19 @@ class CompilationConfig(BaseModel):
     # Mainly used to store attention cls
     # Map from layer name to the attention cls
     static_forward_context: Dict[str, Any] = PrivateAttr
+
+    def __repr__(self) -> str:
+        exclude = {
+            "static_forward_context",
+            "enabled_custom_ops",
+            "disabled_custom_ops",
+            "compilation_time",
+            "bs_to_padded_graph_size",
+            "pass_config",
+        }
+        return self.model_dump_json(exclude=exclude, exclude_unset=True)
+
+    __str__ = __repr__
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
@@ -2403,7 +2429,7 @@ class CompilationConfig(BaseModel):
         self.static_forward_context = {}
         self.compilation_time = 0.0
 
-    def init_backend(self) -> Union[str, Callable]:
+    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -2422,7 +2448,7 @@ class CompilationConfig(BaseModel):
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
         from vllm.compilation.backends import VllmBackend
-        return VllmBackend(self)
+        return VllmBackend(vllm_config)
 
     def init_with_cudagraph_sizes(self, sizes_to_specialize: List[int]):
         """To complete the initialization of config,
@@ -2452,18 +2478,22 @@ class CompilationConfig(BaseModel):
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
+        self.max_capture_size = self.capture_sizes[
+            0] if self.capture_sizes else 0
 
-
-_BATCH_SIZE_ALIGNMENT = 8
-# all the token sizes that **can** be captured by cudagraph.
-# they can be arbitrarily large.
-# currently it includes: 1, 2, 4, 8, 16, 24, 32, 40, ..., 8192.
-# the actual sizes to capture will be determined by the model,
-# depending on the model's max_num_seqs.
-# NOTE: get_graph_batch_size needs to be updated if this list is changed.
-_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
-    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 1025)
-]
+        # pre-compute the mapping from batch size to padded graph size
+        self.bs_to_padded_graph_size = [
+            0 for i in range(self.max_capture_size + 1)
+        ]
+        for end, start in zip(self.capture_sizes,
+                              self.capture_sizes[1:] + [0]):
+            for bs in range(start, end):
+                if bs == start:
+                    self.bs_to_padded_graph_size[bs] = start
+                else:
+                    self.bs_to_padded_graph_size[bs] = end
+        self.bs_to_padded_graph_size[
+            self.max_capture_size] = self.max_capture_size
 
 
 @dataclass
@@ -2493,40 +2523,12 @@ class VllmConfig:
                                                  init=True)  # type: ignore
     instance_id: str = ""
 
-    @staticmethod
-    def get_graph_batch_size(batch_size: int) -> int:
-        """Returns the padded batch size given actual batch size.
-
-        Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
-        2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
-        """
-        if batch_size <= 2:
-            return batch_size
-        elif batch_size <= 4:
-            return 4
-        else:
-            return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
-                    _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-    @staticmethod
-    def get_max_graph_batch_size(max_num_seqs: int) -> int:
-        """
-        max_num_seqs: Maximum number of sequences in a batch.
-        _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
-
-        pad the max_num_seqs if necessary by calling get_graph_batch_size,
-        which will deal with some edge cases like 1, 2, 4.
-
-        if the padded size is in _BATCH_SIZES_TO_CAPTURE, return the padded
-        size. if not, it means the padded size is larger than the largest size
-        in _BATCH_SIZES_TO_CAPTURE, return the largest size in
-        _BATCH_SIZES_TO_CAPTURE.
-        """
-        padded_size = VllmConfig.get_graph_batch_size(max_num_seqs)
-        if padded_size in _BATCH_SIZES_TO_CAPTURE:
-            return padded_size
-        assert padded_size > _BATCH_SIZES_TO_CAPTURE[-1]
-        return _BATCH_SIZES_TO_CAPTURE[-1]
+    def pad_for_cudagraph(self, batch_size: int) -> int:
+        # if batch_size > self.compilation_config.max_capture_size,
+        # it should raise an IndexError.
+        # the caller should make sure the batch_size is within the range,
+        # i.e., batch_size <= self.compilation_config.max_capture_size
+        return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
     @staticmethod
     def _get_quantization_config(
@@ -2620,27 +2622,7 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
 
-        if not envs.VLLM_USE_V1:
-            max_batchsize_to_capture = 0
-            if self.scheduler_config is not None and \
-                self.model_config is not None and \
-                    not self.model_config.enforce_eager:
-                max_batchsize_to_capture = \
-                    self.get_max_graph_batch_size(
-                    self.scheduler_config.max_num_seqs)
-            batch_size_capture_list = [
-                size for size in _BATCH_SIZES_TO_CAPTURE
-                if size <= max_batchsize_to_capture
-            ]
-        else:
-            batch_size_capture_list = []
-            if self.model_config is not None and \
-                not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
-
-        self.compilation_config.init_with_cudagraph_sizes(
-            batch_size_capture_list)
+        self._set_cudagraph_sizes()
 
         if self.cache_config is not None and \
             self.cache_config.cpu_offload_gb > 0 and \
@@ -2660,6 +2642,70 @@ class VllmConfig:
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+    def _set_cudagraph_sizes(self):
+        """
+        cudagraph batchsize padding logic:
+
+        `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
+        batch sizes that cudagraph will capture.
+
+        Depending on the engine's configuration of `max_num_seqs`, the
+        candidate batch sizes to capture cudagraph will shrink to the subset
+        which just cover the range of `[1, max_num_seqs]`. In the common case,
+        `max_num_seqs` is 256, and the cudagraph batch sizes will be
+        `[1, 2, 4, 8, 16, 24, 32, 40, ..., 256]`.
+
+        However, if users specify the cudagraph capture sizes through
+        compilation config, we will use the specified sizes instead.
+
+        In the end, `vllm_config.compilation_config.capture_sizes` will be the
+        final sizes to capture cudagraph (in descending order).
+
+        During runtime, if batchsize is larger than
+        `vllm_config.compilation_config.capture_sizes`,
+        no cudagraph will be used.
+        If the batch size is no larger than
+        `vllm_config.compilation_config.capture_sizes`,
+        we can quickly find the padded graph size for a given batch size by
+        looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
+        """
+
+        # calculate the default `batch_size_capture_list`
+        if not envs.VLLM_USE_V1:
+            batch_size_capture_list = []
+            max_batchsize_to_capture = 0
+            if self.scheduler_config is not None and \
+                self.model_config is not None and \
+                    not self.model_config.enforce_eager:
+
+                possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
+                # find the minimum size that is larger than max_num_seqs,
+                # which then becomes the max_batchsize_to_capture
+                larger_sizes = [
+                    x for x in possible_sizes
+                    if x >= self.scheduler_config.max_num_seqs
+                ]
+                if larger_sizes:
+                    max_batchsize_to_capture = larger_sizes[0]
+                else:
+                    max_batchsize_to_capture = possible_sizes[-1]
+
+                # filter out the sizes that are
+                # larger than max_batchsize_to_capture
+                batch_size_capture_list = [
+                    size for size in possible_sizes
+                    if size <= max_batchsize_to_capture
+                ]
+        else:
+            batch_size_capture_list = []
+            if self.model_config is not None and \
+                not self.model_config.enforce_eager:
+                batch_size_capture_list = [1, 2, 4
+                                           ] + [i for i in range(8, 513, 8)]
+
+        self.compilation_config.init_with_cudagraph_sizes(
+            batch_size_capture_list)
 
     def __str__(self):
         return (
@@ -2693,9 +2739,10 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
+            f"mm_cache_preprocessor={self.model_config.mm_cache_preprocessor!r}, "  # noqa
             f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
-            f"pooler_config={self.model_config.pooler_config!r},"
-            f" compilation_config={self.compilation_config!r}")
+            f"pooler_config={self.model_config.pooler_config!r}, "
+            f"compilation_config={self.compilation_config!r}")
 
 
 _current_vllm_config: Optional[VllmConfig] = None

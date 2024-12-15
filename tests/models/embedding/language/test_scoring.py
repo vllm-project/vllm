@@ -42,7 +42,7 @@ def test_llm_1_to_1(vllm_runner, hf_runner, model_name, dtype: str):
     assert len(vllm_outputs) == 1
     assert len(hf_outputs) == 1
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0][0], rel_tol=0.01)
+    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
 
 
 @pytest.mark.parametrize("dtype", ["half"])
@@ -63,8 +63,8 @@ def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0][0], rel_tol=0.01)
-    assert math.isclose(hf_outputs[1], vllm_outputs[1][0], rel_tol=0.01)
+    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
+    assert math.isclose(hf_outputs[1], vllm_outputs[1], rel_tol=0.01)
 
 
 @pytest.mark.parametrize("dtype", ["half"])
@@ -85,5 +85,5 @@ def test_llm_N_to_N(vllm_runner, hf_runner, model_name, dtype: str):
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0][0], rel_tol=0.01)
-    assert math.isclose(hf_outputs[1], vllm_outputs[1][0], rel_tol=0.01)
+    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
+    assert math.isclose(hf_outputs[1], vllm_outputs[1], rel_tol=0.01)

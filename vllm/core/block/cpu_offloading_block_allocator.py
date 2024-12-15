@@ -111,7 +111,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
           uncached: allocated blocks that didn't hit any cache
           cached: allocated blocks that are cached, either in GPU or in CPU
           free: the blocks are not allocated by block allocator
-        This implementation aims to transform uncacherd blocks to cached blocks
+        This implementation aims to transform uncached blocks to cached blocks
         by performing GPU to CPU copy when calling `get_and_reset_swaps`
         
         As block allocator will automatically track free blocks, and we don't 
@@ -131,8 +131,10 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         self.num_gpu_blocks = gpu_block_allocator.get_num_total_blocks()
         self.num_cpu_blocks = cpu_block_allocator.get_num_total_blocks()
 
-    def allocate_mutable_block(self, prev_block: Optional[Block],
-                               device: Device) -> Block:
+    def allocate_mutable_block(self,
+                               prev_block: Optional[Block],
+                               device: Device,
+                               extra_hash: Optional[int] = None) -> Block:
         """Allocates a new mutable block on the specified device.
 
         Args:
@@ -148,13 +150,17 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             "handles CPU offloading internally."\
         # mark this block as uncached
 
-        block = self._allocators[device].allocate_mutable_block(prev_block)
+        block = self._allocators[device].allocate_mutable_block(
+            prev_block, extra_hash=extra_hash)
         self._uncached_blocks.append(block)
         return block
 
-    def allocate_immutable_blocks(self, prev_block: Optional[Block],
-                                  block_token_ids: List[List[int]],
-                                  device: Device) -> List[Block]:
+    def allocate_immutable_blocks(
+            self,
+            prev_block: Optional[Block],
+            block_token_ids: List[List[int]],
+            device: Device,
+            extra_hash: Optional[int] = None) -> List[Block]:
         """Allocates a new group of immutable blocks with the provided block 
         token IDs on the specified device.
 
@@ -179,13 +185,16 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         for token_ids in block_token_ids:
             prev_block = self.allocate_immutable_block(prev_block=prev_block,
                                                        token_ids=token_ids,
-                                                       device=device)
+                                                       device=device,
+                                                       extra_hash=extra_hash)
             blocks.append(prev_block)
         return blocks
 
-    def allocate_immutable_block(self, prev_block: Optional[Block],
+    def allocate_immutable_block(self,
+                                 prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 device: Device) -> Block:
+                                 device: Device,
+                                 extra_hash: Optional[int] = None) -> Block:
         """Allocates a new immutable block with the provided token IDs on the
         specified device.
 
@@ -207,7 +216,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
 
         # allocate a GPU block
         block = self._allocators[device].allocate_immutable_block(
-            prev_block, token_ids)
+            prev_block, token_ids, extra_hash=extra_hash)
         block_id = block.block_id
         assert block_id is not None
         block_computed = self._allocators[device].block_is_computed(block_id)
@@ -222,7 +231,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         else:
             # check if we can hit cache on CPU by trying to allocate CPU block
             cpu_block = self._allocators[Device.CPU].allocate_immutable_block(
-                prev_block, token_ids)
+                prev_block, token_ids, extra_hash=extra_hash)
             cpu_block_id = cpu_block.block_id
             assert cpu_block_id is not None
             cpu_block_computed = self._allocators[
@@ -327,7 +336,10 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                     (block.content_hash is not None):
                 # allocate a block on CPU
                 cpu_block = cpu_allocator.allocate_immutable_block(
-                    prev_block=block.prev_block, token_ids=block.token_ids)
+                    prev_block=block.prev_block,
+                    token_ids=block.token_ids,
+                    extra_hash=block.extra_hash,
+                )
                 assert cpu_block.block_id is not None
                 self._allocated_cpu_blocks.append(cpu_block)
 

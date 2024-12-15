@@ -1,5 +1,5 @@
 import atexit
-import multiprocessing
+import os
 from typing import List, Union
 
 import msgspec
@@ -105,7 +105,7 @@ class InprocClient(EngineCoreClient):
     def __del__(self):
         self.shutdown()
 
-    async def profile(self, is_start=True) -> None:
+    def profile(self, is_start=True) -> None:
         self.engine_core.profile(is_start)
 
 
@@ -149,31 +149,37 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
-        self.should_shutdown = multiprocessing.Value('b', False, lock=False)
-        self.proc = EngineCoreProc.make_engine_core_process(
+        self.proc_handle = EngineCoreProc.make_engine_core_process(
             *args,
             input_path=input_path,
             output_path=output_path,
             ready_path=ready_path,
-            should_shutdown=self.should_shutdown,
             **kwargs,
         )
         atexit.register(self.shutdown)
 
     def shutdown(self):
-        # Send shutdown signal to background process.
-        self.should_shutdown = True
-
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
 
-        # Shutdown the process if needed.
-        if hasattr(self, "proc") and self.proc.is_alive():
-            self.proc.terminate()
-            self.proc.join(5)
+        if hasattr(self, "proc_handle"):
+            # Shutdown the process if needed.
+            if self.proc_handle.proc.is_alive():
+                self.proc_handle.proc.terminate()
+                self.proc_handle.proc.join(5)
 
-            if self.proc.is_alive():
-                kill_process_tree(self.proc.pid)
+                if self.proc_handle.proc.is_alive():
+                    kill_process_tree(self.proc_handle.proc.pid)
+
+            # Remove zmq ipc socket files
+            ipc_sockets = [
+                self.proc_handle.ready_path, self.proc_handle.output_path,
+                self.proc_handle.input_path
+            ]
+            for ipc_socket in ipc_sockets:
+                socket_file = ipc_socket.replace("ipc://", "")
+                if os.path.exists(socket_file):
+                    os.remove(socket_file)
 
     def __del__(self):
         self.shutdown()
@@ -206,7 +212,7 @@ class SyncMPClient(MPClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    async def profile(self, is_start=True) -> None:
+    def profile(self, is_start=True) -> None:
         self._send_input(EngineCoreRequestType.PROFILE,
                          EngineCoreProfile(is_start))
 

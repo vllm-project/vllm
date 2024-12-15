@@ -781,6 +781,7 @@ def main(args: argparse.Namespace):
     backend = args.backend
     model_id = args.model
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
+    tokenizer_mode = args.tokenizer_mode
 
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
@@ -790,6 +791,7 @@ def main(args: argparse.Namespace):
         base_url = f"http://{args.host}:{args.port}"
 
     tokenizer = get_tokenizer(tokenizer_id,
+                              tokenizer_mode=tokenizer_mode,
                               trust_remote_code=args.trust_remote_code)
 
     if args.dataset is not None:
@@ -1209,6 +1211,16 @@ if __name__ == "__main__":
         help="Output length for each request. Overrides the output lengths "
         "from the sampled HF dataset.",
     )
+
+    parser.add_argument(
+        '--tokenizer-mode',
+        type=str,
+        default="auto",
+        choices=['auto', 'slow', 'mistral'],
+        help='The tokenizer mode.\n\n* "auto" will use the '
+        'fast tokenizer if available.\n* "slow" will '
+        'always use the slow tokenizer. \n* '
+        '"mistral" will always use the `mistral_common` tokenizer.')
 
     args = parser.parse_args()
     main(args)

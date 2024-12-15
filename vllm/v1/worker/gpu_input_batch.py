@@ -53,14 +53,23 @@ class InputBatch:
         self.req_ids: List[Optional[str]] = [None] * max_num_reqs
         self.req_id_to_index: Dict[str, int] = {}
 
-        self.token_ids_cpu = np.empty((max_num_reqs, max_model_len),
-                                      dtype=np.int32)
+        # TODO(woosuk): This buffer could be too large if max_model_len is big.
+        # Find a way to reduce the CPU memory usage.
+        self.token_ids_cpu_tensor = torch.zeros(
+            (max_num_reqs, max_model_len),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
         # Attention-related.
-        self.block_table = torch.zeros((max_num_reqs, max_num_blocks_per_req),
-                                       device=self.device,
-                                       dtype=torch.int32)
+        self.block_table = torch.zeros(
+            (max_num_reqs, max_num_blocks_per_req),
+            device=self.device,
+            dtype=torch.int32,
+        )
         self.block_table_cpu_tensor = torch.zeros(
             (max_num_reqs, max_num_blocks_per_req),
             device="cpu",
