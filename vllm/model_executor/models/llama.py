@@ -169,13 +169,15 @@ class LlamaAttention(nn.Module):
         )
 
         if hasattr(config, "interleaved_sliding_window"):
-            if isinstance(config.interleaved_sliding_window, int):
-                sliding_window = config.interleaved_sliding_window
-            elif isinstance(config.interleaved_sliding_window, list):
-                sw_idx = layer_idx % len(config.interleaved_sliding_window)
-                sliding_window = config.interleaved_sliding_window[sw_idx]
+            interleaved_sliding_window = config.interleaved_sliding_window
+            if isinstance(interleaved_sliding_window, int):
+                sliding_window = interleaved_sliding_window
+            elif isinstance(interleaved_sliding_window, list):
+                sw_idx = layer_idx % len(interleaved_sliding_window)
+                sliding_window = interleaved_sliding_window[sw_idx]
             else:
-                raise ValueError(f"{type(sliding_window)} is not supported.")
+                raise ValueError(
+                    f"{type(interleaved_sliding_window)} is not supported.")
         else:
             sliding_window = None
 
