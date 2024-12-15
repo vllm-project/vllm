@@ -100,6 +100,10 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        if not mm_data:
+            return super()._apply_hf_processor(prompt, mm_data,
+                                               mm_processor_kwargs)
+
         audio_data = mm_data["audio"]
         if not isinstance(audio_data, list):
             audio_data = [audio_data]
