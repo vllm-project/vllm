@@ -100,7 +100,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if not mm_data:
+        if not mm_data or not mm_data.get("audio", None):
             return super()._apply_hf_processor(prompt, mm_data,
                                                mm_processor_kwargs)
 
@@ -147,17 +147,11 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         mm_processor_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
-        tokenizer = hf_processor.tokenizer
         placeholder = hf_processor.audio_token_replacement
-
-        placeholder_token = tokenizer.encode(placeholder,
-                                             add_special_tokens=False)
-        assert len(placeholder_token) == 1
-        placeholder_token = placeholder_token[0]
 
         def get_replacement_ultravox(item_idx: int):
             audio_token_len = hf_inputs["audio_token_len"][item_idx]
-            return [placeholder_token] * audio_token_len
+            return placeholder * audio_token_len
 
         return [
             PromptReplacement(
