@@ -171,7 +171,7 @@ def _support_torch_compile(
             # profile run, skip compilation
             return self.forward(*args, **kwargs)
 
-        input_ids = kwargs.get("input_ids")
+        input_ids = args[0]
         bs = input_ids.size(0)
         # if bs not in self.seen_bs, it means we are seeing a new batch size
         # and we need to compile the forward method for this batch size.
