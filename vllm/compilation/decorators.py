@@ -199,7 +199,7 @@ def _support_torch_compile(
         output = self.compiled_callable(*args, **kwargs)
 
         if self.num_runs >= 3:
-            logger.info("Time taken for dynamo guard evaluation: %f", after_dynamo_time - before_dynamo_time)
+            logger.info("Time taken for dynamo guard evaluation: %f (ms)", (after_dynamo_time - before_dynamo_time) * 1000)
 
         return output
 
