@@ -193,12 +193,12 @@ def _support_torch_compile(
             # here, it is the starting point of the `torch.compile` process
             start_monitoring_torch_compile(self.vllm_config)
 
-        if self.num_runs == 3:
+        if self.num_runs >= 3:
             before_dynamo_time = time.perf_counter()
 
         output = self.compiled_callable(*args, **kwargs)
 
-        if self.num_runs == 3:
+        if self.num_runs >= 3:
             logger.info("Time taken for dynamo guard evaluation: %f", after_dynamo_time - before_dynamo_time)
 
         return output
