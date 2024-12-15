@@ -110,16 +110,20 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         # Ultravox processor doesn't support multiple inputs,
         # therefore we need to input text and audio one by one
         tokenizer = self._get_tokenizer()
-        hf_inputs = defaultdict(list)
+        audio_features = []
         for audio, sr in audio_data:
             data = self._resample_audio(audio, sr)
             processed_inputs = super()._apply_hf_processor(
                 prompt, data, mm_processor_kwargs)
             prompt = tokenizer.decode(processed_inputs["input_ids"][0],
                                       skip_special_tokens=False)
-            hf_inputs["audio_features"].append(
+            audio_features.append(
                 processed_inputs["audio_values"].squeeze(0))
-        hf_inputs["input_ids"] = processed_inputs["input_ids"]
+        
+        hf_inputs = dict(
+            **processed_inputs,
+            audio_features=audio_features,
+        )
         return hf_inputs
 
     def _get_hf_processor(
