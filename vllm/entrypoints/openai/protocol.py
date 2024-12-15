@@ -336,7 +336,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                               or default_sampling_params.get(
                                   "repetition_penalty", 1.0))
         temperature = self.temperature or default_sampling_params.get(
-            "temperature", 1.0)
+            "temperature", 0.7)
         top_p = self.top_p or default_sampling_params.get("top_p", 1.0)
         top_k = self.top_k or default_sampling_params.get("top_k", -1)
         min_p = self.min_p or default_sampling_params.get("min_p", 0.0)
