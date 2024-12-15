@@ -157,7 +157,7 @@ class UltravoxProcessor(BaseMultiModalProcessor):
                                           1e-4))
             audio_token_len = int(np.ceil(nb_encoder_frames / stack_factor))
             max_audio_token_len = get_ultravox_max_audio_tokens(self.ctx)
-            audio_token_len = min(audio_token_len, max_audio_token_len)
+            audio_token_len = min(max(1, audio_token_len), max_audio_token_len)
             return [_AUDIO_PLACEHOLDER_TOKEN] * audio_token_len
 
         return [
