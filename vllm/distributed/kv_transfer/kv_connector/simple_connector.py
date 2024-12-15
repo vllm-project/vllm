@@ -52,7 +52,8 @@ class SimpleConnector(KVConnectorBase):
                     "To use MooncakeConnector, you need to pass the ENV: "
                     "'MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json'.")
             else:
-                from vllm.distributed.kv_transfer.kv_pipe.mooncake_pipe import MooncakePipe  # noqa: E501
+                from vllm.distributed.kv_transfer.kv_pipe.mooncake_pipe import (  # noqa: E501
+                    MooncakePipe)
                 logger.info(
                     "Initializing MooncakeConfig under kv_transfer_config %s",
                     self.config)
