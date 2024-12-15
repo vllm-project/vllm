@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
+from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import PyNcclPipe
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
@@ -62,6 +63,11 @@ class SimpleConnector(KVConnectorBase):
 
         self.producer_buffer: Optional[SimpleBuffer] = None
         self.consumer_buffer: Optional[SimpleBuffer] = None
+
+        self.send_pipe: Optional[KVPipeBase] = None
+        self.recv_pipe: Optional[KVPipeBase] = None
+        self.send_signal_pipe: Optional[KVPipeBase] = None
+        self.recv_signal_pipe: Optional[KVPipeBase] = None
 
         # 2 pipes for every rank in the world
         port_offset_base = 2 * rank
