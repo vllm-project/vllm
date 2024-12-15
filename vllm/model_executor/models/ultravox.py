@@ -73,7 +73,10 @@ def get_ultravox_max_audio_tokens(ctx: InputContext):
     return math.ceil(feature_extractor.chunk_length * _AUDIO_TOKENS_PER_SECOND)
 
 
-class UltravoxProcessor(BaseMultiModalProcessor):
+class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
+
+    def _get_feature_extractor(self) -> WhisperFeatureExtractor:
+        return self._get_hf_processor().audio_processor.feature_extractor
 
     def _resample_audio(
         self,
@@ -81,7 +84,7 @@ class UltravoxProcessor(BaseMultiModalProcessor):
         sr: int,
     ) -> Dict[str, Union[np.ndarray, int]]:
         # resample audio to the model's sampling rate
-        feature_extractor = whisper_feature_extractor(self.ctx)
+        feature_extractor = self._get_feature_extractor()
         if sr != feature_extractor.sampling_rate:
             try:
                 import librosa
@@ -148,6 +151,7 @@ class UltravoxProcessor(BaseMultiModalProcessor):
         hf_processor = self._get_hf_processor()
         stack_factor = hf_processor.stack_factor
         encoder_ds_factor = hf_processor.encoder_ds_factor
+        max_audio_token_len = get_ultravox_max_audio_tokens(self.ctx)
 
         def get_replacement_ultravox(item_idx: int):
             audio_data, sr = mm_items.audio[item_idx]
@@ -156,7 +160,6 @@ class UltravoxProcessor(BaseMultiModalProcessor):
             nb_encoder_frames = int(round(audio_len / encoder_ds_factor +
                                           1e-4))
             audio_token_len = int(np.ceil(nb_encoder_frames / stack_factor))
-            max_audio_token_len = get_ultravox_max_audio_tokens(self.ctx)
             audio_token_len = min(max(1, audio_token_len), max_audio_token_len)
             return [_AUDIO_PLACEHOLDER_TOKEN] * audio_token_len
 
@@ -172,12 +175,12 @@ class UltravoxProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        feature_extractor = whisper_feature_extractor(self.ctx)
+        feature_extractor = self._get_feature_extractor()
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
 
         audio_count = mm_counts["audio"]
-        audio = np.array([0.0] * audio_len)
+        audio = np.zeros(audio_len)
         data = {"audio": [(audio, sampling_rate)] * audio_count}
 
         return ProcessorInputs(
@@ -307,7 +310,7 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "audio", get_ultravox_max_audio_tokens)
-@MULTIMODAL_REGISTRY.register_processor(UltravoxProcessor)
+@MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
