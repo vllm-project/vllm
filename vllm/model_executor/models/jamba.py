@@ -25,8 +25,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-# from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
-#                                       _get_graph_batch_size)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
