@@ -30,9 +30,10 @@ class MockModelConfig:
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
+    diff_sampling_param = None
 
     def get_diff_sampling_param(self):
-        return {}
+        return self.diff_sampling_param or {}
 
 
 @dataclass
@@ -100,8 +101,8 @@ def test_serving_chat_should_set_correct_max_tokens():
 
 def test_serving_chat_could_load_correct_generation_config():
 
-    mock_model_config = MagicMock(spec=MockModelConfig)
-    mock_model_config.get_diff_sampling_param.return_value = {
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {
         "temperature": 0.5,
         "repetition_penalty": 1.05
     }
@@ -111,15 +112,15 @@ def test_serving_chat_could_load_correct_generation_config():
     mock_engine.errored = False
 
     # Initialize the serving chat
-    OpenAIServingChat(mock_engine,
-                      mock_model_config,
-                      BASE_MODEL_PATHS,
-                      response_role="assistant",
-                      chat_template=CHAT_TEMPLATE,
-                      chat_template_content_format="auto",
-                      lora_modules=None,
-                      prompt_adapters=None,
-                      request_logger=None)
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     mock_model_config,
+                                     BASE_MODEL_PATHS,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
+                                     lora_modules=None,
+                                     prompt_adapters=None,
+                                     request_logger=None)
     req = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{
@@ -129,5 +130,8 @@ def test_serving_chat_could_load_correct_generation_config():
         guided_decoding_backend="outlines",
     )
 
-    assert req.temperature == 0.5
-    assert req.repetition_penalty == 1.05
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].temperature == 0.5
+    assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05

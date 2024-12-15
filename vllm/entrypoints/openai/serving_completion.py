@@ -55,7 +55,11 @@ class OpenAIServingCompletion(OpenAIServing):
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
-        self._try_overwrite_sampling_param()
+        diff_sampling_param = self.model_config.get_diff_sampling_param()
+        if diff_sampling_param:
+            logger.info(
+                "Overwriting default completion sampling param with: %s",
+                diff_sampling_param)
 
     async def create_completion(
         self,
@@ -120,12 +124,15 @@ class OpenAIServingCompletion(OpenAIServing):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
+                # Build default sampling params
+                default_sampling_params = (
+                    self.model_config.get_diff_sampling_param())
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens)
+                        default_max_tokens, default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens)
+                        default_max_tokens, default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
 
@@ -542,13 +549,3 @@ class OpenAIServingCompletion(OpenAIServing):
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
         )
-
-    def _try_overwrite_sampling_param(self):
-        diff_sampling_param = self.model_config.get_diff_sampling_param()
-        if diff_sampling_param:
-            logger.info(
-                "Overwriting default completion sampling param with: %s",
-                diff_sampling_param)
-            for k, v in diff_sampling_param.items():
-                CompletionRequest.model_fields[k].default = v
-            CompletionRequest.model_rebuild(force=True)
