@@ -157,6 +157,10 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         override_pooler_config: Initialize non default pooling config or
             override default pooling config for the pooling model.
+        logits_processor_pattern: Optional regex pattern specifying valid
+            logits processor qualified names that can be passed with the
+            `logits_processors` extra completion argument. Defaults to None, 
+            which allows no processors.
         generation_config: Configuration parameter file for generation.
     """
 
@@ -192,6 +196,7 @@ class ModelConfig:
                  mm_cache_preprocessor: bool = False,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  override_pooler_config: Optional["PoolerConfig"] = None,
+                 logits_processor_pattern: Optional[str] = None,
                  generation_config: Optional[str] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -318,6 +323,7 @@ class ModelConfig:
         self.task: Final = task
 
         self.pooler_config = self._init_pooler_config(override_pooler_config)
+        self.logits_processor_pattern = logits_processor_pattern
 
         self.generation_config = generation_config
 

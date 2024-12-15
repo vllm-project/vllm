@@ -204,7 +204,7 @@ class Worker:
         return output if self.rank == 0 else None
         return output
 
-    def profile(self, is_start=True):
+    def profile(self, is_start: bool = True):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:

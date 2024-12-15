@@ -133,7 +133,7 @@ def run_encode(model: str, modality: QueryModality):
     if req_data.image is not None:
         mm_data["image"] = req_data.image
 
-    outputs = req_data.llm.encode({
+    outputs = req_data.llm.embed({
         "prompt": req_data.prompt,
         "multi_modal_data": mm_data,
     })

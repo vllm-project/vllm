@@ -131,7 +131,9 @@ class OpenAIServingCompletion(OpenAIServing):
                         default_max_tokens, default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens, default_sampling_params)
+                        default_max_tokens,
+                        self.model_config.logits_processor_pattern,
+                        default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
 
