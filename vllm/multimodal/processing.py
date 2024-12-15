@@ -625,11 +625,7 @@ class BaseMultiModalProcessor(ABC):
     ) -> BatchFeature:
         # some mm_processor_kwargs may be used in processor initialization
         # instead of processor call
-        processor_init_kwargs = {
-            **self.init_mm_processor_kwargs,
-            **mm_processor_kwargs,
-        }
-        hf_processor = self._get_hf_processor(**processor_init_kwargs)
+        hf_processor = self._get_hf_processor(**mm_processor_kwargs)
 
         processor_data, passthrough_data = self._get_processor_data(mm_data)
 

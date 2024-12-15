@@ -28,8 +28,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalData,
                              MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         InputProcessingContext,
-                                        ModalityProcessingMetadata,
-                                        MultiModalProcessingMetadata,
+                                        MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
@@ -75,52 +74,7 @@ def get_ultravox_max_audio_tokens(ctx: InputContext):
     return math.ceil(feature_extractor.chunk_length * _AUDIO_TOKENS_PER_SECOND)
 
 
-def dummy_audio_for_ultravox(
-    ctx: InputContext,
-    audio_count: int,
-):
-    # dummy audio is set to default 16kHz sampling rate
-    feature_extractor = whisper_feature_extractor(ctx)
-    audio_len = feature_extractor.chunk_length * feature_extractor.sampling_rate
-    audio = np.array([0.0] * audio_len)
-    return {"audio": [audio] * audio_count}
-
-
-def dummy_mm_kwargs_for_ultravox(ctx: InputProcessingContext,
-                                 mm_counts: Mapping[str, int]):
-
-    data = dummy_audio_for_ultravox(ctx=ctx, audio_count=mm_counts["audio"])
-
-    hf_processor = ctx.get_hf_processor()
-    audio_processor = hf_processor.audio_processor
-    hf_inputs = audio_processor(
-        audio=data['audio'],
-        sampling_rate=16000,
-        return_tensors="pt",
-    )
-
-    return MultiModalKwargs(**hf_inputs)
-
-
-def create_metadata_for_ultravox(
-        ctx: InputProcessingContext) -> MultiModalProcessingMetadata:
-    return {
-        "audio":
-        ModalityProcessingMetadata(prompt_repls=[
-            PromptReplacement(target=[_AUDIO_PLACEHOLDER_TOKEN],
-                              repl_unit=[_AUDIO_PLACEHOLDER_TOKEN],
-                              repl_count=get_ultravox_max_audio_tokens(ctx)),
-        ]),
-    }
-
-
 class UltravoxProcessor(BaseMultiModalProcessor):
-
-    def __init__(self, ctx: InputProcessingContext) -> None:
-        super().__init__(
-            ctx=ctx,
-            metadata=create_metadata_for_ultravox(ctx),
-        )
 
     def _resample_audio(
         self,
@@ -182,11 +136,38 @@ class UltravoxProcessor(BaseMultiModalProcessor):
             processor_data["audio"] = processor_data.pop("audios")
         return processor_data, passthrough_data
 
-    def _get_dummy_mm_kwargs(
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_inputs: BatchFeature,
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> list[PromptReplacement]:
+        max_audio_tokens = get_ultravox_max_audio_tokens(self.ctx)
+        return [
+            PromptReplacement(
+                modality="audio",
+                target="<|audio|>",
+                replacement=[_AUDIO_PLACEHOLDER_TOKEN] * max_audio_tokens,
+            )
+        ]
+
+    def _get_dummy_mm_inputs(
         self,
         mm_counts: Mapping[str, int],
-    ) -> MultiModalKwargs:
-        return dummy_mm_kwargs_for_ultravox(self.ctx, mm_counts)
+    ) -> ProcessorInputs:
+        feature_extractor = whisper_feature_extractor(self.ctx)
+        sampling_rate = feature_extractor.sampling_rate
+        audio_len = feature_extractor.chunk_length * sampling_rate
+
+        audio_count = mm_counts["audio"]
+        audio = np.array([0.0] * audio_len)
+        data = {"audio": [(audio, sampling_rate)] * audio_count}
+
+        return ProcessorInputs(
+            prompt_text="<|audio|>" * audio_count,
+            mm_data=data,
+            mm_processor_kwargs={},
+        )
 
 
 class StackAudioFrames(nn.Module):
