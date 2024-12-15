@@ -65,10 +65,10 @@ class SimpleConnector(KVConnectorBase):
         self.producer_buffer: Optional[SimpleBuffer] = None
         self.consumer_buffer: Optional[SimpleBuffer] = None
 
-        self.send_pipe: Optional[KVPipeBase] = None
-        self.recv_pipe: Optional[KVPipeBase] = None
-        self.send_signal_pipe: Optional[KVPipeBase] = None
-        self.recv_signal_pipe: Optional[KVPipeBase] = None
+        self.send_pipe: KVPipeBase = None
+        self.recv_pipe: KVPipeBase = None
+        self.send_signal_pipe: KVPipeBase = None
+        self.recv_signal_pipe: KVPipeBase = None
 
         # 2 pipes for every rank in the world
         port_offset_base = 2 * rank
