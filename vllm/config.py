@@ -1186,6 +1186,14 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
 
+    # Multimodal encoder run compute budget, only used in V1
+    # FIXME(woosuk & ywang96): Below are placeholder values. We need to
+    # calculate the actual values from the configurations.
+    max_num_encoder_input_tokens = 16384
+
+    # Multimodal encoder cache size, only used in V1
+    encoder_cache_size = 16384
+
     # Whether to perform preemption by swapping or
     # recomputation. If not specified, we determine the mode as follows:
     # We use recomputation by default since it incurs lower overhead than

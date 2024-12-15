@@ -10,15 +10,16 @@ import torch.nn as nn
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY, InputRegistry
+from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
+from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -35,7 +36,6 @@ class GPUModelRunner:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        input_registry: InputRegistry = INPUT_REGISTRY,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -77,7 +77,12 @@ class GPUModelRunner:
         self.hidden_size = model_config.get_hidden_size()
 
         # Multi-modal data support
-        self.input_registry = input_registry
+        self.input_registry = INPUT_REGISTRY
+        self.mm_registry = MULTIMODAL_REGISTRY
+        # NOTE: mm_input_mapper is only used for memory profiling.
+        self.mm_input_mapper = MMInputMapperClient(self.model_config)
+        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  #noqa: E501
+        self.encoder_cache_size = self.scheduler_config.encoder_cache_size
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -591,8 +596,6 @@ class GPUModelRunner:
         return hidden_states
 
     def profile_run(self) -> None:
-        # TODO(woosuk): Profile the max memory usage of the encoder and
-        # the encoder cache.
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value `None`.
         # the `dtype` argument does not matter, and we use `float32` as
@@ -604,6 +607,40 @@ class GPUModelRunner:
             torch.tensor([], dtype=torch.float32, device=self.device)
             for _ in range(self.num_attn_layers)
         ]
+
+        # Profile with multimodal encoder & encoder cache.
+        # TODO (ywang96): generalize this beyond image modality.
+        if self.is_multimodal_model:
+
+            # Create dummy patch of multimodal inputs.
+            dummy_mm_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                            self.max_num_tokens,
+                                            self.mm_registry).multi_modal_data
+            dummy_mm_kwargs, _ = self.mm_input_mapper.process_inputs(
+                dummy_mm_data, None, None, None)
+            max_token_per_image = self.mm_registry._plugins[
+                'image'].get_max_multimodal_tokens(self.model_config)
+            max_num_images = min(
+                self.max_num_encoder_input_tokens,
+                self.encoder_cache_size) // max_token_per_image
+
+            batched_dummy_mm_inputs = MultiModalKwargs.batch(
+                [dummy_mm_kwargs[0] for _ in range(max_num_images)])
+            batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
+                batched_dummy_mm_inputs, device=self.device)
+
+            # Run multimodal encoder.
+            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                **batched_dummy_mm_inputs)
+
+            # Cache the dummy encoder outputs.
+            dummy_req_input_ids = [("0", i) for i in range(max_num_images)]
+            self.encoder_cache["0"] = {}
+            for (req_id, input_id), output in zip(dummy_req_input_ids,
+                                                  dummy_encoder_outputs):
+                self.encoder_cache[req_id][input_id] = output
+
         # Trigger compilation for general shape.
         hidden_states = self._dummy_run(self.model, self.max_num_tokens,
                                         dummy_kv_caches)
@@ -612,6 +649,7 @@ class GPUModelRunner:
         # TODO(woosuk): Consider the memory usage of the sampler.
         torch.cuda.synchronize()
         del hidden_states, logits
+        self.encoder_cache.clear()
         gc.collect()
 
     def capture_model(self) -> None:
