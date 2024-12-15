@@ -1,16 +1,15 @@
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Type)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.worker.worker_base import WorkerBase
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class RayExecutor:
+class RayExecutor(Executor):
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -188,11 +187,25 @@ class RayExecutor:
         self._run_workers("initialize")
         self._run_workers("load_model")
 
+    def _configure_ray_workers_use_nsight(self,
+                                          ray_remote_kwargs) -> Dict[str, Any]:
+        # If nsight profiling is enabled, we need to set the profiling
+        # configuration for the ray workers as runtime env.
+        runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
+        runtime_env.update({
+            "nsight": {
+                "t": "cuda,cudnn,cublas",
+                "o": "'worker_process_%p'",
+                "cuda-graph-trace": "node",
+            }
+        })
+
+        return ray_remote_kwargs
+
     def _get_env_vars_to_be_updated(self):
         return self._env_vars_for_all_workers
 
-    def _get_worker_module_and_class(
-            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
+    def _get_worker_module_and_class(self) -> Tuple[str, str]:
         worker_module_name = "vllm.v1.worker.gpu_worker"
         worker_class_name = "Worker"
         return worker_module_name, worker_class_name
@@ -286,7 +299,8 @@ class RayExecutor:
         # Start the ray workers first.
         ray_workers = self.workers
         ray_worker_outputs = [
-            worker.execute_method.remote(method, *worker_args, **worker_kwargs)
+            worker.execute_method.remote(  # type: ignore[attr-defined]
+                method, *worker_args, **worker_kwargs)
             for (worker, worker_args, worker_kwargs
                  ) in zip(ray_workers, all_worker_args, all_worker_kwargs)
         ]
@@ -345,8 +359,8 @@ class RayExecutor:
 
         with InputNode() as input_batches:
             outputs = [
-                worker.execute_model.bind(input_batches)
-                for worker in self.workers
+                worker.execute_model.bind(  # type: ignore[attr-defined]
+                    input_batches) for worker in self.workers
             ]
             forward_dag = MultiOutputNode(outputs)
 

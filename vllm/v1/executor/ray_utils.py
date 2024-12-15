@@ -116,6 +116,7 @@ try:
             # device.
             # We can remove this API after it is fixed in compiled graph.
             import torch
+            assert self.worker is not None, "Worker is not initialized"
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
@@ -125,6 +126,7 @@ try:
             scheduler_output: "SchedulerOutput",
         ) -> ModelRunnerOutput:
             self.setup_device_if_necessary()
+            assert self.worker is not None, "Worker is not initialized"
             output = self.worker.model_runner.execute_model(scheduler_output)
             return output
 
