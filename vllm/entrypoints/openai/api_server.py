@@ -352,8 +352,7 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-# Lazy include chat completion routes to make sure new sampling
-# parameters are included
+@router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -373,8 +372,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-# Lazy include chat completion routes to make sure new sampling
-# parameters are included
+@router.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -662,15 +660,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         model_config = await engine_client.get_model_config()
         init_app_state(engine_client, model_config, app.state, args)
-
-        # Lazy include chat completion routes to make sure new sampling
-        # parameters are included
-        app.add_api_route("/v1/chat/completions",
-                          create_chat_completion,
-                          methods=["POST"])
-        app.add_api_route("/v1/completions",
-                          create_completion,
-                          methods=["POST"])
 
         shutdown_task = await serve_http(
             app,
