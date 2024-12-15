@@ -2,10 +2,9 @@ from typing import cast
 
 import pytest
 
-from vllm.multimodal.processing import (MultiModalDataItems, PromptReplacement,
-                                        _PlaceholderInfo, find_text_matches,
-                                        find_token_matches, iter_placeholders,
-                                        iter_token_matches,
+from vllm.multimodal.processing import (PromptReplacement, _PlaceholderInfo,
+                                        find_text_matches, find_token_matches,
+                                        iter_placeholders, iter_token_matches,
                                         replace_text_matches,
                                         replace_token_matches)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -314,8 +313,8 @@ def test_find_replace_text(
     result = replace_text_matches(
         prompt,
         matches,
-        MultiModalDataItems({key: [None] * mm_count
-                             for key in repl_by_key}),
+        {key: mm_count
+         for key in repl_by_key},
     )
 
     # Only displayed on error
@@ -380,8 +379,8 @@ def test_find_replace_tokens(
     result = replace_token_matches(
         prompt,
         matches,
-        MultiModalDataItems({key: [None] * mm_count
-                             for key in repl_by_key}),
+        {key: mm_count
+         for key in repl_by_key},
     )
 
     # Only displayed on error
@@ -476,7 +475,7 @@ def test_iter_placeholders(
             prompt_repls,
             prompt,
             # Effectively match all occurrences in the prompt
-            MultiModalDataItems({key: [None] * 3 for key in repl_by_key}),
+            {key: 3 for key in repl_by_key},
          ))
 
     # Only displayed on error

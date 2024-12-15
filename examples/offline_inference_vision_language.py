@@ -92,10 +92,7 @@ def run_fuyu(question: str, modality: str):
 def run_phi3v(question: str, modality: str):
     assert modality == "image"
 
-    prompt = f"<|user|>\n<|image_1|>\n{question}<|end|>\n<|assistant|>\n"  # noqa: E501
-    # Note: The default setting of max_num_seqs (256) and
-    # max_model_len (128k) for this model may cause OOM.
-    # You may lower either to run this example on lower-end GPUs.
+    prompt = f"<|user|>\n<|image_1|>\n{question}<|end|>\n<|assistant|>\n"
 
     # num_crops is an override kwarg to the multimodal image processor;
     # For some models, e.g., Phi-3.5-vision-instruct, it is recommended
