@@ -65,10 +65,10 @@ class SimpleConnector(KVConnectorBase):
         self.producer_buffer: Optional[SimpleBuffer] = None
         self.consumer_buffer: Optional[SimpleBuffer] = None
 
-        self.producer_data_pipe: Optional[KVPipeBase] = None
-        self.consumer_data_pipe: Optional[KVPipeBase] = None
-        self.producer_signal_pipe: Optional[KVPipeBase] = None
-        self.consumer_signal_pipe: Optional[KVPipeBase] = None
+        self.producer_data_pipe: Union[PyNcclPipe, MooncakePipe]
+        self.consumer_data_pipe: Union[PyNcclPipe, MooncakePipe]
+        self.producer_signal_pipe: Union[PyNcclPipe, MooncakePipe]
+        self.consumer_signal_pipe: Union[PyNcclPipe, MooncakePipe]
 
         # 2 pipes for every rank in the world
         port_offset_base = 2 * rank
