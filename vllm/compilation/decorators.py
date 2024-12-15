@@ -180,7 +180,7 @@ def _support_torch_compile(
             before_dynamo_time = time.perf_counter()
         output = self.compiled_callable(*args, **kwargs)
         if bs in self.seen_bs:
-            logger.info("Time taken for dynamo guard evaluation: %f (ms)", (after_dynamo_time - before_dynamo_time) * 1000)
+            logger.info("Time taken for dynamo guard evaluation for bs %s: %f (ms)", bs, (after_dynamo_time - before_dynamo_time) * 1000)
         self.seen_bs.add(bs)
         return output
 

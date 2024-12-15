@@ -8,6 +8,7 @@ bs = 4
 prompt_token_ids = [[0] * math.floor(512 / bs)] * bs
 
 # all sequence generates 30 tokens
-sampling_params = SamplingParams(temperature=0, max_tokens=30, ignore_eos=True)
+sampling_params = SamplingParams(temperature=0, max_tokens=2, ignore_eos=True)
 
+outputs = llm.generate(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
 outputs = llm.generate(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
