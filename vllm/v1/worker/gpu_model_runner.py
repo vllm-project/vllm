@@ -81,7 +81,7 @@ class GPUModelRunner:
         self.mm_registry = MULTIMODAL_REGISTRY
         # NOTE: mm_input_mapper is only used for memory profiling.
         self.mm_input_mapper = MMInputMapperClient(self.model_config)
-        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  #noqa: E501
+        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
         self.encoder_cache_size = self.scheduler_config.encoder_cache_size
 
         # Lazy initialization
@@ -638,20 +638,22 @@ class GPUModelRunner:
             # a single request, therefore here we always replicate first
             # item by max_num_mm_items times.
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
-                [dummy_mm_kwargs[0] for _ in range(max_num_mm_items)])
+                [dummy_mm_kwargs[0]] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
                 batched_dummy_mm_inputs, device=self.device)
 
             # Run multimodal encoder.
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
                 **batched_dummy_mm_inputs)
+            assert len(dummy_encoder_outputs) == max_num_mm_items, (
+                "Expected dimension 0 of encoder outputs to match the number "
+                f"of multimodal data items: {max_num_mm_items}, got "
+                f"{len(dummy_encoder_outputs)=} instead. This is most likely "
+                "due to the 'get_multimodal_embeddings' method of the model "
+                "not implemented correctly.")
 
             # Cache the dummy encoder outputs.
-            dummy_req_input_ids = [("0", i) for i in range(max_num_mm_items)]
-            self.encoder_cache["0"] = {}
-            for (req_id, input_id), output in zip(dummy_req_input_ids,
-                                                  dummy_encoder_outputs):
-                self.encoder_cache[req_id][input_id] = output
+            self.encoder_cache["0"] = dict(enumerate(dummy_encoder_outputs))
 
         # Trigger compilation for general shape.
         hidden_states = self._dummy_run(self.model, self.max_num_tokens,

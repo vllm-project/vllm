@@ -209,7 +209,7 @@ class MultiModalRegistry:
         for profiling the memory usage of a model.
 
         Note:
-            This is currently only used in V1.
+            This is currently directly used only in V1.
         """
 
         return {
@@ -233,9 +233,9 @@ class MultiModalRegistry:
         limits_per_plugin = self._limits_by_model[model_config]
 
         return {
-            key: (limits_per_plugin[key] *
-                  plugin.get_max_multimodal_tokens(model_config))
-            for key, plugin in self._plugins.items()
+            key: limits_per_plugin[key] * max_tokens_per_mm_item
+            for key, max_tokens_per_mm_item in
+            self.get_max_tokens_per_item_by_modality(model_config).items()
         }
 
     def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
