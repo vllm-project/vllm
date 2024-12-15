@@ -597,10 +597,7 @@ class BaseMultiModalProcessor(ABC):
     def _get_processor_data(
         self,
         mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        hf_processor = self._get_hf_processor(**mm_processor_kwargs)
-
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
         for k, v in mm_data.items():
