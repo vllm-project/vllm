@@ -141,12 +141,22 @@ class UltravoxProcessor(BaseMultiModalProcessor):
         hf_inputs: BatchFeature,
         mm_processor_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
-        max_audio_tokens = get_ultravox_max_audio_tokens(self.ctx)
+        hf_processor = self._get_hf_processor()
+        stack_factor = hf_processor.stack_factor
+        encoder_ds_factor = hf_processor.encoder_ds_factor
+
+        def get_replacement_ultravox(item_idx: int):
+            audio_data, _ = mm_items.audio[item_idx]
+            audio_len = audio_data.shape[-1]
+            nb_encoder_frames = int(round(audio_len / encoder_ds_factor + 1e-4))
+            audio_token_len = int(np.ceil(nb_encoder_frames / stack_factor))
+            return [_AUDIO_PLACEHOLDER_TOKEN] * audio_token_len
+
         return [
             PromptReplacement(
                 modality="audio",
                 target="<|audio|>",
-                replacement=[_AUDIO_PLACEHOLDER_TOKEN] * max_audio_tokens,
+                replacement=get_replacement_ultravox,
             )
         ]
 
