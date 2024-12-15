@@ -7,7 +7,7 @@ from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import _BATCH_SIZES_TO_CAPTURE, CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -25,6 +25,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+# from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
+#                                       _get_graph_batch_size)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
@@ -422,6 +424,17 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        if self.scheduler_config is not None and \
+                not self.model_config.enforce_eager:
+            if self.scheduler_config.max_num_seqs > \
+                    vllm_config.compilation_config.max_capture_size:
+                self.max_batch_size = \
+                    vllm_config.compilation_config.max_capture_size
+            else:
+                self.max_batch_size = vllm_config.pad_for_cudagraph(
+                    self.scheduler_config.max_num_seqs)
+        else:
+            self.max_batch_size = 8192 + 2
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -435,15 +448,11 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
-            max_batch_size = (VllmConfig.get_graph_batch_size(
-                self.scheduler_config.max_num_seqs) if self.scheduler_config
-                              else max(_BATCH_SIZES_TO_CAPTURE) + 2)
-
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
             self.mamba_cache = MambaCacheManager(
-                self.lm_head.weight.dtype, num_mamba_layers, max_batch_size,
-                *self._get_mamba_cache_shape())
+                self.lm_head.weight.dtype, num_mamba_layers,
+                self.max_batch_size, *self._get_mamba_cache_shape())
         (
             mamba_cache_tensors,
             state_indices_tensor,
@@ -589,6 +598,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                       loaded_weight[:loaded_weight.shape[0] //
                                                     2, :])  # the lin split
 
+                        loaded_params.add(name_lin)
                         param = params_dict[name_gate]
                         weight_loader = getattr(param, "weight_loader",
                                                 default_weight_loader)
@@ -596,12 +606,14 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                         weight_loader(param,
                                       loaded_weight[loaded_weight.shape[0] //
                                                     2:, :])  # the lin split
+                        loaded_params.add(name_gate)
                     else:
                         param = params_dict[name]
                         weight_loader = getattr(param, "weight_loader",
                                                 default_weight_loader)
                         weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+            if "in_proj" not in name:
+                loaded_params.add(name)
         return loaded_params
 
 
