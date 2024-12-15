@@ -16,7 +16,6 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
-from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
