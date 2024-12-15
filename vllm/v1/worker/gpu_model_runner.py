@@ -610,23 +610,32 @@ class GPUModelRunner:
 
         # Profile with multimodal encoder & encoder cache.
         # TODO (ywang96): generalize this beyond image modality.
+        # since mm_input_mapper only supports image inputs.
         if self.is_multimodal_model:
 
-            # Create dummy patch of multimodal inputs.
+            # Create dummy batch of multimodal inputs.
             dummy_mm_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                             self.max_num_tokens,
                                             self.mm_registry).multi_modal_data
             dummy_mm_kwargs, _ = self.mm_input_mapper.process_inputs(
-                dummy_mm_data, None, None, None)
-            max_token_per_image = self.mm_registry._plugins[
-                'image'].get_max_multimodal_tokens(self.model_config)
-            max_num_images = min(
+                mm_data=dummy_mm_data,
+                mm_hashes=None,
+                mm_processor_kwargs=None,
+                precomputed_mm_inputs=None)
+
+            # NOTE: Currently model is profiled with a single non-text
+            # modality even when it supports multiple.
+            max_tokens_per_mm_item = max(
+                self.mm_registry.get_max_tokens_per_item_by_modality(
+                    self.model_config).values())
+
+            max_num_mm_items = min(
                 self.max_num_encoder_input_tokens,
-                self.encoder_cache_size) // max_token_per_image
+                self.encoder_cache_size) // max_tokens_per_mm_item
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
-                [dummy_mm_kwargs[0] for _ in range(max_num_images)])
+                [dummy_mm_kwargs[0] for _ in range(max_num_mm_items)])
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
                 batched_dummy_mm_inputs, device=self.device)
 
@@ -635,7 +644,7 @@ class GPUModelRunner:
                 **batched_dummy_mm_inputs)
 
             # Cache the dummy encoder outputs.
-            dummy_req_input_ids = [("0", i) for i in range(max_num_images)]
+            dummy_req_input_ids = [("0", i) for i in range(max_num_mm_items)]
             self.encoder_cache["0"] = {}
             for (req_id, input_id), output in zip(dummy_req_input_ids,
                                                   dummy_encoder_outputs):

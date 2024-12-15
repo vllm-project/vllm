@@ -200,6 +200,23 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
+    def get_max_tokens_per_item_by_modality(
+        self,
+        model_config: "ModelConfig",
+    ) -> Mapping[str, int]:
+        """
+        Get the maximum number of tokens per data item from each modality
+        for profiling the memory usage of a model.
+
+        Note:
+            This is currently only used in V1.
+        """
+
+        return {
+            key: plugin.get_max_multimodal_tokens(model_config)
+            for key, plugin in self._plugins.items()
+        }
+
     def get_max_tokens_by_modality(
         self,
         model_config: "ModelConfig",
