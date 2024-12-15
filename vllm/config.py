@@ -156,41 +156,45 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         override_pooler_config: Initialize non default pooling config or
             override default pooling config for the pooling model.
+        logits_processor_pattern: Optional regex pattern specifying valid
+            logits processor qualified names that can be passed with the
+            `logits_processors` extra completion argument. Defaults to None, 
+            which allows no processors.
     """
 
-    def __init__(
-            self,
-            model: str,
-            task: Union[TaskOption, Literal["draft"]],
-            tokenizer: str,
-            tokenizer_mode: str,
-            trust_remote_code: bool,
-            dtype: Union[str, torch.dtype],
-            seed: int,
-            allowed_local_media_path: str = "",
-            revision: Optional[str] = None,
-            code_revision: Optional[str] = None,
-            rope_scaling: Optional[Dict[str, Any]] = None,
-            rope_theta: Optional[float] = None,
-            tokenizer_revision: Optional[str] = None,
-            max_model_len: Optional[int] = None,
-            spec_target_max_model_len: Optional[int] = None,
-            quantization: Optional[str] = None,
-            quantization_param_path: Optional[str] = None,
-            enforce_eager: Optional[bool] = None,
-            max_seq_len_to_capture: Optional[int] = None,
-            max_logprobs: int = 20,
-            disable_sliding_window: bool = False,
-            skip_tokenizer_init: bool = False,
-            served_model_name: Optional[Union[str, List[str]]] = None,
-            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-            use_async_output_proc: bool = True,
-            config_format: ConfigFormat = ConfigFormat.AUTO,
-            hf_overrides: Optional[HfOverrides] = None,
-            mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-            mm_cache_preprocessor: bool = False,
-            override_neuron_config: Optional[Dict[str, Any]] = None,
-            override_pooler_config: Optional["PoolerConfig"] = None) -> None:
+    def __init__(self,
+                 model: str,
+                 task: Union[TaskOption, Literal["draft"]],
+                 tokenizer: str,
+                 tokenizer_mode: str,
+                 trust_remote_code: bool,
+                 dtype: Union[str, torch.dtype],
+                 seed: int,
+                 allowed_local_media_path: str = "",
+                 revision: Optional[str] = None,
+                 code_revision: Optional[str] = None,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 rope_theta: Optional[float] = None,
+                 tokenizer_revision: Optional[str] = None,
+                 max_model_len: Optional[int] = None,
+                 spec_target_max_model_len: Optional[int] = None,
+                 quantization: Optional[str] = None,
+                 quantization_param_path: Optional[str] = None,
+                 enforce_eager: Optional[bool] = None,
+                 max_seq_len_to_capture: Optional[int] = None,
+                 max_logprobs: int = 20,
+                 disable_sliding_window: bool = False,
+                 skip_tokenizer_init: bool = False,
+                 served_model_name: Optional[Union[str, List[str]]] = None,
+                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+                 use_async_output_proc: bool = True,
+                 config_format: ConfigFormat = ConfigFormat.AUTO,
+                 hf_overrides: Optional[HfOverrides] = None,
+                 mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+                 mm_cache_preprocessor: bool = False,
+                 override_neuron_config: Optional[Dict[str, Any]] = None,
+                 override_pooler_config: Optional["PoolerConfig"] = None,
+                 logits_processor_pattern: Optional[str] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -316,6 +320,7 @@ class ModelConfig:
         self.task: Final = task
 
         self.pooler_config = self._init_pooler_config(override_pooler_config)
+        self.logits_processor_pattern = logits_processor_pattern
 
         self._verify_quantization()
         self._verify_cuda_graph()
