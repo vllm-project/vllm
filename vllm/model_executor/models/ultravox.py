@@ -24,10 +24,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalData,
-                             MultiModalKwargs, NestedTensors)
+from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        InputProcessingContext,
+                                        MultiModalDataDict,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
@@ -98,7 +97,7 @@ class UltravoxProcessor(BaseMultiModalProcessor):
     def _apply_hf_processor(
         self,
         prompt: str,
-        mm_data: MultiModalData,
+        mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Ultravox processor doesn't support multiple inputs,
@@ -128,7 +127,7 @@ class UltravoxProcessor(BaseMultiModalProcessor):
 
     def _get_processor_data(
         self,
-        mm_data: MultiModalData,
+        mm_data: MultiModalDataDict,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # Ultravox uses "audio" instead of "audios" as calling keyword
         processor_data, passthrough_data = super()._get_processor_data(mm_data)
