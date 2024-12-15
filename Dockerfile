@@ -242,7 +242,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         pip install accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10'; \
     else \
-        pip install accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.44.0' 'timm==0.9.10'; \
+        pip install accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.0' 'timm==0.9.10'; \
     fi
 ENV VLLM_USAGE_SOURCE production-docker-image
 
