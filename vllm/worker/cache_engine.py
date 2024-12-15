@@ -86,10 +86,7 @@ class CacheEngine:
                             device=device))
         return kv_cache
 
-    def swap_in(self,
-                src_to_dst: torch.Tensor,
-                offsets: torch.Tensor = None,
-                sequence_ids: torch.Tensor = None) -> None:
+    def swap_in(self, src_to_dst: torch.Tensor) -> None:
         for i in range(self.num_attention_layers):
             self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
                                           src_to_dst)
@@ -98,6 +95,15 @@ class CacheEngine:
         for i in range(self.num_attention_layers):
             self.attn_backend.swap_blocks(self.gpu_cache[i], self.cpu_cache[i],
                                           src_to_dst)
+
+    def issue_swap_in(self,
+                      src_to_dst: torch.Tensor,
+                      offsets: torch.Tensor = None,
+                      sequence_ids: torch.Tensor = None) -> None:
+        pass
+
+    def issue_swap_out(self, src_to_dst: torch.Tensor) -> None:
+        pass
 
     def swap_in_sync(self, sequence_ids: torch.Tensor) -> None:
         pass
@@ -203,10 +209,10 @@ class GPUCacheEngine(CacheEngine):
             self.swap_out_stream = torch.cuda.Stream()
             self.swap_out_event = torch.cuda.Event()
 
-    def swap_in(self,
-                src_to_dst: torch.Tensor,
-                offsets: torch.Tensor = None,
-                sequence_ids: torch.Tensor = None) -> None:
+    def issue_swap_in(self,
+                      src_to_dst: torch.Tensor,
+                      offsets: torch.Tensor = None,
+                      sequence_ids: torch.Tensor = None) -> None:
         if (not self.use_fast_path) or \
                 (sequence_ids is None) or (sequence_ids.numel() == 0):
             super().swap_in(src_to_dst)
@@ -242,7 +248,7 @@ class GPUCacheEngine(CacheEngine):
                         self.swap_in_event_map[seq_id][layer_idx].record(
                             self.swap_in_stream)
 
-    def swap_out(
+    def issue_swap_out(
         self,
         src_to_dst: torch.Tensor,
     ) -> None:

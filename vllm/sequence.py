@@ -1244,13 +1244,18 @@ class ExecuteModelRequest(
     # Blocks to swap in. List of CPU -> GPU block number.
     blocks_to_swap_in: List[Tuple[int,
                                   int]] = msgspec.field(default_factory=list)
+    blocks_to_offload_swap_in: List[Tuple[int, int]] = msgspec.field(
+        default_factory=list)
     # swap in requests offsets
-    swap_in_offsets: List[int] = msgspec.field(default_factory=list)
+    offload_swap_in_offsets: List[int] = msgspec.field(default_factory=list)
     # swap in sequence IDs
-    swap_in_sequence_ids: List[int] = msgspec.field(default_factory=list)
+    offload_swap_in_sequence_ids: List[int] = msgspec.field(
+        default_factory=list)
     # Blocks to swap out. List of GPU -> CPU block number.
     blocks_to_swap_out: List[Tuple[int,
                                    int]] = msgspec.field(default_factory=list)
+    blocks_to_offload_swap_out: List[Tuple[int, int]] = msgspec.field(
+        default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = msgspec.field(default_factory=list)
     # Virtual engine ID for pipeline parallel.

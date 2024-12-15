@@ -153,7 +153,8 @@ class Attention(nn.Module):
                                     attn_type=attn_type)
             if (cache_engine is not None):
                 assert (worker_input is not None)
-                cache_engine.swap_out(worker_input.blocks_to_swap_out)
+                cache_engine.issue_swap_out(
+                    worker_input.blocks_to_offload_swap_out)
             return ret
         elif self.use_output:
             output = torch.empty_like(query)
@@ -175,7 +176,8 @@ class Attention(nn.Module):
                 self.layer_name)
             if (cache_engine is not None):
                 assert (worker_input is not None)
-                cache_engine.swap_out(worker_input.blocks_to_swap_out)
+                cache_engine.issue_swap_out(
+                    worker_input.blocks_to_offload_swap_out)
             return output.view(-1, hidden_size)
         else:
             if (cache_engine is not None):
@@ -185,7 +187,8 @@ class Attention(nn.Module):
                                                    attn_type, self.layer_name)
             if (cache_engine is not None):
                 assert (worker_input is not None)
-                cache_engine.swap_out(worker_input.blocks_to_swap_out)
+                cache_engine.issue_swap_out(
+                    worker_input.blocks_to_offload_swap_out)
             return ret
 
     def extra_repr(self) -> str:

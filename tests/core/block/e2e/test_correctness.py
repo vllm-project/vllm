@@ -56,9 +56,9 @@ def test_block_manager_with_preemption(baseline_llm_generator,
     # so that only one sequence can fit at a time (once the sequences grow).
 
     prompts = [
-        "Give me your self introduction. Hello, my name is",
-        "You are an American.The president of the United States is",
-        "You are a French. The capital of France is",
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
         "The future of AI is",
     ]
 

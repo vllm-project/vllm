@@ -324,24 +324,33 @@ class Worker(LocalOrDistributedWorkerBase):
             if isinstance(metadata_or_delta, SequenceGroupMetadata):
                 seq_ids.extend(metadata_or_delta.seq_data.keys())
         if (len(seq_ids) == 0):
-            swap_in_offsets = []
-            swap_in_sequence_ids = []
+            offload_swap_in_offsets = []
+            offload_swap_in_sequence_ids = []
 
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
                                          device="cuda",
                                          dtype=torch.int64).view(-1, 2)
-        swap_in_offsets = torch.tensor(execute_model_req.swap_in_offsets,
-                                       device="cpu",
-                                       dtype=torch.int64).view(-1)
-        swap_in_sequence_ids = \
-            torch.tensor(execute_model_req.swap_in_sequence_ids,
+        blocks_to_offload_swap_in = torch.tensor(
+            execute_model_req.blocks_to_offload_swap_in,
+            device="cuda",
+            dtype=torch.int64).view(-1, 2)
+        offload_swap_in_offsets = torch.tensor(
+            execute_model_req.offload_swap_in_offsets,
+            device="cpu",
+            dtype=torch.int64).view(-1)
+        offload_swap_in_sequence_ids = \
+            torch.tensor(execute_model_req.offload_swap_in_sequence_ids,
                          device="cpu",
                          dtype=torch.int64).view(-1)
         blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
                                           device="cuda",
                                           dtype=torch.int64).view(-1, 2)
+        blocks_to_offload_swap_out = torch.tensor(
+            execute_model_req.blocks_to_offload_swap_out,
+            device="cuda",
+            dtype=torch.int64).view(-1, 2)
         running_sequence_ids = torch.tensor(seq_ids,
                                             device="cpu",
                                             dtype=torch.int64).view(-1)
@@ -355,9 +364,11 @@ class Worker(LocalOrDistributedWorkerBase):
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
-            swap_in_offsets=swap_in_offsets,
-            swap_in_sequence_ids=swap_in_sequence_ids,
+            blocks_to_offload_swap_in=blocks_to_offload_swap_in,
+            offload_swap_in_offsets=offload_swap_in_offsets,
+            offload_swap_in_sequence_ids=offload_swap_in_sequence_ids,
             blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_offload_swap_out=blocks_to_offload_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
@@ -382,8 +393,17 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_swap_in is not None
                 and worker_input.blocks_to_swap_in.numel() > 0):
             self.cache_engine[virtual_engine].swap_in(
-                worker_input.blocks_to_swap_in, worker_input.swap_in_offsets,
-                worker_input.swap_in_sequence_ids)
+                worker_input.blocks_to_swap_in)
+        if (worker_input.blocks_to_swap_out is not None
+                and worker_input.blocks_to_swap_out.numel() > 0):
+            self.cache_engine[virtual_engine].swap_out(
+                worker_input.blocks_to_swap_out)
+        if (worker_input.blocks_to_offload_swap_in is not None
+                and worker_input.blocks_to_offload_swap_in.numel() > 0):
+            self.cache_engine[virtual_engine].issue_swap_in(
+                worker_input.blocks_to_offload_swap_in,
+                worker_input.offload_swap_in_offsets,
+                worker_input.offload_swap_in_sequence_ids)
 
     def _get_cached_seq_group_metadata(
             self,
