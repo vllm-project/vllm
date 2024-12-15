@@ -2,7 +2,6 @@
 """PyTorch Ultravox model."""
 
 import math
-from collections import defaultdict
 from functools import cached_property, lru_cache
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
@@ -12,7 +11,7 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
@@ -37,8 +36,6 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings_from_map)
 
-_AUDIO_PLACEHOLDER_TOKEN = 128002
-_AUDIO_PLACEHOLDER_STR = "<|reserved_special_token_0|>"
 _AUDIO_TOKENS_PER_SECOND = 6.25
 
 
@@ -110,7 +107,8 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         # Ultravox processor doesn't support multiple inputs,
         # therefore we need to input text and audio one by one
         tokenizer = self._get_tokenizer()
-        audio_features = []
+        audio_features, audio_token_len = [], []
+        processed_inputs = {}
         for audio, sr in audio_data:
             data = self._resample_audio(audio, sr)
             processed_inputs = super()._apply_hf_processor(
@@ -118,23 +116,16 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
             prompt = tokenizer.decode(processed_inputs["input_ids"][0],
                                       skip_special_tokens=False)
             audio_features.append(
-                processed_inputs["audio_values"].squeeze(0))
-        
+                processed_inputs.pop("audio_values").squeeze(0))
+            audio_token_len.append(
+                processed_inputs.pop("audio_token_len").item())
+
         hf_inputs = dict(
             **processed_inputs,
             audio_features=audio_features,
+            audio_token_len=audio_token_len,
         )
         return hf_inputs
-
-    def _get_hf_processor(
-        self,
-        **mm_processor_kwargs: Mapping[str, object],
-    ) -> ProcessorMixin:
-        # Ultravox processor use eot_token_id as the audio placeholder token,
-        # we replace it with <|reserved_special_token_0|> for convenience.
-        hf_processor = super()._get_hf_processor(**mm_processor_kwargs)
-        hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_STR
-        return hf_processor
 
     def _get_processor_data(
         self,
@@ -153,19 +144,17 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         mm_processor_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
-        stack_factor = hf_processor.stack_factor
-        encoder_ds_factor = hf_processor.encoder_ds_factor
-        max_audio_token_len = get_ultravox_max_audio_tokens(self.ctx)
+        tokenizer = hf_processor.tokenizer
+        placeholder = hf_processor.audio_token_replacement
+
+        placeholder_token = tokenizer.encode(placeholder,
+                                             add_special_tokens=False)
+        assert len(placeholder_token) == 1
+        placeholder_token = placeholder_token[0]
 
         def get_replacement_ultravox(item_idx: int):
-            audio_data, sr = mm_items.audio[item_idx]
-            audio_data = self._resample_audio(audio_data, sr)["audio"]
-            audio_len = audio_data.shape[0]
-            nb_encoder_frames = int(round(audio_len / encoder_ds_factor +
-                                          1e-4))
-            audio_token_len = int(np.ceil(nb_encoder_frames / stack_factor))
-            audio_token_len = min(max(1, audio_token_len), max_audio_token_len)
-            return [_AUDIO_PLACEHOLDER_TOKEN] * audio_token_len
+            audio_token_len = hf_inputs["audio_token_len"][item_idx]
+            return [placeholder_token] * audio_token_len
 
         return [
             PromptReplacement(
