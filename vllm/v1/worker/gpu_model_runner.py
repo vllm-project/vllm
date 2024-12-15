@@ -118,6 +118,12 @@ class GPUModelRunner:
             dtype=self.dtype,
             device=self.device)
 
+        # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        self.arange_np = np.arange(max(self.max_num_reqs, self.max_model_len),
+                                   dtype=np.int32)
+        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
+        # a faster version of creating a new tensor every time. Thus, we should
+        # not make any assumptions about the values in these tensors.
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu",
@@ -269,11 +275,13 @@ class GPUModelRunner:
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        req_indices = np.repeat(np.arange(num_reqs), num_scheduled_tokens)
+        req_indices = np.repeat(self.arange_np[:num_reqs],
+                                num_scheduled_tokens)
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = np.concatenate([np.arange(n) for n in num_scheduled_tokens])
+        arange = np.concatenate(
+            [self.arange_np[:n] for n in num_scheduled_tokens])
 
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
