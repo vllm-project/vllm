@@ -320,7 +320,7 @@ class RayExecutor:
             self.forward_dag = None
 
     def check_health(self) -> None:
-        raise NotImplementedError
+        logger.debug("Called check_health.")
 
     def _check_ray_compiled_graph_installation(self):
         # TODO: We should check versions that support compiled graph.
