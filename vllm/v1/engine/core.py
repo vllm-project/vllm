@@ -33,7 +33,7 @@ logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
-LOGGING_TIME_S = 5000
+LOGGING_TIME_S = 5
 
 
 class EngineCore:
@@ -252,7 +252,6 @@ class EngineCoreProc(EngineCore):
             if not self.scheduler.has_unfinished_requests():
                 while True:
                     try:
-                        logger.info("getting from input queue")
                         req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
                         self._handle_client_request(req)
                         break

@@ -383,41 +383,45 @@ class DetokenizerProc(Detokenizer):
     def run_busy_loop(self):
         """Core busy loop of the Detokenizer."""
 
-        decoder_new = msgspec.msgpack.Decoder(DetokenizerRequest)
-        decoder_out = msgspec.msgpack.Decoder(EngineCoreOutputs)
+        try:
+            # TODO: handle aborted due to client cancellation
+            # TODO: pickle -> msgpack
+            # TODO: send stop string aborts back to EngineCore directly
 
-        with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.constants.PULL) as engine_core_outputs_socket, 
-              zmq_socket_ctx(self.input_path, zmq.constants.PULL) as input_socket,
-              zmq_socket_ctx(self.output_path, zmq.constants.PUSH) as output_socket):
+            decoder_new = msgspec.msgpack.Decoder(DetokenizerRequest)
+            decoder_out = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
-            # TODO: make this work without poll by having both EngineCore
-            # and AsyncLLM send to the same socket (unclear why this was not working
-            # when I originally tried it)
-            poller = zmq.Poller()
-            poller.register(engine_core_outputs_socket, zmq.POLLIN)
-            poller.register(input_socket, zmq.POLLIN)
+            with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.constants.PULL) as engine_core_outputs_socket, 
+                zmq_socket_ctx(self.input_path, zmq.constants.PULL) as input_socket,
+                zmq_socket_ctx(self.output_path, zmq.constants.PUSH) as output_socket):
 
-            while True:
-                socks = dict(poller.poll())
+                # TODO: make this work without poll by having both EngineCore
+                # and AsyncLLM send to the same socket (unclear why this was not working
+                # when I originally tried it)
+                poller = zmq.Poller()
+                poller.register(engine_core_outputs_socket, zmq.POLLIN)
+                poller.register(input_socket, zmq.POLLIN)
 
-                # Handle NewRequest
-                if input_socket in socks:
-                    (frame, ) = input_socket.recv_multipart(copy=False)
-                    detokenizer_request = decoder_new.decode(frame.buffer)
-                    self.add_request(detokenizer_request)
+                while True:
+                    socks = dict(poller.poll())
 
-                # Handle EngineCoreOutput
-                if engine_core_outputs_socket in socks:
-                    (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
-                    engine_core_outputs = decoder_out.decode(frame.buffer).outputs
-                    outputs = self.step(engine_core_outputs)
-                    msg = pickle.dumps(outputs, protocol=pickle.HIGHEST_PROTOCOL)
-                    output_socket.send_multipart((msg, ), copy=False)
-            
-                # TODO: handle aborted due to client cancellation
-                # TODO: pickle -> msgpack
-                # TODO: send stop string aborts back to EngineCore directly
+                    # Handle NewRequest
+                    if input_socket in socks:
+                        (frame, ) = input_socket.recv_multipart(copy=False)
+                        detokenizer_request = decoder_new.decode(frame.buffer)
+                        self.add_request(detokenizer_request)
 
+                    # Handle EngineCoreOutput
+                    if engine_core_outputs_socket in socks:
+                        (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
+                        engine_core_outputs = decoder_out.decode(frame.buffer).outputs
+                        outputs = self.step(engine_core_outputs)
+                        msg = pickle.dumps(outputs, protocol=pickle.HIGHEST_PROTOCOL)
+                        output_socket.send_multipart((msg, ), copy=False)
+        
+        except Exception as e:
+            logger.error(e)
+            raise e
         
 class DetokenizerClient:
     
