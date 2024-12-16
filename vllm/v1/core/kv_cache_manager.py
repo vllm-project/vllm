@@ -88,8 +88,8 @@ class KVCacheManager:
         # The block hashes for the request may already be computed
         # if the request was preempted and resumed.
         if not request.kv_block_hashes:
-            request.kv_block_hashes = hash_request_tokens(
-                self.block_size, request)
+            request.set_kv_block_hashes(
+                hash_request_tokens(self.block_size, request))
         block_hashes = request.kv_block_hashes
 
         for block_hash in block_hashes:

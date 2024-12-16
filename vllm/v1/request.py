@@ -60,8 +60,7 @@ class Request:
         if self.inputs.multi_modal_inputs:
             self.mm_inputs = self.inputs.multi_modal_inputs
 
-        self.mm_hashes: Optional[List[
-            Optional[str]]] = self.inputs.multi_modal_hashes
+        self.mm_hashes: List[Optional[str]] = self.inputs.multi_modal_hashes
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
@@ -138,8 +137,7 @@ class Request:
         # Prevent directly appending to the kv_block_hashes.
         return ConstantList(self._kv_block_hashes)
 
-    @kv_block_hashes.setter
-    def kv_block_hashes(self, value: List["BlockHashType"]) -> None:
+    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
         self._kv_block_hashes = value
 
     def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
