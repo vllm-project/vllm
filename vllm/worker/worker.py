@@ -222,15 +222,13 @@ class Worker(LocalOrDistributedWorkerBase):
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
-        msg = ("Memory profiling results:"
-               "duration="
-               f"{result.profile_time:.2f} seconds;"
+        msg = (f"Memory profiling takes {result.profile_time:.2f}seconds\n"
                "total_gpu_memory="
                f"{(total_gpu_memory / GiB_bytes):.2f}GiB;"
                "gpu_memory_utilization="
                f"{self.cache_config.gpu_memory_utilization:.2f};"
                "the current vLLM instance can use="
-               f"{(memory_for_current_instance / GiB_bytes):.2f}GiB;"
+               f"{(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
                "model weights take="
                f"{(result.weights_memory_in_bytes / GiB_bytes):.2f}GiB;"
                "non_torch_memory="
