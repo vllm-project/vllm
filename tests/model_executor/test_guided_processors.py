@@ -1,4 +1,3 @@
-import contextlib
 import pickle
 
 import pytest
@@ -13,9 +12,6 @@ from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
 from vllm.model_executor.guided_decoding.xgrammar_decoding import TokenizerData
 from vllm.sampling_params import GuidedDecodingParams
-
-with contextlib.suppress(ImportError):
-    import xgrammar as xgr
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
 
@@ -114,6 +110,11 @@ def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
 
 def test_pickle_xgrammar_tokenizer_data():
 
+    # TODO: move to another test file for xgrammar
+    try:
+        import xgrammar as xgr
+    except ImportError:
+        pytest.skip("Could not import xgrammar to run test")
     tokenizer_data = TokenizerData(vocab_type=xgr.VocabType.RAW)
     pickled = pickle.dumps(tokenizer_data)
 
