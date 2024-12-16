@@ -418,7 +418,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
             if model_type == "ultravox":
-                return "<|reserved_special_token_0|>"
+                return "<|audio|>"
             if model_type == "qwen2_audio":
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")

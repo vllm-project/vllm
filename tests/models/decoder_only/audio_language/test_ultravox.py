@@ -16,7 +16,7 @@ MODEL_NAME = "fixie-ai/ultravox-v0_3"
 
 AudioTuple = Tuple[np.ndarray, int]
 
-VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
+VLLM_PLACEHOLDER = "<|audio|>"
 HF_PLACEHOLDER = "<|audio|>"
 
 CHUNKED_PREFILL_KWARGS = {
@@ -46,7 +46,8 @@ def audio(request):
 def server(request, audio_assets):
     args = [
         "--dtype=bfloat16", "--max-model-len=4096", "--enforce-eager",
-        f"--limit-mm-per-prompt=audio={len(audio_assets)}"
+        f"--limit-mm-per-prompt=audio={len(audio_assets)}",
+        "--trust-remote-code"
     ] + [
         f"--{key.replace('_','-')}={value}"
         for key, value in request.param.items()
