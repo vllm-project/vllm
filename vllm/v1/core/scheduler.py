@@ -1,4 +1,4 @@
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
@@ -57,6 +57,8 @@ class Scheduler:
         # Priority queues for requests.
         self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
+        self.running_pipelined: OrderedDict[str, Request] = OrderedDict()
+        self.running_stepped: OrderedDict[str, Request] = OrderedDict()
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -111,12 +113,10 @@ class Scheduler:
         # V1 model runner.
         # TODO(woosuk): Remove this constraint after refactoring model runner.
         has_partial_request = False
-        req_index = 0
-        while req_index < len(self.running):
+        for _, request in self.running_stepped.items():
             # Only the last request in the RUNNING queue can be "partial".
             assert not has_partial_request
             assert token_budget > 0
-            request = self.running[req_index]
             num_new_tokens = request.num_tokens - request.num_computed_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
@@ -135,7 +135,7 @@ class Scheduler:
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    preempted_req = self.running.pop()
+                    preempted_req = self.running_stepped.popitem()[1]
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
@@ -160,7 +160,6 @@ class Scheduler:
             ]
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
-            req_index += 1
             has_partial_request = (request.num_computed_tokens + num_new_tokens
                                    < request.num_tokens)
 
@@ -178,7 +177,8 @@ class Scheduler:
             while self.waiting:
                 if has_partial_request:
                     break
-                if len(self.running) == self.max_num_running_reqs:
+                if len(self.running_stepped) + len(
+                        self.running_pipelined) == self.max_num_running_reqs:
                     break
                 if token_budget == 0:
                     break
@@ -222,7 +222,7 @@ class Scheduler:
                     break
 
                 self.waiting.popleft()
-                self.running.append(request)
+                self.running_stepped[request.request_id] = request
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -254,9 +254,10 @@ class Scheduler:
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        assert len(self.running_stepped) + len(
+            self.running_pipelined) <= self.max_num_running_reqs
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
-                len(scheduled_running_reqs) == len(self.running))
+                len(scheduled_running_reqs) == len(self.running_stepped))
 
         # Construct the scheduler output.
         new_reqs_data = [
@@ -387,10 +388,10 @@ class Scheduler:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        new_running: List[Request] = []
+        new_running_stepped: OrderedDict[str, Request] = OrderedDict()
         engine_core_outputs: List[EngineCoreOutput] = []
-        for request in self.running:
-            req_id = request.request_id
+        for req_id in model_runner_output.req_ids:
+            request = self.running_pipelined[req_id]
             request.num_computed_tokens += num_scheduled_tokens[req_id]
             # When the request's num_computed_tokens catches up its num_tokens,
             # the request generates output tokens. Otherwise, we ignore the
@@ -433,8 +434,8 @@ class Scheduler:
                 if stopped:
                     continue
 
-            new_running.append(request)
-        self.running = new_running
+            new_running_stepped[request.request_id] = request
+        self.running_stepped = new_running_stepped
         return engine_core_outputs
 
     def _check_stop(self, request: Request) -> bool:

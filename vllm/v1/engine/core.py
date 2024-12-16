@@ -123,6 +123,10 @@ class EngineCore:
         # output is the result of prior microbatch(es), and empty
         # when there is no prior microbatch or none are finished.
         outputs = self.model_executor.execute_model_pipelined(scheduler_output)
+
+        self.scheduler.running_pipelined.update(self.scheduler.running_stepped)
+        self.scheduler.running_stepped.clear()
+
         for output in outputs:
             engine_core_outputs = self.scheduler.update_from_output(
                 output[1], output[0])
@@ -300,7 +304,7 @@ class EngineCoreProc(EngineCore):
                 # If all requests are finished, there are no inflight
                 # microbatches, we can take our time to poll the input queue,
                 # without checking microbatch finishes.
-                # TOOD(rui): check if all_requests_finished ==
+                # TODO(rui): check if all_requests_finished ==
                 # no_inflight_microbatches
 
                 # Poll the input queue until there is work to do.
@@ -358,7 +362,7 @@ class EngineCoreProc(EngineCore):
                 self._handle_client_request(req)
 
             # 3) Step the engine core.
-            outputs = self.step2()
+            self.step2()
 
             self._log_stats()
 

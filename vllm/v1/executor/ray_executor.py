@@ -13,11 +13,12 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerBase
 
 if ray is not None:
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
     from ray.exceptions import RayChannelTimeoutError
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+
     from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
