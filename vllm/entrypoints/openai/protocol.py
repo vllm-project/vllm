@@ -737,8 +737,9 @@ class CompletionRequest(OpenAIBaseModel):
             logits_processors=get_logits_processors(self.logits_processors,
                                                     logits_processor_pattern),
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            output_kind=RequestOutputKind.DELTA if self.stream \
-                else RequestOutputKind.FINAL_ONLY,
+            # output_kind=RequestOutputKind.DELTA if self.stream \
+            #     else RequestOutputKind.FINAL_ONLY,
+            output_kind=RequestOutputKind.CUMULATIVE,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids)

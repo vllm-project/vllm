@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -16,13 +17,23 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
+
+@dataclass
+class RequestState:
+
+    event: asyncio.Event
+    out_list: List[RequestOutput]
+    finished: bool
+
+    @classmethod
+    def new(cls) -> "RequestState":
+        return cls(asyncio.Event(), [], False)
 
 
 class AsyncLLM(EngineClient):
@@ -46,6 +57,9 @@ class AsyncLLM(EngineClient):
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
+        # RequestId -> RequestState.
+        self.rid_to_state: Dict[str, RequestState] = {}
+
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
@@ -53,12 +67,6 @@ class AsyncLLM(EngineClient):
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
-
-        # # Request streams (map of request_id -> AsyncStream).
-        # self.request_streams: Dict[str, AsyncStream] = {}
-        # # List of cancelled request ids to be aborted.
-        # self.client_aborted_requests: List[str] = []
-        self.rid_to_state = {}
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(vllm_config.model_config,
@@ -156,11 +164,9 @@ class AsyncLLM(EngineClient):
         if self.detokenizer.is_request_active(request_id):
             raise ValueError(f"Request {request_id} already exists.")
 
-        state = {
-            "out_list": [],
-            "event": asyncio.Event(),
-            "finished": False,
-        }
+        # 1) Add to RequestState tracker. The "event" is used to manage
+        # concurrency between generate() and output_handler task.
+        state = RequestState.new()
         self.rid_to_state[request_id] = state
 
         # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
@@ -224,22 +230,22 @@ class AsyncLLM(EngineClient):
         )
         
         while True:
-            try:
-                await asyncio.wait_for(state["event"].wait(), timeout=4)
-                out = state["out_list"][-1]
+            try:        
+                await asyncio.wait_for(state.event.wait(), timeout=4)
+                out = state.out_list[-1]
             except asyncio.TimeoutError:
                 # if request is not None and await request.is_disconnected():
                 #     self.abort_request(obj.rid)
                 #     raise ValueError(f"Abort request {obj.rid}")
                 continue
 
-            state["out_list"] = []
-            if state["finished"]:
+            state.out_list = []
+            if state.finished:
                 del self.rid_to_state[request_id]
                 yield out
                 break
 
-            state["event"].clear()
+            state.event.clear()
             yield out
 
     # def _finish_stream(self, request_id: str):
@@ -304,10 +310,10 @@ class AsyncLLM(EngineClient):
             state = self.rid_to_state[request_id]
 
             if request_output.finished:
-                state["finished"] = True
-            
-            state["out_list"].append(request_output)
-            state["event"].set()
+                state.finished = True
+
+            state.out_list.append(request_output)
+            state.event.set()
 
 
             # # Each request in the API server pulls from the per-request stream.

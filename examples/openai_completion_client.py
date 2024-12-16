@@ -24,6 +24,6 @@ completion = client.completions.create(
 print("Completion results:")
 if stream:
     for c in completion:
-        print(c)
+        print(c.choices[0].text)
 else:
     print(completion)
