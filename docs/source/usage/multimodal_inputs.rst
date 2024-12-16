@@ -345,12 +345,12 @@ Here is an end-to-end example using VLM2Vec. To serve the model:
 
 .. code-block:: bash
 
-    vllm serve TIGER-Lab/VLM2Vec-Full --task embedding \
+    vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
       --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
 
 .. important::
 
-    Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass ``--task embedding``
+    Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass ``--task embed``
     to run this model in embedding mode instead of text generation mode.
 
     The custom chat template is completely different from the original one for this model,
@@ -386,12 +386,12 @@ Below is another example, this time using the ``MrLight/dse-qwen2-2b-mrl-v1`` mo
 
 .. code-block:: bash
 
-    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embedding \
+    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
       --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
 
 .. important::
 
-    Like with VLM2Vec, we have to explicitly pass ``--task embedding``.
+    Like with VLM2Vec, we have to explicitly pass ``--task embed``.
     
     Additionally, ``MrLight/dse-qwen2-2b-mrl-v1`` requires an EOS token for embeddings, which is handled
     by `this custom chat template <https://github.com/vllm-project/vllm/blob/main/examples/template_dse_qwen2_vl.jinja>`__.

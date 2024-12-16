@@ -301,7 +301,7 @@ class Sampler(nn.Module):
             # Return decoded output tokens and sample/prompt logprobs,
             # as required
             return SamplerOutput(
-                sampled_token_ids=maybe_sampled,
+                sampled_token_ids=maybe_sampled.tolist(),
                 batch_sample_logprobs=maybe_sample_logprobs,
                 batch_sample_logprob_token_ids=
                 maybe_sample_logprobs_token_indices,
@@ -309,7 +309,7 @@ class Sampler(nn.Module):
                 batch_prompt_logprob_token_ids=prompt_logprobs_token_indices)
         else:
             # No logprobs; return decoded output tokens
-            return SamplerOutput(sampled_token_ids=maybe_sampled)
+            return SamplerOutput(sampled_token_ids=maybe_sampled.tolist())
 
     def _apply_temperature(
         self,

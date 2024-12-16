@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -299,7 +299,7 @@ class IncrementalDetokenizer:
         new_prompt_logprobs: Optional[npt.NDArray],
         new_prompt_logprob_token_ids: Optional[npt.NDArray],
         finish_reason: Optional[str],
-        stop_reason: Optional[str],
+        stop_reason: Optional[Union[int, str, None]],
     ) -> Optional[RequestOutput]:
         """Update RequestState for the request_id.
 

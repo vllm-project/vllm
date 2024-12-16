@@ -9,7 +9,7 @@ import torch
 class SamplerOutput:
 
     # [num_reqs]
-    sampled_token_ids: torch.Tensor
+    sampled_token_ids: List[int]
 
     # [num_reqs, max_num_logprobs + 1]
     batch_sample_logprob_token_ids: Optional[torch.Tensor] = None
@@ -22,6 +22,8 @@ class SamplerOutput:
     batch_prompt_logprob_token_ids: Optional[torch.Tensor] = None
 
 
+# ModelRunnerOutput is serialized and sent to the scheduler process.
+# This is expensive for torch.Tensor so prefer to use List instead.
 @dataclass
 class ModelRunnerOutput:
 
@@ -31,7 +33,7 @@ class ModelRunnerOutput:
     req_id_to_index: Dict[str, int]
 
     # [num_reqs]
-    sampled_token_ids_cpu: torch.Tensor
+    sampled_token_ids: List[int]
 
     # [num_reqs, max_num_logprobs + 1]
     batch_logprob_token_ids_cpu: Optional[npt.NDArray]
