@@ -1,6 +1,7 @@
 from vllm import LLM
 from vllm.lora.request import LoRARequest
 import os
+import argparse
 
 def extract_layer_names(llm):
     engine = getattr(llm, "llm_engine")
@@ -17,9 +18,9 @@ def extract_layer_names(llm):
         list_layers.append(adapter_layers)
     return list_layers
 
-def load_base_model(base_model_path):
+def load_base_model(base_model_path, enable_lora, max_model_len, max_num_seqs, max_loras):
     print(f"Loading base model from {base_model_path}...")
-    llm = LLM(model=base_model_path, enable_lora=True)
+    llm = LLM(model=base_model_path, enable_lora=enable_lora, max_model_len=max_model_len, max_num_seqs=max_num_seqs, max_loras=max_loras)
     print("Base model loaded.")
     return llm
 
@@ -58,16 +59,14 @@ def compare_layers(first_model_layers, second_model_layers):
         print("No differences in layers detected.")
         return False
 
-def main():
-    base_model_path = "/data/llama-3/llama-3-8b"
-    lora_adapter_path = "/home/oleg/lora_test/Meta-Llama-3-8B-oasst-Adapter"
+def main(base_model_path, lora_adapter_path, enable_lora, max_model_len, max_num_seqs, max_loras):
 
     if not os.path.exists(base_model_path):
         raise FileNotFoundError(f"Base model path not found: {base_model_path}")
     if not os.path.exists(lora_adapter_path):
         raise FileNotFoundError(f"LoRA adapter path not found: {lora_adapter_path}")
 
-    base_model = load_base_model(base_model_path)
+    base_model = load_base_model(base_model_path, enable_lora, max_model_len, max_num_seqs, max_loras)
     base_layers = extract_layer_names(base_model)
 
     model_with_lora, lora_request = load_lora_adapter(base_model, lora_adapter_path)
@@ -83,5 +82,16 @@ def main():
     compare_layers(lora_layers_before_request, lora_layers_after_request)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('-m', '--base-model-path', dest='base_model_path', type=str, required=True, help="The path of the base model")
+    parser.add_argument('-l', '--lora-adapter-path', dest='lora_adapter_path', type=str, required=True, help="The path of the base model")
+    parser.add_argument('--enable-lora', dest='enable_lora', action='store_true', default=True)
+    parser.add_argument('--max-model-len', dest='max_model_len', type=int, default=2048)
+    parser.add_argument('--max-num-seqs', dest='max_num_seqs', type=int, default=16)
+    parser.add_argument('--max-loras', dest='max_loras', type=int, default=4)
+
+    args = parser.parse_args()
+
+    main(base_model_path=args.base_model_path, lora_adapter_path=args.lora_adapter_path, enable_lora=args.enable_lora, max_model_len=args.max_model_len, max_num_seqs=args.max_num_seqs, max_loras=args.max_loras)
 
