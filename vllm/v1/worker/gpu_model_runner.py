@@ -251,7 +251,7 @@ class GPUModelRunner:
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Tuple[torch.Tensor, FlashAttentionMetadata]:
+    ) -> FlashAttentionMetadata:
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -576,18 +576,18 @@ class GPUModelRunner:
         if do_batch_prompt_logprobs:
             assert (sampler_output.batch_prompt_logprob_token_ids is not None)
             assert (sampler_output.batch_prompt_logprobs is not None)
-            batch_prompt_logprob_token_ids_cpu = sampler_output.batch_prompt_logprob_token_ids.cpu(
-            ).numpy()
-            batch_prompt_logprobs_cpu = sampler_output.batch_prompt_logprobs.cpu(
-            ).numpy()
+            batch_prompt_logprob_token_ids_cpu = (
+                sampler_output.batch_prompt_logprob_token_ids.cpu().numpy())
+            batch_prompt_logprobs_cpu = (
+                sampler_output.batch_prompt_logprobs.cpu().numpy())
         else:
             batch_prompt_logprob_token_ids_cpu = None
             batch_prompt_logprobs_cpu = None
 
         model_runner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_ids=cast(List[str], self.input_batch.req_ids[:num_reqs]),
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids_cpu=sampled_token_ids,
+            sampled_token_ids=sampled_token_ids,
             # NOTE: sample and prompt logprob CPU-GPU synchronization happens
             # here
             batch_logprob_token_ids_cpu=batch_logprob_token_ids_cpu,

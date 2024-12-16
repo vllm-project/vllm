@@ -242,7 +242,8 @@ class EngineCore:
                 token_id = sampled_token_ids[req_index]
                 if request_do_logprobs:
                     assert model_runner_output.batch_logprobs_cpu is not None
-                    assert model_runner_output.batch_logprob_token_ids_cpu is not None
+                    assert (model_runner_output.batch_logprob_token_ids_cpu
+                            is not None)
                     assert request.logprobs is not None
                     # Slice out this request's sample logprobs; defer
                     # pythonization to be carried out in the frontend.

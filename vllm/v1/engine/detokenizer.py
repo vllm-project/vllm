@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -170,7 +170,8 @@ class IncrementalDetokenizer:
         """
         logprob_values = logprob_values.tolist()
         logprob_token_ids = logprob_token_ids.tolist()
-        logprob_token_strs = (self._detokenize_ids(logprob_token_ids) if
+        logprob_token_strs = (cast(List[Optional[str]],
+                                   self._detokenize_ids(logprob_token_ids)) if
                               detokenize else [None] * len(logprob_token_ids))
 
         return {
@@ -213,6 +214,8 @@ class IncrementalDetokenizer:
         """
         new_pythonized_logprobs = []
         max_logprobs = self.max_request_sample_logprobs
+        assert max_logprobs is not None
+        assert self.request_logprobs is not None
         for (logprob_values,
              logprob_token_ids), token_id in zip(new_sample_logprobs,
                                                  new_sample_token_ids):
@@ -246,8 +249,8 @@ class IncrementalDetokenizer:
 
     def _pythonize_maybe_detokenize_prompt_logprobs_for_request(
         self,
-        prompt_logprob_values: Optional[npt.NDArray],
-        prompt_logprob_token_ids: Optional[npt.NDArray],
+        prompt_logprob_values: npt.NDArray,
+        prompt_logprob_token_ids: npt.NDArray,
         detokenize: bool,
     ) -> PromptLogprobs:
         """Pythonize prompt logprobs, maybe detokenize.
@@ -278,7 +281,7 @@ class IncrementalDetokenizer:
           detokenized
         """
         logprob_cnt = self.max_request_prompt_logprobs
-        prompt_logprobs = [
+        prompt_logprobs: List[Optional[Dict[int, Logprob]]] = [
             self._pythonize_sequence_position(plp_tok_values,
                                               plp_tok_token_ids, detokenize)
             for plp_tok_values, plp_tok_token_ids in zip(
@@ -288,7 +291,9 @@ class IncrementalDetokenizer:
         ]
         if not self.request_prompt_logprobs:
             # Ensure that None is the first prompt logprob
-            prompt_logprobs = [None] + prompt_logprobs
+            prompt_logprobs = cast(List[Optional[Dict[int, Logprob]]],
+                                   [None]) + prompt_logprobs
+        assert self.request_prompt_logprobs is not None
         self.request_prompt_logprobs.extend(prompt_logprobs)
         return prompt_logprobs
 
@@ -330,16 +335,18 @@ class IncrementalDetokenizer:
         # Only try to Pythonize sample logprobs if any were provided
         do_request_sample_logprobs = new_sample_logprobs is not None and len(
             new_sample_logprobs) > 0
-        assert not do_request_sample_logprobs or len(
-            new_sample_logprobs) == len(new_sampled_token_ids)
+        if do_request_sample_logprobs:
+            assert new_sample_logprobs is not None
+            assert len(new_sample_logprobs) == len(new_sampled_token_ids)
         # Only try to Pythonize prompt logprobs if any were provided
         do_request_prompt_logprobs = new_prompt_logprobs is not None and len(
             new_prompt_logprobs) > 0
-        assert (not do_request_prompt_logprobs
-                or new_prompt_logprob_token_ids is not None)
+        if do_request_prompt_logprobs:
+            assert new_prompt_logprob_token_ids is not None
 
         if do_request_sample_logprobs:
             # 1) Pythonize & detokenize sample logprobs
+            assert new_sample_logprobs is not None
             new_sample_logprobs = (
                 self._pythonize_maybe_detokenize_sample_logprobs_for_request(
                     new_sample_logprobs,
@@ -348,6 +355,8 @@ class IncrementalDetokenizer:
 
         if do_request_prompt_logprobs:
             # 2) If necessary, detokenize prompt logprobs incrementally
+            assert new_prompt_logprobs is not None
+            assert new_prompt_logprob_token_ids is not None
             new_prompt_logprobs = (
                 self._pythonize_maybe_detokenize_prompt_logprobs_for_request(
                     new_prompt_logprobs,
