@@ -222,23 +222,23 @@ class Worker(LocalOrDistributedWorkerBase):
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
-        msg = ("Memory profiling results:\n"
-               "duration\t"
-               f"{result.profile_time:.2f} seconds\n"
-               "total_gpu_memory\t"
-               f"{(total_gpu_memory / GiB_bytes):.2f}GiB\n"
-               "gpu_memory_utilization\t"
-               f"{self.cache_config.gpu_memory_utilization:.2f}\n"
-               "the current vLLM instance can use\t"
-               f"{(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
-               "model weights take\t"
-               f"{(result.weights_memory_in_bytes / GiB_bytes):.2f}GiB\n"
-               "non_torch_memory\t"
-               f"{(result.non_torch_increase_in_bytes / GiB_bytes):.2f}GiB\n"
-               "PyTorch activation peak memory\t"
-               f"{(result.torch_peak_increase_in_bytes / GiB_bytes):.2f}GiB\n"
-               "available_kv_cache_memory\t"
-               f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB\n")
+        msg = ("Memory profiling results:"
+               "duration="
+               f"{result.profile_time:.2f} seconds;"
+               "total_gpu_memory="
+               f"{(total_gpu_memory / GiB_bytes):.2f}GiB;"
+               "gpu_memory_utilization="
+               f"{self.cache_config.gpu_memory_utilization:.2f};"
+               "the current vLLM instance can use="
+               f"{(memory_for_current_instance / GiB_bytes):.2f}GiB;"
+               "model weights take="
+               f"{(result.weights_memory_in_bytes / GiB_bytes):.2f}GiB;"
+               "non_torch_memory="
+               f"{(result.non_torch_increase_in_bytes / GiB_bytes):.2f}GiB;"
+               "PyTorch activation peak memory="
+               f"{(result.torch_peak_increase_in_bytes / GiB_bytes):.2f}GiB;"
+               "available_kv_cache_memory="
+               f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB;")
 
         logger.info(msg)
 
