@@ -4,13 +4,14 @@ from typing import Optional, Tuple
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
 
-class GPUExecutor:
+class UniprocExecutor(Executor):
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -25,7 +26,7 @@ class GPUExecutor:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
-        self.worker = self._create_worker()
+        self.worker: Worker = self._create_worker()
         self.worker.initialize()
         self.worker.load_model()
 
@@ -54,7 +55,7 @@ class GPUExecutor:
         """
         return self.worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int) -> None:
+    def initialize(self, num_gpu_blocks: int) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 worker
@@ -71,7 +72,13 @@ class GPUExecutor:
         output = self.worker.execute_model(scheduler_output)
         return output
 
+    def profile(self, is_start: bool = True):
+        self.worker.profile(is_start)
+
+    def shutdown(self):
+        pass
+
     def check_health(self) -> None:
-        # GPUExecutor will always be healthy as long as
+        # UniprocExecutor will always be healthy as long as
         # it's running.
         return

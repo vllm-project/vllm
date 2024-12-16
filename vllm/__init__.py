@@ -3,13 +3,15 @@
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
-from vllm.entrypoints.fast_sync_llm import FastSyncLLM
 from vllm.entrypoints.llm import LLM
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.model_executor.models import ModelRegistry
-from vllm.outputs import (CompletionOutput, PoolingOutput,
-                          PoolingRequestOutput, RequestOutput)
+from vllm.outputs import (ClassificationOutput, ClassificationRequestOutput,
+                          CompletionOutput, EmbeddingOutput,
+                          EmbeddingRequestOutput, PoolingOutput,
+                          PoolingRequestOutput, RequestOutput, ScoringOutput,
+                          ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
@@ -19,7 +21,6 @@ __all__ = [
     "__version__",
     "__version_tuple__",
     "LLM",
-    "FastSyncLLM",
     "ModelRegistry",
     "PromptType",
     "TextPrompt",
@@ -29,6 +30,12 @@ __all__ = [
     "CompletionOutput",
     "PoolingOutput",
     "PoolingRequestOutput",
+    "EmbeddingOutput",
+    "EmbeddingRequestOutput",
+    "ClassificationOutput",
+    "ClassificationRequestOutput",
+    "ScoringOutput",
+    "ScoringRequestOutput",
     "LLMEngine",
     "EngineArgs",
     "AsyncLLMEngine",
@@ -36,26 +43,3 @@ __all__ = [
     "initialize_ray_cluster",
     "PoolingParams",
 ]
-
-
-def __getattr__(name: str):
-    import warnings
-
-    if name == "EmbeddingOutput":
-        msg = ("EmbeddingOutput has been renamed to PoolingOutput. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return PoolingOutput
-
-    if name == "EmbeddingRequestOutput":
-        msg = ("EmbeddingRequestOutput has been renamed to "
-               "PoolingRequestOutput. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return PoolingRequestOutput
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

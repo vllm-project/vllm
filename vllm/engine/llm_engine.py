@@ -46,11 +46,10 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           ParallelSampleSequenceGroup, Sequence,
-                           SequenceGroup, SequenceGroupBase,
-                           SequenceGroupMetadata, SequenceGroupOutput,
-                           SequenceStatus)
+from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
+                           PoolingSequenceGroupOutput, Sequence, SequenceGroup,
+                           SequenceGroupBase, SequenceGroupMetadata,
+                           SequenceGroupOutput, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -232,6 +231,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
     ) -> None:
 
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -287,7 +287,7 @@ class LLMEngine:
 
         self.model_executor = executor_class(vllm_config=vllm_config, )
 
-        if self.model_config.task != "embedding":
+        if self.model_config.runner_type != "pooling":
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
@@ -385,13 +385,14 @@ class LLMEngine:
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(
-                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
+                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                        vllm_config=vllm_config),
                     "prometheus":
                     PrometheusStatLogger(
                         local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                         labels=dict(
                             model_name=self.model_config.served_model_name),
-                        max_model_len=self.model_config.max_model_len),
+                        vllm_config=vllm_config),
                 }
                 self.stat_loggers["prometheus"].info("cache_config",
                                                      self.cache_config)
@@ -677,12 +678,10 @@ class LLMEngine:
         self.model_executor.stop_remote_worker_execution_loop()
 
     @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
-        *,
-        inputs: PromptType,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -693,10 +692,12 @@ class LLMEngine:
         ...
 
     @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
     def add_request(
         self,
         request_id: str,
-        prompt: PromptType,
+        *,
+        inputs: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -964,9 +965,9 @@ class LLMEngine:
     @staticmethod
     def _process_sequence_group_outputs(
         seq_group: SequenceGroup,
-        outputs: List[EmbeddingSequenceGroupOutput],
+        outputs: List[PoolingSequenceGroupOutput],
     ) -> None:
-        seq_group.embeddings = outputs[0].embeddings
+        seq_group.pooled_data = outputs[0].data
 
         for seq in seq_group.get_seqs():
             seq.status = SequenceStatus.FINISHED_STOPPED
@@ -1121,7 +1122,7 @@ class LLMEngine:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
 
-            if self.model_config.task == "embedding":
+            if self.model_config.runner_type == "pooling":
                 self._process_sequence_group_outputs(seq_group, output)
             else:
                 self.output_processor.process_prompt_logprob(seq_group, output)
@@ -1782,8 +1783,8 @@ class LLMEngine:
                                num_prompt_tokens_iter)
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
-        if model_output and (model_output[0].spec_decode_worker_metrics
-                             is not None):
+        if model_output and isinstance(model_output[0], SamplerOutput) and (
+                model_output[0].spec_decode_worker_metrics is not None):
             spec_decode_metrics = model_output[0].spec_decode_worker_metrics
         else:
             spec_decode_metrics = None

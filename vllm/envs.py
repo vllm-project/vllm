@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL: bool = True
+    VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = True
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -80,7 +81,8 @@ if TYPE_CHECKING:
     VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
     VLLM_MOE_PADDING: bool = False
     VLLM_FP8_PADDING: bool = True
-    VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
+    VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
+    VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
 
 
 def get_default_cache_root():
@@ -384,6 +386,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
                  ),
 
+    # If the env var is set, it enables GPU communication overlap in
+    # Ray's compiled DAG. This flag is ignored if
+    # VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "1"))
+                 ),
+
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
@@ -521,7 +530,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0"))),
+    lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),
+    "VLLM_LOG_BATCHSIZE_INTERVAL":
+    lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
 }
 
 # end-env-vars-definition

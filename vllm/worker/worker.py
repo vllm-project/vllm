@@ -76,7 +76,7 @@ class Worker(LocalOrDistributedWorkerBase):
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_config.task == "embedding":
+        if model_config.runner_type == "pooling":
             ModelRunnerClass = PoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
@@ -92,7 +92,7 @@ class Worker(LocalOrDistributedWorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
-        # Initialize gpu_cache as embedding models don't initialize kv_caches
+        # Initialize gpu_cache as pooling models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
