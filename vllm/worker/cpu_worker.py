@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.distributed
 
+from vllm import envs
+from vllm.attention import get_attn_backend
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
@@ -73,7 +75,7 @@ class CPUCacheEngine:
     ) -> List[torch.Tensor]:
         """Allocates KV cache on CPU."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_heads, self.head_size)
+            num_blocks, self.block_size, self.num_heads, self.head_size, self.dtype)
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
             kv_cache.append(
@@ -100,8 +102,21 @@ class CPUCacheEngine:
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
 
-        key_cache_block = block_size * num_heads * head_size
-        value_cache_block = key_cache_block
+        if envs.VLLM_CPU_VNNI_KVCACHE_LAYOUT:
+            elem_width = torch.tensor([], dtype=model_config.dtype, device="cpu").element_size()
+            if elem_width == 2:
+                padded_block_size = ((block_size + 1) // 2) * 2
+                padded_head_size = ((head_size + 1) // 2) * 2
+            elif elem_width == 1:
+                padded_block_size = ((block_size + 3) // 4) * 4
+                padded_head_size = ((head_size + 3) // 4) * 4
+            else:
+                assert False, "unsupported dtype for VNNI KV cache layout."
+            key_cache_block = num_heads * padded_head_size * block_size
+            value_cache_block = num_heads * padded_block_size * head_size
+        else:
+            key_cache_block = block_size * num_heads * head_size
+            value_cache_block = key_cache_block
         total = num_layers * (key_cache_block + value_cache_block)
         if cache_dtype == "auto":
             dtype = model_config.dtype

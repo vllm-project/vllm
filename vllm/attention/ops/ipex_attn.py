@@ -2,6 +2,7 @@ from typing import Dict, List, Optional, Tuple
 
 import intel_extension_for_pytorch.llm.modules as ipex_modules
 import torch
+from vllm import envs
 
 from vllm import _custom_ops as ops
 @torch.library.impl("myops::_single_query_cached_kv_attention", "cpu")
@@ -9,7 +10,9 @@ def _single_query_cached_kv_attention(
     output: torch.Tensor,
     query: torch.Tensor,
     key_cache: torch.Tensor,
+    is_key_cache_vnni: bool,
     value_cache: torch.Tensor,
+    is_value_cache_vnni: bool,
     head_mapping: torch.Tensor,
     scale: float,
     block_tables: torch.Tensor,
@@ -19,7 +22,7 @@ def _single_query_cached_kv_attention(
     alibi_slopes: Optional[torch.Tensor]):
 
     ipex_modules.PagedAttention.single_query_cached_kv_attention(
-        output, query, key_cache, value_cache, head_mapping,
+        output, query, key_cache, is_key_cache_vnni, value_cache, is_value_cache_vnni, head_mapping,
         scale, block_tables, context_lens, block_size, max_context_len.contiguous().item(),
         alibi_slopes)
 
@@ -27,10 +30,17 @@ def _single_query_cached_kv_attention(
 
 torch.library.define(
     "myops::_single_query_cached_kv_attention",
-    "(Tensor output, Tensor query, Tensor key_cache, Tensor value_cache, "
+    "(Tensor output, Tensor query, Tensor key_cache, bool is_key_cache_vnni, Tensor value_cache, bool is_value_cache_vnni, "
     + " Tensor head_mapping, float scale, Tensor block_tables, Tensor context_lens, int block_size, Tensor max_context_len, Tensor? alibi_slopes) -> (Tensor)",
 )
 
+
+# Note: just a workaround
+padded_block_size: int = -1
+padded_head_size: int = -1
+v_cache_offset: int = -1
+cached_num_blocks: int = -1
+cached_block_size: int = -1
 
 class PagedAttention:
 
@@ -44,9 +54,27 @@ class PagedAttention:
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        *args,
+        dtype: torch.dtype,
     ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size * num_kv_heads * head_size)
+        if envs.VLLM_CPU_VNNI_KVCACHE_LAYOUT:
+            global padded_block_size, padded_head_size, v_cache_offset, cached_num_blocks, cached_block_size
+            elem_width = torch.tensor([], dtype=dtype, device="cpu").element_size()
+            if elem_width == 2:
+                padded_block_size = ((block_size + 1) // 2) * 2
+                padded_head_size = ((head_size + 1) // 2) * 2
+            elif elem_width == 1:
+                padded_block_size = ((block_size + 3) // 4) * 4
+                padded_head_size = ((head_size + 3) // 4) * 4
+            else:
+                assert False, "unsupported dtype for VNNI KV cache layout."
+            k_cache_elem_num = num_blocks * num_kv_heads * padded_head_size * block_size
+            v_cache_elem_num = num_blocks * num_kv_heads * padded_block_size * head_size
+            v_cache_offset = k_cache_elem_num 
+            cached_num_blocks = num_blocks
+            cached_block_size = block_size
+            return (k_cache_elem_num + v_cache_elem_num,)
+        else:
+            return (2, num_blocks, block_size * num_kv_heads * head_size)
 
     @staticmethod
     def split_kv_cache(
@@ -55,12 +83,19 @@ class PagedAttention:
         head_size: int,
         *args,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        num_blocks = kv_cache.shape[1]
+        if envs.VLLM_CPU_VNNI_KVCACHE_LAYOUT:
+            key_cache = kv_cache[:v_cache_offset]
+            value_cache = kv_cache[v_cache_offset:]
+            key_cache = key_cache.view(cached_num_blocks, num_kv_heads, padded_head_size, cached_block_size)
+            value_cache = value_cache.view(cached_num_blocks, num_kv_heads, padded_block_size, head_size)
+        else:
+            num_blocks = kv_cache.shape[1]
 
-        key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, num_kv_heads, -1, head_size)
-        value_cache = kv_cache[1]
-        value_cache = value_cache.view(num_blocks, num_kv_heads, -1, head_size)
+            key_cache = kv_cache[0]
+            key_cache = key_cache.view(num_blocks, num_kv_heads, -1, head_size)
+            value_cache = kv_cache[1]
+            value_cache = value_cache.view(num_blocks, num_kv_heads, -1, head_size)
+
         return key_cache, value_cache
 
     @staticmethod
@@ -75,7 +110,7 @@ class PagedAttention:
         *args,
     ) -> None:
         ipex_modules.PagedAttention.reshape_and_cache(
-            key, value, key_cache, value_cache,
+            key, value, key_cache, envs.VLLM_CPU_VNNI_KVCACHE_LAYOUT, value_cache, envs.VLLM_CPU_VNNI_KVCACHE_LAYOUT,
             slot_mapping.flatten().int())
 
     @staticmethod
@@ -104,7 +139,7 @@ class PagedAttention:
                1).repeat_interleave(query.size(1) // num_kv_heads).flatten()
         # ipex_modules.PagedAttention.single_query_cached_kv_attention(
         torch.ops.myops._single_query_cached_kv_attention(
-            output, query.contiguous(), key_cache, value_cache, head_mapping,
+            output, query.contiguous(), key_cache, envs.VLLM_CPU_VNNI_KVCACHE_LAYOUT, value_cache, envs.VLLM_CPU_VNNI_KVCACHE_LAYOUT, head_mapping,
             scale, block_tables, context_lens, block_size, max_context_len.contiguous(),
             alibi_slopes)
 

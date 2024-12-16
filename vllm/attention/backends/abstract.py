@@ -31,6 +31,7 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        dtype: torch.dtype,
     ) -> Tuple[int, ...]:
         raise NotImplementedError
 
