@@ -3,7 +3,8 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from vllm.model_executor.layers.mamba.ops.ssd_combined import mamba_chunk_scan_combined
+from vllm.model_executor.layers.mamba.ops.ssd_combined import (
+    mamba_chunk_scan_combined)
 from vllm.platforms import current_platform
 
 # Added by the IBM Team, 2024
@@ -39,10 +40,8 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
     assert X.shape[1] % block_len == 0
 
     # Rearrange into blocks/chunks
-    X, A, B, C = [
-        rearrange(x, "b (c l) ... -> b c l ...", l=block_len)
-        for x in (X, A, B, C)
-    ]
+    X, A, B, C = (rearrange(x, "b (c l) ... -> b c l ...", l=block_len)
+                  for x in (X, A, B, C))
 
     A = rearrange(A, "b c l h -> b h c l")
     A_cumsum = torch.cumsum(A, dim=-1)
@@ -53,10 +52,11 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
-    decay_states = torch.exp((A_cumsum[:, :, :, -1:] - A_cumsum))
+    decay_states = torch.exp(A_cumsum[:, :, :, -1:] - A_cumsum)
     states = torch.einsum("bclhn,bhcl,bclhp->bchpn", B, decay_states, X)
 
-    # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
+    # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at
+    #    chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
     if initial_states is None:
         initial_states = torch.zeros_like(states[:, :1])
@@ -70,7 +70,8 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
     state_decay_out = torch.exp(A_cumsum)
     Y_off = torch.einsum('bclhn,bchpn,bhcl->bclhp', C, states, state_decay_out)
 
-    # Add output of intra-chunk and inter-chunk terms (diagonal and off-diagonal blocks)
+    # Add output of intra-chunk and inter-chunk terms
+    # (diagonal and off-diagonal blocks)
     Y = rearrange(Y_diag + Y_off, "b c l h p -> b (c l) h p")
     return Y, final_state
 
