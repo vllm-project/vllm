@@ -614,10 +614,12 @@ class GPUModelRunner:
         if self.is_multimodal_model:
 
             # Create dummy batch of multimodal inputs.
-            dummy_mm_data = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
-                                            self.max_num_tokens,
-                                            self.mm_registry).multi_modal_data
+            dummy_request_data = self.input_registry.dummy_data_for_profiling(
+                model_config=self.model_config,
+                seq_len=self.max_num_tokens,
+                mm_registry=self.mm_registry,
+            )
+            dummy_mm_data = dummy_request_data.multi_modal_data
             dummy_mm_kwargs, _ = self.mm_input_mapper.process_inputs(
                 mm_data=dummy_mm_data,
                 mm_hashes=None,
@@ -634,9 +636,10 @@ class GPUModelRunner:
                 self.max_num_encoder_input_tokens,
                 self.encoder_cache_size) // max_tokens_per_mm_item
 
-            # Dummy data definition in V0 may contain multiple items for
-            # a single request, therefore here we always replicate first
-            # item by max_num_mm_items times.
+            # Dummy data definition in V0 may contain multiple multimodal items
+            # (e.g, multiple images) for a single request, therefore here we
+            # always replicate first item by max_num_mm_items times since in V1
+            # they are scheduled to be processed separately.
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs[0]] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
@@ -653,7 +656,7 @@ class GPUModelRunner:
                 "not implemented correctly.")
 
             # Cache the dummy encoder outputs.
-            self.encoder_cache["0"] = dict(enumerate(dummy_encoder_outputs))
+            self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
         # Trigger compilation for general shape.
         hidden_states = self._dummy_run(self.model, self.max_num_tokens,
