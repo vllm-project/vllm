@@ -21,8 +21,8 @@ correctess for the target model outputs.
 
 import pytest
 
-from .conftest import run_equality_correctness_test
 from ..utils import maybe_enable_chunked_prefill
+from .conftest import run_equality_correctness_test
 
 # main model
 # lmsys/vicuna-7b-v1.3 was to be used but it's causing
@@ -127,7 +127,8 @@ def test_medusa_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
                                     per_test_common_llm_kwargs,
                                     baseline_llm_kwargs, test_llm_kwargs,
                                     batch_size: int, output_len: int,
-                                    seed: int, logprobs: int, prefill_chunk_size: int):
+                                    seed: int, logprobs: int,
+                                    prefill_chunk_size: int):
     """Verify greedy equality with different batch size."""
     maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
@@ -328,7 +329,8 @@ def test_medusa_different_k(vllm_runner, common_llm_kwargs,
 def test_medusa_disable_queue(vllm_runner, common_llm_kwargs,
                               per_test_common_llm_kwargs, baseline_llm_kwargs,
                               test_llm_kwargs, batch_size: int,
-                              output_len: int, seed: int, prefill_chunk_size: int):
+                              output_len: int, seed: int,
+                              prefill_chunk_size: int):
     """Verify that medusa speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
