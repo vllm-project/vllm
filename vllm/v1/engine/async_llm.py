@@ -310,18 +310,6 @@ class AsyncLLM(EngineClient):
             state.out_list.append(request_output)
             state.event.set()
 
-
-            # # Each request in the API server pulls from the per-request stream.
-            # stream = self.request_streams.get(request_id)
-            # if stream is not None:
-            #     stream.put(request_output)
-
-            #     # If finished, remove from the tracker.
-            #     if request_output.finished:
-            #         if self.log_requests:
-            #             logger.info("Finished request %s.", request_id)
-            #         self._finish_stream(request_id)
-
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
