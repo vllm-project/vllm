@@ -30,7 +30,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import SequenceData
-from vllm.vllm_flash_attn import flash_attn_func
 
 from .interfaces import SupportsMultiModal
 from .utils import AutoWeightsLoader, make_layers, maybe_prefix
@@ -635,7 +634,6 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def forward(
         self,
-        #whisper_data: torch.Tensor,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],

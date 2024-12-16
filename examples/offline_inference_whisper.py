@@ -16,8 +16,8 @@ dtype = "float"
 llm = LLM(
     model="openai/whisper-large-v3",
     max_model_len=448,
-    max_num_seqs=64,
-    enforce_eager=True,
+    max_num_seqs=128,
+    #max_num_batched_tokens=16384,
     limit_mm_per_prompt={"audio": 1}
 )
 
@@ -36,7 +36,7 @@ prompts = [
         ),
         decoder_prompt="<|startoftranscript|>",
     ),
-] * 128
+] * 1024
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
@@ -63,5 +63,6 @@ for output in outputs:
           f"Generated text: {generated_text!r}")
 
 duration = time.time() - start
+
 print("Duration:", duration)
 print("RPS:", len(prompts) / duration)
