@@ -630,12 +630,6 @@ async def benchmark(
                                      pbar=pbar)))
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    total_chunks = 0
-    for output in outputs:
-        total_chunks += output.total_chunks
-
-    print(f"TOTAL_CHUNKS: {total_chunks}")
-
     if profile:
         print("Stopping profiler...")
         profile_input = RequestFuncInput(

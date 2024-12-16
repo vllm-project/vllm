@@ -40,7 +40,6 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
-    total_chunks: int = 0
 
 
 async def async_request_tgi(
@@ -270,7 +269,6 @@ async def async_request_openai_completions(
 
                         chunk = chunk_bytes.decode("utf-8").removeprefix(
                             "data: ")
-                        output.total_chunks += 1
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
