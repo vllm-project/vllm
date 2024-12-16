@@ -300,15 +300,16 @@ class AsyncLLM(EngineClient):
         """Process outputs by putting them into per-request AsyncStreams."""
 
         for request_output in request_outputs:
-            request_id = request_output.request_id
-            assert request_id in self.rid_to_state
-            state = self.rid_to_state[request_id]
-
+            assert request_output.request_id in self.rid_to_state
+            
+            # Update the RequestState and alert generate() that there
+            # is a RequestOutput ready to return to the user.
+            state = self.rid_to_state[request_output.request_id]
             if request_output.finished:
                 state.finished = True
-
             state.out_list.append(request_output)
             state.event.set()
+
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
