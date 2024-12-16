@@ -28,7 +28,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        is_mi250, is_navi, get_cpu_memory, print_warning_once,
+                        get_cpu_memory, is_mi250, is_navi, print_warning_once,
                         random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
