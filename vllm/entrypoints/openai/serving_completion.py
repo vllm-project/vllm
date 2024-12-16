@@ -249,7 +249,8 @@ class OpenAIServingCompletion(OpenAIServing):
         """
         In V0, we use RequestOutputType.DELTA and each RequestOutput
             from the result_generator is guaranteed to correspond to
-            a single token so 
+            a single token so can construct the outputs without needing
+            to maintain any state.
 
         In V1, we use RequestOutputType.CUMULATIVE and each RequestOutput
             from the result_generator is not guaranteed to correspond to
