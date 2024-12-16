@@ -72,6 +72,9 @@ class LayerwiseProfileResults(profile):
     _model_stats_tree: List[_StatsTreeNode] = field(init=False)
     _summary_stats_tree: List[_StatsTreeNode] = field(init=False)
 
+    # profile metadata
+    num_running_seqs: Optional[int] = None
+
     def __post_init__(self):
         self._build_correlation_map()
         self._build_module_tree()
@@ -127,6 +130,9 @@ class LayerwiseProfileResults(profile):
 
     def convert_stats_to_dict(self) -> str:
         return {
+            "metadata": {
+                "num_running_seqs": self.num_running_seqs
+            },
             "summary_stats":
             self._convert_stats_tree_to_dict(self._summary_stats_tree),
             "model_stats":
@@ -338,7 +344,15 @@ class LayerwiseProfileResults(profile):
 
 class layerwise_profile(profile):
 
-    def __init__(self):
+    def __init__(self, num_running_seqs: Optional[int] = None):
+        """
+        layerwise profile constructor.
+
+        Args:
+            num_running_seqs (Optional[int], optional): When given,
+            num_running_seqs will be passed to LayerProfileResults for metadata
+            update. Defaults to None.
+        """
         super().__init__(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,
@@ -346,9 +360,13 @@ class layerwise_profile(profile):
             with_modules=True,
             experimental_config=_ExperimentalConfig(verbose=True))
 
+        self.num_running_seqs = num_running_seqs
+
     def __enter__(self):
         return super().__enter__()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         super().__exit__(exc_type, exc_val, exc_tb)
-        self.results = LayerwiseProfileResults(self.profiler.kineto_results)
+        self.results = LayerwiseProfileResults(
+            self.profiler.kineto_results,
+            num_running_seqs=self.num_running_seqs)
