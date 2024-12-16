@@ -134,7 +134,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                    lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
                    output_slices: Tuple[int, ...],
                    offset_start: int = 0,
-                   add_input=True,
+                   add_inputs=True,
                    **kwargs) -> None:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
@@ -153,7 +153,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): 
                 bias's weight
             output_slices (Tuple[int, ...]): Every slice's size
-            add_input (bool):  Defaults to True.
+            add_inputs (bool):  Defaults to True.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
@@ -175,7 +175,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                     lora_b_stacked[slice_idx],
                     offset_start,
                     output_slices[slice_idx],
-                    add_inputs=add_input,
+                    add_inputs=add_inputs,
                 )
                 offset_start += output_slices[slice_idx]
         y = y.view_as(y_org)
@@ -184,7 +184,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                            y: torch.Tensor,
                            x: torch.Tensor,
                            lora_b_stacked: torch.Tensor,
-                           add_input: bool = True,
+                           add_inputs: bool = True,
                            **kwargs) -> None:
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
@@ -196,7 +196,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
-            add_input (bool): Default to True.
+            add_inputs (bool): Default to True.
         """
 
         if self.is_prefill:
@@ -206,11 +206,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 y,
                 *self.prefill_metadata,
                 offset_start=0,
-                add_inputs=add_input,
+                add_inputs=add_inputs,
             )
         else:
             bgmv_expand(x, lora_b_stacked, y, self.token_lora_indices,
-                        add_input)
+                        add_inputs)
 
     def add_lora_linear(self,
                         y: torch.Tensor,
