@@ -166,9 +166,7 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        logger.info("ABOUT TO SEND READINESS")
         with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
-            logger.info("SENDING READY SIGNAL")
             ready_socket.send_string(EngineCoreProc.READY_STR)
 
     @staticmethod
@@ -257,7 +255,7 @@ class EngineCoreProc(EngineCore):
                         break
                     except queue.Empty:
                         self._log_stats()
-                        logger.info("EngineCore busy loop waiting.")
+                        logger.debug("EngineCore busy loop waiting.")
                     except BaseException:
                         raise
 
@@ -335,7 +333,6 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        logger.info(f"{output_path=}")
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 engine_core_outputs = self.output_queue.get()

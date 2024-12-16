@@ -277,6 +277,9 @@ class Detokenizer:
                 # Free completed requests.
                 if request_output.finished:
                     self.request_states.pop(request_id)
+                    # If Request finished but EngineCore not finished,
+                    # this was caused by a stop string + we need to send
+                    # an abort signal to the EngineCore.
                     if not engine_core_output.finished:
                         requests_to_abort.append(request_id)
 
@@ -395,9 +398,9 @@ class DetokenizerProc(Detokenizer):
                 zmq_socket_ctx(self.input_path, zmq.constants.PULL) as input_socket,
                 zmq_socket_ctx(self.output_path, zmq.constants.PUSH) as output_socket):
 
-                # TODO: make this work without poll by having both EngineCore
-                # and AsyncLLM send to the same socket (unclear why this was not working
-                # when I originally tried it)
+                # TODO: avoid poll by having both EngineCore
+                # and AsyncLLM send to the same socket (unclear why this 
+                # was not working when I originally tried it)
                 poller = zmq.Poller()
                 poller.register(engine_core_outputs_socket, zmq.POLLIN)
                 poller.register(input_socket, zmq.POLLIN)
@@ -405,13 +408,13 @@ class DetokenizerProc(Detokenizer):
                 while True:
                     socks = dict(poller.poll())
 
-                    # Handle NewRequest
+                    # Handle NewRequest.
                     if input_socket in socks:
                         (frame, ) = input_socket.recv_multipart(copy=False)
                         detokenizer_request = decoder_new.decode(frame.buffer)
                         self.add_request(detokenizer_request)
 
-                    # Handle EngineCoreOutput
+                    # Handle EngineCoreOutput.
                     if engine_core_outputs_socket in socks:
                         (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
@@ -449,7 +452,6 @@ class DetokenizerClient:
             output_path,
             zmq.constants.PULL,
         )
-        self.output_socket.connect(output_path)        
 
         # Start Detokenizer in background process.
         self.proc_handle: Optional[BackgroundProcHandle]

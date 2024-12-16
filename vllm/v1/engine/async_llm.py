@@ -286,9 +286,8 @@ class AsyncLLM(EngineClient):
 
         for request_output in request_outputs:
             request_id = request_output.request_id
-            logger.debug("about to assert")
             if request_id not in self.request_streams:
-                raise ValueError("%s not found in Request Steams", request_id)
+                raise ValueError(f"{request_id} not in AsyncStreams")
 
             # Each request in the API server pulls from the per-request stream.
             stream = self.request_streams.get(request_id)
@@ -307,21 +306,17 @@ class AsyncLLM(EngineClient):
         try:
             while True:
                 # 1) Pull outputs from the Detokenizer.
-                logger.debug("get_output_async")
                 request_outputs, reqs_to_abort = (
                     await self.detokenizer.get_output_async())
 
                 # 2) Put the RequestOutputs into the per-request AsyncStreams.
-                logger.debug("_process_request_outputs")
                 self._process_request_outputs(request_outputs)
 
                 # 3) Abort any requests that finished due to stop strings.
-                logger.debug("abort_requests_async")
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
                 # 4) Abort any requests due to client cancellations.
                 # TODO: send back to detokenizer if this fails.
-                logger.debug("process_cancellations")
                 await self._process_cancellations()
 
         except Exception as e:
@@ -356,7 +351,6 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        logger.debug("Called get_tokenizer.")
         return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:

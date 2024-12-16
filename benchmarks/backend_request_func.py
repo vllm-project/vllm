@@ -242,7 +242,9 @@ async def async_request_openai_completions(
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
-            "ignore_eos": request_func_input.ignore_eos,
+            # "ignore_eos": request_func_input.ignore_eos,
+            "ignore_eos": False,
+
         }
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)

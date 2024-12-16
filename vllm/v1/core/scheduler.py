@@ -424,7 +424,7 @@ class Scheduler:
                 # Check for stop and update request state.
                 # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
-
+                
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
                     request_id=req_id,
