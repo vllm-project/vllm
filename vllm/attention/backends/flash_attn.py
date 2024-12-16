@@ -712,7 +712,6 @@ class FlashAttentionImpl(AttentionImpl):
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
-        print("ATTN_METADATA", attn_metadata)
         decode_query = query[num_prefill_query_tokens:]
         decode_output = output[num_prefill_query_tokens:]
         # QKV for prefill.
@@ -775,7 +774,10 @@ class FlashAttentionImpl(AttentionImpl):
                     out=prefill_output,
                 )
 
+        print("METADATA", attn_metadata)
+
         if decode_meta := attn_metadata.decode_metadata:
+            print("DECODE_META", decode_meta)
             # Decoding run.
             # Use flash_attn_varlen_func kernel for speculative decoding
             # because different queries might have different lengths.

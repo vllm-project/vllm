@@ -340,6 +340,7 @@ class WhisperEncoderLayer(nn.Module):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
+        hidden_states = hidden_states.view(residual.size())  ## HACK
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -570,8 +571,9 @@ def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
                                    mm_counts: Mapping[str, int]):
     assert mm_counts["audio"] == 1
     sample_rate = 16000
+    num_tokens = ctx.model_config.hf_config.max_source_positions
     return DummyData(
-        SequenceData.from_prompt_token_counts((0, seq_len)),
+        SequenceData.from_prompt_token_counts((0, num_tokens)),
         {"audio": [(np.zeros(30 * sample_rate), sample_rate)]},
     )
 
