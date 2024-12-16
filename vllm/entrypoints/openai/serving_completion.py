@@ -27,7 +27,8 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import (BeamSearchParams, SamplingParams, 
+                                  RequestOutputKind)
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
@@ -182,7 +183,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 model_name,
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
-                request_metadata=request_metadata)
+                request_metadata=request_metadata,
+                output_kind=sampling_params.output_kind,
+            )
 
         # Non-streaming response
         final_res_batch: List[Optional[RequestOutput]] = [None] * num_prompts
@@ -240,7 +243,32 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts: int,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        output_kind: RequestOutputKind,
     ) -> AsyncGenerator[str, None]:
+        """
+        In V0, we use RequestOutputType.DELTA and each RequestOutput
+            from the result_generator is guarenteed to correspond to
+            a single token.
+
+            To handle this, we can simply constuct the Streaming
+
+        In V1, we use RequestOutputType.CUMULATIVE and each RequestOutput
+            from the result_genrator is not guarenteed to correspond to
+            a single token (it could correspond to 2+ tokens).
+
+            To handle this, we need to maintain state around how many
+            characters and tokens have been returned so far, and dynamically
+            stream back just the delta (where the delta could be the text
+            corresponding to N tokens).
+
+            We do this to dynamically adjust how much work the API server
+            is doing. If the QPS is high and streaming becomes a bottleneck,
+            such that the API server falls behind, we dynamically fall back
+            to streaming chunks of tokens.
+        """
+        assert (output_kind == RequestOutputKind.CUMULATIVE or
+                output_kind == RequestOutputKind.DELTA)
+
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
@@ -276,9 +304,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
                         assert prompt_text is not None
-                        # If we not echoed, we have not sent text yet.
-                        assert previous_text_lens[i] == 0
-                        assert previous_num_tokens[i] == 0
                         if request.max_tokens == 0:
                             # only return the prompt
                             delta_text = prompt_text
@@ -297,9 +322,15 @@ class OpenAIServingCompletion(OpenAIServing):
                             ]
                         has_echoed[i] = True
                     else:
-                        delta_text = output.text[previous_text_lens[i]:]
-                        delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                        out_logprobs = output.logprobs[previous_num_tokens[i]:] if output.logprobs else None
+                        if output_kind == RequestOutputKind.CUMULATIVE:
+                            delta_text = output.text[previous_text_lens[i]:]
+                            delta_token_ids = output.token_ids[previous_num_tokens[i]:]
+                            out_logprobs = (output.logprobs[previous_num_tokens[i]:] if 
+                                            output.logprobs else None)
+                        else:
+                            delta_text = output.text
+                            delta_token_ids = output.token_ids
+                            out_logprobs = output.logprobs
 
                         if not delta_text and not delta_token_ids \
                             and not previous_num_tokens[i]:
@@ -319,8 +350,13 @@ class OpenAIServingCompletion(OpenAIServing):
                     else:
                         logprobs = None
 
-                    previous_text_lens[i] = len(output.text)
-                    previous_num_tokens[i] = len(output.token_ids)
+                    if output_kind == RequestOutputKind.CUMULATIVE:
+                        previous_text_lens[i] = len(output.text)
+                        previous_num_tokens[i] = len(output.token_ids)
+                    else:
+                        previous_text_lens[i] += len(output.text)
+                        previous_num_tokens[i] += len(output.token_ids)
+
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
