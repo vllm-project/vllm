@@ -117,6 +117,17 @@ steps:
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
+# platform plugin test need a single pipeline, since it needs to install a new fake platform plugin
+- label: Platform Plugin Test # < 1min
+  working_dir: "/vllm-workspace/tests"
+  fast_check: true
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  commands:
+  - pip install -e ./plugins/vllm_add_dummy_platform
+  - pytest -v -s platform/test_platform_plugin.py
+
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
