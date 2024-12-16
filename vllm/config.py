@@ -165,6 +165,10 @@ class ModelConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -857,6 +861,10 @@ class CacheConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -967,6 +975,10 @@ class TokenizerPoolConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1063,6 +1075,10 @@ class LoadConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1289,6 +1305,10 @@ class SchedulerConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1380,6 +1400,10 @@ class DeviceConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1422,6 +1446,10 @@ class SpeculativeConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1876,6 +1904,10 @@ class LoRAConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1939,6 +1971,10 @@ class PromptAdapterConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -1981,6 +2017,10 @@ class MultiModalConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -2034,6 +2074,10 @@ class PoolerConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -2282,6 +2326,10 @@ class DecodingConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -2317,6 +2365,10 @@ class ObservabilityConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -2372,6 +2424,10 @@ class KVTransferConfig(BaseModel):
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -2600,6 +2656,10 @@ class CompilationConfig(BaseModel):
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
@@ -2807,6 +2867,10 @@ class VllmConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
