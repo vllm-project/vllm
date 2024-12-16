@@ -43,7 +43,7 @@ Every plugin has three parts:
 
 ## What Can Plugins Do?
 
-Currently, the primary use case for plugins is to register custom, out-of-the-tree models into vLLM. This is done by calling `ModelRegistry.register_model` to register the model. In the future, the plugin system may be extended to support more features, such as swapping in custom implementations for certain classes in vLLM.
+Currently, the primary use case for plugins is to register custom, out-of-the-tree models or platforms into vLLM. This is done by calling `ModelRegistry.register_model` or `PlatformRegistry.register_platform` to register the model or platform. In the future, the plugin system may be extended to support more features, such as swapping in custom implementations for certain classes in vLLM.
 
 ## Guidelines for Writing Plugins
 

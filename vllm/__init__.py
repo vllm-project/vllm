@@ -12,16 +12,23 @@ from vllm.outputs import (ClassificationOutput, ClassificationRequestOutput,
                           EmbeddingRequestOutput, PoolingOutput,
                           PoolingRequestOutput, RequestOutput, ScoringOutput,
                           ScoringRequestOutput)
+from vllm.platforms.registry import PlatformRegistry
+from vllm.plugins import load_general_plugins
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 from .version import __version__, __version_tuple__
+
+# Load general plugins first when the module is imported to make sure that all
+# necessary global variables are set. Such as the `current_platform`.
+load_general_plugins()
 
 __all__ = [
     "__version__",
     "__version_tuple__",
     "LLM",
     "ModelRegistry",
+    "PlatformRegistry",
     "PromptType",
     "TextPrompt",
     "TokensPrompt",
