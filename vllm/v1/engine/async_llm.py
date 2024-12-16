@@ -201,17 +201,17 @@ class AsyncLLM(EngineClient):
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
-            * 1) Making an AsyncStream corresponding to the Request.
+            * 1) Making an RequestState corresponding to the Request.
             # 2) Processing the Input.
             * 3) Adding the Request to the Detokenizer.
             * 4) Adding the Request to the EngineCore (separate process).
 
-        A separate output_handler loop runs in a background AsyncIO task, 
-        pulling outputs from EngineCore and putting them into the 
-        per-request AsyncStream.
+        A separate output_handler loop runs in a background task, 
+        pulling outputs from EngineCore and updating the RequestState and
+        setting the asyncio Event.
 
-        The caller of generate() iterates the returned AsyncGenerator,
-        returning the RequestOutput back to the caller.
+        The caller of generate() waits on the asyncio event and forwards
+        the latest RequestOutput back to the caller.
         """
 
         # We start the output_handler on the first call to generate() so that
@@ -232,15 +232,22 @@ class AsyncLLM(EngineClient):
         )
         
         while True:
-            try:        
+            try:
                 await asyncio.wait_for(state.event.wait(), timeout=WAITING_TIMEOUT_MS)
+
+                # NOTE(rob): out_list can have more than one item. However, in the 
+                # streaming case, we use RequestOutputKind.CUMULATIVE, which has the 
+                # full generated text output (not just the text corresponding to the
+                # last token). So, we can just send the last item and the API Client
+                # handles converting the stream buffer into a delta text. This way
+                # we do "dynamic chunked streaming", such that the API client does not
+                # fall behind the EngineCore (which happens at high QPS othwerwise).
                 out = state.out_list[-1]
 
             except asyncio.TimeoutError:
                 logger.debug("Timeout waiting for %s", request_id)
-                # if request is not None and await request.is_disconnected():
-                #     self.abort_request(obj.rid)
-                #     raise ValueError(f"Abort request {obj.rid}")
+                
+                # TODO (rob): do request cancellation checking here.
                 continue
 
             state.out_list = []
@@ -252,58 +259,35 @@ class AsyncLLM(EngineClient):
             state.event.clear()
             yield out
 
-    # def _finish_stream(self, request_id: str):
-    #     stream = self.request_streams.pop(request_id, None)
-    #     if stream is not None:
-    #         stream.finish()
+    async def _process_cancellations(self) -> None:
+        """
+        Process requests cancelled from user disconnecting.
 
-    # def _add_request_to_streams(
-    #     self,
-    #     request_id: str,
-    # ) -> AsyncStream:
+        When a client disconnects, AsyncStream._cancel() is called.
+        We passed a callback to AsyncStream(), which appends to 
+        self.client_aborted_requests.
 
-        # if request_id in self.request_streams:
-        #     raise ValueError(f"Request id {request_id} already running.")
+        As a result, if any requests are canceled from the user side
+        the request_id will show up in self.client_aborted_requests.
+        """
 
-        # # Avoid streams having circular ref to parent AsyncLLM object.
-        # aborted_reqs = self.client_aborted_requests
-        # stream = AsyncStream(request_id, aborted_reqs.append)
-        # self.request_streams[request_id] = stream
+        # Avoid streams having circular ref to parent AsyncLLM object.
+        if not self.client_aborted_requests:
+            return
+        reqs_to_abort = self.client_aborted_requests.copy()
+        self.client_aborted_requests.clear()
 
-        # if self.log_requests:
-        #     logger.info("Added request %s.", request_id)
+        # Remove from Detokenizer.
+        self.detokenizer.abort_requests(reqs_to_abort)
 
-        # return stream
+        # Remove from RequestStreams.
+        for request_id in reqs_to_abort:
+            if self.log_requests:
+                logger.info("User-cancelled request %s.", request_id)
+            self._finish_stream(request_id)
 
-    # async def _process_cancellations(self) -> None:
-    #     """
-    #     Process requests cancelled from user disconnecting.
-
-    #     When a client disconnects, AsyncStream._cancel() is called.
-    #     We passed a callback to AsyncStream(), which appends to 
-    #     self.client_aborted_requests.
-
-    #     As a result, if any requests are canceled from the user side
-    #     the request_id will show up in self.client_aborted_requests.
-    #     """
-
-    #     # Avoid streams having circular ref to parent AsyncLLM object.
-    #     if not self.client_aborted_requests:
-    #         return
-    #     reqs_to_abort = self.client_aborted_requests.copy()
-    #     self.client_aborted_requests.clear()
-
-    #     # Remove from Detokenizer.
-    #     self.detokenizer.abort_requests(reqs_to_abort)
-
-    #     # Remove from RequestStreams.
-    #     for request_id in reqs_to_abort:
-    #         if self.log_requests:
-    #             logger.info("User-cancelled request %s.", request_id)
-    #         self._finish_stream(request_id)
-
-    #     # Remove from EngineCore.
-    #     await self.engine_core.abort_requests_async(reqs_to_abort)
+        # Remove from EngineCore.
+        await self.engine_core.abort_requests_async(reqs_to_abort)
 
     def _process_request_outputs(self, request_outputs: List[RequestOutput]):
         """Process outputs by putting them into per-request AsyncStreams."""
