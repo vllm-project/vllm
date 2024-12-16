@@ -14,6 +14,9 @@ try:
 except ImportError:
     pass
 
+from vllm.model_executor.guided_decoding.xgrammar_utils import (
+    convert_lark_to_gbnf, grammar_is_likely_lark)
+
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
@@ -128,32 +131,56 @@ class GrammarConfig:
                            max_threads: int = 8) -> GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
-        # Only get tokenizer data if not already cached
-        if tokenizer_hash in TokenizerDataCache._cache:
-            encoded_vocab = None
-            stop_token_ids = None
-            backend_str = None
-        else:
-            tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
-            encoded_vocab = tokenizer_data.encoded_vocab
-            stop_token_ids = tokenizer_data.stop_token_ids
-            backend_str = tokenizer_data.backend_str
+        tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
+        encoded_vocab = tokenizer_data.encoded_vocab
+        stop_token_ids = tokenizer_data.stop_token_ids
+        backend_str = tokenizer_data.backend_str
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
                 json_str = json.dumps(guided_params.json)
             else:
                 json_str = guided_params.json
+
+            # Validate the schema and raise ValueError here if it is invalid.
+            # This is to avoid exceptions in model execution, which will crash
+            # the engine worker process.
+            try:
+                xgr.Grammar.from_json_schema(json_str)
+            except RuntimeError as err:
+                raise ValueError(str(err)) from err
+
             return cls(json_str=json_str,
-                       vocab_size=model_config.hf_config.vocab_size,
+                       vocab_size=model_config.hf_text_config.vocab_size,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
                        backend_str=backend_str,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads)
         elif guided_params.grammar:
-            return cls(grammar_str=guided_params.grammar,
-                       vocab_size=model_config.hf_config.vocab_size,
+            # XGrammar only supports GBNF grammars, so we must convert Lark
+            if grammar_is_likely_lark(guided_params.grammar):
+                try:
+                    grammar_str = convert_lark_to_gbnf(guided_params.grammar)
+                except ValueError as e:
+                    raise ValueError(
+                        "Failed to convert the grammar from Lark to GBNF. "
+                        "Please either use GBNF grammar directly or specify"
+                        " --guided-decoding-backend=outlines.\n"
+                        f"Conversion error: {str(e)}") from e
+            else:
+                grammar_str = guided_params.grammar
+
+            # Validate the grammar and raise ValueError here if it is invalid.
+            # This is to avoid exceptions in model execution, which will crash
+            # the engine worker process.
+            try:
+                xgr.Grammar.from_ebnf(grammar_str)
+            except RuntimeError as err:
+                raise ValueError(str(err)) from err
+
+            return cls(grammar_str=grammar_str,
+                       vocab_size=model_config.hf_text_config.vocab_size,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
                        backend_str=backend_str,
@@ -161,7 +188,7 @@ class GrammarConfig:
                        max_threads=max_threads)
         elif guided_params.json_object:
             return cls(json_object=True,
-                       vocab_size=model_config.hf_config.vocab_size,
+                       vocab_size=model_config.hf_text_config.vocab_size,
                        encoded_vocab=encoded_vocab,
                        stop_token_ids=stop_token_ids,
                        backend_str=backend_str,

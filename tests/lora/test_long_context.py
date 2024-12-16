@@ -124,7 +124,8 @@ def lora_llm(long_context_infos):
         tensor_parallel_size=4,
         # FIXME enable async output processor
         disable_async_output_proc=True,
-        distributed_executor_backend="mp")
+        distributed_executor_backend="mp",
+        enable_chunked_prefill=True)
     yield llm
     del llm
 

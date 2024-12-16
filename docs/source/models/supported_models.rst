@@ -3,11 +3,21 @@
 Supported Models
 ================
 
-vLLM supports a variety of generative and embedding models from `HuggingFace (HF) Transformers <https://huggingface.co/models>`_.
-This page lists the model architectures that are currently supported by vLLM.
+vLLM supports generative and pooling models across various tasks.
+If a model supports more than one task, you can set the task via the :code:`--task` argument.
+
+For each task, we list the model architectures that have been implemented in vLLM.
 Alongside each architecture, we include some popular models that use it.
 
-For other models, you can check the :code:`config.json` file inside the model repository.
+Loading a Model
+^^^^^^^^^^^^^^^
+
+HuggingFace Hub
++++++++++++++++
+
+By default, vLLM loads models from `HuggingFace (HF) Hub <https://huggingface.co/models>`_.
+
+To determine whether a given model is supported, you can check the :code:`config.json` file inside the HF repository.
 If the :code:`"architectures"` field contains a model architecture listed below, then it should be supported in theory.
 
 .. tip::
@@ -17,38 +27,57 @@ If the :code:`"architectures"` field contains a model architecture listed below,
 
         from vllm import LLM
 
-        llm = LLM(model=...)  # Name or path of your model
+        # For generative models (task=generate) only
+        llm = LLM(model=..., task="generate")  # Name or path of your model
         output = llm.generate("Hello, my name is")
         print(output)
 
-    If vLLM successfully generates text, it indicates that your model is supported.
+        # For pooling models (task={embed,classify,reward}) only
+        llm = LLM(model=..., task="embed")  # Name or path of your model
+        output = llm.encode("Hello, my name is")
+        print(output)
+
+    If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
 for instructions on how to implement your model in vLLM.
 Alternatively, you can `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ to request vLLM support.
 
-.. note::
-    To use models from `ModelScope <https://www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
+ModelScope
+++++++++++
 
-    .. code-block:: shell
+To use models from `ModelScope <https://www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
 
-       $ export VLLM_USE_MODELSCOPE=True
+.. code-block:: shell
 
-    And use with :code:`trust_remote_code=True`.
+    $ export VLLM_USE_MODELSCOPE=True
 
-    .. code-block:: python
+And use with :code:`trust_remote_code=True`.
 
-        from vllm import LLM
+.. code-block:: python
 
-        llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
-        output = llm.generate("Hello, my name is")
-        print(output)
+    from vllm import LLM
 
-Text-only Language Models
-^^^^^^^^^^^^^^^^^^^^^^^^^
+    llm = LLM(model=..., revision=..., task=..., trust_remote_code=True)
 
-Text Generation
----------------
+    # For generative models (task=generate) only
+    output = llm.generate("Hello, my name is")
+    print(output)
+
+    # For pooling models (task={embed,classify,reward}) only
+    output = llm.encode("Hello, my name is")
+    print(output)
+
+List of Text-only Language Models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Generative Models
++++++++++++++++++
+
+See :ref:`this page <generative_models>` for more information on how to use generative models.
+
+Text Generation (``--task generate``)
+-------------------------------------
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -89,9 +118,9 @@ Text Generation
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
     - ✅︎
     - ✅︎
-  * - :code:`CohereForCausalLM`
+  * - :code:`CohereForCausalLM`,:code:`Cohere2ForCausalLM`
     - Command-R
-    - :code:`CohereForAI/c4ai-command-r-v01`, etc.
+    - :code:`CohereForAI/c4ai-command-r-v01`, :code:`CohereForAI/c4ai-command-r7b-12-2024`, etc.
     - ✅︎
     - ✅︎
   * - :code:`DbrxForCausalLM`
@@ -128,7 +157,7 @@ Text Generation
     - FalconMamba
     - :code:`tiiuae/falcon-mamba-7b`, :code:`tiiuae/falcon-mamba-7b-instruct`, etc.
     - ✅︎
-    -  
+    - ✅︎
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
@@ -174,6 +203,11 @@ Text Generation
     - :code:`ibm-granite/granite-3.0-1b-a400m-base`, :code:`ibm-granite/granite-3.0-3b-a800m-instruct`, :code:`ibm/PowerMoE-3b`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`GritLM`
+    - GritLM
+    - :code:`parasail-ai/GritLM-7B-vllm`.
+    - ✅︎
+    - ✅︎
   * - :code:`InternLMForCausalLM`
     - InternLM
     - :code:`internlm/internlm-7b`, :code:`internlm/internlm-chat-7b`, etc.
@@ -193,7 +227,7 @@ Text Generation
     - Jamba
     - :code:`ai21labs/AI21-Jamba-1.5-Large`, :code:`ai21labs/AI21-Jamba-1.5-Mini`, :code:`ai21labs/Jamba-v0.1`, etc.
     - ✅︎
-    - 
+    - ✅︎
   * - :code:`LlamaForCausalLM`
     - Llama 3.1, Llama 3, Llama 2, LLaMA, Yi
     - :code:`meta-llama/Meta-Llama-3.1-405B-Instruct`, :code:`meta-llama/Meta-Llama-3.1-70B`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-70b-hf`, :code:`01-ai/Yi-34B`, etc.
@@ -203,7 +237,7 @@ Text Generation
     - Mamba
     - :code:`state-spaces/mamba-130m-hf`, :code:`state-spaces/mamba-790m-hf`, :code:`state-spaces/mamba-2.8b-hf`, etc.
     -
-    -
+    - ✅︎
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, :code:`openbmb/MiniCPM-S-1B-sft`, etc.
@@ -328,8 +362,24 @@ Text Generation
 .. note::
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
-Text Embedding
---------------
+Pooling Models
+++++++++++++++
+
+See :ref:`this page <pooling_models>` for more information on how to use pooling models.
+
+.. important::
+    Since some model architectures support both generative and pooling tasks,
+    you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
+
+Text Embedding (``--task embed``)
+---------------------------------
+
+Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
+
+.. note::
+    To get the best results, you should use pooling models that are specifically trained as such.
+
+The following table lists those that are tested in vLLM.
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -349,6 +399,11 @@ Text Embedding
     - Gemma2-based
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
     - 
+    - ✅︎
+  * - :code:`GritLM`
+    - GritLM
+    - :code:`parasail-ai/GritLM-7B-vllm`.
+    - ✅︎
     - ✅︎
   * - :code:`LlamaModel`, :code:`LlamaForCausalLM`, :code:`MistralModel`, etc.
     - Llama-based
@@ -371,13 +426,6 @@ Text Embedding
     - 
     - 
 
-.. important::
-  Some model architectures support both generation and embedding tasks.
-  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
-
-.. tip::
-  You can override the model's pooling method by passing :code:`--override-pooler-config`.
-
 .. note::
   :code:`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
   You should manually set mean pooling by passing :code:`--override-pooler-config '{"pooling_type": "MEAN"}'`.
@@ -389,8 +437,8 @@ Text Embedding
   On the other hand, its 1.5B variant (:code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
   despite being described otherwise on its model card.
 
-Reward Modeling
----------------
+Reward Modeling (``--task reward``)
+-----------------------------------
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -416,11 +464,8 @@ Reward Modeling
   For process-supervised reward models such as :code:`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
   e.g.: :code:`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
-.. note::
-    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
-
-Classification
----------------
+Classification (``--task classify``)
+------------------------------------
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -437,11 +482,8 @@ Classification
     - ✅︎
     - ✅︎
 
-.. note::
-    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
-
-Sentence Pair Scoring
----------------------
+Sentence Pair Scoring (``--task score``)
+----------------------------------------
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -468,13 +510,10 @@ Sentence Pair Scoring
     - 
     - 
 
-.. note::
-    These models are supported in both offline and online inference via Score API.
-
 .. _supported_mm_models:
 
-Multimodal Language Models
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+List of Multimodal Language Models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The following modalities are supported depending on the model:
 
@@ -491,11 +530,18 @@ On the other hand, modalities separated by :code:`/` are mutually exclusive.
 
 - e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
-Text Generation
----------------
+See :ref:`this page <multimodal_inputs>` on how to pass multi-modal inputs to the model.
+
+Generative Models
++++++++++++++++++
+
+See :ref:`this page <generative_models>` for more information on how to use generative models.
+
+Text Generation (``--task generate``)
+-------------------------------------
 
 .. list-table::
-  :widths: 25 25 15 25 5 5
+  :widths: 25 25 15 20 5 5 5
   :header-rows: 1
 
   * - Architecture
@@ -504,59 +550,69 @@ Text Generation
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+    - V1
   * - :code:`AriaForConditionalGeneration`
     - Aria
     - T + I
     - :code:`rhymes-ai/Aria`
     - 
     - ✅︎
+    - 
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
     - T + I\ :sup:`E`
     - :code:`Salesforce/blip2-opt-2.7b`, :code:`Salesforce/blip2-opt-6.7b`, etc.
     -
     - ✅︎
+    - 
   * - :code:`ChameleonForConditionalGeneration`
     - Chameleon
     - T + I
     - :code:`facebook/chameleon-7b` etc.
     - 
     - ✅︎
+    - 
   * - :code:`FuyuForCausalLM`
     - Fuyu
     - T + I
     - :code:`adept/fuyu-8b` etc.
     - 
     - ✅︎
+    - 
   * - :code:`ChatGLMModel`
     - GLM-4V
     - T + I
     - :code:`THUDM/glm-4v-9b` etc.
     - ✅︎
     - ✅︎
+    - 
   * - :code:`H2OVLChatModel`
     - H2OVL
     - T + I\ :sup:`E+`
     - :code:`h2oai/h2ovl-mississippi-800m`, :code:`h2oai/h2ovl-mississippi-2b`, etc.
     - 
     - ✅︎
+    - 
   * - :code:`Idefics3ForConditionalGeneration`
     - Idefics3
     - T + I
     - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
     - ✅︎
+    -
     - 
   * - :code:`InternVLChatModel`
-    - InternVL2
+    - InternVL 2.5, Mono-InternVL, InternVL 2.0
     - T + I\ :sup:`E+`
-    - :code:`OpenGVLab/Mono-InternVL-2B`, :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
+    - :code:`OpenGVLab/InternVL2_5-4B`, :code:`OpenGVLab/Mono-InternVL-2B`, :code:`OpenGVLab/InternVL2-4B`, etc.
     - 
+    - ✅︎
     - ✅︎
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
     - T + I\ :sup:`E+`
-    - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
+    - :code:`llava-hf/llava-1.5-7b-hf`, :code:`TIGER-Lab/Mantis-8B-siglip-llama3` (see note), etc.
     -
+    - ✅︎
     - ✅︎
   * - :code:`LlavaNextForConditionalGeneration`
     - LLaVA-NeXT
@@ -564,28 +620,33 @@ Text Generation
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
     - ✅︎
+    - 
   * - :code:`LlavaNextVideoForConditionalGeneration`
     - LLaVA-NeXT-Video
     - T + V
     - :code:`llava-hf/LLaVA-NeXT-Video-7B-hf`, etc.
     -
     - ✅︎
+    - 
   * - :code:`LlavaOnevisionForConditionalGeneration`
     - LLaVA-Onevision
     - T + I\ :sup:`+` + V\ :sup:`+`
     - :code:`llava-hf/llava-onevision-qwen2-7b-ov-hf`, :code:`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
     -
     - ✅︎
+    - 
   * - :code:`MiniCPMV`
     - MiniCPM-V
     - T + I\ :sup:`E+`
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     - ✅︎
     - ✅︎
+    - 
   * - :code:`MllamaForConditionalGeneration`
     - Llama 3.2
     - T + I\ :sup:`+`
     - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
+    -
     -
     -
   * - :code:`MolmoForCausalLM`
@@ -594,23 +655,27 @@ Text Generation
     - :code:`allenai/Molmo-7B-D-0924`, :code:`allenai/Molmo-72B-0924`, etc.
     -
     - ✅︎
+    - ✅︎
   * - :code:`NVLM_D_Model`
     - NVLM-D 1.0
     - T + I\ :sup:`E+`
     - :code:`nvidia/NVLM-D-72B`, etc.
     - 
     - ✅︎
+    - ✅︎
   * - :code:`PaliGemmaForConditionalGeneration`
-    - PaliGemma
+    - PaliGemma, PaliGemma 2
     - T + I\ :sup:`E`
-    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
+    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, :code:`google/paligemma2-3b-ft-docci-448`, etc.
     - 
     - ✅︎
+    - 
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision, Phi-3.5-Vision
     - T + I\ :sup:`E+`
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
+    - ✅︎
     - ✅︎
   * - :code:`PixtralForConditionalGeneration`
     - Pixtral
@@ -618,30 +683,35 @@ Text Generation
     - :code:`mistralai/Pixtral-12B-2409`, :code:`mistral-community/pixtral-12b` etc.
     -
     - ✅︎
+    - ✅︎
   * - :code:`QWenLMHeadModel`
     - Qwen-VL
     - T + I\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     - ✅︎
     - ✅︎
+    -
   * - :code:`Qwen2AudioForConditionalGeneration`
     - Qwen2-Audio
     - T + A\ :sup:`+`
     - :code:`Qwen/Qwen2-Audio-7B-Instruct`
     -
     - ✅︎
+    - 
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
     - T + I\ :sup:`E+` + V\ :sup:`E+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     - ✅︎
     - ✅︎
+    - 
   * - :code:`UltravoxModel`
     - Ultravox
     - T + A\ :sup:`E+`
     - :code:`fixie-ai/ultravox-v0_3`
     -
     - ✅︎
+    - 
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
@@ -665,11 +735,31 @@ Text Generation
   vLLM currently only supports adding LoRA to the language backbone of multimodal models.
 
 .. note::
+  To use :code:`TIGER-Lab/Mantis-8B-siglip-llama3`, you have to install their GitHub repo (:code:`pip install git+https://github.com/TIGER-AI-Lab/Mantis.git`)
+  and pass :code:`--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+
+.. note::
   The official :code:`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
-Multimodal Embedding
---------------------
+Pooling Models
+++++++++++++++
+
+See :ref:`this page <pooling_models>` for more information on how to use pooling models.
+
+.. important::
+    Since some model architectures support both generative and pooling tasks,
+    you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
+
+Text Embedding (``--task embed``)
+---------------------------------
+
+Any text generation model can be converted into an embedding model by passing :code:`--task embed`.
+
+.. note::
+    To get the best results, you should use pooling models that are specifically trained as such.
+
+The following table lists those that are tested in vLLM.
 
 .. list-table::
   :widths: 25 25 15 25 5 5
@@ -700,12 +790,7 @@ Multimodal Embedding
     - 
     - ✅︎
 
-.. important::
-  Some model architectures support both generation and embedding tasks.
-  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
-
-.. tip::
-  You can override the model's pooling method by passing :code:`--override-pooler-config`.
+----
 
 Model Support Policy
 =====================

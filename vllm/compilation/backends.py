@@ -1,5 +1,6 @@
 import copy
 import dataclasses
+import time
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
@@ -8,12 +9,13 @@ import torch
 import torch.fx as fx
 
 import vllm.envs as envs
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
+from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
@@ -22,22 +24,23 @@ logger = init_logger(__name__)
 def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config,
-                  do_logging=False,
+                  compilation_config: CompilationConfig,
+                  graph_index: int = 0,
+                  num_graphs: int = 1,
                   runtime_shape: Optional[int] = None,
                   use_inductor: bool = True):
+    if graph_index == 0:
+        # before compiling the first graph, record the start time
+        global compilation_start_time
+        compilation_start_time = time.time()
+
     if not use_inductor:
         return graph
 
     compilation_counter.num_inductor_compilations += 1
 
-    if do_logging:
-        if runtime_shape is None:
-            logger.info("Compiling a graph for general shape")
-        else:
-            logger.info("Compiling a graph for shape %s", runtime_shape)
-
     from torch._inductor import config
-    current_config = config.shallow_copy_dict()
+    current_config = config.get_config_copy()
     from torch._inductor.compile_fx import compile_fx
 
     if additional_inductor_config is not None:
@@ -52,7 +55,23 @@ def wrap_inductor(graph,
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
-    return compile_fx(graph, example_inputs, config_patches=current_config)
+    compiled_graph = compile_fx(graph,
+                                example_inputs,
+                                config_patches=current_config)
+
+    # after compiling the last graph, record the end time
+    if graph_index == num_graphs - 1:
+        now = time.time()
+        elapsed = now - compilation_start_time
+        compilation_config.compilation_time += elapsed
+        if runtime_shape is None:
+            logger.info("Compiling a graph for general shape takes %.2f s",
+                        elapsed)
+        else:
+            logger.info("Compiling a graph for shape %s takes %.2f s",
+                        runtime_shape, elapsed)
+
+    return compiled_graph
 
 
 @dataclasses.dataclass
@@ -114,6 +133,8 @@ def split_graph(graph: fx.GraphModule,
 # we share the global graph pool among all the backends
 global_graph_pool = None
 
+compilation_start_time = 0.0
+
 
 class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
@@ -128,14 +149,15 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """
 
     def __init__(self, module: torch.fx.GraphModule,
-                 compile_submod_names: List[str],
-                 compilation_configs: CompilationConfig, graph_pool):
+                 compile_submod_names: List[str], vllm_config: VllmConfig,
+                 graph_pool):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
-        self.compilation_configs = compilation_configs
+        self.compilation_config = vllm_config.compilation_config
         self.graph_pool = graph_pool
+        self.vllm_config = vllm_config
 
     def run(self, *args):
         fake_args = [
@@ -157,16 +179,19 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
+            global compilation_start_time
             compiled_graph_for_general_shape = wrap_inductor(
                 submod,
                 args,
-                self.compilation_configs.inductor_compile_config,
+                self.compilation_config.inductor_compile_config,
+                self.compilation_config,
+                graph_index=index,
+                num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
-                do_logging=index == 0,
-                use_inductor=self.compilation_configs.use_inductor)
+                use_inductor=self.compilation_config.use_inductor)
 
             self.module.__dict__[target] = PiecewiseBackend(
-                submod, self.compilation_configs, self.graph_pool, index,
+                submod, self.vllm_config, self.graph_pool, index,
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_general_shape)
 
@@ -187,7 +212,8 @@ class VllmBackend:
     which handles the post-grad passes.
     """
 
-    compilation_configs: CompilationConfig
+    vllm_config: VllmConfig
+    compilation_config: CompilationConfig
     graph_pool: Any
     _called: bool = False
     # the graph we compiled
@@ -203,7 +229,7 @@ class VllmBackend:
 
     def __init__(
         self,
-        compilation_configs: CompilationConfig,
+        vllm_config: VllmConfig,
     ):
         global global_graph_pool
         if global_graph_pool is None:
@@ -220,13 +246,14 @@ class VllmBackend:
         self.sym_tensor_indices = []
         self.input_buffers = []
 
-        self.compilation_configs = compilation_configs
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
     def configure_post_pass(self):
-        config = self.compilation_configs
+        config = self.compilation_config
         self.post_grad_pass_manager.configure(config.pass_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
@@ -241,7 +268,13 @@ class VllmBackend:
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
+        # when dynamo calls the backend, it means the bytecode
+        # transform and analysis are done
         compilation_counter.num_graphs_seen += 1
+        from .monitor import torch_compile_start_time
+        dynamo_time = time.time() - torch_compile_start_time
+        logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
         # called once
@@ -251,12 +284,14 @@ class VllmBackend:
         self.configure_post_pass()
 
         self.split_gm, self.piecewise_graphs = split_graph(
-            graph, self.compilation_configs.splitting_ops)
+            graph, self.compilation_config.splitting_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
-        logger.debug("%s", lazy_format_graph_code("before split", self.graph))
-        logger.debug("%s", lazy_format_graph_code("after split",
-                                                  self.split_gm))
+
+        # depyf will hook lazy_format_graph_code and dump the graph
+        # for debugging, no need to print the graph here
+        lazy_format_graph_code("before split", self.graph)
+        lazy_format_graph_code("after split", self.split_gm)
 
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)
@@ -268,13 +303,13 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-                                    self.compilation_configs,
+                                    self.vllm_config,
                                     self.graph_pool).run(*example_inputs)
 
         self._called = True
 
-        if not self.compilation_configs.use_cudagraph or \
-            not self.compilation_configs.cudagraph_copy_inputs:
+        if not self.compilation_config.use_cudagraph or \
+            not self.compilation_config.cudagraph_copy_inputs:
             return self.split_gm
 
         # if we need to copy input buffers for cudagraph
@@ -334,10 +369,9 @@ class ConcreteSizeEntry:
 
 class PiecewiseBackend:
 
-    def __init__(self, graph: fx.GraphModule,
-                 compilation_configs: CompilationConfig, graph_pool: Any,
-                 piecewise_compile_index: int, total_piecewise_compiles: int,
-                 sym_shape_indices: List[int],
+    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
+                 graph_pool: Any, piecewise_compile_index: int,
+                 total_piecewise_compiles: int, sym_shape_indices: List[int],
                  compiled_graph_for_general_shape: Callable):
         """
         The backend for piecewise compilation.
@@ -345,7 +379,7 @@ class PiecewiseBackend:
 
         We will compile `self.graph` once for the general shape,
         and then compile for different shapes specified in
-        `compilation_configs.compile_sizes`.
+        `compilation_config.compile_sizes`.
 
         Independently, we will capture cudagraph for different shapes.
 
@@ -353,7 +387,8 @@ class PiecewiseBackend:
         compile it first, and then capture cudagraph.
         """
         self.graph = graph
-        self.compilation_configs = compilation_configs
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
         self.graph_pool = graph_pool
         self.piecewise_compile_index = piecewise_compile_index
         self.total_piecewise_compiles = total_piecewise_compiles
@@ -363,10 +398,10 @@ class PiecewiseBackend:
             piecewise_compile_index == total_piecewise_compiles - 1)
 
         self.compile_sizes: Set[int] = set(
-            self.compilation_configs.compile_sizes)
+            self.compilation_config.compile_sizes)
         self.capture_sizes: Set[int] = set(
-            self.compilation_configs.capture_sizes
-        ) if self.compilation_configs.use_cudagraph else set()
+            self.compilation_config.capture_sizes
+        ) if self.compilation_config.use_cudagraph else set()
 
         self.first_run_finished = False
 
@@ -379,6 +414,8 @@ class PiecewiseBackend:
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
         self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
+        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.union(
+            self.capture_sizes)
         for shape in self.compile_sizes.union(self.capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
@@ -389,6 +426,9 @@ class PiecewiseBackend:
     def __call__(self, *args) -> Any:
         if not self.first_run_finished:
             self.first_run_finished = True
+            # no specific sizes to compile
+            if self.is_last_graph and not self.to_be_compiled_sizes:
+                end_monitoring_torch_compile(self.vllm_config)
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
@@ -403,26 +443,33 @@ class PiecewiseBackend:
 
         if entry.need_to_compile and not entry.compiled:
             entry.compiled = True
+            self.to_be_compiled_sizes.remove(runtime_shape)
             # args are real arguments
             entry.runnable = wrap_inductor(
                 self.graph,
                 args,
-                self.compilation_configs.inductor_compile_config,
+                self.compilation_config.inductor_compile_config,
+                self.compilation_config,
+                graph_index=self.piecewise_compile_index,
+                num_graphs=self.total_piecewise_compiles,
                 runtime_shape=runtime_shape,
-                do_logging=self.is_first_graph,
-                use_inductor=self.compilation_configs.use_inductor)
+                use_inductor=self.compilation_config.use_inductor)
+
+            # finished compilations for all required shapes
+            if self.is_last_graph and not self.to_be_compiled_sizes:
+                end_monitoring_torch_compile(self.vllm_config)
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
-            if entry.num_finished_warmup < self.compilation_configs.cudagraph_num_of_warmups:  # noqa
+            if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
                 entry.num_finished_warmup += 1
                 if self.is_first_graph:
                     logger.debug(
                         "Warming up %s/%s for shape %s",
                         entry.num_finished_warmup,
-                        self.compilation_configs.cudagraph_num_of_warmups,
+                        self.compilation_config.cudagraph_num_of_warmups,
                         runtime_shape)
                 return entry.runnable(*args)
 
