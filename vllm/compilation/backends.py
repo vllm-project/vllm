@@ -181,6 +181,11 @@ def wrap_inductor(graph,
         # we compiled this graph before
         # so we can directly lookup the compiled graph via hash
         hash_str = cache_data[(runtime_shape, graph_index)]
+        if graph_index == 0:
+            # adds some info logging for the first graph
+            logger.info(
+                "Directly lookup the graph for shape %s from the cache",
+                str(runtime_shape))  # noqa
         logger.debug(
             "directly lookup the %s-th graph for shape %s via hash %s",
             graph_index, str(runtime_shape), hash_str)
@@ -225,6 +230,10 @@ def wrap_inductor(graph,
             # store the hash in the cache
             nonlocal cache_data
             cache_data[(runtime_shape, graph_index)] = out[0]
+            if graph_index == 0:
+                # adds some info logging for the first graph
+                logger.info("Cache the graph of shape %s for later use",
+                            str(runtime_shape))
             logger.debug("store the %s-th graph for shape %s via hash %s",
                          graph_index, str(runtime_shape), out[0])
             return out
