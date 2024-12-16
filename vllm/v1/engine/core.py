@@ -1,3 +1,4 @@
+import asyncio
 import multiprocessing
 import pickle
 import queue
@@ -275,6 +276,36 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
                 engine_core = None
+
+    def run_busy_loop_async(self):
+        """Core busy loop of the EngineCore in async mode."""
+        self._background_loop = asyncio.get_event_loop().create_task(
+            self.run_engine_core_async())
+
+    async def run_engine_core_async(self):
+        while True:
+            # 1) Poll the input queue until there is work to do.
+            if not self.scheduler.has_unfinished_requests():
+                while True:
+                    try:
+                        req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
+                        self._handle_client_request(req)
+                        break
+                    except queue.Empty:
+                        self._log_stats()
+                        logger.debug("EngineCore busy loop waiting.")
+                    except BaseException:
+                        raise
+
+            # 2) Handle any new client requests (Abort or Add).
+            while not self.input_queue.empty():
+                req = self.input_queue.get_nowait()
+                self._handle_client_request(req)
+
+            # 3) Step the engine core.
+            self.step2()
+
+            self._log_stats()
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
