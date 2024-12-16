@@ -558,24 +558,43 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
+        # Prepare batch-level sample logprobs in a way that the type-checker
+        # understands
+        if do_batch_sample_logprobs:
+            assert (sampler_output.batch_sample_logprob_token_ids is not None)
+            assert (sampler_output.batch_sample_logprobs is not None)
+            batch_logprob_token_ids_cpu = (
+                sampler_output.batch_sample_logprob_token_ids.cpu().numpy())
+            batch_logprobs_cpu = (
+                sampler_output.batch_sample_logprobs.cpu().numpy())
+        else:
+            batch_logprob_token_ids_cpu = None
+            batch_logprobs_cpu = None
+
+        # Prepare batch-level prompt logprobs in a way that the type-checker
+        # understands
+        if do_batch_prompt_logprobs:
+            assert (sampler_output.batch_prompt_logprob_token_ids is not None)
+            assert (sampler_output.batch_prompt_logprobs is not None)
+            batch_prompt_logprob_token_ids_cpu = sampler_output.batch_prompt_logprob_token_ids.cpu(
+            ).numpy()
+            batch_prompt_logprobs_cpu = sampler_output.batch_prompt_logprobs.cpu(
+            ).numpy()
+        else:
+            batch_prompt_logprob_token_ids_cpu = None
+            batch_prompt_logprobs_cpu = None
+
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids_cpu=sampled_token_ids,
             # NOTE: sample and prompt logprob CPU-GPU synchronization happens
             # here
-            batch_logprob_token_ids_cpu=(
-                sampler_output.batch_sample_logprob_token_ids.cpu().numpy()
-                if do_batch_sample_logprobs else None),
-            batch_logprobs_cpu=(
-                sampler_output.batch_sample_logprobs.cpu().numpy()
-                if do_batch_sample_logprobs else None),
+            batch_logprob_token_ids_cpu=batch_logprob_token_ids_cpu,
+            batch_logprobs_cpu=batch_logprobs_cpu,
             batch_prompt_logprob_token_ids_cpu=(
-                sampler_output.batch_prompt_logprob_token_ids.cpu().numpy()
-                if do_batch_prompt_logprobs else None),
-            batch_prompt_logprobs_cpu=(
-                sampler_output.batch_prompt_logprobs.cpu().numpy()
-                if do_batch_prompt_logprobs else None))
+                batch_prompt_logprob_token_ids_cpu),
+            batch_prompt_logprobs_cpu=(batch_prompt_logprobs_cpu))
         return model_runner_output
 
     def load_model(self) -> None:

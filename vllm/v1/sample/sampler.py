@@ -196,12 +196,16 @@ class Sampler(nn.Module):
             # Batch requires only prompt logprobs
 
             # - Compute top logprobs only at sequence offsets of prompt tokens
+            assert logits_w_tmp_tpk_tpp is not None
             logprobs = self.get_logprobs(
                 logits_w_tmp_tpk_tpp[prompt_logits_mask, :])
 
             # Return prompt logprobs
             return ((None, None) + self._top_logprobs_token_indices(
                 logprobs, sampling_metadata.max_num_batch_prompt_logprobs))
+
+        raise ValueError("One or both of Logprobs and Prompt Logprobs must"
+                         " be enabled to use this method.")
 
     def forward(
         self,
@@ -242,6 +246,7 @@ class Sampler(nn.Module):
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
+        assert sampling_metadata.query_start_loc is not None
         maybe_sample_logits_indices = sampling_metadata.query_start_loc[1:] - 1
         prompt_logits_mask = torch.ones(sampling_metadata.num_input_tokens,
                                         dtype=torch.bool)
