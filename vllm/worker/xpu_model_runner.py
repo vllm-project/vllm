@@ -157,8 +157,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         if len(self.seq_group_metadata_list) == 0:
             return None
 
-        assert self.sliding_window is None, "TODO: support sliding window later"
-
         for seq_group_metadata in self.seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             # is_prompt indicates that it is still in prompt states
@@ -206,8 +204,14 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 else:
                     # Prefill without chunked prefill
                     block_table = []
+                if self.sliding_window is not None:
+                    sliding_window_blocks = (self.sliding_window //
+                                             self.block_size)
+                    block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
                 # Total seq_lens
+                seq_len = seq_len if self.sliding_window is None else min(
+                    seq_len, self.sliding_window)
                 seq_lens.append(seq_len)
                 input_tokens.extend(tokens)
                 query_len = seq_len - context_len
@@ -270,11 +274,14 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 # seq_id: List[int]
                 block_table = seq_group_metadata.block_tables[seq_id]
 
+                start_idx=0
+                if self.sliding_window is not None:
+                    start_idx = max(0, seq_len - self.sliding_window)
                 # TODO: add sliding window
                 for i in range(context_len, seq_len):
-                    # if i < start_idx:
-                    #     slot_mapping.append(_PAD_SLOT_ID)
-                    #     continue
+                    if i < start_idx:
+                        slot_mapping.append(_PAD_SLOT_ID)
+                        continue
                     block_number = block_table[i // self.block_size]
                     block_offset = i % self.block_size
                     # slot_mapping is when we flatteren the blocks, and see which block it is located
