@@ -315,7 +315,7 @@ You can use `these tests <https://github.com/vllm-project/vllm/blob/main/tests/e
 Audio
 ^^^^^
 
-Audio input is supported according to `OpenAI Audio in API <https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in>`_.
+Audio input is supported according to `OpenAI Audio API <https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in>`_.
 Here is a simple example using Ultravox-v0.3.
 
 First, launch the OpenAI-compatible server:
