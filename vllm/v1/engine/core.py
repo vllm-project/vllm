@@ -188,6 +188,13 @@ class EngineCore:
                     #
                     # Note: new_prompt_logprobs will be used later to build the
                     # engine core output
+                    assert (model_runner_output.batch_prompt_logprobs_cpu
+                            is not None)
+                    assert (
+                        model_runner_output.batch_prompt_logprob_token_ids_cpu
+                        is not None)
+                    assert request.prompt_logprobs is not None
+                    assert request.prompt_logprob_token_ids is not None
                     logprob_cnt = request_prompt_logprobs
                     mr_output_slice_upper_index = (
                         mr_output_slice_lower_index + num_new_prompt_tokens)
@@ -234,6 +241,9 @@ class EngineCore:
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
                 if request_do_logprobs:
+                    assert model_runner_output.batch_logprobs_cpu is not None
+                    assert model_runner_output.batch_logprob_token_ids_cpu is not None
+                    assert request.logprobs is not None
                     # Slice out this request's sample logprobs; defer
                     # pythonization to be carried out in the frontend.
                     request.logprobs.append(
@@ -247,6 +257,14 @@ class EngineCore:
                 # This must be called before me make the EngineCoreOutput.
                 stopped = scheduler._check_stop(request)
 
+                # Compute engine core output logprobs list as such,
+                # so the type checker can see the assert
+                if request_do_logprobs:
+                    assert request.logprobs is not None
+                    logprobs = request.logprobs[-num_new_tokens:]
+                else:
+                    logprobs = None
+
                 # Add EngineCoreOutput for this Request.
                 # Return the logprob for the most recently computed tokens.
                 # Return no prompt logprobs in decode-phase.
@@ -256,8 +274,7 @@ class EngineCore:
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
                     stop_reason=request.stop_reason,
-                    logprobs=(request.logprobs[-num_new_tokens:]
-                              if request_do_logprobs else None),
+                    logprobs=logprobs,
                     prompt_logprobs=(new_prompt_logprobs
                                      if request_do_prompt_logprobs else None),
                     prompt_logprobs_token_ids=(new_prompt_logprob_token_ids
