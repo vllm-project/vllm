@@ -29,18 +29,24 @@ WAITING_TIMEOUT_MS = 5
 
 @dataclass
 class RequestState:
-    """RequestState manages concurrency between the output_handler,
-    which pulls outputs from EngineCore and the user-facing generate()
-    function the 
+    """
+    RequestState manages concurrency between:
+        * the output_handler(), which pulls outputs from EngineCore
+        * the per-request generate(), which is the interface to client code.
+
+    The output_handler adds new RequestOutputs to out_list and sets the 
+    asyncio event, notifying the generate() that there is work to do.
+
+    generate() waits on the asyncio event and yields the data from 
+    out_list back to the caller generate()
     """
 
     event: asyncio.Event
     out_list: List[RequestOutput]
-    finished: bool
 
     @classmethod
     def new(cls) -> "RequestState":
-        return cls(asyncio.Event(), [], False)
+        return cls(asyncio.Event(), [])
 
 
 class AsyncLLM(EngineClient):
@@ -261,7 +267,7 @@ class AsyncLLM(EngineClient):
                 continue
 
             state.out_list = []
-            if state.finished:
+            if out.finished:
                 del self.rid_to_state[request_id]
                 yield out
                 break
@@ -308,8 +314,6 @@ class AsyncLLM(EngineClient):
             # Update the RequestState and alert generate() that there
             # is a RequestOutput ready to return to the user.
             state = self.rid_to_state[request_output.request_id]
-            if request_output.finished:
-                state.finished = True
             state.out_list.append(request_output)
             state.event.set()
 
