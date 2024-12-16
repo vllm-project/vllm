@@ -19,7 +19,6 @@ PASSTHROUGH_ENV_VARS = {
 app = modal.App("buildkite-runner")
 hf_cache = modal.Volume.from_name("vllm-benchmark-hf-cache", create_if_missing=True)
 
-print(f"Building image for commit: {BUILDKITE_COMMIT}")
 # Image to use for runner
 BASE_IMG = f"public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:{BUILDKITE_COMMIT}"
 image = (
