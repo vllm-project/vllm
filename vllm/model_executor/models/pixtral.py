@@ -245,6 +245,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             # Do not split, return as tensor of shape [1, fs, hs]
             return image_embeds.unsqueeze(0)
 
+        # If the last split index is the last index in image_tokens, we
+        # ignore it to avoid empty split tensor
+        if split_indices[-1] == len(image_tokens):
+            split_indices = split_indices[:-1]
+
         image_embeds = image_embeds.tensor_split(split_indices.cpu())
         return image_embeds
 
