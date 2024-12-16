@@ -110,9 +110,11 @@ async def test_check_health(server: RemoteOpenAIServer):
 @pytest.mark.parametrize(
     "server_args",
     [
-        pytest.param([], id="default-frontend-multiprocessing"),
-        pytest.param(["--disable-frontend-multiprocessing"],
-                     id="disable-frontend-multiprocessing")
+        pytest.param(["--max-model-len", "32768"],
+                     id="default-frontend-multiprocessing"),
+        pytest.param(
+            ["--disable-frontend-multiprocessing", "--max-model-len", "32768"],
+            id="disable-frontend-multiprocessing")
     ],
     indirect=True,
 )
@@ -122,14 +124,15 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # then ensure that it still responds quickly afterwards
 
     chat_input = [{"role": "user", "content": "Write a long story"}]
-    client = server.get_async_client(timeout=1)
+    client = server.get_async_client(timeout=0.5)
     tasks = []
-    for _ in range(1000):
+    # Request about 2 million tokens (32k * 62)
+    for _ in range(62):
         task = asyncio.create_task(
             client.chat.completions.create(messages=chat_input,
                                            model=MODEL_NAME,
-                                           max_tokens=5096,
-                                           extra_body={"min_tokens": 2048}))
+                                           max_tokens=32000,
+                                           extra_body={"min_tokens": 32000}))
         tasks.append(task)
 
     done, pending = await asyncio.wait(tasks,
@@ -145,6 +148,7 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
 
     # If the server had not cancelled all the other requests, then it would not
     # be able to respond to this one within the timeout
+    client = server.get_async_client(timeout=5)
     response = await client.chat.completions.create(messages=chat_input,
                                                     model=MODEL_NAME,
                                                     max_tokens=10)
