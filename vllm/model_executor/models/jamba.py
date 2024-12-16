@@ -288,7 +288,7 @@ class JambaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
 
-        extra_kwargs = {"is_lora_enabled": bool(vllm_config)}
+        extra_kwargs = {"is_lora_enabled": bool(vllm_config.lora_config)}
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
