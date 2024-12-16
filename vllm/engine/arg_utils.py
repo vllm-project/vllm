@@ -1266,9 +1266,6 @@ class EngineArgs:
         Override the EngineConfig's configs based on the usage context for V1.
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
-        if engine_config.model_config.is_multimodal_model:
-            # TODO (ywang96): Enable APC by default when VLM supports it.
-            assert not engine_config.cache_config.enable_prefix_caching
 
 
 @dataclass
