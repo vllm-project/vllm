@@ -194,12 +194,10 @@ class EngineCoreProc(EngineCore):
         proc = context.Process(target=EngineCoreProc.run_engine_core,
                                kwargs=process_kwargs)
         proc.start()
-        logger.info("WAITING FOR STARTUP")
         wait_for_startup(proc=proc,
                          ready_path=ready_path,
                          ready_str=EngineCoreProc.READY_STR,
                          timeout_ms=POLLING_TIMEOUT_MS)
-        logger.info("READY")
 
         return BackgroundProcHandle(proc=proc,
                                     ready_path=ready_path,
@@ -273,7 +271,6 @@ class EngineCoreProc(EngineCore):
             outputs = self.step()
 
             # 4) Put EngineCoreOutputs into the output queue.
-            logger.info("putting to output queue")
             self.output_queue.put_nowait(outputs)
 
             self._log_stats()
@@ -345,5 +342,6 @@ class EngineCoreProc(EngineCore):
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
-                msg = (DetokenizerRequestType.OUT.value, buffer)
+                # msg = (DetokenizerRequestType.OUT.value, buffer)
+                msg = (buffer, )
                 socket.send_multipart(msg, copy=False)

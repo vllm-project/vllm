@@ -407,8 +407,8 @@ class DetokenizerProc(Detokenizer):
                     self.add_request(detokenizer_request)
 
                 # Handle EngineCoreOutput
-                if from_engine_core_socket in socks:
-                    (frame, ) = from_engine_core_socket.recv_multipart(copy=False)
+                if engine_core_outputs_socket in socks:
+                    (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
                     engine_core_outputs = decoder_out.decode(frame.buffer).outputs
                     outputs = self.step(engine_core_outputs)
                     msg = pickle.dumps(outputs, protocol=pickle.HIGHEST_PROTOCOL)
@@ -460,7 +460,7 @@ class DetokenizerClient:
     async def add_request_async(self, request: DetokenizerRequest):
         """Send new DetokenizerRequest to Detokenizer."""
 
-        msg = (DetokenizerRequestType.NEW.value, self.encoder.encode(request))
+        msg = (self.encoder.encode(request), )
         await self.input_socket.send_multipart(msg, copy=False)
 
 
