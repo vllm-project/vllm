@@ -363,7 +363,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         n = self.n if self.n is not None else 1
 
         if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get("temperature", 0.0)
+            temperature = default_sampling_params.get("temperature", 1.0)
 
         return BeamSearchParams(
             beam_width=n,
