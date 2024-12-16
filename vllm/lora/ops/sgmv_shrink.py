@@ -126,7 +126,7 @@ def _sgmv_shrink_kernel(
 _LORA_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
 
 
-def _get_lora_ptr(lora_a_weights, device):
+def _get_lora_a_ptr(lora_a_weights, device):
     key = tuple(lora_weight.data_ptr() for lora_weight in lora_a_weights)
 
     if _LORA_PTR_DICT.get(key) is None:
@@ -220,7 +220,7 @@ def _sgmv_shrink(
         lora_strides_d0_tensor,
         lora_strides_d1_tensor,
         lora_strides_d2_tensor,
-    ) = _get_lora_ptr(lora_a_weights, b_seq_start_loc.device)
+    ) = _get_lora_a_ptr(lora_a_weights, b_seq_start_loc.device)
     # TODO tuning this config
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
     BLOCK_M = 32
@@ -234,14 +234,31 @@ def _sgmv_shrink(
         batches,
     )
 
-    _sgmv_shrink_kernel[grid](inputs, lora_ptr_tensor, output_tensor, N, K,
-                              b_seq_start_loc, seq_len_tensor,
-                              lora_indices_tensor, scaling, inputs.stride(0),
-                              inputs.stride(1), lora_strides_d0_tensor,
-                              lora_strides_d1_tensor, lora_strides_d2_tensor,
-                              output_tensor.stride(0), output_tensor.stride(1),
-                              output_tensor.stride(2), BLOCK_M, BLOCK_N,
-                              BLOCK_K, EVEN_K, SPLIT_K, len(lora_a_weights))
+    _sgmv_shrink_kernel[grid](
+        inputs,
+        lora_ptr_tensor,
+        output_tensor,
+        N,
+        K,
+        b_seq_start_loc,
+        seq_len_tensor,
+        lora_indices_tensor,
+        scaling,
+        inputs.stride(0),
+        inputs.stride(1),
+        lora_strides_d0_tensor,
+        lora_strides_d1_tensor,
+        lora_strides_d2_tensor,
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        output_tensor.stride(2),
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        EVEN_K,
+        SPLIT_K,
+        len(lora_a_weights),
+    )
     return
 
 

@@ -141,7 +141,7 @@ _LORA_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
 
 
 #TODO Optimize
-def _get_lora_ptr(lora_weights, offset_start, device):
+def _get_lora_b_ptr(lora_weights, offset_start, device):
 
     key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
     if _LORA_PTR_DICT.get(key) is None:
@@ -222,7 +222,7 @@ def _sgmv_expand(
         lora_strides_d0_tensor,
         lora_strides_d1_tensor,
         lora_strides_d2_tensor,
-    ) = _get_lora_ptr(lora_b_weights, offset_start, b_seq_start_loc.device)
+    ) = _get_lora_b_ptr(lora_b_weights, offset_start, b_seq_start_loc.device)
 
     # TODO tuning this config
     N, K = lora_b_weights[0].shape[-2:]  # K= rank,N=hidden_size
@@ -244,15 +244,32 @@ def _sgmv_expand(
         batches,
         len(lora_ptr_tensor),
     )
-    _sgmv_expand_kernel[grid](inputs, lora_ptr_tensor, output_tensor, N, K,
-                              b_seq_start_loc, seq_len_tensor,
-                              lora_indices_tensor, slice_start_tensor,
-                              inputs.stride(0), inputs.stride(1),
-                              inputs.stride(2), lora_strides_d0_tensor,
-                              lora_strides_d1_tensor, lora_strides_d2_tensor,
-                              output_tensor.stride(0), output_tensor.stride(1),
-                              BLOCK_M, BLOCK_N, BLOCK_K, EVEN_K, ADD_INPUTS,
-                              CAST_TYPE, len(lora_b_weights))
+    _sgmv_expand_kernel[grid](
+        inputs,
+        lora_ptr_tensor,
+        output_tensor,
+        N,
+        K,
+        b_seq_start_loc,
+        seq_len_tensor,
+        lora_indices_tensor,
+        slice_start_tensor,
+        inputs.stride(0),
+        inputs.stride(1),
+        inputs.stride(2),
+        lora_strides_d0_tensor,
+        lora_strides_d1_tensor,
+        lora_strides_d2_tensor,
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        EVEN_K,
+        ADD_INPUTS,
+        CAST_TYPE,
+        len(lora_b_weights),
+    )
     return
 
 
