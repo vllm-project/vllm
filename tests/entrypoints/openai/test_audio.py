@@ -25,6 +25,7 @@ def server():
         "--max-num-seqs",
         "5",
         "--enforce-eager",
+        "--trust-remote-code",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
