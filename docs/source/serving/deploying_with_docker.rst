@@ -37,6 +37,32 @@ You can build and run vLLM from source via the provided `Dockerfile <https://git
         current GPU type the machine is running on, you can add the argument ``--build-arg torch_cuda_arch_list=""``
         for vLLM to find the current GPU type and build for that.
 
+Building for Arm64/aarch64
+--------------------------
+
+A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper. At time of this writing, this requires the use
+of PyTorch Nightly and should be considered **experimental**. Using the flag `--platform "linux/arm64"` will attempt to build for arm64.
+
+.. note::
+
+        Multiple modules must be compiled, so this process can take a while. Recommend using `--build-arg max_jobs=` & `--build-arg nvcc_threads=`
+        flags to speed up build process. However, ensure your 'max_jobs' is substantially larger than 'nvcc_threads' to get the most benefits.
+        Keep an eye on memory usage with parallel jobs as it can be substantial (see example below).
+
+.. code-block:: console
+
+    # Example of building on Nvidia GH200 server. (Memory usage: ~12GB, Build time: ~1475s / ~25 min, Image size: 7.26GB)
+    $ DOCKER_BUILDKIT=1 sudo docker build . \
+      --target vllm-openai \
+      -platform "linux/arm64" \
+      -t vllm/vllm-gh200-openai:latest \
+      --build-arg max_jobs=66 \
+      --build-arg nvcc_threads=2 \
+      --build-arg torch_cuda_arch_list="9.0+PTX" \
+      --build-arg vllm_fa_cmake_gpu_arches="90-real"
+
+
+
 
 To run vLLM:
 

@@ -4,7 +4,7 @@
 # Dependencies for NVIDIA GPUs
 ray >= 2.9
 nvidia-ml-py >= 12.560.30 # for pynvml package
-torch == 2.5.1
+torch == 2.5.1; platform_machine != 'aarch64'
 # These must be updated alongside torch
-torchvision == 0.20.1 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+torchvision == 0.20.1; platform_machine != 'aarch64' # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 xformers == 0.0.28.post3; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch 2.5.1
