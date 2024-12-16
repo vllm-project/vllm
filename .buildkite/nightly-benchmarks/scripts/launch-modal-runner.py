@@ -43,31 +43,27 @@ def runner(env: dict, cmd: str = ""):
 
     # TODO: the vllm-ci-postmerge-repo does not contain the VLLM package itself
     # we need to figure out how to install from source.
-    # currently, vllm install fails, logs: https://gist.github.com/erik-dunteman/f75f0733ac6a78de73d25220a4a3f58a
+    # I tried doing this in the build step but it appears to fail without an underlying GPU
+    # So I am doing here on the runner GPU. 
+    # The VLLM install still fails, logs: https://gist.github.com/erik-dunteman/f75f0733ac6a78de73d25220a4a3f58a
     print("Installing VLLM from source, commit:", BUILDKITE_COMMIT)
     # Install vllm from source
     subprocess.run(["pip", "install", f"git+https://github.com/vllm-project/vllm.git@{BUILDKITE_COMMIT}"])
 
-    # Debug Python environment
+    # TODO: remove below env debugging code
     print("\n=== Python Environment Info ===")
     print(f"Python Version: {sys.version}")
     print(f"Python Executable: {sys.executable}")
     print(f"Python Path: {sys.path}")
-    
-    # List all installed packages
     print("\n=== Installed Packages ===")
     subprocess.run(["pip", "list"])
-    
-    # Try to get vllm package info specifically
     print("\n=== VLLM Package Info ===")
     subprocess.run(["pip", "show", "vllm"])
-    
-    # Show current working directory and its contents
     print("\n=== Working Directory Info ===")
     print(f"Current Directory: {os.getcwd()}")
     subprocess.run(["ls", "-la"])
 
-    # TODO: remove this cmd override
+    # TODO: remove these cmd overrides
     # cmd = "python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Meta-Llama-3.1-8B-Instruct"
     cmd = "nvidia-smi"
 
