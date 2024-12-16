@@ -376,6 +376,10 @@ Then, you can use the OpenAI client as follows:
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from input audio:", result)
 
+Alternatively, you can pass :code:`audio_url`, which is the audio counterpart of :code:`image_url` for image input:
+
+.. code-block:: python
+
     chat_completion_from_url = client.chat.completions.create(
         messages=[{
             "role": "user",

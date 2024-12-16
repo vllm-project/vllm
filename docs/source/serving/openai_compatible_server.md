@@ -34,11 +34,6 @@ We currently support the following OpenAI APIs:
   - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
   - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`) with a [chat template](#chat-template).
-  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
-    - *Note: `image_url.detail` parameter is not supported.*
-  - We support two audio content types.
-    - Support `input_audio` content type as defined [here](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
-    - Support `audio_url` content type for audio files. Refer to [here](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py#L51) for the exact schema.
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
   - Only applicable to [embedding models](../models/pooling_models.rst) (`--task embed`).
@@ -208,6 +203,11 @@ The following extra parameters are supported:
 ### Chat Completions API
 
 Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/chat) for more details.
+
+We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
+[Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
+see our [Multimodal Inputs](../usage/multimodal_inputs.rst) guide for more information.
+- *Note: `image_url.detail` parameter is not supported.*
 
 #### Extra parameters
 
