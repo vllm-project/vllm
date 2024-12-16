@@ -170,6 +170,7 @@ class EngineArgs:
     enable_chunked_prefill: Optional[bool] = None
 
     guided_decoding_backend: str = 'xgrammar'
+    logits_processor_pattern: Optional[str] = None
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     speculative_model_quantization: Optional[str] = None
@@ -374,6 +375,14 @@ class EngineArgs:
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.')
+        parser.add_argument(
+            '--logits-processor-pattern',
+            type=nullable_str,
+            default=None,
+            help='Optional regex pattern specifying valid logits processor '
+            'qualified names that can be passed with the `logits_processors` '
+            'extra completion argument. Defaults to None, which allows no '
+            'processors.')
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
@@ -416,7 +425,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32, 64, 128],
+                            choices=[8, 16, 32],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
                             'set to max-model-len')
@@ -478,11 +487,12 @@ class EngineArgs:
             help='The fraction of GPU memory to be used for the model '
             'executor, which can range from 0 to 1. For example, a value of '
             '0.5 would imply 50%% GPU memory utilization. If unspecified, '
-            'will use the default value of 0.9. This is a global gpu memory '
-            'utilization limit, for example if 50%% of the gpu memory is '
-            'already used before vLLM starts and --gpu-memory-utilization is '
-            'set to 0.9, then only 40%% of the gpu memory will be allocated '
-            'to the model executor.')
+            'will use the default value of 0.9. This is a per-instance '
+            'limit, and only applies to the current vLLM instance.'
+            'It does not matter if you have another vLLM instance running '
+            'on the same GPU. For example, if you have two vLLM instances '
+            'running on the same GPU, you can set the GPU memory utilization '
+            'to 0.5 for each instance.')
         parser.add_argument(
             '--num-gpu-blocks-override',
             type=int,
@@ -975,7 +985,7 @@ class EngineArgs:
             mm_cache_preprocessor=self.mm_cache_preprocessor,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
-        )
+            logits_processor_pattern=self.logits_processor_pattern)
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(

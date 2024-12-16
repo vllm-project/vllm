@@ -103,7 +103,8 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig):
+    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
+        executor_class: Type[Executor]
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
         if distributed_executor_backend == "mp":
@@ -196,3 +197,10 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown()
