@@ -53,6 +53,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
                                          trust_remote_code=True),
+    "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
+                                         trust_remote_code=True),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
     "DeciLMForCausalLM": _HfExamplesInfo("Deci/DeciLM-7B-instruct",
                                          trust_remote_code=True),
@@ -135,6 +137,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
+    "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),

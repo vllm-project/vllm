@@ -1,0 +1,7 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: "{{ .Release.Name }}-pdb"
+  namespace: {{ .Release.Namespace }}
+spec:
+  maxUnavailable: {{ default 1 .Values.maxUnavailablePodDisruptionBudget }}
