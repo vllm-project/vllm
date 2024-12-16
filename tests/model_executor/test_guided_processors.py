@@ -10,7 +10,6 @@ from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
-from vllm.model_executor.guided_decoding.xgrammar_decoding import TokenizerData
 from vllm.sampling_params import GuidedDecodingParams
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
@@ -115,6 +114,9 @@ def test_pickle_xgrammar_tokenizer_data():
         import xgrammar as xgr
     except ImportError:
         pytest.skip("Could not import xgrammar to run test")
+
+    from vllm.model_executor.guided_decoding.xgrammar_decoding import (
+        TokenizerData)
     tokenizer_data = TokenizerData(vocab_type=xgr.VocabType.RAW)
     pickled = pickle.dumps(tokenizer_data)
 
