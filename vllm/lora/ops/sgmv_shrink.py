@@ -16,29 +16,29 @@ from vllm.utils import direct_register_custom_op
 
 @triton.jit
 def _sgmv_shrink_kernel(
-    input_ptr,
-    lora_ptr,  #1-3
-    out_ptr,
-    N,
-    K,
-    b_seq_start_loc,
-    seq_lens,
-    lora_indices,
-    scaling,
-    xm_stride,  # hidden_size
-    xk_stride,  # 1
-    ls_d0_ptr,  # hidden_size*max_rank
-    ls_d1_ptr,
-    ls_d2_ptr,
-    c0_stride,
-    cm_stride,
-    cn_stride,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    EVEN_K: tl.constexpr,
-    SPLIT_K: tl.constexpr,
-):
+        input_ptr,
+        lora_ptr,  #1-3
+        out_ptr,
+        N,
+        K,
+        b_seq_start_loc,
+        seq_lens,
+        lora_indices,
+        scaling,
+        xm_stride,  # hidden_size
+        xk_stride,  # 1
+        ls_d0_ptr,  # hidden_size*max_rank
+        ls_d1_ptr,
+        ls_d2_ptr,
+        c0_stride,
+        cm_stride,
+        cn_stride,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        EVEN_K: tl.constexpr,
+        SPLIT_K: tl.constexpr,
+        NSLICE_NUM: tl.constexpr):
     """
     The sgmv's shrink triton kernel is based on GroupGEMM+SPLIT-K.
     The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally,
@@ -50,8 +50,14 @@ def _sgmv_shrink_kernel(
     cta_n_num = tl.cdiv(N, BLOCK_N)
     pid_m = pid // cta_n_num
     pid_n = pid % cta_n_num
-    slice_id = pid_mix // SPLIT_K
-    pid_sk = pid_mix % SPLIT_K
+    if NSLICE_NUM == 1:
+        slice_id = 0
+        pid_sk = tl.program_id(axis=1)
+    else:
+        pid_mix = tl.program_id(axis=1)
+        slice_id = pid_mix // SPLIT_K
+        pid_sk = pid_mix % SPLIT_K
+
     M = tl.load(seq_lens + cur_batch)
     if pid_m * BLOCK_M > M:
         return
@@ -68,12 +74,17 @@ def _sgmv_shrink_kernel(
 
     a_ptr = (input_ptr + cur_seq_start * xm_stride + ram[:, None] * xm_stride +
              offset_k[None, :] * xk_stride)
-
-    cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
-        tl.pointer_type(input_ptr.dtype.element_ty))
-    cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
-    cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
-    cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
+    if NSLICE_NUM == 1:
+        cur_lora_ptr = lora_ptr
+        cur_lora_d0_stride = ls_d0_ptr
+        cur_lora_d1_stride = ls_d1_ptr
+        cur_lora_d2_stride = ls_d2_ptr
+    else:
+        cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
+            tl.pointer_type(input_ptr.dtype.element_ty))
+        cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
+        cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
+        cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
 
     b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
              rbn[None, :] * cur_lora_d1_stride +
@@ -99,7 +110,7 @@ def _sgmv_shrink_kernel(
     offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
 
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    cur_out_ptr = out_ptr + slice_id * c0_stride
+    cur_out_ptr = out_ptr if NSLICE_NUM == 1 else out_ptr + slice_id * c0_stride
     c_ptr = cur_out_ptr + offset_cm[:, None] * cm_stride + offset_cn[
         None, :] * cn_stride
     c_mask = (offset_cm[:, None] <
@@ -115,9 +126,7 @@ def _sgmv_shrink_kernel(
 _LORA_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
 
 
-#TODO FIX THIS
 def _get_lora_ptr(lora_a_weights, device):
-
     key = tuple(lora_weight.data_ptr() for lora_weight in lora_a_weights)
 
     if _LORA_PTR_DICT.get(key) is None:
@@ -137,10 +146,19 @@ def _get_lora_ptr(lora_a_weights, device):
             lora_strides_d1.append(lora_a_weight.stride(1))
             lora_strides_d2.append(lora_a_weight.stride(2))
 
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
-        lora_strides_d0_tensor = torch.tensor(lora_strides_d0, device=device)
-        lora_strides_d1_tensor = torch.tensor(lora_strides_d1, device=device)
-        lora_strides_d2_tensor = torch.tensor(lora_strides_d2, device=device)
+        if len(lora_a_weights) > 1:
+            lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
+            lora_strides_d0_tensor = torch.tensor(lora_strides_d0,
+                                                  device=device)
+            lora_strides_d1_tensor = torch.tensor(lora_strides_d1,
+                                                  device=device)
+            lora_strides_d2_tensor = torch.tensor(lora_strides_d2,
+                                                  device=device)
+        else:
+            lora_ptr_tensor = lora_a_weights[0]
+            lora_strides_d0_tensor = lora_strides_d0[0]
+            lora_strides_d1_tensor = lora_strides_d1[0]
+            lora_strides_d2_tensor = lora_strides_d2[0]
         _LORA_PTR_DICT[key] = (
             lora_ptr_tensor,
             lora_strides_d0_tensor,
@@ -216,30 +234,14 @@ def _sgmv_shrink(
         batches,
     )
 
-    _sgmv_shrink_kernel[grid](
-        inputs,
-        lora_ptr_tensor,
-        output_tensor,
-        N,
-        K,
-        b_seq_start_loc,
-        seq_len_tensor,
-        lora_indices_tensor,
-        scaling,
-        inputs.stride(0),
-        inputs.stride(1),
-        lora_strides_d0_tensor,
-        lora_strides_d1_tensor,
-        lora_strides_d2_tensor,
-        output_tensor.stride(0),
-        output_tensor.stride(1),
-        output_tensor.stride(2),
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_K,
-        EVEN_K,
-        SPLIT_K,
-    )
+    _sgmv_shrink_kernel[grid](inputs, lora_ptr_tensor, output_tensor, N, K,
+                              b_seq_start_loc, seq_len_tensor,
+                              lora_indices_tensor, scaling, inputs.stride(0),
+                              inputs.stride(1), lora_strides_d0_tensor,
+                              lora_strides_d1_tensor, lora_strides_d2_tensor,
+                              output_tensor.stride(0), output_tensor.stride(1),
+                              output_tensor.stride(2), BLOCK_M, BLOCK_N,
+                              BLOCK_K, EVEN_K, SPLIT_K, len(lora_a_weights))
     return
 
 

@@ -168,7 +168,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                                        offset_start,
                                        add_inputs=True)
         else:
-            # TODO fuse these kernels 
+            # TODO fuse these kernels
             for slice_idx in range(len(lora_b_stacked)):
                 self._apply_expand_decode(
                     y,
