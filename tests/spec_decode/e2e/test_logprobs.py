@@ -5,6 +5,7 @@ import pytest
 from vllm import SamplingParams
 
 from .conftest import run_equality_correctness_test
+from ..utils import maybe_enable_chunked_prefill
 
 
 @pytest.mark.parametrize(
@@ -27,7 +28,7 @@ from .conftest import run_equality_correctness_test
                              "num_speculative_tokens": 3,
                              "disable_logprobs_during_spec_decoding": True,
                          }])
-@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -41,17 +42,10 @@ def test_logprobs_equality(vllm_runner, common_llm_kwargs,
                            per_test_common_llm_kwargs, baseline_llm_kwargs,
                            test_llm_kwargs, batch_size: int, output_len: int,
                            seed: int, logprobs: int, prefill_chunk_size: int):
-    """Verify output logprobs are equal with and without speculative decoding.
+    """Verify output logprobs are equal with and without speculative decoding,
+        as well as with and without chunked prefill.
     """
-    if prefill_chunk_size > 0:
-        common_llm_kwargs.update(
-            **{
-                "enable_chunked_prefill": True,
-                "max_num_batched_tokens": prefill_chunk_size,
-                "max_num_seqs": prefill_chunk_size
-            })
-    else:
-        common_llm_kwargs["enable_chunked_prefill"] = False
+    maybe_enable_chunked_prefill(prefill_chunk_size, common_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,

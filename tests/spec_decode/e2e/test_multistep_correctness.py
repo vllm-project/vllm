@@ -104,8 +104,6 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         max_tokens=output_len,
         ignore_eos=True,
         temperature=temperature,
-        # logprobs=6,
-        # prompt_logprobs=6,
     )
 
     batch_tokens, batch_token_ids, _ = get_output_from_llm_generator(

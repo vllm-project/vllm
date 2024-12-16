@@ -939,6 +939,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # avoid padding or repetition to fit decodes, we separate them.
         for i, sg in enumerate(seq_group_metadata_list):
             if not sg.is_prompt:
+                # Requests are ordered as prefills|decodes=>no more prefills.
                 break
             num_logprobs = num_logprobs_per_seq[i]
             seq_kwargs = dict(token_id=-1,
@@ -967,7 +968,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             plogs = None
             if prompt_logprobs is not None:
                 # Even non-terminal prompt chunks can have logprobs here.
-                # plogs = seq_id_to_plogprob[sg.request_id]
                 plogs = prompt_logprobs[i]
             elif needs_plogs:
                 # Prompt logprobs are requested but `_disable_logprobs` is set.
@@ -980,6 +980,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     sg.token_chunk_size]
 
                 is_first_chunk = seq_data._num_computed_tokens == 0
+                # There's no prob generated for the first token in a sequence.
                 if is_first_chunk:
                     prompt_token_ids = prompt_token_ids[1:]
                 plogs = [
