@@ -124,6 +124,8 @@ void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   using ElementD = typename Gemm::ElementD;
 
   // Interface stride expected from the argument a (will get transposed)
+  // We compute C^T = B^T * A^T, but we assume B is transposed before
+  // compression and hence the bt_* naming
   using LayoutA = cutlass::layout::RowMajor;
   using LayoutB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutA;
   using LayoutE = typename Gemm::GemmKernel::CollectiveMainloop::LayoutE;
@@ -135,12 +137,16 @@ void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   auto layout_A = make_cute_layout<StrideA>(a, "A");
   auto layout_D = make_cute_layout<StrideD>(out, "D");
 
+  // Transpose A and D
+  // A doesn't need to be transposed since cutlass expects a NxK matrix
+  // for B (which is At)
   auto stride_At = layout_A.stride();
   auto stride_Dt = permute_layout<1, 0, 2>(layout_D).stride();
 
   using GemmKernel = typename Gemm::GemmKernel;
   typename GemmKernel::ProblemShape prob_shape{
-      (int)bt_nzs.size(0), (int)size<0>(layout_A), (int)size<1>(layout_A), 1};
+      static_cast<int>(bt_nzs.size(0)), static_cast<int>(size<0>(layout_A)),
+      static_cast<int>(size<1>(layout_A)), 1};
 
   using ElementE = typename GemmKernel::CollectiveMainloop::ElementE;
   using SparseConfig = typename GemmKernel::CollectiveMainloop::SparseConfig;

@@ -317,14 +317,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // quantization, as well as bias
   ops.def(
       "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
-      "                         Tensor b,"
-      "                         Tensor e, Tensor a_scales,"
+      "                         Tensor bt_nzs,"
+      "                         Tensor bt_meta, Tensor a_scales,"
       "                         Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
 
   // CUTLASS sparse matrix compressor
   ops.def(
-      "cutlass_sparse_compress_entry(Tensor! a_compressed, Tensor! e,"
+      "cutlass_sparse_compress_entry(Tensor! a_nzs, Tensor! a_meta,"
       "                              Tensor a) -> bool");
   ops.impl("cutlass_sparse_compress_entry", &cutlass_sparse_compress_entry);
 

@@ -18,7 +18,7 @@ using namespace vllm;
 
 /// Make A structured sparse by replacing elements with 0 and compress it
 template <typename ElementA_, typename ElementAcc_>
-bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
+bool cutlass_sparse_compress(torch::Tensor& a_nzs, torch::Tensor& a_meta,
                              torch::Tensor const& a) {
   // Checks for conformality
   TORCH_CHECK(a.dtype() == torch::kInt8 || a.dtype() == torch::kFloat8_e4m3fn ||
@@ -122,9 +122,9 @@ bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
 
   auto a_ptr = static_cast<ElementA*>(a.data_ptr());
 
-  auto a_compressed_ptr = static_cast<ElementA*>(a_compressed.data_ptr());
-  auto e_ptr =
-      static_cast<typename Gemm::CollectiveMainloop::ElementE*>(e.data_ptr());
+  auto a_nzs_ptr = static_cast<ElementA*>(a_nzs.data_ptr());
+  auto a_meta_ptr = static_cast<typename Gemm::CollectiveMainloop::ElementE*>(
+      a_meta.data_ptr());
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = 0;
@@ -132,7 +132,7 @@ bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
       cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
           hw_info.device_id);
   typename Compressor::Arguments arguments{
-      prob_shape, {a_ptr, stride_A, a_compressed_ptr, e_ptr}, {hw_info}};
+      prob_shape, {a_ptr, stride_A, a_nzs_ptr, a_meta_ptr}, {hw_info}};
 
   Compressor compressor_op;
   size_t workspace_size = Compressor::get_workspace_size(arguments);
@@ -146,18 +146,18 @@ bool cutlass_sparse_compress(torch::Tensor& a_compressed, torch::Tensor& e,
   return true;
 }
 
-bool cutlass_sparse_compress_entry(torch::Tensor& a_compressed,
-                                   torch::Tensor& e, torch::Tensor const& a) {
+bool cutlass_sparse_compress_entry(torch::Tensor& a_nzs, torch::Tensor& a_meta,
+                                   torch::Tensor const& a) {
   if (a.dtype() == torch::kBFloat16) {
-    return cutlass_sparse_compress<cutlass::bfloat16_t, float>(a_compressed, e,
+    return cutlass_sparse_compress<cutlass::bfloat16_t, float>(a_nzs, a_meta,
                                                                a);
   } else if (a.dtype() == torch::kFloat16) {
-    return cutlass_sparse_compress<cutlass::half_t, float>(a_compressed, e, a);
+    return cutlass_sparse_compress<cutlass::half_t, float>(a_nzs, a_meta, a);
   } else if (a.dtype() == torch::kFloat8_e4m3fn) {
-    return cutlass_sparse_compress<cutlass::float_e4m3_t, float>(a_compressed,
-                                                                 e, a);
+    return cutlass_sparse_compress<cutlass::float_e4m3_t, float>(a_nzs, a_meta,
+                                                                 a);
   } else if (a.dtype() == torch::kInt8) {
-    return cutlass_sparse_compress<int8_t, int32_t>(a_compressed, e, a);
+    return cutlass_sparse_compress<int8_t, int32_t>(a_nzs, a_meta, a);
   }
   return false;
 }
