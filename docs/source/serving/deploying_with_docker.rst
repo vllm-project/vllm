@@ -51,11 +51,11 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
 .. code-block:: console
 
-    # Example of building on Nvidia GH200 server. (Memory usage: ~180GB, Build time: ~2387s / ~40 min)
+    # Example of building on Nvidia GH200 server. (Memory usage: ~12GB, Build time: ~1475s / ~25 min, Image size: 7.26GB)
     $ DOCKER_BUILDKIT=1 sudo docker build . \
       --target vllm-openai \
       -platform "linux/arm64" \
-      -t drikster80/vllm-gh200-openai:v0.6.4.post1 \
+      -t vllm/vllm-gh200-openai:latest \
       --build-arg max_jobs=66 \
       --build-arg nvcc_threads=2 \
       --build-arg torch_cuda_arch_list="9.0+PTX" \
