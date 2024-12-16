@@ -220,13 +220,13 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--use_residual",
+    parser.add_argument("--use-residual",
                         action="store_true",
                         help="Whether to use residual connection")
     parser.add_argument(
-        "--save_path",
+        "--save-path",
         type=str,
-        default="./configs/benchmark_ops/rmsnorm/",
+        default="./configs/rmsnorm/",
         help="Path to save rmsnorm benchmark results",
     )
     args = parser.parse_args()
