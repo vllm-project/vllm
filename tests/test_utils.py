@@ -303,8 +303,8 @@ def test_memory_profiling():
         handle2 = lib.cudaMalloc(256 * 1024 * 1024)
 
     # Check that the memory usage is within 5% of the expected values
-    non_torch_ratio = result.non_torch_increase_in_bytes / 256 * 1024 * 1024
-    torch_peak_ratio = result.torch_peak_increase_in_bytes / 1024 * 1024 * 1024
+    non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
+    torch_peak_ratio = result.torch_peak_increase_in_bytes / (1024 * 1024 * 1024) # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
     assert abs(torch_peak_ratio - 1) <= 0.05
     del weights
