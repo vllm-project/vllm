@@ -32,7 +32,7 @@ class RequestState:
     """
     RequestState manages concurrency between:
         * the output_handler(), which pulls outputs from EngineCore
-        * the per-request generate(), which is the interface to client code.
+        * the per-request generate(), which yields to the API server
 
     The output_handler adds new RequestOutputs to out_list and sets the 
     asyncio event, notifying the generate() that there is work to do.
