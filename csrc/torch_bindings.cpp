@@ -325,7 +325,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // CUTLASS sparse matrix compressor
   ops.def(
       "cutlass_sparse_compress_entry(Tensor! a_compressed, Tensor! e,"
-      " Tensor a) -> bool");
+      "                              Tensor a) -> bool");
   ops.impl("cutlass_sparse_compress_entry", &cutlass_sparse_compress_entry);
 
   // Mamba selective scan kernel
