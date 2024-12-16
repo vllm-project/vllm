@@ -56,6 +56,7 @@ class FlashAttentionMetadata:
     seq_start_loc: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    num_input_tokens: int = 0  # Number of tokens including padding.
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -134,18 +135,31 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
+        assert output is not None, "Output tensor must be provided."
+
         if attn_metadata is None:
             # Profiling run.
             return output
 
-        num_actual_tokens = attn_metadata.num_actual_tokens
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
 
+        num_actual_tokens = attn_metadata.num_actual_tokens
         # Reshape the input keys and values and store them in the cache.
-        key_cache = kv_cache[0]
-        value_cache = kv_cache[1]
+        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens] and
+        # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
+        # the slot_mapping's shape to determine the number of actual tokens.
+        key_cache, value_cache = kv_cache.unbind(0)
         torch.ops._C_cache_ops.reshape_and_cache_flash(
-            key[:num_actual_tokens],
-            value[:num_actual_tokens],
+            key,
+            value,
             key_cache,
             value_cache,
             attn_metadata.slot_mapping,

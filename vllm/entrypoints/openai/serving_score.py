@@ -13,9 +13,9 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, ScoreRequest,
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
+from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import make_async, merge_async_iterators, random_uuid
+from vllm.utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -24,13 +24,13 @@ def request_output_to_score_response(
         final_res_batch: List[PoolingRequestOutput], request_id: str,
         created_time: int, model_name: str) -> ScoreResponse:
     data: List[ScoreResponseData] = []
-    score = None
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
-        if final_res is not None:
-            score = final_res.outputs.embedding
-            score_data = ScoreResponseData(index=idx, score=score)
-            data.append(score_data)
+        classify_res = ScoringRequestOutput.from_base(final_res)
+
+        score_data = ScoreResponseData(index=idx,
+                                       score=classify_res.outputs.score)
+        data.append(score_data)
 
     usage = UsageInfo(
         prompt_tokens=num_prompt_tokens,
@@ -102,7 +102,7 @@ class OpenAIServingScores(OpenAIServing):
             return error_check_ret
 
         model_name = request.model
-        request_id = f"score-{random_uuid()}"
+        request_id = f"score-{self._base_request_id(raw_request)}"
         created_time = int(time.monotonic())
         truncate_prompt_tokens = request.truncate_prompt_tokens
 
@@ -119,7 +119,7 @@ class OpenAIServingScores(OpenAIServing):
 
             if prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
-                                          "for embedding models")
+                                          "for scoring models")
 
             if isinstance(tokenizer, MistralTokenizer):
                 raise ValueError(
