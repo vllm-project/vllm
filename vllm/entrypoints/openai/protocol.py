@@ -705,8 +705,9 @@ class CompletionRequest(OpenAIBaseModel):
         if default_sampling_params is None:
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
-        temperature = self.temperature or default_sampling_params.get(
-            "temperature", 1.0)
+
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get("temperature", 1.0)
 
         return BeamSearchParams(
             beam_width=n,
