@@ -36,7 +36,7 @@ __global__ void act_and_mul_quant_kernel(
 
   const int32_t tgt_elems_per_block = div_ceil(d, blocks_per_token);
   const int32_t elems_per_block =
-      next_multiple_of(elems_per_128bit_load, tgt_elems_per_block);
+      round_to_next_multiple_of(tgt_elems_per_block, elems_per_128bit_load);
   const int32_t block_start = blockIdx.y * elems_per_block;
   int32_t block_end = block_start + elems_per_block;
   block_end = block_end > d ? d : block_end;
@@ -47,7 +47,7 @@ __global__ void act_and_mul_quant_kernel(
 
   // 128-bit vectorized code
   const int32_t vec_loop_end =
-      prev_multiple_of(elems_per_128bit_load, block_end);
+      round_to_previous_multiple_of(elems_per_128bit_load, block_end);
   const int32_t vec_end_idx = vec_loop_end / elems_per_128bit_load;
   const int32_t vec_start_idx = block_start / elems_per_128bit_load;
 
