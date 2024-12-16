@@ -14,9 +14,11 @@ from vllm.worker.worker_base import WorkerBase
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+    from ray.exceptions import RayChannelTimeoutError
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+    from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -35,6 +37,7 @@ class RayExecutor:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.compiled_dag_refs = []
         self._init_executor()
 
     def _init_executor(self) -> None:
@@ -317,6 +320,27 @@ class RayExecutor:
         # get the first output.
         output = ray.get(self.forward_dag.execute(scheduler_output))[0]
         return output
+
+    def execute_model_pipelined(
+            self, scheduler_output
+    ) -> List[Tuple[ModelRunnerOutput, SchedulerOutput]]:
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag()
+
+        outputs = []
+        for dag_ref, schd_output in self.compiled_dag_refs:
+            try:
+                outputs.append((ray.get(dag_ref, timeout=0)[0], schd_output))
+            except RayChannelTimeoutError:
+                break
+        self.compiled_dag_refs = self.compiled_dag_refs[len(outputs):]
+        if len(self.compiled_dag_refs
+               ) == self.parallel_config.pipeline_parallel_size:
+            outputs.append((ray.get(self.compiled_dag_refs[0],
+                                    timeout=-1)[0], scheduler_output))
+        ref = self.forward_dag.execute(scheduler_output)
+        self.compiled_dag_refs.append((ref, scheduler_output))
+        return outputs
 
     def profile(self, is_start=True):
         raise NotImplementedError

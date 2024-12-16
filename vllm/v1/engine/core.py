@@ -113,7 +113,7 @@ class EngineCore:
             scheduler_output, output)
         return engine_core_outputs
 
-    def step2(self) -> List[EngineCoreOutput]:
+    def step2(self) -> None:
         """Schedule, execute, and make output."""
 
         if not self.scheduler.has_unfinished_requests():
@@ -122,10 +122,11 @@ class EngineCore:
         scheduler_output = self.scheduler.schedule()
         # output is the result of prior microbatch(es), and empty
         # when there is no prior microbatch or none are finished.
-        output = self.model_executor.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output)
-        return engine_core_outputs
+        outputs = self.model_executor.execute_model_pipelined(scheduler_output)
+        for output in outputs:
+            engine_core_outputs = self.scheduler.update_from_output(
+                output[1], output[0])
+            self.output_queue.put_nowait(engine_core_outputs)
 
     def shutdown(self):
         self.model_executor.shutdown()
@@ -358,9 +359,6 @@ class EngineCoreProc(EngineCore):
 
             # 3) Step the engine core.
             outputs = self.step2()
-
-            # 4) Put EngineCoreOutputs into the output queue.
-            self.output_queue.put_nowait(outputs)
 
             self._log_stats()
 
