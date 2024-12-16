@@ -1,0 +1,3 @@
+--index-url https://download.pytorch.org/whl/nightly/cu124
+torchvision; platform_machine == 'aarch64'
+torch; platform_machine == 'aarch64'
