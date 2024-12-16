@@ -118,9 +118,9 @@ Text Generation (``--task generate``)
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
     - ✅︎
     - ✅︎
-  * - :code:`CohereForCausalLM`
+  * - :code:`CohereForCausalLM`,:code:`Cohere2ForCausalLM`
     - Command-R
-    - :code:`CohereForAI/c4ai-command-r-v01`, etc.
+    - :code:`CohereForAI/c4ai-command-r-v01`, :code:`CohereForAI/c4ai-command-r7b-12-2024`, etc.
     - ✅︎
     - ✅︎
   * - :code:`DbrxForCausalLM`

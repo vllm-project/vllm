@@ -53,6 +53,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
                                          trust_remote_code=True),
+    "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
+                                         trust_remote_code=True),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
     "DeciLMForCausalLM": _HfExamplesInfo("Deci/DeciLM-7B-instruct",
                                          trust_remote_code=True),
