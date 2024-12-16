@@ -1,8 +1,8 @@
-# Aqlm Example
+Aqlm Example
+============
 
-Source <https://github.com/vllm-project/vllm/blob/main/examples/aqlm_example.py>.
+Source https://github.com/vllm-project/vllm/blob/main/examples/aqlm_example.py.
 
-```{literalinclude} ../../../../examples/aqlm_example.py
-:language: python
-:linenos: true
-```
+.. literalinclude:: ../../../../examples/aqlm_example.py
+    :language: python
+    :linenos:

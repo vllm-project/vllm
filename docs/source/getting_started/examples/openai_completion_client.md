@@ -1,8 +1,8 @@
-# OpenAI Completion Client
+OpenAI Completion Client
+========================
 
-Source <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>.
+Source https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py.
 
-```{literalinclude} ../../../../examples/openai_completion_client.py
-:language: python
-:linenos: true
-```
+.. literalinclude:: ../../../../examples/openai_completion_client.py
+    :language: python
+    :linenos:

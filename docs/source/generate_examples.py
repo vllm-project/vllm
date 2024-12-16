@@ -38,7 +38,7 @@ def generate_examples():
 
     # Destination paths
     doc_dir = root_dir / "docs/source/getting_started/examples"
-    doc_paths = [doc_dir / f"{path.stem}.rst" for path in script_paths]
+    doc_paths = [doc_dir / f"{path.stem}.md" for path in script_paths]
 
     # Generate the example docs for each example script
     for script_path, doc_path in zip(script_paths, doc_paths):
@@ -54,8 +54,8 @@ def generate_examples():
             f.write(content)
 
     # Generate the toctree for the example scripts
-    with open(doc_dir / "examples_index.template.rst") as f:
+    with open(doc_dir / "examples_index.template.md") as f:
         examples_index = f.read()
-    with open(doc_dir / "examples_index.rst", "w+") as f:
+    with open(doc_dir / "examples_index.md", "w+") as f:
         example_docs = "\n   ".join(path.stem for path in script_paths)
         f.write(examples_index.replace(r"%EXAMPLE_DOCS%", example_docs))

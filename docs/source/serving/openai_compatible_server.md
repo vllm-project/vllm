@@ -2,7 +2,7 @@
 
 vLLM provides an HTTP server that implements OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
 
-You can start the server using Python, or using [Docker](deploying_with_docker.rst):
+You can start the server using Python, or using [Docker](deploying_with_docker.md):
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
@@ -32,7 +32,7 @@ We currently support the following OpenAI APIs:
 - [Completions API](https://platform.openai.com/docs/api-reference/completions)
   - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
-  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
+  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.md).
     - *Note: `image_url.detail` parameter is not supported.*
   - We also support `audio_url` content type for audio files.
     - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
@@ -41,7 +41,7 @@ We currently support the following OpenAI APIs:
 - [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
   - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
     which will be treated as a single prompt to the model according to its chat template.
-    - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
+    - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.md) for details.
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
 ## Score API for Cross Encoder Models
@@ -232,7 +232,7 @@ print(completion._request_id)
 
 ### Extra Parameters for Completions API
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -250,7 +250,7 @@ The following extra parameters are supported:
 
 ### Extra Parameters for Chat Completions API
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -268,7 +268,7 @@ The following extra parameters are supported:
 
 ### Extra Parameters for Embeddings API
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
