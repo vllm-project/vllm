@@ -1,6 +1,6 @@
 import os
-from typing import List, Optional
 import weakref
+from typing import List, Optional
 
 import msgspec
 import zmq
