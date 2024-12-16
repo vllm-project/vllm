@@ -328,9 +328,19 @@ Then, you can use the OpenAI client as follows:
 
 .. code-block:: python
 
+    import base64
+    import requests
     from openai import OpenAI
     from vllm.assets.audio import AudioAsset
-    import requests, base64
+
+    def encode_base64_content_from_url(content_url: str) -> str:
+        """Encode a content retrieved from a remote url to base64 format."""
+
+        with requests.get(content_url) as response:
+            response.raise_for_status()
+            result = base64.b64encode(response.content).decode('utf-8')
+
+        return result
 
     openai_api_key = "EMPTY"
     openai_api_base = "http://localhost:8000/v1"
@@ -342,14 +352,6 @@ Then, you can use the OpenAI client as follows:
 
     # Any format supported by librosa is supported
     audio_url = AudioAsset("winning_call").url
-    def encode_base64_content_from_url(content_url: str) -> str:
-        """Encode a content retrieved from a remote url to base64 format."""
-
-        with requests.get(content_url) as response:
-            response.raise_for_status()
-            result = base64.b64encode(response.content).decode('utf-8')
-
-        return result
     audio_base64 = encode_base64_content_from_url(audio_url)
 
     chat_completion_from_base64 = client.chat.completions.create(
