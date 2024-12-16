@@ -296,11 +296,11 @@ class HpuModelAdapter:
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
 
-        if not is_fake_hpu() and htorch.utils.internal.is_lazy():
+        if not is_fake_hpu():
             block_mapping = torch.nn.functional.one_hot(metadata.block_groups,
                                                         num_classes=batch_size)
         else:
-            # Unfortunately one_hot on CPU/torch.compile mode/eager mode
+            # Unfortunately one_hot on CPU
             # doesn't handle out of bounds classes so we need to convert
             # all negative values to 0 (block_mapping) or bs (block_groups)
             block_groups = metadata.block_groups.to(torch.long)
