@@ -139,7 +139,7 @@ input tensors and capturing cudagraphs.
 ## Model
 
 Every model runner object has one model object, which is the actual
-`torch.nn.Module` instance. See {ref}`huggingface_integration` for how various
+`torch.nn.Module` instance. See [huggingface_integration](#huggingface-integration) for how various
 configurations affect the class we ultimately get.
 
 ## Class Hierarchy
