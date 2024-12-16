@@ -15,18 +15,12 @@ def fix_case(text: str) -> str:
     return text
 
 
-def underline(title: str, character: str = "=") -> str:
-    return f"{title}\n{character * len(title)}"
-
-
 def generate_title(filename: str) -> str:
     # Turn filename into a title
     title = filename.replace("_", " ").title()
     # Handle acronyms and names
     title = fix_case(title)
-    # Underline title
-    title = underline(title)
-    return title
+    return f"# {title}"
 
 
 def generate_examples():
@@ -47,9 +41,9 @@ def generate_examples():
         include_path = '../../../..' / script_path.relative_to(root_dir)
         content = (f"{generate_title(doc_path.stem)}\n\n"
                    f"Source {script_url}.\n\n"
-                   f".. literalinclude:: {include_path}\n"
-                   "    :language: python\n"
-                   "    :linenos:\n")
+                   f"```{{literalinclude}} {include_path}\n"
+                   ":language: python\n"
+                   ":linenos:\n```")
         with open(doc_path, "w+") as f:
             f.write(content)
 
@@ -57,5 +51,5 @@ def generate_examples():
     with open(doc_dir / "examples_index.template.md") as f:
         examples_index = f.read()
     with open(doc_dir / "examples_index.md", "w+") as f:
-        example_docs = "\n   ".join(path.stem for path in script_paths)
+        example_docs = "\n".join(path.stem + ".md" for path in script_paths)
         f.write(examples_index.replace(r"%EXAMPLE_DOCS%", example_docs))

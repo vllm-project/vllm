@@ -707,11 +707,13 @@ See {ref}`this page <generative_models>` for more information on how to use gene
     -
 ```
 
+```{eval-rst}
 {sup}`E`
 
  Pre-computed embeddings can be inputted for this modality.
 
 {sup}`+`
+```
 
  Multiple items can be inputted per text prompt for this modality.
 

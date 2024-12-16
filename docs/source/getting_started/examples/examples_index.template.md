@@ -1,8 +1,8 @@
 # Examples
 
 ```{toctree}
-:caption: Scripts
 :maxdepth: 1
+:caption: Scripts
 
 %EXAMPLE_DOCS%
 ```
