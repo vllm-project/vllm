@@ -146,3 +146,12 @@ def test_serving_chat_could_load_correct_generation_config():
 
     assert mock_engine.generate.call_args.args[1].temperature == 0.1
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
+
+    # Test When temperature==0.0
+    req.temperature = 0.0
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].temperature == 0.0
+    assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05

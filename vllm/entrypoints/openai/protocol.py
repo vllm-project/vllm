@@ -361,8 +361,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if default_sampling_params is None:
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
-        temperature = self.temperature or default_sampling_params.get(
-            "temperature", 0.0)
+
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get("temperature", 0.0)
 
         return BeamSearchParams(
             beam_width=n,
@@ -389,7 +390,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             repetition_penalty = (default_sampling_params.get(
                 "repetition_penalty", 1.0))
         if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get("temperature", 0.7)
+            temperature = default_sampling_params.get("temperature", 1.0)
         if (top_p := self.top_p) is None:
             top_p = default_sampling_params.get("top_p", 1.0)
         if (top_k := self.top_k) is None:
@@ -705,7 +706,7 @@ class CompletionRequest(OpenAIBaseModel):
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
         temperature = self.temperature or default_sampling_params.get(
-            "temperature", 0.0)
+            "temperature", 1.0)
 
         return BeamSearchParams(
             beam_width=n,
