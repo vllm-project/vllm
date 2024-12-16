@@ -261,7 +261,6 @@ class WhisperEncoderLayer(nn.Module):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        hidden_states = hidden_states.view(residual.size())  ## HACK
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -393,17 +392,18 @@ class WhisperEncoder(nn.Module):
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
-    
+
         embed_pos = self.embed_positions.weight
 
         hidden_states = inputs_embeds + embed_pos
+        hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
         for idx, encoder_layer in enumerate(self.layers):
             hidden_states = encoder_layer(
                 hidden_states,
                 kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata,
             )
-        
+
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
@@ -653,13 +653,13 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
             attn_metadata=attn_metadata,
         )
         return decoder_outputs
-    
+
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.proj_out, hidden_states,
                                        sampling_metadata)
         return logits
-    
+
     def sample(
         self,
         logits: torch.Tensor,
