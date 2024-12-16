@@ -231,11 +231,11 @@ class Worker(LocalOrDistributedWorkerBase):
                f" = {(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
                "model weights take "
                f"{(result.weights_memory_in_bytes / GiB_bytes):.2f}GiB;"
-               " non_torch_memory takes"
+               " non_torch_memory takes "
                f"{(result.non_torch_increase_in_bytes / GiB_bytes):.2f}GiB;"
-               " PyTorch activation peak memory takes"
+               " PyTorch activation peak memory takes "
                f"{(result.torch_peak_increase_in_bytes / GiB_bytes):.2f}GiB;"
-               " the rest of the memory reserved for KV Cache is"
+               " the rest of the memory reserved for KV Cache is "
                f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
 
         logger.info(msg)
