@@ -8,8 +8,9 @@ from transformers import BambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import _BATCH_SIZES_TO_CAPTURE, CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -28,9 +29,12 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.utils import LayerBlockType
 
-from .interfaces import HasInnerState, SupportsLoRA
-from .utils import maybe_prefix
+from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -291,16 +295,24 @@ class BambaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
 
-        decoder_layers = []
-        for i in range(config.num_hidden_layers):
-            layer_class = ALL_DECODER_LAYER_TYPES[config.layers_block_type[i]]
-            decoder_layers.append(
-                layer_class(config,
-                            layer_idx=i,
-                            cache_config=cache_config,
-                            quant_config=quant_config,
-                            prefix=f"{prefix}.layers.{i}"))
-        self.layers = nn.ModuleList(decoder_layers)
+        def get_layer(prefix: str):
+            layer_idx = int(prefix.rsplit(".", 1)[1])
+            layer_class = ALL_DECODER_LAYER_TYPES[
+                config.layers_block_type[layer_idx]]
+            return layer_class(
+                config,
+                layer_idx,
+                cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
+
         self.final_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
 
@@ -314,6 +326,7 @@ class BambaModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
@@ -331,10 +344,17 @@ class BambaModel(nn.Module):
                 seq_idx[srt:end] = i
             seq_idx.unsqueeze_(0)
 
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
+            residual = None
         else:
-            hidden_states = self.get_input_embeddings(input_ids)
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
         residual = None
         num_attn = 0
         for i in range(len(self.layers)):
@@ -358,11 +378,17 @@ class BambaModel(nn.Module):
                 mamba_cache_params=layer_mamba_cache_params,
                 sequence_idx=seq_idx,
             )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
         hidden_states, _ = self.final_layernorm(hidden_states, residual)
         return hidden_states
 
 
-class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
+class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -387,6 +413,8 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
@@ -419,6 +447,26 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                                                 config.vocab_size)
         self.sampler = get_sampler()
 
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+        # follow jamba
+        if self.scheduler_config is not None and \
+            not self.model_config.enforce_eager:
+            # for compilation
+            if self.scheduler_config.max_num_seqs > \
+                vllm_config.compilation_config.max_capture_size:
+                self.max_batch_size = \
+                    vllm_config.compilation_config.max_capture_size
+            else:
+                self.max_batch_size = vllm_config.pad_for_cudagraph(
+                    self.scheduler_config.max_num_seqs)
+        elif self.scheduler_config is not None:
+            # for eager just take the scheduler_config if avail
+            self.max_batch_size =self.scheduler_config.max_num_seqs 
+        else:
+            self.max_batch_size = 8192 + 2
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
@@ -431,16 +479,12 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
-            max_batch_size = (VllmConfig.get_graph_batch_size(
-                self.scheduler_config.max_num_seqs) if self.scheduler_config
-                              else max(_BATCH_SIZES_TO_CAPTURE) + 2)
 
-            layers_type = self.config.layers_block_type
-            num_mamba_layers = sum(
-                [layer_type == "mamba" for layer_type in layers_type])
+            num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+                self.vllm_config.parallel_config, LayerBlockType.mamba)
 
             self.mamba_cache = MambaCacheManager(
-                self.lm_head.weight.dtype, num_mamba_layers, max_batch_size,
+                self.lm_head.weight.dtype, num_mamba_layers, self.max_batch_size,
                 *self._get_mamba_cache_shape())
         (
             mamba_cache_tensors,
@@ -452,6 +496,7 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                                               state_indices_tensor)
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, mamba_cache_params,
+                                   intermediate_tensors,
                                    inputs_embeds)
 
         return hidden_states
@@ -543,6 +588,9 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -551,6 +599,8 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                        continue
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
