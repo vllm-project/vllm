@@ -65,7 +65,8 @@ class EngineCore:
 
         self._last_logging_time = time.time()
 
-        self.mm_input_mapper_server = MMInputMapperServer()
+        self.mm_input_mapper_server = MMInputMapperServer(
+            vllm_config.model_config)
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:

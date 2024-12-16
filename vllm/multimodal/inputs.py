@@ -1,6 +1,6 @@
 from collections import UserDict, defaultdict
-from typing import (Any, Dict, List, Literal, Mapping, Optional, Sequence,
-                    Tuple, TypedDict, TypeVar, Union, cast, final)
+from typing import (Any, Dict, List, Literal, Mapping, Sequence, Tuple,
+                    TypedDict, TypeVar, Union, cast, final)
 
 import numpy as np
 import torch
@@ -215,7 +215,7 @@ class MultiModalInputsV2(TypedDict):
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: NotRequired[List[Optional[str]]]
+    mm_hashes: NotRequired[List[str]]
     """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict

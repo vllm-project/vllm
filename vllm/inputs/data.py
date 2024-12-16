@@ -162,7 +162,7 @@ class TokenInputs(TypedDict):
     Placeholder ranges for the multi-modal data.
     """
 
-    multi_modal_hashes: NotRequired[List[Optional[str]]]
+    multi_modal_hashes: NotRequired[List[str]]
     """
     The hashes of the multi-modal data.
     """
@@ -182,7 +182,7 @@ def token_inputs(
     prompt: Optional[str] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
     multi_modal_inputs: Optional["MultiModalKwargs"] = None,
-    multi_modal_hashes: Optional[List[Optional[str]]] = None,
+    multi_modal_hashes: Optional[List[str]] = None,
     multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> TokenInputs:
@@ -304,7 +304,7 @@ class SingletonInputsAdapter:
         assert_never(inputs)
 
     @cached_property
-    def multi_modal_hashes(self) -> List[Optional[str]]:
+    def multi_modal_hashes(self) -> List[str]:
         inputs = self.inputs
 
         if inputs["type"] == "token":

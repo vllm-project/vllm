@@ -56,6 +56,7 @@ class LLMEngine:
 
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config.model_config,
+                                   vllm_config.cache_config,
                                    vllm_config.lora_config, self.tokenizer,
                                    input_registry, mm_registry)
 
