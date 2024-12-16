@@ -245,13 +245,39 @@ class WhisperDecoderCrossAttention(WhisperAttention):
             cache_config=cache_config,
             prefix=prefix,
         )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata = None,
+        encoder_hidden_states: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ):
+        q, _ = self.q_proj(hidden_states)
+
+        if encoder_hidden_states is not None:
+            k, _ = self.k_proj(encoder_hidden_states)
+            v, _ = self.v_proj(encoder_hidden_states)
+        else:
+            k = v = None
+
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+                                attn_type=AttentionType.ENCODER_DECODER)
+
+        output, _ = self.out_proj(attn_output)
+
+        return output
+
+        output, _ = self.out_proj(attn_output)
         # HACK
         query_lens = attn_metadata.query_start_loc.diff().tolist()
         hidden_states = list(hidden_states.split(query_lens))
@@ -404,7 +430,7 @@ class WhisperDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ):
@@ -422,6 +448,7 @@ class WhisperDecoderLayer(nn.Module):
         hidden_states = self.encoder_attn(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
+            kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states
@@ -470,7 +497,6 @@ class WhisperEncoder(nn.Module):
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
-        print("INPUTS EMBEDS", inputs_embeds.size())
     
         embed_pos = self.embed_positions.weight
 
@@ -511,7 +537,7 @@ class WhisperDecoder(nn.Module):
         self,
         input_ids,
         positions: torch.Tensor,
-        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
@@ -524,7 +550,7 @@ class WhisperDecoder(nn.Module):
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 kv_cache=kv_caches[idx],
-                attn_metadata=attn_metadata
+                attn_metadata=attn_metadata,
             )
 
         hidden_states = self.layer_norm(hidden_states)
@@ -541,17 +567,21 @@ class WhisperModel(nn.Module):
 
     def forward(
         self,
-        input_features: torch.FloatTensor,
+        input_features: Optional[torch.FloatTensor],
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor: 
-        encoder_outputs = self.encoder(
-            input_features,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-        )
+    ) -> torch.Tensor:
+        if input_features is not None:
+            # Prefill encoder kv-caches
+            encoder_outputs = self.encoder(
+                input_features,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
+            )
+        else:
+            encoder_outputs = None
 
         decoder_outputs = self.decoder(
             input_ids=input_ids,
@@ -677,9 +707,11 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
-        print(attn_metadata.encoder_seq_lens, attn_metadata.encoder_seq_start_loc)
+        input_features = kwargs.get("input_features")
+        if input_features is not None:
+            input_features = input_features.to(torch.float16)
         decoder_outputs = self.model(
-            input_features=kwargs["input_features"].to(torch.float16),
+            input_features=input_features,
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,

@@ -774,10 +774,7 @@ class FlashAttentionImpl(AttentionImpl):
                     out=prefill_output,
                 )
 
-        print("METADATA", attn_metadata)
-
         if decode_meta := attn_metadata.decode_metadata:
-            print("DECODE_META", decode_meta)
             # Decoding run.
             # Use flash_attn_varlen_func kernel for speculative decoding
             # because different queries might have different lengths.

@@ -1382,7 +1382,7 @@ class Scheduler:
                     # the subsequent comms can still use delta, but
                     # `multi_modal_data` will be None.
                     multi_modal_data=(seq_group.multi_modal_data or seq_group.encoder_seq.multi_modal_data)
-                    ,#if scheduler_outputs.num_prefill_groups > 0 else None,
+                    if scheduler_outputs.num_prefill_groups > 0 else None,
                     multi_modal_placeholders=seq_group.multi_modal_placeholders
                     if scheduler_outputs.num_prefill_groups > 0 else None,
                     mm_processor_kwargs=seq_group.mm_processor_kwargs,
