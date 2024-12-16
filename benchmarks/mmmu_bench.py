@@ -30,7 +30,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
-async def sample_mmmu_pro_vision_requests(
+def sample_mmmu_pro_vision_requests(
     dataset,
     num_requests: int,
     image_hit_rate: float,
@@ -42,6 +42,8 @@ async def sample_mmmu_pro_vision_requests(
     )
     dataset = dataset.take(num_unique_images)
 
+    # The dataset with streaming=True fetches (downloads) 64 rows at a time.
+    print("Fetching data. This may take a while...")
     for data in dataset:
         if len(sampled_requests) == num_requests:
             break
@@ -86,7 +88,7 @@ async def sample_mmmu_pro_vision_requests(
     return sampled_requests
 
 
-async def sample_hf_requests(
+def sample_hf_requests(
     num_requests: int,
     random_seed: int,
     image_hit_rate: float,
@@ -96,11 +98,12 @@ async def sample_hf_requests(
                            split="test",
                            streaming=True)
     dataset = dataset.shuffle(seed=random_seed)
-    return await sample_mmmu_pro_vision_requests(dataset, num_requests,
-                                                 image_hit_rate)
+    return sample_mmmu_pro_vision_requests(dataset, num_requests,
+                                           image_hit_rate)
 
 
-async def initialize_llm(engine_args):
+def initialize_llm(engine_args):
+    print("Initializing LLM...")
     return LLM(**dataclasses.asdict(engine_args))
 
 
@@ -111,12 +114,18 @@ async def main(args: argparse.Namespace):
 
     sampling_params = SamplingParams(max_tokens=args.output_len, temperature=0)
 
-    # Concurrently initialize the LLM and sample data
+    # Concurrently initialize the LLM and sample data. Note that since
+    # both initialize_llm and sample_hf_requests are blocking, we need to
+    # use asyncio.to_thread to create async coroutines.
+    st = time.perf_counter()
     sampling_task = asyncio.create_task(
-        sample_hf_requests(args.num_prompts, args.seed, args.image_hit_rate))
-    llm_task = asyncio.create_task(initialize_llm(engine_args))
+        asyncio.to_thread(sample_hf_requests, args.num_prompts, args.seed,
+                          args.image_hit_rate))
+    llm_task = asyncio.create_task(
+        asyncio.to_thread(initialize_llm, engine_args))
 
     sampled, llm = await asyncio.gather(sampling_task, llm_task)
+    print(f"Data sampling + LLM init time: {time.perf_counter() - st:.2f}s")
 
     st = time.perf_counter()
     outputs = llm.chat(sampled, sampling_params=sampling_params)
