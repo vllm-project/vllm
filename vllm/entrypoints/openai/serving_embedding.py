@@ -18,14 +18,15 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.logger import init_logger
-from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.utils import merge_async_iterators, random_uuid
+from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
+                          PoolingRequestOutput)
+from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
 
 
 def _get_embedding(
-    output: PoolingOutput,
+    output: EmbeddingOutput,
     encoding_format: Literal["float", "base64"],
 ) -> Union[List[float], str]:
     if encoding_format == "float":
@@ -46,8 +47,10 @@ def request_output_to_embedding_response(
     data: List[EmbeddingResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
+        embedding_res = EmbeddingRequestOutput.from_base(final_res)
         prompt_token_ids = final_res.prompt_token_ids
-        embedding = _get_embedding(final_res.outputs, encoding_format)
+
+        embedding = _get_embedding(embedding_res.outputs, encoding_format)
         embedding_data = EmbeddingResponseData(index=idx, embedding=embedding)
         data.append(embedding_data)
 
@@ -110,7 +113,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 "dimensions is currently not supported")
 
         model_name = request.model
-        request_id = f"embd-{random_uuid()}"
+        request_id = f"embd-{self._base_request_id(raw_request)}"
         created_time = int(time.monotonic())
 
         truncate_prompt_tokens = None

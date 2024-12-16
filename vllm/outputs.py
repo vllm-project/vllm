@@ -1,8 +1,11 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Generic, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
+
+import torch
+from typing_extensions import TypeVar, deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
@@ -57,14 +60,24 @@ class PoolingOutput:
     """The output data of one pooling output of a request.
 
     Args:
-        embedding: The embedding vector, which is a list of floats. The
-        length of vector depends on the model as listed in the embedding guide.
+        data: The extracted hidden states.
     """
-    embedding: List[float]
+    data: torch.Tensor
 
     def __repr__(self) -> str:
-        return (f"PoolingOutput("
-                f"embedding={len(self.embedding)})")
+        return (f"PoolingOutput(data={self.data})")
+
+    def __eq__(self, other: object) -> bool:
+        return (isinstance(other, self.__class__) and bool(
+            (self.data == other.data).all()))
+
+    @property
+    @deprecated("`LLM.encode()` now stores raw outputs in the `data` "
+                "attribute. To return embeddings, use `LLM.embed()`. "
+                "To return class probabilities, use `LLM.classify()` "
+                "and access the `probs` attribute. ")
+    def embedding(self) -> list[float]:
+        return self.data.tolist()
 
 
 class RequestOutput:
@@ -316,7 +329,10 @@ class RequestOutput:
                 f"multi_modal_placeholders={self.multi_modal_placeholders})")
 
 
-class PoolingRequestOutput:
+_O = TypeVar("_O", default=PoolingOutput)
+
+
+class PoolingRequestOutput(Generic[_O]):
     """
     The output data of a pooling request to the LLM.
 
@@ -327,24 +343,24 @@ class PoolingRequestOutput:
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
-    def __init__(self, request_id: str, outputs: "PoolingOutput",
+    def __init__(self, request_id: str, outputs: _O,
                  prompt_token_ids: List[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
         self.outputs = outputs
 
-    @classmethod
-    def from_seq_group(cls,
-                       seq_group: 'SequenceGroup') -> "PoolingRequestOutput":
-        if seq_group.embeddings is None:
-            raise ValueError(
-                "Embeddings are missing in seq_group for EmbeddingRequest.")
-        output = PoolingOutput(seq_group.embeddings)
+    @staticmethod
+    def from_seq_group(seq_group: SequenceGroup) -> "PoolingRequestOutput":
+        pooled_data = seq_group.pooled_data
+        assert pooled_data is not None
+
+        output = PoolingOutput(pooled_data)
         prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()
 
-        return cls(seq_group.request_id, output, prompt_token_ids, finished)
+        return PoolingRequestOutput(seq_group.request_id, output,
+                                    prompt_token_ids, finished)
 
     def __repr__(self):
         """
@@ -356,54 +372,10 @@ class PoolingRequestOutput:
         Returns:
             str: A string representation of the PoolingRequestOutput instance.
         """
-        return (f"PoolingRequestOutput(request_id='{self.request_id}', "
-                f"outputs={repr(self.outputs)}, "
+        return (f"{type(self).__name__}(request_id={self.request_id!r}, "
+                f"outputs={self.outputs!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"finished={self.finished})")
-
-
-@dataclass
-class ScoreOutput:
-    """The output data of one completion output of a request.
-
-    Args:
-        score: The score, which is a list of floats. 
-        index: The correspondent text index of the score.
-    """
-    index: int
-    score: List[float]
-
-    def __repr__(self) -> str:
-        return (f"ScoreOutput("
-                f"score={self.score}), "
-                f"index={self.index})")
-
-
-class ScoreRequestOutput:
-    """
-    The output data of an score request to the LLM.
-
-    Args:
-        request_id (str): A unique identifier for the score request.
-        outputs (score): The embedding results for the given input.
-    """
-
-    def __init__(self, request_id: str, outputs: "ScoreOutput"):
-        self.request_id = request_id
-        self.outputs = outputs
-
-    def __repr__(self):
-        """
-        Returns a string representation of an ScoreRequestOutput instance.
-
-        The representation includes the request_id and the number of outputs,
-        providing a quick overview of the embedding request's results.
-
-        Returns:
-            str: A string representation of the ScoreRequestOutput instance.
-        """
-        return (f"ScoreRequestOutput(request_id='{self.request_id}', "
-                f"outputs={repr(self.outputs)}")
 
 
 class RequestOutputFactory:
@@ -412,33 +384,123 @@ class RequestOutputFactory:
     def create(seq_group: SequenceGroup,
                seq_id_to_seq_group: Dict[str, SequenceGroupBase],
                use_cache: bool = False):
-        # Determine the type based on a condition, for example:
-        if hasattr(seq_group,
-                   'embeddings') and seq_group.embeddings is not None:
+        if seq_group.pooled_data is not None:
             return PoolingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group, use_cache,
                                                 seq_id_to_seq_group)
 
 
-def __getattr__(name: str):
-    import warnings
+@dataclass
+class EmbeddingOutput:
+    """The output data of one embedding output of a request.
 
-    if name == "EmbeddingOutput":
-        msg = ("EmbeddingOutput has been renamed to PoolingOutput. "
-               "The original name will be removed in an upcoming version.")
+    Args:
+        embedding: The embedding vector, which is a list of floats.
+        Its length depends on the hidden dimension of the model.
+    """
+    embedding: list[float]
 
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+    @staticmethod
+    def from_base(pooling_output: PoolingOutput):
+        pooled_data = pooling_output.data
+        if pooled_data.ndim != 1:
+            raise ValueError("pooled_data should be a 1-D embedding vector")
 
-        return PoolingOutput
+        return EmbeddingOutput(pooled_data.tolist())
 
-    if name == "EmbeddingRequestOutput":
-        msg = ("EmbeddingRequestOutput has been renamed to "
-               "PoolingRequestOutput. "
-               "The original name will be removed in an upcoming version.")
+    @property
+    def hidden_size(self) -> int:
+        return len(self.embedding)
 
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+    def __repr__(self) -> str:
+        return f"EmbeddingOutput(hidden_size={self.hidden_size})"
 
-        return PoolingRequestOutput
 
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
+
+    @staticmethod
+    def from_base(request_output: PoolingRequestOutput):
+        return EmbeddingRequestOutput(
+            request_id=request_output.request_id,
+            outputs=EmbeddingOutput.from_base(request_output.outputs),
+            prompt_token_ids=request_output.prompt_token_ids,
+            finished=request_output.finished,
+        )
+
+
+@dataclass
+class ClassificationOutput:
+    """The output data of one classification output of a request.
+
+    Args:
+        probs: The probability vector, which is a list of floats.
+        Its length depends on the number of classes.
+    """
+    probs: list[float]
+
+    @staticmethod
+    def from_base(pooling_output: PoolingOutput):
+        pooled_data = pooling_output.data
+        if pooled_data.ndim != 1:
+            raise ValueError("pooled_data should be a 1-D probability vector")
+
+        return ClassificationOutput(pooled_data.tolist())
+
+    @property
+    def num_classes(self) -> int:
+        return len(self.probs)
+
+    def __repr__(self) -> str:
+        return f"ClassificationOutput(num_classes={self.num_classes})"
+
+
+class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
+
+    @staticmethod
+    def from_base(request_output: PoolingRequestOutput):
+        return ClassificationRequestOutput(
+            request_id=request_output.request_id,
+            outputs=ClassificationOutput.from_base(request_output.outputs),
+            prompt_token_ids=request_output.prompt_token_ids,
+            finished=request_output.finished,
+        )
+
+
+@dataclass
+class ScoringOutput:
+    """The output data of one scoring output of a request.
+
+    Args:
+        score: The similarity score, which is a scalar value.
+    """
+    score: float
+
+    @staticmethod
+    def from_base(pooling_output: PoolingOutput):
+        pooled_data = pooling_output.data
+        if pooled_data.ndim != 0:
+            raise ValueError("pooled_data should be a scalar score")
+
+        return ScoringOutput(pooled_data.item())
+
+    def __repr__(self) -> str:
+        return f"ScoringOutput(score={self.score})"
+
+    @property
+    @deprecated("`LLM.score()` now returns scalar scores. "
+                "Please access it via the `score` attribute. ")
+    def embedding(self) -> list[float]:
+        return [self.score]
+
+
+class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
+
+    @staticmethod
+    def from_base(request_output: PoolingRequestOutput):
+        return ScoringRequestOutput(
+            request_id=request_output.request_id,
+            outputs=ScoringOutput.from_base(request_output.outputs),
+            prompt_token_ids=request_output.prompt_token_ids,
+            finished=request_output.finished,
+        )

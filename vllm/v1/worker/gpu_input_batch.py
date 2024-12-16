@@ -53,14 +53,23 @@ class InputBatch:
         self.req_ids: List[Optional[str]] = [None] * max_num_reqs
         self.req_id_to_index: Dict[str, int] = {}
 
-        self.token_ids_cpu = np.empty((max_num_reqs, max_model_len),
-                                      dtype=np.int32)
+        # TODO(woosuk): This buffer could be too large if max_model_len is big.
+        # Find a way to reduce the CPU memory usage.
+        self.token_ids_cpu_tensor = torch.zeros(
+            (max_num_reqs, max_model_len),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
         # Attention-related.
-        self.block_table = torch.zeros((max_num_reqs, max_num_blocks_per_req),
-                                       device=self.device,
-                                       dtype=torch.int32)
+        self.block_table = torch.zeros(
+            (max_num_reqs, max_num_blocks_per_req),
+            device=self.device,
+            dtype=torch.int32,
+        )
         self.block_table_cpu_tensor = torch.zeros(
             (max_num_reqs, max_num_blocks_per_req),
             device="cpu",
@@ -102,6 +111,8 @@ class InputBatch:
         self.top_k_reqs: Set[str] = set()
 
         # req_index -> generator
+        # NOTE(woosuk): The indices of the requests that do not have their own
+        # generator should not be included in the dictionary.
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
@@ -147,7 +158,10 @@ class InputBatch:
         if sampling_params.top_k > 0:
             self.top_k_reqs.add(req_id)
 
-        self.generators[req_index] = request.generator
+        # NOTE(woosuk): self.generators should not include the requests that
+        # do not have their own generator.
+        if request.generator is not None:
+            self.generators[req_index] = request.generator
 
         num_logprobs = sampling_params.logprobs
         if num_logprobs is not None and num_logprobs > 0:
@@ -201,6 +215,7 @@ class InputBatch:
 
             # Swap the states.
             req_id = self.req_ids[last_req_index]
+            assert req_id is not None
             self.req_ids[empty_index] = req_id
             self.req_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index

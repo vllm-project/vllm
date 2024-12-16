@@ -123,6 +123,8 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
+            model_name = self._get_model_name(lora_request)
+
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             tool_parser = self.tool_parser
@@ -176,7 +178,8 @@ class OpenAIServingChat(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        request_id = f"chatcmpl-{request.request_id}"
+        request_id = "chatcmpl-" \
+                     f"{self._base_request_id(raw_request, request.request_id)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -194,7 +197,8 @@ class OpenAIServingChat(OpenAIServing):
                         default_max_tokens)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens)
+                        default_max_tokens,
+                        self.model_config.logits_processor_pattern)
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
@@ -237,13 +241,13 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation, tokenizer,
-                request_metadata)
+                request, result_generator, request_id, model_name,
+                conversation, tokenizer, request_metadata)
 
         try:
             return await self.chat_completion_full_generator(
-                request, result_generator, request_id, conversation, tokenizer,
-                request_metadata)
+                request, result_generator, request_id, model_name,
+                conversation, tokenizer, request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -258,11 +262,11 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
+        model_name: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
-        model_name = self.base_model_paths[0].name
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -495,21 +499,33 @@ class OpenAIServingChat(OpenAIServing):
 
                         if self._should_check_for_unstreamed_tool_arg_tokens(
                                 delta_message, output) and tool_parser:
+                            latest_delta_len = 0
+                            if ((isinstance(
+                                    delta_message.tool_calls[0].function,
+                                    DeltaFunctionCall)) and isinstance(
+                                        delta_message.tool_calls[0].function.
+                                        arguments, str)):
+                                latest_delta_len = len(
+                                    delta_message.tool_calls[0].function.
+                                    arguments)
+
                             # get the expected call based on partial JSON
                             # parsing which "autocompletes" the JSON
                             expected_call = json.dumps(
                                 tool_parser.prev_tool_call_arr[index].get(
-                                    "arguments", {}))
+                                    "arguments", {}),
+                                ensure_ascii=False)
 
                             # get what we've streamed so far for arguments
                             # for the current tool
                             actual_call = tool_parser.streamed_args_for_tool[
                                 index]
+                            if (latest_delta_len > 0):
+                                actual_call = actual_call[:-latest_delta_len]
 
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(
                                 actual_call, "", 1)
-
                             # set that as a delta message
                             delta_message = DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=index,
@@ -591,12 +607,12 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
+        model_name: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
-        model_name = self.base_model_paths[0].name
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 

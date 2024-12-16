@@ -21,7 +21,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from .adapters import as_embedding_model
-from .interfaces import (has_inner_state, is_attention_free,
+from .interfaces import (has_inner_state, is_attention_free, is_hybrid,
                          supports_cross_encoding, supports_multimodal,
                          supports_pp)
 from .interfaces_base import is_pooling_model, is_text_generation_model
@@ -41,6 +41,7 @@ _TEXT_GENERATION_MODELS = {
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
+    "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
@@ -56,6 +57,7 @@ _TEXT_GENERATION_MODELS = {
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
     "GraniteForCausalLM": ("granite", "GraniteForCausalLM"),
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
+    "GritLM": ("gritlm", "GritLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -111,6 +113,7 @@ _EMBEDDING_MODELS = {
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
+    "GritLM": ("gritlm", "GritLM"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
         # Multiple models share the same architecture, so we include them all
@@ -219,6 +222,7 @@ class _ModelInfo:
     supports_pp: bool
     has_inner_state: bool
     is_attention_free: bool
+    is_hybrid: bool
 
     @staticmethod
     def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
@@ -240,6 +244,7 @@ class _ModelInfo:
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
+            is_hybrid=is_hybrid(model),
         )
 
 
@@ -484,6 +489,13 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_attention_free
+
+    def is_hybrid_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.is_hybrid
 
 
 ModelRegistry = _ModelRegistry({

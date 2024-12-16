@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import numpy as np
 import torch
@@ -15,8 +15,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
-                        is_pin_memory_available)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
+                        LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.outputs import ModelRunnerOutput
@@ -34,6 +34,7 @@ class GPUModelRunner:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        device: torch.device,
         input_registry: InputRegistry = INPUT_REGISTRY,
     ):
         self.vllm_config = vllm_config
@@ -43,7 +44,6 @@ class GPUModelRunner:
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
@@ -52,7 +52,7 @@ class GPUModelRunner:
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
-        self.device = self.device_config.device
+        self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         if cache_config.cache_dtype == "auto":
@@ -61,15 +61,17 @@ class GPUModelRunner:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
+        self.is_multimodal_model = model_config.is_multimodal_model
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Model-related.
-        self.num_attn_layers = model_config.get_num_attention_layers(
-            parallel_config)
+        self.num_attn_layers = model_config.get_num_layers_by_block_type(
+            parallel_config, LayerBlockType.attention)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
@@ -87,7 +89,7 @@ class GPUModelRunner:
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
         self.input_batch = InputBatch(
-            max_num_reqs=self.scheduler_config.max_num_seqs,
+            max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
             device=self.device,
@@ -103,6 +105,11 @@ class GPUModelRunner:
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
             reversed(self.vllm_config.compilation_config.capture_sizes))
+
+        # Persistent buffers for CUDA graphs.
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
@@ -110,6 +117,38 @@ class GPUModelRunner:
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=self.device)
+
+        # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        self.arange_np = np.arange(max(self.max_num_reqs, self.max_model_len),
+                                   dtype=np.int32)
+        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
+        # a faster version of creating a new tensor every time. Thus, we should
+        # not make any assumptions about the values in these tensors.
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int32,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.input_ids_np = self.input_ids_cpu.numpy()
+        self.positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.positions_np = self.positions_cpu.numpy()
+        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+        self.seq_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                             dtype=torch.int32,
+                                             device="cpu",
+                                             pin_memory=self.pin_memory)
+        self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -160,9 +199,9 @@ class GPUModelRunner:
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
-        for req_data in scheduler_output.scheduled_new_reqs:
-            req_id = req_data.req_id
-            sampling_params = req_data.sampling_params
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            req_id = new_req_data.req_id
+            sampling_params = new_req_data.sampling_params
             if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
@@ -171,25 +210,25 @@ class GPUModelRunner:
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
-                prompt_token_ids=req_data.prompt_token_ids,
-                prompt=req_data.prompt,
-                mm_inputs=req_data.mm_inputs,
-                mm_positions=req_data.mm_positions,
+                prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt=new_req_data.prompt,
+                mm_inputs=new_req_data.mm_inputs,
+                mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
                 generator=generator,
-                block_ids=req_data.block_ids,
-                num_computed_tokens=req_data.num_computed_tokens,
+                block_ids=new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
             )
             req_ids_to_add.append(req_id)
 
         # Update the cached states of the resumed requests.
-        for req_data in scheduler_output.scheduled_resumed_reqs:
-            req_id = req_data.req_id
+        for res_req_data in scheduler_output.scheduled_resumed_reqs:
+            req_id = res_req_data.req_id
             req_state = self.requests[req_id]
 
-            req_state.block_ids = req_data.block_ids
-            req_state.num_computed_tokens = req_data.num_computed_tokens
+            req_state.block_ids = res_req_data.block_ids
+            req_state.num_computed_tokens = res_req_data.num_computed_tokens
             req_ids_to_add.append(req_id)
 
         # Add the new or resumed requests to the persistent batch.
@@ -226,6 +265,7 @@ class GPUModelRunner:
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
@@ -235,22 +275,16 @@ class GPUModelRunner:
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        indices = np.arange(num_reqs)
-        req_indices = np.repeat(indices, num_scheduled_tokens)
+        req_indices = np.repeat(self.arange_np[:num_reqs],
+                                num_scheduled_tokens)
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange_matrix = np.tile(np.arange(max_num_scheduled_tokens),
-                                (num_reqs, 1))
-        mask = arange_matrix < num_scheduled_tokens[:, np.newaxis]
-        arange = arange_matrix[mask]
+        arange = np.concatenate(
+            [self.arange_np[:n] for n in num_scheduled_tokens])
 
         # Get positions.
-        positions = torch.empty((total_num_scheduled_tokens, ),
-                                dtype=torch.int32,
-                                device="cpu",
-                                pin_memory=self.pin_memory)
-        positions_np = positions.numpy()
+        positions_np = self.positions_np[:total_num_scheduled_tokens]
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
@@ -261,16 +295,13 @@ class GPUModelRunner:
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-        token_indices = torch.from_numpy(token_indices)
-        input_ids = torch.empty((total_num_scheduled_tokens, ),
-                                dtype=torch.int32,
-                                device="cpu",
-                                pin_memory=self.pin_memory)
-        torch.index_select(torch.from_numpy(
-            self.input_batch.token_ids_cpu).flatten(),
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
-                           token_indices,
-                           out=input_ids)
+                           torch.from_numpy(token_indices),
+                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
         # Calculate the slot mapping.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -278,44 +309,40 @@ class GPUModelRunner:
         # where K is the max_num_blocks_per_req and the block size is 2.
         # NOTE(woosuk): We can't simply use `token_indices // block_size` here
         # because M (max_model_len) is not necessarily divisible by block_size.
-        block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
-            req_indices * self.max_num_blocks_per_req +
-            positions_np // self.block_size]
-        block_offsets = torch.from_numpy(positions_np % self.block_size)
-        slot_mapping = torch.empty((total_num_scheduled_tokens, ),
-                                   dtype=torch.int32,
-                                   device="cpu",
-                                   pin_memory=self.pin_memory)
-        torch.add(block_numbers * self.block_size,
-                  block_offsets,
-                  out=slot_mapping)
+        block_table_indices = (req_indices * self.max_num_blocks_per_req +
+                               positions_np // self.block_size)
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
+                         [block_table_indices].numpy())
+        block_offsets = positions_np % self.block_size
+        np.add(block_numbers * self.block_size,
+               block_offsets,
+               out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
-        query_start_loc = torch.empty((num_reqs + 1, ),
-                                      dtype=torch.int32,
-                                      device="cpu",
-                                      pin_memory=self.pin_memory)
-        query_start_loc_np = query_start_loc.numpy()
-        query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+        self.query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens,
+                  out=self.query_start_loc_np[1:num_reqs + 1])
 
         seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
                     num_scheduled_tokens)
         max_seq_len = seq_lens.max()
-        seq_start_loc = torch.empty((num_reqs + 1, ),
-                                    dtype=torch.int32,
-                                    device="cpu",
-                                    pin_memory=self.pin_memory)
-        seq_start_loc_np = seq_start_loc.numpy()
-        seq_start_loc_np[0] = 0
-        np.cumsum(seq_lens, out=seq_start_loc_np[1:])
+        self.seq_start_loc_np[0] = 0
+        np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
 
-        input_ids = input_ids.to(self.device, non_blocking=True)
-        self.positions[:total_num_scheduled_tokens].copy_(positions,
-                                                          non_blocking=True)
-        query_start_loc = query_start_loc.to(self.device, non_blocking=True)
-        seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
-        slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
+        # Copy the tensors to the GPU.
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        self.positions[:total_num_scheduled_tokens].copy_(
+            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(
+            self.device, non_blocking=True)
+        seq_start_loc = self.seq_start_loc_cpu[:num_reqs + 1].to(
+            self.device, non_blocking=True)
+        slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
+            self.device, non_blocking=True).long()
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
@@ -331,7 +358,7 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return input_ids, attn_metadata, logits_indices
+        return attn_metadata, logits_indices
 
     def _prepare_sampling(
         self,
@@ -355,7 +382,7 @@ class GPUModelRunner:
 
         # Batch the multi-modal inputs.
         mm_inputs: List[MultiModalKwargs] = []
-        req_input_ids: List[Tuple[int, int]] = []
+        req_input_ids: List[Tuple[str, int]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:
@@ -388,6 +415,7 @@ class GPUModelRunner:
         encoder_outputs: List[torch.Tensor] = []
         num_reqs = self.input_batch.num_reqs
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -427,44 +455,58 @@ class GPUModelRunner:
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
-        # Run the encoder.
-        self._execute_encoder(scheduler_output)
-        encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            self._execute_encoder(scheduler_output)
+            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        else:
+            encoder_outputs = []
 
         # Prepare the decoder inputs.
-        input_ids, attn_metadata, logits_indices = self._prepare_inputs(
-            scheduler_output)
+        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
-            num_input_tokens = self._get_padded_batch_size(
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
+        attn_metadata.num_input_tokens = num_input_tokens
 
-        # Get the inputs embeds.
-        if encoder_outputs:
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids, encoder_outputs)
+        if self.is_multimodal_model:
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
+            input_ids = self.input_ids[:num_scheduled_tokens]
+            if encoder_outputs:
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids, encoder_outputs)
+            else:
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            # TODO(woosuk): Avoid the copy. Optimize.
+            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            input_ids = None
         else:
-            inputs_embeds = self.model.get_input_embeddings(input_ids)
-        # NOTE(woosuk): To unify token ids and soft tokens (vision embeddings),
-        # always use embeddings (rather than token ids) as input to the model.
-        # TODO(woosuk): Avoid the copy. Optimize.
-        self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+            # For text-only models, we use token ids as input.
+            # While it is possible to use embeddings as input just like the
+            # multimodal models, it is not desirable for performance since
+            # then the embedding layer is not included in the CUDA graph.
+            input_ids = self.input_ids[:num_input_tokens]
+            inputs_embeds = None
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
-                input_ids=None,
+                input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
-                inputs_embeds=self.inputs_embeds[:num_input_tokens],
+                inputs_embeds=inputs_embeds,
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
@@ -477,20 +519,19 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
-        # NOTE: CPU-GPU synchronization happens here.
-        sampled_token_ids = sampler_output.sampled_token_ids.cpu()
-        sampled_token_ids_list = sampled_token_ids.tolist()
+        sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            assert req_id is not None
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
             assert seq_len <= req_state.num_tokens
             if seq_len == req_state.num_tokens:
                 # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids_list[i]
+                token_id = sampled_token_ids[i]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
             else:
@@ -509,10 +550,17 @@ class GPUModelRunner:
             logprobs = None
         else:
             logprobs = sampler_output.logprobs.cpu()
+
+        # num_reqs entries should be non-None
+        assert all(
+            req_id is not None for req_id in
+            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
+        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
+
         model_runner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids_cpu=sampled_token_ids,
+            sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
         )
@@ -534,13 +582,20 @@ class GPUModelRunner:
         num_tokens: int,
         kv_caches: List[torch.Tensor],
     ) -> torch.Tensor:
+        if self.is_multimodal_model:
+            input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_tokens]
+        else:
+            input_ids = self.input_ids[:num_tokens]
+            inputs_embeds = None
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(
-                input_ids=None,
+                input_ids=input_ids,
                 positions=self.positions[:num_tokens],
                 kv_caches=kv_caches,
                 attn_metadata=None,
-                inputs_embeds=self.inputs_embeds[:num_tokens])
+                inputs_embeds=inputs_embeds,
+            )
         return hidden_states
 
     def profile_run(self) -> None:
@@ -604,10 +659,3 @@ class GPUModelRunner:
                 torch.zeros(kv_cache_shape,
                             dtype=self.kv_cache_dtype,
                             device=self.device))
-
-    def _get_padded_batch_size(self, batch_size: int) -> Optional[int]:
-        # TODO: Optimize this?
-        for size in self.cudagraph_batch_sizes:
-            if batch_size <= size:
-                return size
-        return None
