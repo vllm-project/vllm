@@ -215,6 +215,7 @@ class InputBatch:
 
             # Swap the states.
             req_id = self.req_ids[last_req_index]
+            assert req_id is not None
             self.req_ids[empty_index] = req_id
             self.req_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
