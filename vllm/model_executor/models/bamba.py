@@ -388,7 +388,8 @@ class BambaModel(nn.Module):
         return hidden_states
 
 
-class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid):
+class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
+                       IsHybrid):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -463,7 +464,7 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHyb
                     self.scheduler_config.max_num_seqs)
         elif self.scheduler_config is not None:
             # for eager just take the scheduler_config if avail
-            self.max_batch_size =self.scheduler_config.max_num_seqs 
+            self.max_batch_size = self.scheduler_config.max_num_seqs
         else:
             self.max_batch_size = 8192 + 2
 
@@ -484,8 +485,8 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHyb
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
 
             self.mamba_cache = MambaCacheManager(
-                self.lm_head.weight.dtype, num_mamba_layers, self.max_batch_size,
-                *self._get_mamba_cache_shape())
+                self.lm_head.weight.dtype, num_mamba_layers,
+                self.max_batch_size, *self._get_mamba_cache_shape())
         (
             mamba_cache_tensors,
             state_indices_tensor,
@@ -496,8 +497,7 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHyb
                                               state_indices_tensor)
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, mamba_cache_params,
-                                   intermediate_tensors,
-                                   inputs_embeds)
+                                   intermediate_tensors, inputs_embeds)
 
         return hidden_states
 
@@ -600,7 +600,7 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHyb
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 if is_pp_missing_parameter(name, self):
-                        continue
+                    continue
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
