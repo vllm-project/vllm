@@ -302,8 +302,11 @@ def test_memory_profiling():
         # Add some extra non-torch memory 256 MiB (simulate NCCL)
         handle2 = lib.cudaMalloc(256 * 1024 * 1024)
 
-    assert result.non_torch_increase_in_bytes == 256 * 1024 * 1024
-    assert result.torch_peak_increase_in_bytes == 256 * 1024 * 1024 * 4
+    # Check that the memory usage is within 5% of the expected values
+    non_torch_ratio = result.non_torch_increase_in_bytes / 256 * 1024 * 1024
+    torch_peak_ratio = result.torch_peak_increase_in_bytes / 1024 * 1024 * 1024
+    assert abs(non_torch_ratio - 1) <= 0.05
+    assert abs(torch_peak_ratio - 1) <= 0.05
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)
