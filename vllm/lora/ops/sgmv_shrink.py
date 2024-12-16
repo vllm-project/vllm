@@ -38,7 +38,7 @@ def _sgmv_shrink_kernel(
         BLOCK_K: tl.constexpr,
         EVEN_K: tl.constexpr,
         SPLIT_K: tl.constexpr,
-        NSLICE_NUM: tl.constexpr):
+        SLICE_NUM: tl.constexpr):
     """
     The sgmv's shrink triton kernel is based on GroupGEMM+SPLIT-K.
     The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally,
@@ -50,8 +50,8 @@ def _sgmv_shrink_kernel(
     cta_n_num = tl.cdiv(N, BLOCK_N)
     pid_m = pid // cta_n_num
     pid_n = pid % cta_n_num
-    if NSLICE_NUM == 1:
-        slice_id = 0
+    if SLICE_NUM == 1:
+        slice_id: tl.constexpr = 0
         pid_sk = tl.program_id(axis=1)
     else:
         pid_mix = tl.program_id(axis=1)
@@ -74,7 +74,7 @@ def _sgmv_shrink_kernel(
 
     a_ptr = (input_ptr + cur_seq_start * xm_stride + ram[:, None] * xm_stride +
              offset_k[None, :] * xk_stride)
-    if NSLICE_NUM == 1:
+    if SLICE_NUM == 1:
         cur_lora_ptr = lora_ptr
         cur_lora_d0_stride = ls_d0_ptr
         cur_lora_d1_stride = ls_d1_ptr
@@ -110,7 +110,7 @@ def _sgmv_shrink_kernel(
     offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
 
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    cur_out_ptr = out_ptr if NSLICE_NUM == 1 else out_ptr + slice_id * c0_stride
+    cur_out_ptr = out_ptr if SLICE_NUM == 1 else out_ptr + slice_id * c0_stride
     c_ptr = cur_out_ptr + offset_cm[:, None] * cm_stride + offset_cn[
         None, :] * cn_stride
     c_mask = (offset_cm[:, None] <
