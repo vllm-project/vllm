@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -28,6 +28,10 @@ WAITING_TIMEOUT_MS=5
 
 @dataclass
 class RequestState:
+    """RequestState manages concurrency between the output_handler,
+    which pulls outputs from EngineCore and the user-facing generate()
+    function the 
+    """
 
     event: asyncio.Event
     out_list: List[RequestOutput]
@@ -59,9 +63,6 @@ class AsyncLLM(EngineClient):
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
-        # RequestId -> RequestState.
-        self.rid_to_state: Dict[str, RequestState] = {}
-
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
@@ -69,6 +70,11 @@ class AsyncLLM(EngineClient):
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
+
+        # RequestId -> RequestState.
+        self.rid_to_state: Dict[str, RequestState] = {}
+        # List of cancelled request ids to be aborted.
+        self.client_aborted_requests: List[str] = []
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(vllm_config.model_config,
@@ -160,16 +166,15 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> asyncio.Event:
+    ) -> RequestState:
         """Add new request to the AsyncLLM."""
 
         if self.detokenizer.is_request_active(request_id):
             raise ValueError(f"Request {request_id} already exists.")
 
         # 1) Add to RequestState tracker. The "event" is used to manage
-        # concurrency between generate() and output_handler task.
-        state = RequestState.new()
-        self.rid_to_state[request_id] = state
+        # concurrency between generate() and output_handler().
+        self.rid_to_state[request_id] = RequestState.new()
 
         # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
         detokenizer_req, engine_core_req = self.processor.process_inputs(
@@ -182,7 +187,7 @@ class AsyncLLM(EngineClient):
         # 4) Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(engine_core_req)
 
-        return state
+        return self.rid_to_state[request_id]
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -201,18 +206,21 @@ class AsyncLLM(EngineClient):
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
-            * 1) Making an RequestState corresponding to the Request.
+            * 1) Make RequestState corresponding to the Request.
             # 2) Processing the Input.
             * 3) Adding the Request to the Detokenizer.
             * 4) Adding the Request to the EngineCore (separate process).
 
-        A separate output_handler loop runs in a background task, 
-        pulling outputs from EngineCore and updating the RequestState and
-        setting the asyncio Event.
+        The output_handler() loop runs in a background task, pulling outputs from
+        EngineCore and updating the RequestState and setting the asyncio event.
 
         The caller of generate() waits on the asyncio event and forwards
-        the latest RequestOutput back to the caller.
+        the latest RequestOutput back to the caller. 
         """
+
+        # DELTA streaming is not supported due to dynamic chunking.
+        assert (sampling_params.output_kind == RequestOutputKind.CUMULATIVE or
+                sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
 
         # We start the output_handler on the first call to generate() so that
         # we can call __init__ before the event loop starts, which enables us
@@ -245,9 +253,8 @@ class AsyncLLM(EngineClient):
                 out = state.out_list[-1]
 
             except asyncio.TimeoutError:
+                # TODO(rob): do request cancellation checking here.
                 logger.debug("Timeout waiting for %s", request_id)
-                
-                # TODO (rob): do request cancellation checking here.
                 continue
 
             state.out_list = []
