@@ -24,6 +24,8 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
+WAITING_TIMEOUT_MS=5
+
 @dataclass
 class RequestState:
 
@@ -231,9 +233,11 @@ class AsyncLLM(EngineClient):
         
         while True:
             try:        
-                await asyncio.wait_for(state.event.wait(), timeout=4)
+                await asyncio.wait_for(state.event.wait(), timeout=WAITING_TIMEOUT_MS)
                 out = state.out_list[-1]
+
             except asyncio.TimeoutError:
+                logger.debug("Timeout waiting for %s", request_id)
                 # if request is not None and await request.is_disconnected():
                 #     self.abort_request(obj.rid)
                 #     raise ValueError(f"Abort request {obj.rid}")

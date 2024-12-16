@@ -159,10 +159,8 @@ class OpenAIServingCompletion(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        # result_generator = merge_async_iterators(
-        #     *generators, is_cancelled=raw_request.is_disconnected)
-        assert len(generators) == 1
-        result_generator = generators[0]
+        result_generator = merge_async_iterators(
+            *generators, is_cancelled=raw_request.is_disconnected)
 
         model_name = self._get_model_name(lora_request)
         num_prompts = len(engine_prompts)
@@ -257,11 +255,10 @@ class OpenAIServingCompletion(OpenAIServing):
         else:
             include_usage, include_continuous_usage = False, False
 
-        streamed_text = ""
-
         try:
-            # async for prompt_idx, res in result_generator:
-            async for res in result_generator:
+            async for prompt_idx, res in result_generator:
+                # Output.text is cumulative
+
                 prompt_idx = 0
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
@@ -280,31 +277,32 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
-                        pass
-                        # assert prompt_token_ids is not None
-                        # assert prompt_text is not None
-                        # if request.max_tokens == 0:
-                        #     # only return the prompt
-                        #     delta_text = prompt_text
-                        #     delta_token_ids = prompt_token_ids
-                        #     out_logprobs = prompt_logprobs
-                        # else:
-                        #     assert prompt_logprobs is not None
-                        #     # echo the prompt and first token
-                        #     delta_text = prompt_text + output.text
-                        #     delta_token_ids = [
-                        #         *prompt_token_ids, *output.token_ids
-                        #     ]
-                        #     out_logprobs = [
-                        #         *prompt_logprobs,
-                        #         *(output.logprobs or []),
-                        #     ]
-                        # has_echoed[i] = True
+                        assert prompt_token_ids is not None
+                        assert prompt_text is not None
+                        # If we not echoed, we have not sent text yet.
+                        assert previous_text_lens[i] == 0
+                        assert previous_num_tokens[i] == 0
+                        if request.max_tokens == 0:
+                            # only return the prompt
+                            delta_text = prompt_text
+                            delta_token_ids = prompt_token_ids
+                            out_logprobs = prompt_logprobs
+                        else:
+                            assert prompt_logprobs is not None
+                            # echo the prompt and first token
+                            delta_text = prompt_text + output.text
+                            delta_token_ids = [
+                                *prompt_token_ids, *output.token_ids
+                            ]
+                            out_logprobs = [
+                                *prompt_logprobs,
+                                *(output.logprobs or []),
+                            ]
+                        has_echoed[i] = True
                     else:
-                        # return just the delta
                         delta_text = output.text[previous_text_lens[i]:]
-                        delta_token_ids = output.token_ids
-                        out_logprobs = output.logprobs
+                        delta_token_ids = output.token_ids[previous_num_tokens[i]:]
+                        out_logprobs = output.logprobs[previous_num_tokens[i]:] if output.logprobs else None
 
                         if not delta_text and not delta_token_ids \
                             and not previous_num_tokens[i]:
@@ -312,21 +310,18 @@ class OpenAIServingCompletion(OpenAIServing):
                             continue
 
                     if request.logprobs is not None:
-                        pass
-                        # assert out_logprobs is not None, (
-                        #     "Did not output logprobs")
-                        # logprobs = self._create_completion_logprobs(
-                        #     token_ids=delta_token_ids,
-                        #     top_logprobs=out_logprobs,
-                        #     num_output_top_logprobs=request.logprobs,
-                        #     tokenizer=tokenizer,
-                        #     initial_text_offset=previous_text_lens[i],
-                        # )
+                        assert out_logprobs is not None, (
+                            "Did not output logprobs")
+                        logprobs = self._create_completion_logprobs(
+                            token_ids=delta_token_ids,
+                            top_logprobs=out_logprobs,
+                            num_output_top_logprobs=request.logprobs,
+                            tokenizer=tokenizer,
+                            initial_text_offset=previous_text_lens[i],
+                        )
                     else:
                         logprobs = None
 
-                    # previous_text_lens[i] += len(output.text)
-                    # previous_num_tokens[i] += len(output.token_ids)
                     previous_text_lens[i] = len(output.text)
                     previous_num_tokens[i] = len(output.token_ids)
                     finish_reason = output.finish_reason

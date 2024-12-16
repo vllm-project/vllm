@@ -18,12 +18,17 @@ stream = True
 completion = client.completions.create(
     model=model,
     prompt="A robot may not injure a human being",
-    echo=False,
+    echo=True,
+    n=1,
+    logprobs=2,
     stream=stream)
 
 print("Completion results:")
+text = ""
 if stream:
     for c in completion:
-        print(c.choices[0].text)
+        text += c.choices[0].text
+        print(c)
+    print(text)
 else:
     print(completion)
