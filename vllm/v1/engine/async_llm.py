@@ -10,10 +10,10 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams, RequestOutputKind
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -24,7 +24,8 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
-WAITING_TIMEOUT_MS=5
+WAITING_TIMEOUT_MS = 5
+
 
 @dataclass
 class RequestState:
@@ -211,7 +212,7 @@ class AsyncLLM(EngineClient):
             * 3) Adding the Request to the Detokenizer.
             * 4) Adding the Request to the EngineCore (separate process).
 
-        The output_handler() loop runs in a background task, pulling outputs from
+        The output_handler() loop runs in a background task, pulling from
         EngineCore and updating the RequestState and setting the asyncio event.
 
         The caller of generate() waits on the asyncio event and forwards
@@ -219,8 +220,8 @@ class AsyncLLM(EngineClient):
         """
 
         # DELTA streaming is not supported due to dynamic chunking.
-        assert (sampling_params.output_kind == RequestOutputKind.CUMULATIVE or
-                sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
+        assert (sampling_params.output_kind == RequestOutputKind.CUMULATIVE
+                or sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
 
         # We start the output_handler on the first call to generate() so that
         # we can call __init__ before the event loop starts, which enables us
@@ -238,18 +239,20 @@ class AsyncLLM(EngineClient):
             prompt_adapter_request=prompt_adapter_request,
             priority=priority,
         )
-        
+
         while True:
             try:
-                await asyncio.wait_for(state.event.wait(), timeout=WAITING_TIMEOUT_MS)
+                await asyncio.wait_for(state.event.wait(),
+                                       timeout=WAITING_TIMEOUT_MS)
 
-                # NOTE(rob): out_list can have more than one item. However, in the 
-                # streaming case, we use RequestOutputKind.CUMULATIVE, which has the 
-                # full generated text output (not just the text corresponding to the
-                # last token). So, we can just send the last item and the API Client
-                # handles converting the stream buffer into a delta text. This way
-                # we do "dynamic chunked streaming", such that the API client does not
-                # fall behind the EngineCore (which happens at high QPS othwerwise).
+                # NOTE(rob): out_list can have more than one item. However,
+                # in the streaming case, we use RequestOutputKind.CUMULATIVE,
+                # which has the full generated text output (not just the text
+                # corresponding to the last token). So, we can just send the
+                # last RequestOutput and the API Client handles converting into
+                # a delta text. This way we do "dynamic chunked streaming", such
+                # that the API client does not fall behind the EngineCor,
+                # which happens at high QPS otherwise.
                 out = state.out_list[-1]
 
             except asyncio.TimeoutError:
@@ -301,7 +304,7 @@ class AsyncLLM(EngineClient):
 
         for request_output in request_outputs:
             assert request_output.request_id in self.rid_to_state
-            
+
             # Update the RequestState and alert generate() that there
             # is a RequestOutput ready to return to the user.
             state = self.rid_to_state[request_output.request_id]
@@ -309,7 +312,6 @@ class AsyncLLM(EngineClient):
                 state.finished = True
             state.out_list.append(request_output)
             state.event.set()
-
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""

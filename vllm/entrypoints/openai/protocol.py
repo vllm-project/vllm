@@ -9,8 +9,8 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated
 
-from vllm.envs import VLLM_USE_V1
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.envs import VLLM_USE_V1
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -37,7 +37,6 @@ except ModuleNotFoundError:
 
 assert _LONG_INFO.min == _MOCK_LONG_INFO.min
 assert _LONG_INFO.max == _MOCK_LONG_INFO.max
-
 
 STREAM_SAMPLING_OUTPUT_KIND = RequestOutputKind.DELTA
 if VLLM_USE_V1:

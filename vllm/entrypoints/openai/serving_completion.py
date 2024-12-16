@@ -27,8 +27,8 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import (BeamSearchParams, SamplingParams, 
-                                  RequestOutputKind)
+from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
+                                  SamplingParams)
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
@@ -172,6 +172,7 @@ class OpenAIServingCompletion(OpenAIServing):
         stream = (request.stream
                   and (request.best_of is None or request.n == request.best_of)
                   and not request.use_beam_search)
+        assert isinstance(sampling_params, SamplingParams)
 
         # Streaming response
         if stream:
@@ -247,13 +248,11 @@ class OpenAIServingCompletion(OpenAIServing):
     ) -> AsyncGenerator[str, None]:
         """
         In V0, we use RequestOutputType.DELTA and each RequestOutput
-            from the result_generator is guarenteed to correspond to
-            a single token.
-
-            To handle this, we can simply constuct the Streaming
+            from the result_generator is guaranteed to correspond to
+            a single token so 
 
         In V1, we use RequestOutputType.CUMULATIVE and each RequestOutput
-            from the result_genrator is not guarenteed to correspond to
+            from the result_generator is not guaranteed to correspond to
             a single token (it could correspond to 2+ tokens).
 
             To handle this, we need to maintain state around how many
@@ -266,8 +265,8 @@ class OpenAIServingCompletion(OpenAIServing):
             such that the API server falls behind, we dynamically fall back
             to streaming chunks of tokens.
         """
-        assert (output_kind == RequestOutputKind.CUMULATIVE or
-                output_kind == RequestOutputKind.DELTA)
+        assert (output_kind == RequestOutputKind.CUMULATIVE
+                or output_kind == RequestOutputKind.DELTA)
 
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
@@ -324,9 +323,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     else:
                         if output_kind == RequestOutputKind.CUMULATIVE:
                             delta_text = output.text[previous_text_lens[i]:]
-                            delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                            out_logprobs = (output.logprobs[previous_num_tokens[i]:] if 
-                                            output.logprobs else None)
+                            delta_token_ids = output.token_ids[
+                                previous_num_tokens[i]:]
+                            out_logprobs = (
+                                output.logprobs[previous_num_tokens[i]:]
+                                if output.logprobs else None)
                         else:
                             delta_text = output.text
                             delta_token_ids = output.token_ids
