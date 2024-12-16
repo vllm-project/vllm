@@ -1610,7 +1610,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    virtual_engine=virtual_engine)
 
     @torch.inference_mode()
-    @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
+    @dump_input_when_exception(exclude_args=[0],
+                               exclude_kwargs=["self", "cache_engine"])
     def execute_model(
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
