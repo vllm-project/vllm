@@ -16,9 +16,9 @@ dtype = "float"
 llm = LLM(
     model="openai/whisper-large-v3",
     max_model_len=448,
-    max_num_seqs=128,
-    #max_num_batched_tokens=16384,
-    limit_mm_per_prompt={"audio": 1}
+    max_num_seqs=400,
+    limit_mm_per_prompt={"audio": 1},
+    kv_cache_dtype="fp8",
 )
 
 prompts = [
@@ -44,6 +44,9 @@ sampling_params = SamplingParams(
     top_p=1.0,
     min_tokens=0,
     max_tokens=200,
+    # min_tokens=40,
+    # max_tokens=40,
+    # ignore_eos=True,
 )
 
 start = time.time()
@@ -58,9 +61,9 @@ for output in outputs:
     prompt = output.prompt
     encoder_prompt = output.encoder_prompt
     generated_text = output.outputs[0].text
-    print(f"Encoder prompt: {encoder_prompt!r}, "
-          f"Decoder prompt: {prompt!r}, "
-          f"Generated text: {generated_text!r}")
+    # print(f"Encoder prompt: {encoder_prompt!r}, "
+    #       f"Decoder prompt: {prompt!r}, "
+    #       f"Generated text: {generated_text!r}")
 
 duration = time.time() - start
 
