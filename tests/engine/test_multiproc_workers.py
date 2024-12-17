@@ -27,10 +27,10 @@ class DummyWorkerWrapper(WorkerWrapperBase):
 
 def _start_workers() -> Tuple[List[ProcessWorkerWrapper], WorkerMonitor]:
     result_handler = ResultHandler()
-    config = VllmConfig()
+    vllm_config = VllmConfig()
     workers = [
-        ProcessWorkerWrapper(result_handler, DummyWorkerWrapper, config, rank)
-        for rank in range(8)
+        ProcessWorkerWrapper(result_handler, DummyWorkerWrapper, vllm_config,
+                             rank) for rank in range(8)
     ]
 
     worker_monitor = WorkerMonitor(workers, result_handler)
