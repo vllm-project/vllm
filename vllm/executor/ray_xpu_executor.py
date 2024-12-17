@@ -22,7 +22,9 @@ class RayXPUExecutor(RayGPUExecutor, XPUExecutor):
                 # driver_dummy_worker can be None when using ray spmd worker.
                 continue
             worker_node_and_gpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote()))  # type: ignore
+                ray.get(
+                    worker.get_node_and_accelerator_ids.remote(  # type: ignore
+                    )))
 
         # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = [({

@@ -19,6 +19,7 @@ class TpuPlatform(Platform):
     device_name: str = "tpu"
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
+    ray_device_key: str = "TPU"
     supported_quantization: list[str] = ["tpu_int8"]
 
     @classmethod
