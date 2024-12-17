@@ -426,7 +426,9 @@ class EngineArgs:
                             choices=[8, 16, 32, 64, 128],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
-                            'set to max-model-len')
+                            'set to max-model-len. On CUDA devices, '
+                            'only block sizes up to 32 are supported. '
+                            'On HPU devices, block size defaults to 128.')
 
         parser.add_argument(
             "--enable-prefix-caching",
