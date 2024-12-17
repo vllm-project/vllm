@@ -5,7 +5,7 @@ import json
 import random
 import time
 from functools import cache
-from typing import Dict, List, Optional
+from typing import Tuple, Dict, List, Optional
 
 import torch
 import uvloop
@@ -74,12 +74,14 @@ def download_lora(lora_path: str) -> str:
     """
     return snapshot_download(lora_path)
 
-
-def get_random_lora_request(args: argparse.Namespace):
+lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
+def get_random_lora_request(args: argparse.Namespace) -> Tuple[LoRARequest, AnyTokenizer]:
+    global lora_tokenizer_cache
     lora_id = random.randint(0, args.max_loras)
-    return LoRARequest(lora_name=str(lora_id),
-                       lora_int_id=lora_id,
-                       lora_path=download_lora(args.lora_path))
+    lora_request = LoRARequest(lora_name=str(lora_id), lora_int_id=lora_id, lora_path=download_lora(args.lora_path))
+    if lora_id not in lora_tokenizer_cache:
+        lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
+    return lora_request, lora_tokenizer_cache[lora_id]
 
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
@@ -99,8 +101,6 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
     # Shuffle the dataset.
     random.shuffle(dataset)
-
-    lora_tokenizers_cache: Dict[int, AnyTokenizer] = {}
 
     # Filter out sequences that are too long or too short
     filtered_dataset: List[SampleRequest] = []
@@ -132,12 +132,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         lora_request: Optional[LoRARequest] = None
         request_tokenizer = tokenizer
         if args.enable_lora:
-            lora_request = get_random_lora_request(args)
-            lora_id = lora_request.lora_int_id
-            if lora_id not in lora_tokenizers_cache:
-                lora_tokenizers_cache[lora_id] = get_lora_tokenizer(
-                    lora_request)
-            request_tokenizer = lora_tokenizers_cache[lora_id]
+            lora_request, request_tokenizer = get_random_lora_request(args)
 
         # Tokenize the prompts and completions.
         prompt_token_ids = request_tokenizer(prompt).input_ids
@@ -345,20 +340,14 @@ def main(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
-        lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
         vocab_size = tokenizer.vocab_size
         requests = []
-
         for _ in range(args.num_prompts):
 
             request_tokenizer = tokenizer
             lora_request: Optional[LoRARequest] = None
             if args.enable_lora:
-                lora_request = get_random_lora_request(args)
-                lora_id = lora_request.lora_int_id
-                if lora_id not in lora_tokenizer_cache:
-                    lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
-                request_tokenizer = lora_tokenizer_cache[lora_id]
+                lora_request, request_tokenizer = get_random_lora_request(args)
 
             # Synthesize a prompt with the given input length.
             candidate_ids = [
