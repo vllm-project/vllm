@@ -1,14 +1,7 @@
-'''
-Demonstrate prompting of text-to-text
-encoder/decoder models, specifically BART
-'''
 import time
 
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
-from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt
-
-audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 
 dtype = "float"
 
@@ -22,27 +15,27 @@ llm = LLM(
 )
 
 prompts = [
-    ExplicitEncoderDecoderPrompt(
-        encoder_prompt=TextPrompt(
-            prompt="",
-            multi_modal_data={"audio": AudioAsset("mary_had_lamb").audio_and_sample_rate}
-        ),
-        decoder_prompt="<|startoftranscript|>",
-    ),
-    ExplicitEncoderDecoderPrompt(
-        encoder_prompt=TextPrompt(
-            prompt="",
-            multi_modal_data={"audio": AudioAsset("winning_call").audio_and_sample_rate}
-        ),
-        decoder_prompt="<|startoftranscript|>",
-    ),
+    {
+        "prompt": "<|startoftranscript|>",
+        "multi_modal_data": {
+            "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+        },
+    },
+    {  # Test explicit encoder/decoder prompt
+        "encoder_prompt": {
+            "prompt": "",
+            "multi_modal_data": {
+                "audio": AudioAsset("winning_call").audio_and_sample_rate,
+            },
+        },
+        "decoder_prompt": "<|startoftranscript|>",
+    }
 ] * 1024
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
     temperature=0,
     top_p=1.0,
-    min_tokens=0,
     max_tokens=200,
 )
 

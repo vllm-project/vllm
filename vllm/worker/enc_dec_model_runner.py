@@ -280,7 +280,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_len = min(seq_len, 448)
+            seq_len = min(seq_len, self.model_config.max_model_len)
             batch_size += seq_len
 
             decoder_dummy_data = self.input_registry \
