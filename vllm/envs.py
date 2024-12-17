@@ -83,6 +83,8 @@ if TYPE_CHECKING:
     VLLM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
+    K_SCALE_CONSTANT: int = 200
+    V_SCALE_CONSTANT: int = 100
 
 
 def get_default_cache_root():
@@ -527,6 +529,14 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Pad the weight for moe kernel or not
     "VLLM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_FP8_PADDING", "1"))),
+
+    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
+    "K_SCALE_CONSTANT":
+    lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
+
+    # Divisor for dynamic value scale factor calculation for FP8 KV Cache
+    "V_SCALE_CONSTANT":
+    lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
 
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
