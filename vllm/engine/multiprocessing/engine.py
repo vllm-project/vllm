@@ -18,7 +18,6 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -335,16 +334,10 @@ class MQLLMEngine:
             self._errored_with = e
 
     def start_profile(self) -> None:
-        if type(self.engine.model_executor) is UniProcExecutor:
-            self.engine.model_executor.start_profile()
-        else:
-            self.engine.model_executor._run_workers("start_profile")
+        self.engine.model_executor.collective_rpc("start_profile")
 
     def stop_profile(self) -> None:
-        if type(self.engine.model_executor) is UniProcExecutor:
-            self.engine.model_executor.stop_profile()
-        else:
-            self.engine.model_executor._run_workers("stop_profile")
+        self.engine.model_executor.collective_rpc("stop_profile")
 
 
 def signal_handler(*_) -> None:
