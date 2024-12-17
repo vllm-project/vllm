@@ -203,6 +203,11 @@ class EngineArgs:
         if not self.tokenizer:
             self.tokenizer = self.model
 
+        # Override the default value of enable_prefix_caching if it's not set
+        # by user.
+        if self.enable_prefix_caching is None:
+            self.enable_prefix_caching = bool(envs.VLLM_USE_V1)
+
         # Override max_num_seqs if it's not set by user.
         if self.max_num_seqs is None:
             self.max_num_seqs = 256 if not envs.VLLM_USE_V1 else 1024
@@ -1023,22 +1028,11 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        # Configure prefix caching
-        if self.enable_prefix_caching is None:
-            if not envs.VLLM_USE_V1:
-                # V0: default off.
-                self.enable_prefix_caching = False
-            else:
-                # V1: default on for non-multimodal models.
-                self.enable_prefix_caching = (
-                    not model_config.is_multimodal_model)
-        elif (self.enable_prefix_caching and model_config.is_multimodal_model
-              and not envs.VLLM_USE_V1):
-            # Force disable prefix caching for multimodal models in V0.
-            logger.warning("--enable-prefix-caching is currently not "
-                           "supported for multimodal models in v0 and "
-                           "has been disabled.")
-            self.enable_prefix_caching = False
+        if model_config.is_multimodal_model and not envs.VLLM_USE_V1:
+            if self.enable_prefix_caching:
+                logger.warning("--enable-prefix-caching is currently not "
+                               "supported for multimodal models in v0 and "
+                               "has been disabled.")
 
         cache_config = CacheConfig(
             # neuron needs block_size = max_model_len
