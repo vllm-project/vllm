@@ -181,12 +181,13 @@ def _get_lora_b_ptr(lora_weights, offset_start, device):
 
         # If each lora has the same stride, there's no need to use a
         # tensor for storage.
-        if ((set(lora_strides_d0) == 1) and (set(lora_strides_d1) == 1)
-                and (set(lora_strides_d2) == 1)):
+        if (len(set(lora_strides_d0)) == 1 and len(set(lora_strides_d1)) == 1
+                and len(set(lora_strides_d2)) == 1):
             lora_strides_d0_tensor = lora_strides_d0[0]
             lora_strides_d1_tensor = lora_strides_d1[0]
             lora_strides_d2_tensor = lora_strides_d2[0]
             same_stride = True
+
         else:
             lora_strides_d0_tensor = torch.tensor(lora_strides_d0,
                                                   device=device)
@@ -195,7 +196,7 @@ def _get_lora_b_ptr(lora_weights, offset_start, device):
             lora_strides_d2_tensor = torch.tensor(lora_strides_d2,
                                                   device=device)
             same_stride = False
-
+        print(f"same_stride:{same_stride}")
         _LORA_PTR_DICT[key] = (slice_start_tensor, lora_ptr_tensor,
                                lora_strides_d0_tensor, lora_strides_d1_tensor,
                                lora_strides_d2_tensor, same_stride)

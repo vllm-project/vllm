@@ -159,8 +159,8 @@ def _get_lora_a_ptr(lora_a_weights, device):
             lora_ptr_tensor = lora_a_weights[0]
         # If each lora has the same stride, there's no need to use a
         # tensor for storage.
-        if ((set(lora_strides_d0) == 1) and (set(lora_strides_d1) == 1)
-                and (set(lora_strides_d2) == 1)):
+        if (len(set(lora_strides_d0)) == 1 and len(set(lora_strides_d1)) == 1
+                and len(set(lora_strides_d2)) == 1):
             lora_strides_d0_tensor = lora_strides_d0[0]
             lora_strides_d1_tensor = lora_strides_d1[0]
             lora_strides_d2_tensor = lora_strides_d2[0]
