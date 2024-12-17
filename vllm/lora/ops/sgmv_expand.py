@@ -162,7 +162,7 @@ def _get_lora_b_ptr(lora_weights, offset_start, device):
             slice_offset += lora_b_weight.size(1)
 
         if len(lora_weights) > 1:
-            #note these are device tensors
+            # note these are device tensors
             lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
             slice_start_tensor = torch.tensor(slice_offset_lst, device=device)
         else:
