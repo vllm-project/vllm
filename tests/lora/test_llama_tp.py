@@ -120,7 +120,6 @@ def test_llama_lora_warmup(sql_lora_files):
         "less when using lora than when not using lora")
 
 
-@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4(sql_lora_files):
@@ -136,7 +135,6 @@ def test_llama_lora_tp4(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
-@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
@@ -153,7 +151,6 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
-@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4_fully_sharded_enable_bias(sql_lora_files):

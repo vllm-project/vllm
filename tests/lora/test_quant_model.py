@@ -171,7 +171,6 @@ def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.skip_v1
 @pytest.mark.parametrize("model", MODELS)
 def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
                                  model):
