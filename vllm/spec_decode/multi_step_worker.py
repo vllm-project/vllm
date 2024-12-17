@@ -32,7 +32,8 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(kwargs.get("vllm_config"))
+        WorkerWrapperBase.__init__(self, kwargs.get("vllm_config"),
+                                   kwargs.get("rank"))
         self.init_worker(*args, **kwargs)
 
         # Lazy initialization list.

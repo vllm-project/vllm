@@ -112,7 +112,7 @@ class CPUExecutor(ExecutorBase):
         rank: int = 0,
     ):
 
-        wrapper = WorkerWrapperBase(vllm_config=self.vllm_config)
+        wrapper = WorkerWrapperBase(vllm_config=self.vllm_config, rank=rank)
 
         assert self.distributed_init_method is not None
 

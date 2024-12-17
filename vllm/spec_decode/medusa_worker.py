@@ -17,7 +17,7 @@ class MedusaWorker(NonLLMProposerWorkerBase, WorkerWrapperBase):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(kwargs.get("vllm_config"))
+        super().__init__(kwargs.get("vllm_config"), kwargs.get("rank"))
         self.init_worker(*args, **kwargs)
 
         # Lazy initialization list.

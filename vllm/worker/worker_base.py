@@ -416,7 +416,9 @@ class WorkerWrapperBase:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        rank: int = 0,
     ) -> None:
+        self.rank = rank
         self.vllm_config = vllm_config
         trust_remote_code = vllm_config.model_config.trust_remote_code
         self.worker: Optional[WorkerBase] = None
@@ -424,6 +426,10 @@ class WorkerWrapperBase:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
+
+    def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
+        if self.rank in rank_mapping:
+            self.rank = rank_mapping[self.rank]
 
     @staticmethod
     def update_environment_variables(envs: Dict[str, str]) -> None:

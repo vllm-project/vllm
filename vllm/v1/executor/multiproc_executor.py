@@ -236,7 +236,7 @@ class WorkerProc:
         ready_path: str,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(vllm_config=vllm_config)
+        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rank=rank)
         wrapper.init_worker(vllm_config, local_rank, rank,
                             distributed_init_method)
         self.worker = wrapper.worker

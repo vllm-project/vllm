@@ -15,7 +15,8 @@ logger = init_logger(__name__)
 
 def create_worker(**kwargs):
     vllm_config = kwargs.get("vllm_config")
-    wrapper = WorkerWrapperBase(vllm_config=vllm_config)
+    rank = kwargs.get("rank")
+    wrapper = WorkerWrapperBase(vllm_config=vllm_config, rank=rank)
     wrapper.init_worker(**kwargs)
     return wrapper.worker
 
