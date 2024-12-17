@@ -51,10 +51,8 @@ def _sgmv_expand_kernel(
     """
     pid = tl.program_id(axis=0)
     cur_batch = tl.program_id(axis=1)
-    if SLICE_NUM == 1:
-        slice_id: tl.constexpr = 0
-    else:
-        slice_id = tl.program_id(axis=2)
+
+    slice_id = tl.program_id(axis=2)
     cta_n_num = tl.cdiv(N, BLOCK_N)
     pid_m = pid // cta_n_num
     pid_n = pid % cta_n_num
@@ -80,25 +78,18 @@ def _sgmv_expand_kernel(
         cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
         cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
         cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
-
     if SLICE_NUM == 1:
-        # input
-        a_ptr = (input_ptr + cur_seq_start * input_d1_stride +
-                 ram[:, None] * input_d1_stride +
-                 offset_k[None, :] * input_d2_stride, )
-        # current lora ptr
+        cur_input_ptr = input_ptr
         cur_lora_ptr = lora_ptr
 
     else:
-        # input
         cur_input_ptr = input_ptr + slice_id * input_d0_stride
-        a_ptr = (cur_input_ptr + cur_seq_start * input_d1_stride +
-                 ram[:, None] * input_d1_stride +
-                 offset_k[None, :] * input_d2_stride, )
-        # current lora ptr
         cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
             tl.pointer_type(out_ptr.dtype.element_ty))
 
+    a_ptr = (cur_input_ptr + cur_seq_start * input_d1_stride +
+             ram[:, None] * input_d1_stride +
+             offset_k[None, :] * input_d2_stride, )
     b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
              offset_k[:, None] * cur_lora_d2_stride +
              rbn[None, :] * cur_lora_d1_stride)
@@ -171,13 +162,12 @@ def _get_lora_b_ptr(lora_weights, offset_start, device):
             slice_offset += lora_b_weight.size(1)
 
         if len(lora_weights) > 1:
-            # note these are device tensors
-            slice_start_tensor = torch.tensor(slice_offset_lst, device=device)
+            #note these are device tensors
             lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
-
+            slice_start_tensor = torch.tensor(slice_offset_lst, device=device)
         else:
             slice_start_tensor = slice_offset_lst[0]
-            lora_ptr_tensor = lora_weights[0]
+            lora_ptr_tensor = lora_b_weight[0]
 
         # If each lora has the same stride, there's no need to use a
         # tensor for storage.
@@ -196,7 +186,6 @@ def _get_lora_b_ptr(lora_weights, offset_start, device):
             lora_strides_d2_tensor = torch.tensor(lora_strides_d2,
                                                   device=device)
             same_stride = False
-        print(f"same_stride:{same_stride}")
         _LORA_PTR_DICT[key] = (slice_start_tensor, lora_ptr_tensor,
                                lora_strides_d0_tensor, lora_strides_d1_tensor,
                                lora_strides_d2_tensor, same_stride)
@@ -256,7 +245,7 @@ def _sgmv_expand(
     grid = (
         triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         batches,
-        len(lora_ptr_tensor),
+        len(lora_b_weights),
     )
     _sgmv_expand_kernel[grid](
         inputs,
