@@ -392,6 +392,9 @@ class InputBatch:
         max_prompt_len = max(self.num_prompt_token_ids[:self.num_reqs])
         # use the value of vocab_size as a pad since we don't have a
         # token_id of this value.
+        # TODO - Add a method in vllm/utils.py to pad a numpy array similar
+        # to make_tensor_with_pad which takes a list and move the logic
+        # there.
         padded_prompts = np.full((self.num_reqs, max_prompt_len),
                                  vocab_size,
                                  dtype=np.int64)
