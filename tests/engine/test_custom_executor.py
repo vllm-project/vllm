@@ -16,7 +16,7 @@ class Mock:
     ...
 
 
-class CustomGPUExecutor(UniProcExecutor):
+class CustomUniExecutor(UniProcExecutor):
 
     def collective_rpc(self,
                        method: str,
@@ -29,7 +29,7 @@ class CustomGPUExecutor(UniProcExecutor):
         return super().collective_rpc(method, timeout, args, kwargs)
 
 
-class CustomGPUExecutorAsync(UniProcExecutorAsync):
+class CustomUniExecutorAsync(UniProcExecutorAsync):
 
     async def execute_model_async(self, *args, **kwargs):
         with open(".marker", "w"):
@@ -49,7 +49,7 @@ def test_custom_executor_type_checking(model):
         AsyncLLMEngine.from_engine_args(engine_args)
     with pytest.raises(TypeError):
         engine_args = AsyncEngineArgs(
-            model=model, distributed_executor_backend=CustomGPUExecutor)
+            model=model, distributed_executor_backend=CustomUniExecutor)
         AsyncLLMEngine.from_engine_args(engine_args)
 
 
@@ -61,7 +61,7 @@ def test_custom_executor(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = EngineArgs(
-            model=model, distributed_executor_backend=CustomGPUExecutor)
+            model=model, distributed_executor_backend=CustomUniExecutor)
         engine = LLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
@@ -81,7 +81,7 @@ def test_custom_executor_async(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = AsyncEngineArgs(
-            model=model, distributed_executor_backend=CustomGPUExecutorAsync)
+            model=model, distributed_executor_backend=CustomUniExecutorAsync)
         engine = AsyncLLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
