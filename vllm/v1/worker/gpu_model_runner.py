@@ -630,7 +630,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for _ in range(self.num_attn_layers)
         ]
 
-<<<<<<< HEAD
         # Profile with multimodal encoder & encoder cache.
         # TODO (ywang96): generalize this beyond image modality since
         # mm_input_mapper only supports image inputs.
@@ -681,16 +680,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                        dummy_kv_caches)
-        logits = self.model.compute_logits(hidden_states, None)
-        logits = logits[:self.max_num_tokens]
-        # TODO(woosuk): Consider the memory usage of the sampler.
-        torch.cuda.synchronize()
-        del hidden_states, logits
-        self.encoder_cache.clear()
-=======
+        # TODO (varun): Reconcile text-only with multi-modal
         # compute num tokens per request. For profile, have maximum num_reqs and
         # that collectively have maximum num_tokens.
         num_reqs = self.scheduler_config.max_num_seqs
@@ -715,9 +705,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = self.model.compute_logits(hidden_states, None)
             # TODO(woosuk): Consider the memory usage of the sampler.
             torch.cuda.synchronize()
-
             del hidden_states, logits
->>>>>>> 90bb4d2c3 (Add lora support)
+            self.encoder_cache.clear()
         gc.collect()
 
     def capture_model(self) -> None:
