@@ -1,5 +1,4 @@
 import asyncio
-import os
 from typing import Any, List, Optional
 
 from vllm.executor.executor_base import (
