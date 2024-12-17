@@ -31,6 +31,7 @@ class CompressedTensors24(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        # Only cutlass 3.x kernels are implemented so far
         return 90
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,

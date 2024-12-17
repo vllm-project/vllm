@@ -17,12 +17,12 @@ bool cutlass_sparse_compress_entry(torch::Tensor& a_nzs, torch::Tensor& a_meta,
   TORCH_CHECK(a.size(0) == a_nzs.size(0) && a.size(0) == a_meta.size(0) &&
               a_nzs.size(1) * 2 == a.size(1) &&
               a_meta.size(1) * 2 * 4 == a.size(1));
-              // Considering elemsPerMetaElem = 8b / 2b_per_nz = 4
+  // Considering elemsPerMetaElem = 8b / 2b_per_nz = 4
 
   // Check for strides and alignment
   TORCH_CHECK(a.stride(1) == 1 && a_nzs.stride(1) == 1 &&
-              a_meta.stride(1) == 1);       // Row-major
-  TORCH_CHECK(a.stride(0) % 8 == 0);       // 8 Byte Alignment for Compression
+              a_meta.stride(1) == 1);  // Row-major
+  TORCH_CHECK(a.stride(0) % 8 == 0);   // 8 Byte Alignment for Compression
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
   int32_t version_num = get_sm_version_num();

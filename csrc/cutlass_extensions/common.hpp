@@ -8,10 +8,11 @@
 /**
  * Helper function for checking CUTLASS errors
  */
-#define CUTLASS_CHECK(status)                        \
-  {                                                  \
-    TORCH_CHECK(status == cutlass::Status::kSuccess, \
-                cutlassGetStatusString(status));     \
+#define CUTLASS_CHECK(status)                       \
+  {                                                 \
+    cutlass::Status error = status;                 \
+    TORCH_CHECK(error == cutlass::Status::kSuccess, \
+                cutlassGetStatusString(error));     \
   }
 
 /**
