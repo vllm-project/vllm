@@ -241,10 +241,6 @@ struct Sm90RowOrScalarBroadcastArray {
     auto [m, n, k, l] = args.tile_coord_mnkl;
     using ThreadCount = decltype(size(args.tiled_copy));
 
-    if (threadIdx.x ==128){
-      printf("ROW M: %d, N: %d, K: %d, L: %d, coord m: %d, n: %d, k: %d, l: %d\n", M, N, K, L, m, n, k, l);
-    }
-
     Tensor mRow = make_tensor(make_gmem_ptr(params.ptr_row_array[l]), make_shape(M,N,1), params.dRow);
     Tensor gRow = local_tile(mRow(_,_,l), take<0,2>(args.tile_shape_mnk), make_coord(m, n));          // (CTA_M, CTA_N)
     Tensor sRow = make_tensor(make_smem_ptr(smem), 
@@ -435,9 +431,6 @@ struct Sm90ColOrScalarBroadcastArray {
     auto [M, N, K, L] = args.problem_shape_mnkl;
     auto [m, n, k, l] = args.tile_coord_mnkl;
 
-    // if (threadIdx.x ==128){
-    //   printf("COL M: %d, N: %d, K: %d, L: %d, coord m: %d, n: %d, k: %d, l: %d\n", M, N, K, L, m, n, k, l);
-    // }
     Tensor mCol = make_tensor(make_gmem_ptr(params.ptr_col_array[l]), make_shape(M,N,1), params.dCol);
     Tensor tCgCol = sm90_partition_for_epilogue<ReferenceSrc>(                         // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
       mCol, args.tile_shape_mnk, args.tile_coord_mnkl, args.epi_tile, args.tiled_copy, args.thread_idx);

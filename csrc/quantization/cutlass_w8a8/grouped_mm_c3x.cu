@@ -5,7 +5,7 @@
 
 #include "cutlass/cutlass.h"
 
-// TODO let's see which of these we'll need
+// TODO clean up the includes we no longer need
 
 #include "cute/tensor.hpp"
 #include "cutlass/tensor_ref.h"
@@ -25,10 +25,6 @@
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 #include "common.hpp"
-
-// get rid of these?
-// #include "helper.h"
-// using namespace cute;
 
 using namespace cute;
 
@@ -129,20 +125,6 @@ cutlass::platform::unique_ptr<T, ItemDeleter<T>> make_device_ptr(
   return cutlass::platform::unique_ptr<T, ItemDeleter<T>>(data_device);
 }
 
-///////////////
-template <class TupType, size_t... I>
-void print(const TupType& _tup, std::index_sequence<I...>) {
-  std::cout << "(";
-  (..., (std::cout << (I == 0 ? "" : ", ") << std::get<I>(_tup)));
-  std::cout << ")\n";
-}
-
-template <class... T>
-void print(const std::tuple<T...>& _tup) {
-  print(_tup, std::make_index_sequence<sizeof...(T)>());
-}
-////////////
-
 template <typename Gemm>
 void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
                                c10::List<at::Tensor> const& a_tensors,
@@ -242,6 +224,8 @@ void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
   typename GemmKernel::MainloopArguments mainloop_args{
       a_ptrs_ptr.get(), a_stride_ptr.get(), b_ptrs_ptr.get(),
       b_stride_ptr.get()};
+  // Currently, we are only able to do broadcast on either all or none a_scales
+  // and on either all or none b_scales
   typename GemmKernel::EpilogueArguments epilogue_args{
       Gemm::Epilogue::prepare_args(
           a_scales_ptrs_ptr.get(), b_scales_ptrs_ptr.get(),
@@ -255,8 +239,6 @@ void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
 
   using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   GemmOp gemm_op;
-  //   std::cout << "gemm_op.can_implement(args): "
-  //             << (int)gemm_op.can_implement(args) << std::endl;
   CUTLASS_CHECK(gemm_op.can_implement(args));
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
@@ -336,27 +318,6 @@ void cutlass_grouped_mm_sm90(c10::List<at::Tensor> const& out_tensors,
   using Cutlass3xGemmDefault = typename sm90_fp8_config_default<
       ElementAB_Type, ElementC_Type,
       vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
-  // using Cutlass3xGemmM64 =
-  //     typename sm90_fp8_config_M64<ElementAB_Type, ElementC_Type,
-  //     vllm::c3x::ScaledEpilogue>::Cutlass3xGemm;
-  // using Cutlass3xGemmM128 =
-  //     typename sm90_fp8_config_M128<ElementAB_Type, ElementC_Type,
-  //     vllm::c3x::ScaledEpilogue>::Cutlass3xGemm;
-
-  // // uint32_t const m = a.size(0);
-  // uint32_t const mp2 =
-  //     std::max(static_cast<uint32_t>(64), next_pow_2(m));  // next power of 2
-
-  // if (mp2 <= 64) {
-  //   // m in [1, 64]
-  //   cutlass_group_gemm_caller<Cutlass3xGemmM64>(out, a, b, a_scales,
-  //   b_scales);
-  // } else if (mp2 <= 128) {
-  //   // m in (64, 128]
-  //   cutlass_group_gemm_caller<Cutlass3xGemmM128>(out, a, b, a_scales,
-  //   b_scales);
-  // } else {
-  //   // m in (128, inf)
   cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
       out_tensors, a_tensors, b_tensors, a_scales, b_scales);
 }

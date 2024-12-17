@@ -457,10 +457,11 @@ def test_cutlass_support_opcheck():
     opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability, ))
 
 
+# TODO add bias
 @pytest.mark.parametrize("num_groups", [8])
-@pytest.mark.parametrize("per_act_token", [True, False])  # [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])  # [True, False])
-@pytest.mark.parametrize("use_bias", [False])  # [True, False])
+@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("use_bias", [False])
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
@@ -479,9 +480,9 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
     baseline_tensors = []
 
     alignment = 16  # 128 // 8
-    # For variation, each group g has dimensions
+    # For variation, each group has dimensions
     # (m_g = m/(g+1), n_g = n/(g+1), k_g = k/(g+1))
-    for g in range(num_groups):
+    for _ in range(num_groups):
         m_g = alignment * random.randint(1, 64)
         n_g = alignment * random.randint(1, 64)
         k_g = alignment * random.randint(1, 64)

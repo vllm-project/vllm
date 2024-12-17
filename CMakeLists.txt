@@ -264,7 +264,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
     set(SRCS
         "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
-        "csrc/quantization/cutlass_w8a8/grouped_gemm_test.cu")
+        "csrc/quantization/cutlass_w8a8/grouped_mm_c3x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
