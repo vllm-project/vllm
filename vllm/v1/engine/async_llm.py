@@ -184,9 +184,6 @@ class AsyncLLM(EngineClient):
     ) -> RequestState:
         """Add new request to the AsyncLLM."""
 
-        # if self.detokenizer.is_request_active(request_id):
-        #     raise ValueError(f"Request {request_id} already exists.")
-
         # 1) Add to RequestState tracker. The "event" is used to manage
         # concurrency between generate() and output_handler().
         self.rid_to_state[request_id] = RequestState.new()
@@ -197,6 +194,8 @@ class AsyncLLM(EngineClient):
             trace_headers, prompt_adapter_request, priority)
 
         # 3) Add the DetokenizerRequest to Detokenizer.
+        # TODO: sending these separately is a race condition. We should instead
+        # have the EngineCore do the "AddRequest" logic.
         await self.detokenizer.add_request_async(detokenizer_req)
 
         # 4) Add the EngineCoreRequest to EngineCore.
@@ -268,6 +267,8 @@ class AsyncLLM(EngineClient):
                 # that the API client does not fall behind the EngineCor,
                 # which happens at high QPS otherwise.
                 out = state.out_list[-1]
+                if len(state.out_list) > 10:
+                    logger.info(f"{len(state.out_list)=}")
 
             except asyncio.TimeoutError:
                 # TODO(rob): do request cancellation checking here.

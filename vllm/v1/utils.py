@@ -88,11 +88,25 @@ def make_zmq_socket(
     ) -> Union[zmq.Socket, zmq.asyncio.Socket]:
     """Make a ZMQ socket with the proper bind/connext semantics."""
 
+    import psutil
+    mem = psutil.virtual_memory()
+
     socket = ctx.socket(type)
+    
+    total_mem = mem.total / 1024**3
+    available_mem = mem.available / 1024**3
+    if total_mem > 32 and available_mem > 16:
+        buf_size = int(0.5 * 1024**3)
+    else:
+        buf_size = -1
 
     if type == zmq.constants.PULL:
+        socket.setsockopt(zmq.RCVHWM, 0)
+        socket.setsockopt(zmq.RCVBUF, buf_size)
         socket.connect(path)
     elif type == zmq.constants.PUSH:
+        socket.setsockopt(zmq.SNDHWM, 0)
+        socket.setsockopt(zmq.SNDBUF, buf_size)
         socket.bind(path)
     else:
         raise ValueError(f"Unknown Socket Type: {type}")
@@ -105,7 +119,7 @@ def zmq_socket_ctx(
         type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
-    ctx = zmq.Context()  # type: ignore[attr-defined]
+    ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
     try:
         yield make_zmq_socket(ctx, path, type)
 

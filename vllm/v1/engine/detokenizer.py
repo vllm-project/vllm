@@ -13,7 +13,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import get_open_zmq_ipc_path
+from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import (DetokenizerRequest, DetokenizerRequestType,
                             EngineCoreOutput, EngineCoreOutputs, 
                             BackgroundProcHandle,)
@@ -386,6 +386,10 @@ class DetokenizerProc(Detokenizer):
     def run_busy_loop(self):
         """Core busy loop of the Detokenizer."""
 
+        log_interval = 0
+        import time
+
+        last_log = time.perf_counter()
         try:
             # TODO: handle aborted due to client cancellation
             # TODO: pickle -> msgpack
@@ -420,7 +424,11 @@ class DetokenizerProc(Detokenizer):
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
                         outputs = self.step(engine_core_outputs)
                         msg = pickle.dumps(outputs, protocol=pickle.HIGHEST_PROTOCOL)
-                        output_socket.send_multipart((msg, ), copy=False)
+                        # now = time.perf_counter()
+                        # if now - last_log > 0.1:
+                        #     logger.info("Detok: Sending")
+                        #     last_log = now
+                        output_socket.send_multipart((msg, ), copy=False)                        
         
         except Exception as e:
             logger.error(e)
@@ -435,7 +443,7 @@ class DetokenizerClient:
         self.decoder = PickleEncoder()
         
         # ZMQ setup.
-        self.ctx = zmq.asyncio.Context()
+        self.ctx = zmq.asyncio.Context(io_threads=2)
 
         # Get input (DetokenizerRequest) to Detokenizer.
         input_path = get_open_zmq_ipc_path()
@@ -463,6 +471,13 @@ class DetokenizerClient:
             **kwargs,
         )
     
+    def shutdown(self):
+        self.proc_handle.proc.terminate()
+        self.proc_handle.proc.join(5)
+
+        if self.proc_handle.proc.is_alive():
+            kill_process_tree(self.proc_handle.proc.pid)
+
     async def add_request_async(self, request: DetokenizerRequest):
         """Send new DetokenizerRequest to Detokenizer."""
 

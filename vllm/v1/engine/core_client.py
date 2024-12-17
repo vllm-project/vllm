@@ -130,8 +130,8 @@ class MPClient(EngineCoreClient):
     def __init__(
         self,
         *args,
-        output_path: str,
         asyncio_mode: bool,
+        output_path: Optional[str] = None,
         **kwargs,
     ):
         # Serialization setup.
@@ -140,9 +140,9 @@ class MPClient(EngineCoreClient):
 
         # ZMQ setup.
         if asyncio_mode:
-            self.ctx = zmq.asyncio.Context()
+            self.ctx = zmq.asyncio.Context(io_threads=2)
         else:
-            self.ctx = zmq.Context()  # type: ignore[attr-defined]
+            self.ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
 
         input_path = get_open_zmq_ipc_path()
         self.input_socket = make_zmq_socket(
@@ -150,6 +150,9 @@ class MPClient(EngineCoreClient):
             input_path,
             zmq.constants.PUSH,
         )
+
+        if output_path is None:
+            output_path = get_open_zmq_ipc_path()
 
         # Start EngineCore in background process.
         self.proc_handle: Optional[BackgroundProcHandle]
