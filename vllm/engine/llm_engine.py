@@ -472,8 +472,12 @@ class LLMEngine:
                 from vllm.executor.uniproc_executor import UniProcExecutor
                 executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "cpu":
-            from vllm.executor.cpu_executor import CPUExecutor
-            executor_class = CPUExecutor
+            if engine_config.parallel_config.world_size == 1:
+                from vllm.executor.uniproc_executor import UniProcExecutor
+                executor_class = UniProcExecutor
+            else:
+                from vllm.executor.multiproc_distributed_executor import (
+                    MultiprocessingDistributedExecutor)
         elif engine_config.device_config.device_type == "hpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
