@@ -8,9 +8,6 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async)
-from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -85,6 +82,10 @@ class ExecutorBase(ABC):
                            self.model_config.max_model_len)
         logger.info("Maximum concurrency for %s tokens per request: %.2fx",
                     self.model_config.max_model_len, max_concurrency)
+
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 

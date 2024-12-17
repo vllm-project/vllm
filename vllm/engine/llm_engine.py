@@ -28,8 +28,8 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
+from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
@@ -513,8 +513,7 @@ class LLMEngine:
                 "support VLLM_USE_RAY_SPMD_WORKER=1")
             executor_class = MultiprocessingGPUExecutor
         else:
-            from vllm.executor.gpu_executor import GPUExecutor
-            executor_class = GPUExecutor
+            executor_class = UniProcExecutor
         return executor_class
 
     @classmethod
@@ -1862,20 +1861,10 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def start_profile(self) -> None:
-        # using type instead of isinstance to check to avoid capturing
-        # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.start_profile()
-        else:
-            self.model_executor._run_workers("start_profile")
+        self.model_executor.collective_rpc("start_profile")
 
     def stop_profile(self) -> None:
-        # using type instead of isinstance to check to avoid capturing
-        # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.stop_profile()
-        else:
-            self.model_executor._run_workers("stop_profile")
+        self.model_executor.collective_rpc("stop_profile")
 
     def is_tracing_enabled(self) -> bool:
         return self.tracer is not None

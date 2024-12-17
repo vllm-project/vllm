@@ -1,12 +1,14 @@
 import asyncio
 import os
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
-from vllm.executor.gpu_executor import GPUExecutor, GPUExecutorAsync
+from vllm.executor.uniproc_executor import (UniProcExecutor,
+                                            UniProcExecutorAsync)
 from vllm.sampling_params import SamplingParams
 
 
@@ -14,16 +16,20 @@ class Mock:
     ...
 
 
-class CustomGPUExecutor(GPUExecutor):
+class CustomGPUExecutor(UniProcExecutor):
 
-    def execute_model(self, *args, **kwargs):
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
         # Drop marker to show that this was ran
         with open(".marker", "w"):
             ...
-        return super().execute_model(*args, **kwargs)
+        return super().collective_rpc(method, timeout, args, kwargs)
 
 
-class CustomGPUExecutorAsync(GPUExecutorAsync):
+class CustomGPUExecutorAsync(UniProcExecutorAsync):
 
     async def execute_model_async(self, *args, **kwargs):
         with open(".marker", "w"):
