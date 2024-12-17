@@ -30,6 +30,7 @@ class MockModelConfig:
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
+    logits_processor_pattern = None
 
 
 @dataclass
