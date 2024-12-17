@@ -22,26 +22,25 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import cached_property, partial
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Set, Tuple, Type, TypedDict, Union)
+from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Set,
+                    Tuple, Type, TypedDict, Union)
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from PIL import Image
-from transformers import ProcessorMixin, BatchFeature
+from transformers import BatchFeature, ProcessorMixin
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLConfig, Qwen2VLVisionConfig)
-from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.inputs import InputContext
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
@@ -55,29 +54,19 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.inputs import (MultiModalData, MultiModalDataDict,
-                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataDict,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
-from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.platforms import _Backend
-from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
-from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
                     init_vllm_registered_model, maybe_prefix)
 
 logger = init_logger(__name__)
-
-
-VIDEO_MIN_PIXELS = 128 * 28 * 28
-VIDEO_MAX_PIXELS = 768 * 28 * 28
-FPS_MAX_FRAMES = 768
-
 
 # === Vision Inputs === #
 
@@ -754,7 +743,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         self,
         *,
         min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None
+        max_pixels: Optional[int] = None,
     ) -> ProcessorMixin:
         hf_processor = self.ctx.get_hf_processor()
         if min_pixels:
@@ -767,7 +756,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
                 "max_pixels": hf_processor.image_processor.max_pixels,
             }
         return hf_processor
-    
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
@@ -777,29 +766,24 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor: Qwen2VLProcessor = self._get_hf_processor()
         # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
         # image_token and video_token registered
-        image_token = hf_processor.image_token
-        video_token = hf_processor.video_token
+        placeholder = {
+            "image": hf_processor.image_token,
+            "video": hf_processor.video_token,
+        }
         merge_length = hf_processor.image_processor.merge_size**2
-        
-        def get_image_replacement_qwen2vl(item_idx: int):
-            num_tokens = hf_inputs["image_grid_thw"][item_idx].prod() // merge_length
-            return image_token * num_tokens
 
-        def get_video_replacement_qwen2vl(item_idx: int):
-            num_tokens = hf_inputs["video_grid_thw"][item_idx].prod() // merge_length
-            return video_token * num_tokens
-        
+        def get_replacement_qwen2vl(item_idx: int, modality: str):
+            grid_thw = hf_inputs[f"{modality}_grid_thw"][item_idx]
+            num_tokens = grid_thw.prod() // merge_length
+            return placeholder[modality] * num_tokens
+
         return [
             PromptReplacement(
-                modality="image",
-                target=image_token,
-                replacement=get_image_replacement_qwen2vl,
-            ),
-            PromptReplacement(
-                modality="video",
-                target=image_token,
-                replacement=get_video_replacement_qwen2vl,
-            ),
+                modality=modality,
+                target=placeholder[modality],
+                replacement=partial(get_replacement_qwen2vl,
+                                    modality=modality),
+            ) for modality in ("image", "video")
         ]
 
     def _get_dummy_mm_inputs(
@@ -820,11 +804,12 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
             max_pixels=image_processor.max_pixels,
         )
 
-        dummy_image = Image.new("RGB", (resized_width, resized_height), color=0)
+        dummy_image = Image.new("RGB", (resized_width, resized_height),
+                                color=0)
         data["image"] = [dummy_image] * num_images
 
         return ProcessorInputs(
-            prompt_text=image_token*num_images,
+            prompt_text=image_token * num_images,
             mm_data=data,
             mm_processor_kwargs={},
         )
@@ -861,7 +846,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config: Qwen2VLConfig = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
