@@ -52,4 +52,5 @@ class UniProcExecutor(ExecutorBase):
         return
 
 
-UniProcExecutorAsync = ExecutorAsyncBase
+class UniProcExecutorAsync(ExecutorAsyncBase):
+    uses_ray: bool = False
