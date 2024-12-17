@@ -8,7 +8,6 @@ import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
 
 if TYPE_CHECKING:
@@ -390,19 +389,19 @@ class InputBatch:
         vocab_size: int,
         device: torch.device,
     ) -> torch.Tensor:
-        prompt_token_ids: List[List[int]] = []
-        for index in range(self.num_reqs):
-            prompt_token_ids.append(self.token_ids_cpu[
-                index, :self.num_prompt_token_ids[index]].tolist())
-        prompt_tokens_cpu_tensor = make_tensor_with_pad(
-            prompt_token_ids,
-            # use the value of vocab_size as a pad since we don't have a
-            # token_id of this value.
-            pad=vocab_size,
-            device="cpu",
-            dtype=torch.int64,
-            pin_memory=self.pin_memory,
-        )
+        max_prompt_len = max(self.num_prompt_token_ids[:self.num_reqs])
+        # use the value of vocab_size as a pad since we don't have a
+        # token_id of this value.
+        padded_prompts = np.full((self.num_reqs, max_prompt_len),
+                                 vocab_size,
+                                 dtype=np.int64)
+        for i in range(self.num_reqs):
+            padded_prompts[i, :self.num_prompt_token_ids[i]] =\
+                self.token_ids_cpu[i, :self.num_prompt_token_ids[i]]
+        prompt_tokens_cpu_tensor = torch.from_numpy(padded_prompts).to("cpu")
+        if self.pin_memory:
+            prompt_tokens_cpu_tensor = \
+                prompt_tokens_cpu_tensor.pin_memory()
         prompt_tokens_tensor = prompt_tokens_cpu_tensor.to(device=device,
                                                            non_blocking=True)
         return prompt_tokens_tensor
