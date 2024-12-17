@@ -1,11 +1,14 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, PoolerOutput
+
+logger = init_logger(__name__)
 
 
 class ExecutorBase(ABC):
@@ -40,6 +43,13 @@ class ExecutorBase(ABC):
         pass
 
     @abstractmethod
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        pass
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
@@ -53,58 +63,89 @@ class ExecutorBase(ABC):
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
-        raise NotImplementedError
+        results = self.collective_rpc("determine_num_available_blocks")
+        a = min([r[0] for r in results])
+        b = min([r[1] for r in results])
+        return a, b
 
-    @abstractmethod
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks.
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+        """Initialize the KV cache by invoking the underlying worker.
         """
-        raise NotImplementedError
+        # NOTE: This is logged in the executor because there can be >1 worker
+        # with other executors. We could log in the engine level, but work
+        # remains to abstract away the device for non-GPU configurations.
+        logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
+                    num_cpu_blocks)
+        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
+                           self.model_config.max_model_len)
+        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                    self.model_config.max_model_len, max_concurrency)
+        self.collective_rpc("initialize_cache",
+                            args=(num_gpu_blocks, num_cpu_blocks))
 
-    @abstractmethod
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[SamplerOutput]]:
-        """Executes at least one model step on the given sequences."""
-        raise NotImplementedError
+    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
+        output = self.collective_rpc("execute_model",
+                                     args=(execute_model_req, ))
+        return output[0]
 
     def stop_remote_worker_execution_loop(self) -> None:
         """Releases parallel workers from model loop."""
         return
 
-    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        raise NotImplementedError
+        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
+        return all(self.collective_rpc("add_lora", args=(lora_request, )))
 
-    @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return all(self.collective_rpc("remove_lora", args=(lora_id, )))
 
-    @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError  # type: ignore
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return all(self.collective_rpc("pin_lora", args=(lora_id, )))
 
-    @abstractmethod
     def list_loras(self) -> Set[int]:
-        raise NotImplementedError
+        sets = self.collective_rpc("list_loras")
+        for s in sets:
+            assert s == sets[0], "All workers should have the same LORAs."
+        return sets[0]
 
-    @abstractmethod
     def add_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        raise NotImplementedError
+        assert prompt_adapter_request.prompt_adapter_id > 0, \
+            "prompt_adapter_id must be greater than 0."
+        return all(
+            self.collective_rpc("add_prompt_adapter",
+                                args=(prompt_adapter_request, )))
 
-    @abstractmethod
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError
+        assert prompt_adapter_id > 0, \
+            "prompt_adapter_id must be greater than 0."
+        return all(
+            self.collective_rpc("remove_prompt_adapter",
+                                args=(prompt_adapter_id, )))
 
-    @abstractmethod
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError  # type: ignore
+        assert prompt_adapter_id > 0, \
+            "prompt_adapter_id must be greater than 0."
+        return all(
+            self.collective_rpc("pin_prompt_adapter",
+                                args=(prompt_adapter_id, )))
 
-    @abstractmethod
     def list_prompt_adapters(self) -> Set[int]:
-        raise NotImplementedError
+        sets = self.collective_rpc("list_prompt_adapters")
+        for s in sets:
+            assert s == sets[
+                0], "All workers should have the same prompt adapters."
+        return sets[0]
+
+    def start_profile(self) -> None:
+        self.collective_rpc("start_profile")
+
+    def stop_profile(self) -> None:
+        self.collective_rpc("stop_profile")
 
     @abstractmethod
     def check_health(self) -> None:

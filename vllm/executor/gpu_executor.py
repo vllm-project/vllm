@@ -1,10 +1,8 @@
-from typing import List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
@@ -37,81 +35,22 @@ class GPUExecutor(ExecutorBase):
             is_driver_worker=(not self.parallel_config)
             or (rank % self.parallel_config.tensor_parallel_size == 0),
         )
-        self.driver_worker.init_worker([kwargs])
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
+        self.collective_rpc("init_worker", args=([kwargs], ))
+        self.collective_rpc("init_device")
+        self.collective_rpc("load_model")
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Determine the number of available KV blocks by invoking the
-        underlying worker.
-        """
-        return self.driver_worker.determine_num_available_blocks()
-
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
-        """Initialize the KV cache by invoking the underlying worker.
-        """
-        # NOTE: This is logged in the executor because there can be >1 worker
-        # with other executors. We could log in the engine level, but work
-        # remains to abstract away the device for non-GPU configurations.
-        logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
-                    num_cpu_blocks)
-        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
-                           self.model_config.max_model_len)
-        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
-                    self.model_config.max_model_len, max_concurrency)
-
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-
-    def execute_model(
-        self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
-        output = self.driver_worker.execute_model(execute_model_req)
-        return output
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return self.driver_worker.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        assert lora_id > 0, "lora_id must be greater than 0."
-        return self.driver_worker.remove_lora(lora_id)
-
-    def pin_lora(self, lora_id: int) -> bool:
-        assert lora_id > 0, "lora_id must be greater than 0."
-        return self.driver_worker.pin_lora(lora_id)
-
-    def list_loras(self) -> Set[int]:
-        return self.driver_worker.list_loras()
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        assert prompt_adapter_request.prompt_adapter_id > 0, \
-            "prompt_adapter_id must be greater than 0."
-        return self.driver_worker.add_prompt_adapter(prompt_adapter_request)
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        assert prompt_adapter_id > 0, \
-            "prompt_adapter_id must be greater than 0."
-        return self.driver_worker.remove_prompt_adapter(prompt_adapter_id)
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        assert prompt_adapter_id > 0, \
-                "prompt_adapter_id must be greater than 0."
-        return self.driver_worker.pin_prompt_adapter(prompt_adapter_id)
-
-    def list_prompt_adapters(self) -> Set[int]:
-        return self.driver_worker.list_prompt_adapters()
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        answer = getattr(self.driver_worker, method)(*args, **kwargs)
+        return [answer]
 
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as
         # it's running.
         return
-
-    def start_profile(self) -> None:
-        self.driver_worker.start_profile()
-
-    def stop_profile(self) -> None:
-        self.driver_worker.stop_profile()
 
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
@@ -120,6 +59,7 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
-        output = await make_async(self.driver_worker.execute_model
-                                  )(execute_model_req=execute_model_req)
+        output = await make_async(self.collective_rpc
+                                  )(method="execute_model",
+                                    args=(execute_model_req, ))
         return output
