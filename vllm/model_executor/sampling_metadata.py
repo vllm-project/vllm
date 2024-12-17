@@ -426,7 +426,7 @@ class SamplingTensors:
                 do_penalties = True
 
             is_prompt = seq_group.is_prompt
-            if (is_prompt and sampling_params.prompt_logprobs is not None):
+            if is_prompt and sampling_params.prompt_logprobs is not None:
                 # For tokens in the prompt that we only need to get
                 # their logprobs
                 query_len = seq_group.query_len
