@@ -38,6 +38,12 @@ class NeuronPlatform(Platform):
         assert (not vllm_config.speculative_config
                 ), "Speculative decoding not yet supported for Neuron backend."
 
+        cache_config = vllm_config.cache_config
+        if cache_config:
+            # neuron needs block_size = max_model_len
+            vllm_config.cache_config.block_size = \
+                vllm_config.model_config.max_model_len
+
     @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Neuron.")

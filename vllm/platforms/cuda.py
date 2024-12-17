@@ -159,6 +159,10 @@ class CudaPlatformBase(Platform):
             f"please ensure that world_size ({world_size}) "
             f"is less than than max local gpu count ({cuda_device_count})")
 
+        cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
