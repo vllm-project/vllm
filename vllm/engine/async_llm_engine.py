@@ -666,7 +666,7 @@ class AsyncLLMEngine(EngineClient):
                 from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
                 executor_class = RayXPUExecutorAsync
             elif distributed_executor_backend == "mp":
-                from vllm.executor.multiproc_gpu_executor import (
+                from vllm.executor.multiproc_distributed_executor import (
                     MultiprocessingDistributedExecutor)
                 executor_class = MultiprocessingDistributedExecutor
             else:
@@ -676,7 +676,7 @@ class AsyncLLMEngine(EngineClient):
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
             executor_class = RayGPUExecutorAsync
         elif distributed_executor_backend == "mp":
-            from vllm.executor.multiproc_gpu_executor import (
+            from vllm.executor.multiproc_distributed_executor import (
                 MultiprocessingDistributedExecutor)
             executor_class = MultiprocessingDistributedExecutor
         else:
