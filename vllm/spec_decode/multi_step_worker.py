@@ -4,6 +4,7 @@ from typing import Dict, List, Set, Tuple
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
@@ -16,6 +17,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
+from vllm.utils import resolve_obj_by_qualname
 
 
 class MultiStepWorker(ProposerWorkerBase):
@@ -31,8 +33,10 @@ class MultiStepWorker(ProposerWorkerBase):
     """
 
     def __init__(self, *args, **kwargs):
-        vllm_config = kwargs.get("vllm_config")
+        vllm_config: VllmConfig = kwargs.get("vllm_config")
         super().__init__(vllm_config=vllm_config)
+        cls = resolve_obj_by_qualname(vllm_config.parallel_config.worker_cls)
+        self.worker = cls(*args, **kwargs)
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
