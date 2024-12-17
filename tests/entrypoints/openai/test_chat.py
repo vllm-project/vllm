@@ -496,6 +496,7 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=10,
+        temperature=0.0,  # to ensure deterministic results
         extra_body=dict(guided_choice=sample_guided_choice,
                         guided_decoding_backend=guided_decoding_backend))
     choice2 = chat_completion.choices[0].message.content

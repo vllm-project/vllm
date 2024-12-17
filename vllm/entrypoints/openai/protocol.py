@@ -348,6 +348,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: end-chat-completion-extra-params
 
+    # Default sampling parameters for chat completion requests
+    _DEFAULT_SAMPLING_PARAMS: dict = {
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+    }
+
     def to_beam_search_params(
             self,
             default_max_tokens: int,
@@ -363,7 +372,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         n = self.n if self.n is not None else 1
 
         if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get("temperature", 1.0)
+            temperature = default_sampling_params.get(
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
 
         return BeamSearchParams(
             beam_width=n,
@@ -387,16 +397,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
             default_sampling_params = {}
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
-            repetition_penalty = (default_sampling_params.get(
-                "repetition_penalty", 1.0))
+            repetition_penalty = default_sampling_params.get(
+                "repetition_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+            )
         if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get("temperature", 1.0)
+            temperature = default_sampling_params.get(
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
         if (top_p := self.top_p) is None:
-            top_p = default_sampling_params.get("top_p", 1.0)
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
         if (top_k := self.top_k) is None:
-            top_k = default_sampling_params.get("top_k", -1)
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
         if (min_p := self.min_p) is None:
-            min_p = default_sampling_params.get("min_p", 0.0)
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -693,6 +709,15 @@ class CompletionRequest(OpenAIBaseModel):
 
     # doc: end-completion-extra-params
 
+    # Default sampling parameters for completion requests
+    _DEFAULT_SAMPLING_PARAMS: dict = {
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+    }
+
     def to_beam_search_params(
             self,
             default_max_tokens: int,
@@ -730,16 +755,22 @@ class CompletionRequest(OpenAIBaseModel):
             default_sampling_params = {}
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
-            repetition_penalty = (default_sampling_params.get(
-                "repetition_penalty", 1.0))
+            repetition_penalty = default_sampling_params.get(
+                "repetition_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+            )
         if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get("temperature", 1.0)
+            temperature = default_sampling_params.get(
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
         if (top_p := self.top_p) is None:
-            top_p = default_sampling_params.get("top_p", 1.0)
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
         if (top_k := self.top_k) is None:
-            top_k = default_sampling_params.get("top_k", -1)
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
         if (min_p := self.min_p) is None:
-            min_p = default_sampling_params.get("min_p", 0.0)
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
