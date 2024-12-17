@@ -38,7 +38,8 @@ def _sgmv_shrink_kernel(
         BLOCK_K: tl.constexpr,
         EVEN_K: tl.constexpr,
         SPLIT_K: tl.constexpr,
-        SLICE_NUM: tl.constexpr):
+        SLICE_NUM: tl.constexpr,
+        SAME_STRIDE: tl.constexpr):
     """
     The sgmv's shrink triton kernel is based on GroupGEMM+SPLIT-K.
     The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally,
@@ -74,17 +75,20 @@ def _sgmv_shrink_kernel(
 
     a_ptr = (input_ptr + cur_seq_start * xm_stride + ram[:, None] * xm_stride +
              offset_k[None, :] * xk_stride)
-    if SLICE_NUM == 1:
-        cur_lora_ptr = lora_ptr
+    if SAME_STRIDE:
         cur_lora_d0_stride = ls_d0_ptr
         cur_lora_d1_stride = ls_d1_ptr
         cur_lora_d2_stride = ls_d2_ptr
     else:
-        cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
-            tl.pointer_type(input_ptr.dtype.element_ty))
         cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
         cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
         cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
+
+    if SLICE_NUM == 1:
+        cur_lora_ptr = lora_ptr
+    else:
+        cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
+            tl.pointer_type(input_ptr.dtype.element_ty))
 
     b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
              rbn[None, :] * cur_lora_d1_stride +
@@ -148,23 +152,29 @@ def _get_lora_a_ptr(lora_a_weights, device):
 
         if len(lora_a_weights) > 1:
             lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
+
+        else:
+            lora_ptr_tensor = lora_a_weights[0]
+        # If each lora has the same stride, there's no need to use a
+        # tensor for storage.
+        if ((set(lora_strides_d0) == 1) and (set(lora_strides_d1) == 1)
+                and (set(lora_strides_d2) == 1)):
+            lora_strides_d0_tensor = lora_strides_d0[0]
+            lora_strides_d1_tensor = lora_strides_d1[0]
+            lora_strides_d2_tensor = lora_strides_d2[0]
+            same_stride = True
+        else:
             lora_strides_d0_tensor = torch.tensor(lora_strides_d0,
                                                   device=device)
             lora_strides_d1_tensor = torch.tensor(lora_strides_d1,
                                                   device=device)
             lora_strides_d2_tensor = torch.tensor(lora_strides_d2,
                                                   device=device)
-        else:
-            lora_ptr_tensor = lora_a_weights[0]
-            lora_strides_d0_tensor = lora_strides_d0[0]
-            lora_strides_d1_tensor = lora_strides_d1[0]
-            lora_strides_d2_tensor = lora_strides_d2[0]
-        _LORA_PTR_DICT[key] = (
-            lora_ptr_tensor,
-            lora_strides_d0_tensor,
-            lora_strides_d1_tensor,
-            lora_strides_d2_tensor,
-        )
+            same_stride = False
+
+        _LORA_PTR_DICT[key] = (lora_ptr_tensor, lora_strides_d0_tensor,
+                               lora_strides_d1_tensor, lora_strides_d2_tensor,
+                               same_stride)
     return _LORA_PTR_DICT.get(key)
 
 
@@ -220,6 +230,7 @@ def _sgmv_shrink(
         lora_strides_d0_tensor,
         lora_strides_d1_tensor,
         lora_strides_d2_tensor,
+        same_stride,
     ) = _get_lora_a_ptr(lora_a_weights, b_seq_start_loc.device)
     # TODO tuning this config
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
@@ -258,6 +269,7 @@ def _sgmv_shrink(
         EVEN_K,
         SPLIT_K,
         len(lora_a_weights),
+        same_stride,
     )
     return
 
