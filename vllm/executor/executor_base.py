@@ -5,8 +5,12 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        make_async)
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -74,7 +78,8 @@ class ExecutorBase(ABC):
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
-        logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
+        logger.info("# %s blocks: %d, # CPU blocks: %d",
+                    current_platform.dispatch_key, num_gpu_blocks,
                     num_cpu_blocks)
         max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
                            self.model_config.max_model_len)
