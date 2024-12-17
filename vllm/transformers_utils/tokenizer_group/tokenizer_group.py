@@ -58,6 +58,8 @@ class TokenizerGroup(BaseTokenizerGroup):
                lora_request: Optional[LoRARequest] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
         ret = tokenizer.encode(prompt)
+        if ret[-1] == 50257:
+            ret = ret[:-1]
         self._raise_if_input_too_long(ret, lora_request)
         return ret
 

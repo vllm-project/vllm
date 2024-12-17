@@ -27,14 +27,14 @@ prompts = [
             prompt="",
             multi_modal_data={"audio": AudioAsset("mary_had_lamb").audio_and_sample_rate}
         ),
-        decoder_prompt="<|startoftranscript|>",
+        decoder_prompt="",
     ),
     ExplicitEncoderDecoderPrompt(
         encoder_prompt=TextPrompt(
             prompt="",
             multi_modal_data={"audio": AudioAsset("winning_call").audio_and_sample_rate}
         ),
-        decoder_prompt="<|startoftranscript|>",
+        decoder_prompt="",
     ),
 ] * 1024
 
@@ -61,9 +61,9 @@ for output in outputs:
     prompt = output.prompt
     encoder_prompt = output.encoder_prompt
     generated_text = output.outputs[0].text
-    # print(f"Encoder prompt: {encoder_prompt!r}, "
-    #       f"Decoder prompt: {prompt!r}, "
-    #       f"Generated text: {generated_text!r}")
+    print(f"Encoder prompt: {encoder_prompt!r}, "
+          f"Decoder prompt: {prompt!r}, "
+          f"Generated text: {generated_text!r}")
 
 duration = time.time() - start
 

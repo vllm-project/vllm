@@ -384,18 +384,35 @@ class WhisperEncoder(nn.Module):
     
     def forward(
         self,
-        input_features,
+        input_features: Union[torch.Tensor, List[torch.Tensor]],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
-        inputs_embeds = nn.functional.gelu(self.conv1(input_features))
-        inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
-        inputs_embeds = inputs_embeds.permute(0, 2, 1)
+        hs = []
+        for t in input_features:
+            t = nn.functional.gelu(self.conv1(t))
+            t = nn.functional.gelu(self.conv2(t))
+            t = t.permute(1, 0)
+            h = t + self.embed_positions.weight[:t.size(0), :]
+            hs.append(h)
+        hidden_states = torch.cat(hs)
 
-        embed_pos = self.embed_positions.weight
+        # #inputs_embeds = nn.functional.gelu(self.conv1(input_features))
+        # inputs_embeds = [
+        #     nn.functional.gelu(self.conv1(t)) for t in input_features
+        # ]
+        # inputs_embeds = [
+        #     nn.functional.gelu(self.conv2(t)) for t in inputs_embeds
+        # ]
+        # print(inputs_embeds[0].shape)
+        # inputs_embeds = torch.cat(inputs_embeds)
+        # #inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
+        # inputs_embeds = inputs_embeds.permute(0, 2, 1)
 
-        hidden_states = inputs_embeds + embed_pos
-        hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
+        # embed_pos = self.embed_positions.weight
+
+        # hidden_states = inputs_embeds + embed_pos
+        # hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
         for idx, encoder_layer in enumerate(self.layers):
             hidden_states = encoder_layer(
                 hidden_states,
@@ -575,7 +592,19 @@ def get_whisper_processor(
 
 
 def input_processor_for_whisper(ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
-    inputs["encoder"]["prompt_token_ids"] = [0] * ctx.model_config.hf_config.max_source_positions
+    audio, orig_sr = inputs["encoder"]["multi_modal_data"]["audio"]
+    processor = get_whisper_processor(ctx.model_config.model)
+    target_sr = processor.feature_extractor.sampling_rate
+    audio = librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
+    if audio.size > 30 * target_sr:
+        # Truncate audio to 30 seconds
+        audio = audio[:30 * target_sr]
+    inputs["encoder"]["multi_modal_data"]["audio"] = (audio, target_sr)
+    # Calculate number of tokens after convolutions
+    num_tokens = (audio.size // 80 - 1) // 2 + 1
+    num_tokens = (num_tokens - 2) // 2 + 1
+    # Pre-allocate placeholder tokens in encoder sequence
+    inputs["encoder"]["prompt_token_ids"] = [0] * num_tokens
     return inputs
 
 
@@ -592,17 +621,14 @@ def input_mapper_for_whisper(
         return MultiModalKwargs()
 
     processor = get_whisper_processor(ctx.model_config.model)
-    target_sampling_rate = processor.feature_extractor.sampling_rate
+    sampling_rate = processor.feature_extractor.sampling_rate
 
-    resampled_audios = [
-        librosa.resample(audio, orig_sr=sampling_rate,
-                         target_sr=target_sampling_rate)
-        for audio, sampling_rate in multi_modal_data
-    ]
+    audios = [audio for audio, _ in multi_modal_data]
 
-    kwargs = processor(resampled_audios, sampling_rate=target_sampling_rate,
-                       return_tensors="pt")
+    kwargs = processor(audios, sampling_rate=sampling_rate,
+                       padding=False, return_tensors="pt")
     kwargs["input_features"] = kwargs["input_features"].squeeze(0)
+    kwargs["input_features"] = kwargs["input_features"].to(torch.float16)
 
     return MultiModalKwargs(kwargs)
 
@@ -641,8 +667,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         **kwargs,
     ) -> torch.Tensor:
         input_features = kwargs.get("input_features")
-        if input_features is not None:
-            input_features = input_features.to(torch.float16)
+        # if input_features is not None:
+        #     input_features = input_features.to(torch.float16)
         decoder_outputs = self.model(
             input_features=input_features,
             input_ids=input_ids,
