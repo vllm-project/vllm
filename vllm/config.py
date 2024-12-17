@@ -2732,7 +2732,7 @@ class CompilationConfig(BaseModel):
         dump_graph_stages: List[str] = Field(default_factory=list)
         dump_graph_dir: Path = Field(default=Path("."))
         enable_collective_fusion: bool = True
-        enable_dynamic_collective_fusion: bool = True
+        enable_dynamic_collective_fusion: bool = False
         enable_fusion: bool = True
         enable_reshape: bool = True
         max_num_batched_tokens: int = field(default=None)  # type: ignore
@@ -2934,7 +2934,7 @@ class CompilationConfig(BaseModel):
                          " %s is overridden by config %s"),
                         sizes_to_specialize, self.cudagraph_capture_sizes)
 
-        if True:
+        if False:
             if self.candidate_compile_sizes is None:
                 self.candidate_compile_sizes = []
             self.compile_sizes = [
