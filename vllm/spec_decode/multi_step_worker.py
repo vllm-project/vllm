@@ -37,6 +37,10 @@ class MultiStepWorker(ProposerWorkerBase):
         super().__init__(vllm_config=vllm_config)
         cls = resolve_obj_by_qualname(vllm_config.parallel_config.worker_cls)
         self.worker = cls(*args, **kwargs)
+        self.device = self.worker.device
+        self.vocab_size = self.worker.vocab_size
+        self.max_model_len = self.worker.max_model_len
+        self.model_runner = self.worker.model_runner
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
