@@ -9,13 +9,11 @@ import pytest
 from vllm.config import VllmConfig
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
+from vllm.worker.worker_base import WorkerWrapperBase
 
 
-class DummyWorker:
+class DummyWorkerWrapper(WorkerWrapperBase):
     """Dummy version of vllm.worker.worker.Worker"""
-
-    def __init__(self, vllm_config: VllmConfig, rank: int):
-        self.rank = rank
 
     def worker_method(self, worker_input: Any) -> Tuple[int, Any]:
         sleep(0.05)
@@ -31,7 +29,7 @@ def _start_workers() -> Tuple[List[ProcessWorkerWrapper], WorkerMonitor]:
     result_handler = ResultHandler()
     config = VllmConfig()
     workers = [
-        ProcessWorkerWrapper(result_handler, DummyWorker, config, rank)
+        ProcessWorkerWrapper(result_handler, DummyWorkerWrapper, config, rank)
         for rank in range(8)
     ]
 
