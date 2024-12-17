@@ -481,8 +481,8 @@ class LLMEngine:
         elif engine_config.device_config.device_type == "hpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_hpu_executor import RayHPUExecutor
-                executor_class = RayHPUExecutor
+                from vllm.executor.ray_gpu_executor import RayGPUExecutor
+                executor_class = RayGPUExecutor
             else:
                 from vllm.executor.uniproc_executor import UniProcExecutor
                 executor_class = UniProcExecutor
@@ -492,8 +492,8 @@ class LLMEngine:
         elif engine_config.device_config.device_type == "xpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_xpu_executor import RayXPUExecutor
-                executor_class = RayXPUExecutor
+                from vllm.executor.ray_gpu_executor import RayGPUExecutor
+                executor_class = RayGPUExecutor
             elif distributed_executor_backend == "mp":
                 # FIXME(kunshang):
                 # spawn needs calling `if __name__ == '__main__':``

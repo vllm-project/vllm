@@ -646,8 +646,8 @@ class AsyncLLMEngine(EngineClient):
         elif engine_config.device_config.device_type == "hpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_hpu_executor import RayHPUExecutorAsync
-                executor_class = RayHPUExecutorAsync
+                from vllm.executor.ray_gpu_executor import RayGPUExecutor
+                executor_class = RayGPUExecutor
             else:
                 from vllm.executor.uniproc_executor import UniProcExecutor
                 executor_class = UniProcExecutor
@@ -662,8 +662,8 @@ class AsyncLLMEngine(EngineClient):
                 from vllm.executor.uniproc_executor import UniProcExecutor
                 executor_class = UniProcExecutor
             elif distributed_executor_backend == "ray":
-                from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
-                executor_class = RayXPUExecutorAsync
+                from vllm.executor.ray_gpu_executor import RayGPUExecutor
+                executor_class = RayGPUExecutor
             elif distributed_executor_backend == "mp":
                 from vllm.executor.multiproc_distributed_executor import (
                     MultiprocessingDistributedExecutor)
