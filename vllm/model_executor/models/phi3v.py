@@ -312,9 +312,8 @@ def get_max_phi3v_image_tokens(
         mm_processor_kwargs["num_crops"] = num_crops
 
     processor = ctx.get_hf_processor(**mm_processor_kwargs)
-    image_processor = processor.image_processor  # type: ignore
 
-    return image_processor.calc_num_image_tokens_from_image_size(
+    return processor.calc_num_image_tokens_from_image_size(
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
