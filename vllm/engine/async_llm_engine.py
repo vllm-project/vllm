@@ -634,8 +634,8 @@ class AsyncLLMEngine(EngineClient):
             executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "tpu":
             if distributed_executor_backend == "ray":
-                from vllm.executor.ray_tpu_executor import RayTPUExecutorAsync
-                executor_class = RayTPUExecutorAsync
+                from vllm.executor.ray_gpu_executor import RayGPUExecutor
+                executor_class = RayGPUExecutor
             else:
                 assert distributed_executor_backend is None
                 from vllm.executor.uniproc_executor import UniProcExecutor

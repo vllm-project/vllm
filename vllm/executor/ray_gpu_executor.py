@@ -12,6 +12,7 @@ from vllm.executor.msgspec_utils import encode_hook
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
                         get_ip, get_open_port, make_async)
@@ -125,7 +126,7 @@ class RayGPUExecutor(DistributedExecutorBase):
         rank = 0
         worker_initial_ranks = []
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if not bundle.get("GPU", 0):
+            if not bundle.get(current_platform.device_name, 0):
                 continue
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
@@ -242,14 +243,21 @@ class RayGPUExecutor(DistributedExecutorBase):
 
         # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = [({
-            "CUDA_VISIBLE_DEVICES":
+            f"{current_platform.device_name}_VISIBLE_DEVICES":
             ",".join(map(str, node_gpus[node_id])),
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
-            **({
-                "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
-            } if envs.VLLM_ATTENTION_BACKEND is not None else {})
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
+
+        for args in all_args_to_update_environment_variables:
+            # some carry-over env vars from the driver
+            # TODO: refactor platform-specific env vars
+            for name in [
+                    "VLLM_ATTENTION_BACKEND", "TPU_CHIPS_PER_HOST_BOUNDS",
+                    "TPU_HOST_BOUNDS"
+            ]:
+                if name in os.environ:
+                    args[0][name] = os.environ[name]
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
