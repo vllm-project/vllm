@@ -230,9 +230,9 @@ def _sgmv_expand(
     # TODO tuning this config
     N, K = lora_b_weights[0].shape[-2:]  # K= rank,N=hidden_size
 
-    BLOCK_M = 64
-    BLOCK_N = 64
-    BLOCK_K = 32
+    BLOCK_M = 32
+    BLOCK_N = 32
+    BLOCK_K = 16
     EVEN_K = K % BLOCK_K == 0
     ADD_INPUTS = add_inputs
     CAST_TYPE = False
