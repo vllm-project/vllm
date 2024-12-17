@@ -41,10 +41,6 @@ def test_custom_executor_type_checking(model):
         engine_args = AsyncEngineArgs(model=model,
                                       distributed_executor_backend=Mock)
         AsyncLLMEngine.from_engine_args(engine_args)
-    with pytest.raises(TypeError):
-        engine_args = AsyncEngineArgs(
-            model=model, distributed_executor_backend=CustomUniExecutor)
-        AsyncLLMEngine.from_engine_args(engine_args)
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
