@@ -462,12 +462,14 @@ class WorkerWrapperBase:
     ) -> None:
         self.rank = rank
         self.vllm_config = vllm_config
-        trust_remote_code = vllm_config.model_config.trust_remote_code
         self.worker: Optional[WorkerBase] = None
-        if trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
-            init_cached_hf_modules()
+        if vllm_config.model_config is not None:
+            # it can be None in tests
+            trust_remote_code = vllm_config.model_config.trust_remote_code
+            if trust_remote_code:
+                # note: lazy import to avoid importing torch before initializing
+                from vllm.utils import init_cached_hf_modules
+                init_cached_hf_modules()
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         if self.rank in rank_mapping:
