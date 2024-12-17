@@ -60,6 +60,9 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
         if kv_cache_space >= 0:

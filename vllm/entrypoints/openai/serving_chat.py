@@ -197,7 +197,8 @@ class OpenAIServingChat(OpenAIServing):
                         default_max_tokens)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens)
+                        default_max_tokens,
+                        self.model_config.logits_processor_pattern)
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
