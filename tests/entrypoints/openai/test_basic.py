@@ -110,10 +110,10 @@ async def test_check_health(server: RemoteOpenAIServer):
 @pytest.mark.parametrize(
     "server_args",
     [
-        pytest.param(["--max-model-len", "32768"],
+        pytest.param(["--max-model-len", "10100"],
                      id="default-frontend-multiprocessing"),
         pytest.param(
-            ["--disable-frontend-multiprocessing", "--max-model-len", "32768"],
+            ["--disable-frontend-multiprocessing", "--max-model-len", "10100"],
             id="disable-frontend-multiprocessing")
     ],
     indirect=True,
@@ -126,13 +126,13 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     chat_input = [{"role": "user", "content": "Write a long story"}]
     client = server.get_async_client(timeout=0.5)
     tasks = []
-    # Request about 2 million tokens (32k * 62)
-    for _ in range(62):
+    # Request about 2 million tokens
+    for _ in range(200):
         task = asyncio.create_task(
             client.chat.completions.create(messages=chat_input,
                                            model=MODEL_NAME,
-                                           max_tokens=32000,
-                                           extra_body={"min_tokens": 32000}))
+                                           max_tokens=10000,
+                                           extra_body={"min_tokens": 10000}))
         tasks.append(task)
 
     done, pending = await asyncio.wait(tasks,
