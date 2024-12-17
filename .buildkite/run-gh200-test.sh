@@ -6,7 +6,7 @@ set -ex
 
 # Try building the docker image
 DOCKER_BUILDKIT=1 docker build . \
-  --target test \
+  --target vllm-openai \
   --platform "linux/arm64" \
   -t gh200-test \
   --build-arg max_jobs=66 \
