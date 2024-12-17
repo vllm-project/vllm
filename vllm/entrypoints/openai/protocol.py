@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.envs import VLLM_USE_V1
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -36,6 +37,10 @@ except ModuleNotFoundError:
 
 assert _LONG_INFO.min == _MOCK_LONG_INFO.min
 assert _LONG_INFO.max == _MOCK_LONG_INFO.max
+
+STREAM_SAMPLING_OUTPUT_KIND = RequestOutputKind.DELTA
+if VLLM_USE_V1:
+    STREAM_SAMPLING_OUTPUT_KIND = RequestOutputKind.CUMULATIVE
 
 
 class OpenAIBaseModel(BaseModel):
@@ -422,7 +427,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                                     logits_processor_pattern),
             include_stop_str_in_output=self.include_stop_str_in_output,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            output_kind=RequestOutputKind.DELTA if self.stream \
+            output_kind=STREAM_SAMPLING_OUTPUT_KIND if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias)
@@ -737,7 +742,7 @@ class CompletionRequest(OpenAIBaseModel):
             logits_processors=get_logits_processors(self.logits_processors,
                                                     logits_processor_pattern),
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            output_kind=RequestOutputKind.DELTA if self.stream \
+            output_kind=STREAM_SAMPLING_OUTPUT_KIND if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
