@@ -329,12 +329,20 @@ class RayExecutor(Executor):
         logger.debug("Called check_health.")
 
     def _check_ray_compiled_graph_installation(self):
-        # TODO: We should check versions that support compiled graph.
+        import pkg_resources
+        from packaging import version
+
+        required_version = version.parse("2.39")
+        current_version = version.parse(
+            pkg_resources.get_distribution("ray").version)
+        if current_version < required_version:
+            raise ValueError(f"Ray version {required_version} is "
+                             f"required, but found {current_version}")
+
         import importlib.util
-        adag_spec = importlib.util.find_spec(
-            "ray.experimental.compiled_dag_ref")
-        if adag_spec is None:
-            raise ValueError("Ray accelerated DAG is not installed. "
+        raycg = importlib.util.find_spec("ray.experimental.compiled_dag_ref")
+        if raycg is None:
+            raise ValueError("Ray Compiled Graph is not installed. "
                              "Run `pip install ray[adag]` to install it.")
 
         cupy_spec = importlib.util.find_spec("cupy")
