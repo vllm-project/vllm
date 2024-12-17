@@ -1,18 +1,16 @@
 import asyncio
 from abc import abstractmethod
-from typing import Any, Awaitable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 
-from vllm.executor.executor_base import ExecutorAsyncBase
-from vllm.executor.gpu_executor import GPUExecutor
+from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 
 logger = init_logger(__name__)
 
 
-class DistributedGPUExecutor(GPUExecutor):
+class DistributedGPUExecutor(ExecutorBase):
     """Abstract superclass of multi-GPU executor implementations."""
 
     def __init__(self, *args, **kwargs):
@@ -51,13 +49,6 @@ class DistributedGPUExecutor(GPUExecutor):
         # (this will raise otherwise)
         self._wait_for_tasks_completion(parallel_worker_tasks)
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return self._run_workers(
-            "add_lora",
-            lora_request=lora_request,
-        )
-
     def save_sharded_state(
         self,
         path: str,
@@ -80,6 +71,13 @@ class DistributedGPUExecutor(GPUExecutor):
         returns None. Otherwise, this method returns the model output.
         """
         raise NotImplementedError
+
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        self._run_workers(method, *args, **(kwargs or {}))
 
     @abstractmethod
     def _run_workers(
@@ -105,9 +103,6 @@ class DistributedGPUExecutor(GPUExecutor):
         """Wait for futures returned from _run_workers() with
         async_run_remote_workers_only to complete."""
         raise NotImplementedError
-
-
-class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
             self,

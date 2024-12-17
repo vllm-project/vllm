@@ -2,8 +2,8 @@ import asyncio
 import os
 from typing import Any, List, Optional
 
-from vllm.executor.distributed_gpu_executor import (  # yapf: disable
-    DistributedGPUExecutor, DistributedGPUExecutorAsync)
+from vllm.executor.distributed_gpu_executor import (
+    DistributedGPUExecutor)  # yapf: disable
 from vllm.executor.multiproc_worker_utils import (
     ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
     set_multiprocessing_worker_envs)
@@ -182,8 +182,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             result.get()
 
 
-class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,
-                                      DistributedGPUExecutorAsync):
+class MultiprocessingGPUExecutorAsync(DistributedGPUExecutor):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

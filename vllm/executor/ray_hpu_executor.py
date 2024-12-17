@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import msgspec
 
 import vllm.envs as envs
-from vllm.executor.distributed_gpu_executor import (  # yapf: disable
-    DistributedGPUExecutor, DistributedGPUExecutorAsync)
+from vllm.executor.distributed_gpu_executor import (
+    DistributedGPUExecutor)  # yapf: disable
 from vllm.executor.msgspec_utils import encode_hook
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
@@ -424,7 +424,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
         self.shutdown()
 
 
-class RayHPUExecutorAsync(RayHPUExecutor, DistributedGPUExecutorAsync):
+class RayHPUExecutorAsync(RayHPUExecutor, DistributedGPUExecutor):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
