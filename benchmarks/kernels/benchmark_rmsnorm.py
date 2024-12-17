@@ -221,7 +221,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--batch-szie",
+        "--batch-size",
         type=int,
         default=4,
         help="Batch size",
