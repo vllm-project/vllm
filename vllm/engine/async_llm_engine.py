@@ -630,8 +630,8 @@ class AsyncLLMEngine(EngineClient):
                     f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
         elif engine_config.device_config.device_type == "neuron":
-            from vllm.executor.neuron_executor import NeuronExecutorAsync
-            executor_class = NeuronExecutorAsync
+            from vllm.executor.uniproc_executor import UniProcExecutor
+            executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "tpu":
             if distributed_executor_backend == "ray":
                 from vllm.executor.ray_tpu_executor import RayTPUExecutorAsync

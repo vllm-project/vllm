@@ -33,6 +33,11 @@ class NeuronPlatform(Platform):
             parallel_config.worker_cls = \
                 "vllm.worker.neuron_worker.NeuronWorker"
 
+        assert (vllm_config.lora_config is
+                None), "LoRA is not supported for Neuron backend."
+        assert (not vllm_config.speculative_config
+                ), "Speculative decoding not yet supported for Neuron backend."
+
     @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Neuron.")

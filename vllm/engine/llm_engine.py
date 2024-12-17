@@ -460,8 +460,8 @@ class LLMEngine:
                 initialize_ray_cluster(engine_config.parallel_config)
             executor_class = distributed_executor_backend
         elif engine_config.device_config.device_type == "neuron":
-            from vllm.executor.neuron_executor import NeuronExecutor
-            executor_class = NeuronExecutor
+            from vllm.executor.uniproc_executor import UniProcExecutor
+            executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "tpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)

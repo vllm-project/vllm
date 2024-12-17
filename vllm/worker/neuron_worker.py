@@ -8,7 +8,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerBase,
@@ -38,6 +38,21 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
             vllm_config=vllm_config)
         self.is_driver_worker = True
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+    ) -> Optional[List[SamplerOutput]]:
+        assert execute_model_req is not None
+        assert (not execute_model_req.blocks_to_swap_in
+                and not execute_model_req.blocks_to_swap_out
+                and not execute_model_req.blocks_to_copy), (
+                    "Cache operations are not supported for Neuron backend.")
+        assert execute_model_req.num_lookahead_slots == 0, (
+            "lookahead not supported for Neuron backend.")
+        output = LocalOrDistributedWorkerBase.execute_model(
+            self, execute_model_req)
+        return output
 
     def init_device(self) -> None:
         self.init_distributed_environment()
