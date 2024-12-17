@@ -271,6 +271,8 @@ class DistributedExecutorBase(ExecutorBase):
                 run only in the remote TP workers, not the driver worker.
                 It will also be run asynchronously and return a list of futures
                 rather than blocking on the results.
+        
+        # TODO: simplify and merge with collective_rpc
         """
         raise NotImplementedError
 
