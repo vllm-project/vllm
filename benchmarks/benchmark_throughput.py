@@ -5,13 +5,13 @@ import json
 import random
 import time
 from functools import cache
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 import uvloop
+from huggingface_hub import snapshot_download
 from PIL import Image
 from tqdm import tqdm
-from huggingface_hub import snapshot_download
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
@@ -19,11 +19,11 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt
+from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
+from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
-from vllm.transformers_utils.tokenizer import get_lora_tokenizer
-from vllm.lora.request import LoRARequest
 
 
 @dataclasses.dataclass
@@ -74,11 +74,13 @@ def download_lora(lora_path: str) -> str:
     """
     return snapshot_download(lora_path)
 
+
 def get_random_lora_request(args: argparse.Namespace):
-    lora_id = random.randint(0, args.max_loras) 
-    return LoRARequest(lora_name = str(lora_id),
-                       lora_int_id = lora_id,
-                       lora_path = download_lora(args.lora_path))
+    lora_id = random.randint(0, args.max_loras)
+    return LoRARequest(lora_name=str(lora_id),
+                       lora_int_id=lora_id,
+                       lora_path=download_lora(args.lora_path))
+
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> List[SampleRequest]:
@@ -98,9 +100,13 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     # Shuffle the dataset.
     random.shuffle(dataset)
 
+    lora_tokenizers_cache: Dict[int, AnyTokenizer] = {}
+
     # Filter out sequences that are too long or too short
     filtered_dataset: List[SampleRequest] = []
-    for data in dataset:
+    for data in tqdm(dataset,
+                     total=len(filtered_dataset),
+                     desc="sampling requests"):
         if len(filtered_dataset) == num_requests:
             break
 
@@ -127,7 +133,11 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         request_tokenizer = tokenizer
         if args.enable_lora:
             lora_request = get_random_lora_request(args)
-            request_tokenizer = get_lora_tokenizer(lora_request)
+            lora_id = lora_request.lora_int_id
+            if lora_id not in lora_tokenizers_cache:
+                lora_tokenizers_cache[lora_id] = get_lora_tokenizer(
+                    lora_request)
+            request_tokenizer = lora_tokenizers_cache[lora_id]
 
         # Tokenize the prompts and completions.
         prompt_token_ids = request_tokenizer(prompt).input_ids
@@ -174,7 +184,7 @@ def run_vllm(
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
             ))
-    lora_requests : Optional[List[LoRARequest]] = None
+    lora_requests: Optional[List[LoRARequest]] = None
     if engine_args.enable_lora:
         lora_requests = [request.lora_request for request in requests]
 
@@ -182,7 +192,10 @@ def run_vllm(
 
     if not use_beam_search:
         start = time.perf_counter()
-        llm.generate(prompts, sampling_params, lora_request = lora_requests, use_tqdm=True)
+        llm.generate(prompts,
+                     sampling_params,
+                     lora_request=lora_requests,
+                     use_tqdm=True)
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
@@ -234,8 +247,12 @@ async def run_vllm_async(
 
         generators = []
         start = time.perf_counter()
-        for i, (prompt, sp, lr) in enumerate(zip(prompts, sampling_params, lora_requests)):
-            generator = llm.generate(prompt, sp, lora_request=lr, request_id=f"test{i}")
+        for i, (prompt, sp,
+                lr) in enumerate(zip(prompts, sampling_params, lora_requests)):
+            generator = llm.generate(prompt,
+                                     sp,
+                                     lora_request=lr,
+                                     request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
