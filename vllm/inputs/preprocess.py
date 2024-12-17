@@ -118,7 +118,6 @@ class InputPreprocessor:
 
         * prompt_token_ids
         '''
-
         bos_token_id = self.get_bos_token_id()
         assert bos_token_id is not None
         return [bos_token_id]
@@ -439,8 +438,15 @@ class InputPreprocessor:
             assert_never(encoder_inputs)
 
         if decoder_inputs is None:
-            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                None)
+            if self.model_config.hf_config.model_type == "whisper":
+                # For Whisper models, the text prompt should go to the decoder.
+                # If no explicit encoder/decoder inputs, then copy the prompt
+                # from the encoder to the decoder. The encoder tokens are later
+                # overridden by the audio features.
+                dec_token_ids = encoder_inputs["prompt_token_ids"].copy()
+            else:
+                dec_token_ids = self._prepare_decoder_input_ids_for_generation(
+                    None)
             decoder_inputs = token_inputs(dec_token_ids)
         elif (decoder_inputs["type"] == "token"
               or decoder_inputs["type"] == "multimodal"):

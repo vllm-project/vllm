@@ -388,31 +388,15 @@ class WhisperEncoder(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
-        hs = []
-        for t in input_features:
-            t = nn.functional.gelu(self.conv1(t))
-            t = nn.functional.gelu(self.conv2(t))
-            t = t.permute(1, 0)
-            h = t + self.embed_positions.weight[:t.size(0), :]
-            hs.append(h)
-        hidden_states = torch.cat(hs)
+        hidden_states = []
+        for features in input_features:
+            embeds = nn.functional.gelu(self.conv1(features))
+            embeds = nn.functional.gelu(self.conv2(embeds))
+            embeds = embeds.permute(1, 0)
+            embeds = embeds + self.embed_positions.weight[:embeds.size(0), :]
+            hidden_states.append(embeds)
+        hidden_states = torch.cat(hidden_states)
 
-        # #inputs_embeds = nn.functional.gelu(self.conv1(input_features))
-        # inputs_embeds = [
-        #     nn.functional.gelu(self.conv1(t)) for t in input_features
-        # ]
-        # inputs_embeds = [
-        #     nn.functional.gelu(self.conv2(t)) for t in inputs_embeds
-        # ]
-        # print(inputs_embeds[0].shape)
-        # inputs_embeds = torch.cat(inputs_embeds)
-        # #inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
-        # inputs_embeds = inputs_embeds.permute(0, 2, 1)
-
-        # embed_pos = self.embed_positions.weight
-
-        # hidden_states = inputs_embeds + embed_pos
-        # hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
         for idx, encoder_layer in enumerate(self.layers):
             hidden_states = encoder_layer(
                 hidden_states,
@@ -592,14 +576,19 @@ def get_whisper_processor(
 
 
 def input_processor_for_whisper(ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
-    audio, orig_sr = inputs["encoder"]["multi_modal_data"]["audio"]
+    multi_modal_data = inputs["encoder"]["multi_modal_data"]
+    if isinstance(multi_modal_data["audio"], list):
+        assert len(multi_modal_data["audio"]) == 1
+        multi_modal_data["audio"] = multi_modal_data["audio"][0]
+    # Resample and process audio
+    audio, orig_sr = multi_modal_data["audio"]
     processor = get_whisper_processor(ctx.model_config.model)
     target_sr = processor.feature_extractor.sampling_rate
     audio = librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
     if audio.size > 30 * target_sr:
         # Truncate audio to 30 seconds
         audio = audio[:30 * target_sr]
-    inputs["encoder"]["multi_modal_data"]["audio"] = (audio, target_sr)
+    multi_modal_data["audio"] = (audio, target_sr)
     # Calculate number of tokens after convolutions
     num_tokens = (audio.size // 80 - 1) // 2 + 1
     num_tokens = (num_tokens - 2) // 2 + 1
@@ -667,8 +656,6 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         **kwargs,
     ) -> torch.Tensor:
         input_features = kwargs.get("input_features")
-        # if input_features is not None:
-        #     input_features = input_features.to(torch.float16)
         decoder_outputs = self.model(
             input_features=input_features,
             input_ids=input_ids,

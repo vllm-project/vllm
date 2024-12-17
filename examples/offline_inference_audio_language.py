@@ -66,17 +66,12 @@ def run_whisper(question: str, audio_count: int):
     model_name = "openai/whisper-large-v3"
 
     llm = LLM(model=model_name,
-              max_model_len=4096,
+              max_model_len=448,
               max_num_seqs=1,
               enforce_eager=True,
               limit_mm_per_prompt={"audio": audio_count})
 
-    # audio_in_prompt = "".join([
-    #     f"Audio {idx+1}: "
-    #     f"<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
-    # ])
-
-    prompt = "<|startoftranscript|>"
+    prompt = "<|startoftranscript|><|en|>"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -111,6 +106,7 @@ def main(args):
 
     assert args.num_prompts > 0
     inputs = {"prompt": prompt, "multi_modal_data": mm_data}
+    #inputs = {"encoder_prompt": {"prompt": "", "multi_modal_data": mm_data}, "decoder_prompt": prompt}
     if args.num_prompts > 1:
         # Batch inference
         inputs = [inputs] * args.num_prompts

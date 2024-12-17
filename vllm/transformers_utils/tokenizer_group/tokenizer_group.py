@@ -15,11 +15,13 @@ class TokenizerGroup(BaseTokenizerGroup):
     """A group of tokenizers that can be used for LoRA adapters."""
 
     def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
-                 max_input_length: Optional[int], **tokenizer_config):
+                 max_input_length: Optional[int],
+                 add_special_tokens: Optional[bool], **tokenizer_config):
         self.tokenizer_id = tokenizer_id
         self.tokenizer_config = tokenizer_config
         self.enable_lora = enable_lora
         self.max_input_length = max_input_length
+        self.add_special_tokens = add_special_tokens
         self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
         max_loras = tokenizer_config.get("max_loras", 0)
         self.lora_tokenizers = LRUCache[AnyTokenizer](
@@ -57,9 +59,11 @@ class TokenizerGroup(BaseTokenizerGroup):
                request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
-        ret = tokenizer.encode(prompt)
-        if ret[-1] == 50257:
-            ret = ret[:-1]
+        if self.add_special_tokens is not None:
+            ret = tokenizer.encode(prompt,
+                                   add_special_tokens=self.add_special_tokens)
+        else:
+            ret = tokenizer.encode(prompt)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
 
@@ -69,7 +73,11 @@ class TokenizerGroup(BaseTokenizerGroup):
             request_id: Optional[str] = None,
             lora_request: Optional[LoRARequest] = None) -> List[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
-        ret = tokenizer.encode(prompt)
+        if self.add_special_tokens is not None:
+            ret = tokenizer.encode(prompt,
+                                   add_special_tokens=self.add_special_tokens)
+        else:
+            ret = tokenizer.encode(prompt)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
 
