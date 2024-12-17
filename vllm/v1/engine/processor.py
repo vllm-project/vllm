@@ -78,7 +78,6 @@ class Processor:
         request_id: str,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
-        max_logprobs_permitted_by_engine: int,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -109,7 +108,7 @@ class Processor:
         # TODO(woosuk): Support encoder-decoder models.
 
         self._assert_valid_sample_logprobs_prompt_logprobs(
-            params, max_logprobs_permitted_by_engine)
+            params, self.model_config.max_logprobs)
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "

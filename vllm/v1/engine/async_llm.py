@@ -163,8 +163,6 @@ class AsyncLLM(EngineClient):
             request_id=request_id,
             prompt=prompt,
             params=params,
-            max_logprobs_permitted_by_engine=(
-                await self.get_model_config()).max_logprobs,
             arrival_time=arrival_time,
             lora_request=lora_request,
             trace_headers=trace_headers,
