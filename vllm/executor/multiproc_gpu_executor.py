@@ -3,7 +3,7 @@ import os
 from typing import Any, List, Optional
 
 from vllm.executor.distributed_gpu_executor import (
-    DistributedGPUExecutor)  # yapf: disable
+    DistributedExecutorBase)  # yapf: disable
 from vllm.executor.multiproc_worker_utils import (
     ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
     set_multiprocessing_worker_envs)
@@ -18,7 +18,7 @@ from vllm.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
-class MultiprocessingGPUExecutor(DistributedGPUExecutor):
+class MultiprocessingGPUExecutor(DistributedExecutorBase):
     """Python multiprocessing-based multi-GPU executor"""
 
     uses_ray: bool = False
@@ -92,6 +92,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+        self.driver_exec_model = make_async(self.driver_worker.execute_model)
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
 
     def _check_executor_parameters(self):
         world_size = self.parallel_config.world_size
@@ -180,14 +182,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         async_run_remote_workers_only to complete."""
         for result in parallel_worker_tasks:
             result.get()
-
-
-class MultiprocessingGPUExecutorAsync(DistributedGPUExecutor):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.driver_exec_model = make_async(self.driver_worker.execute_model)
-        self.pp_locks: Optional[List[asyncio.Lock]] = None
 
     async def _driver_execute_model_async(
         self,

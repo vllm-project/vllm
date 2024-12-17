@@ -10,8 +10,8 @@ from vllm.sequence import ExecuteModelRequest
 logger = init_logger(__name__)
 
 
-class DistributedGPUExecutor(ExecutorBase):
-    """Abstract superclass of multi-GPU executor implementations."""
+class DistributedExecutorBase(ExecutorBase):
+    """Abstract superclass of distributed executor implementations."""
 
     def __init__(self, *args, **kwargs):
         # This is non-None when the execute model loop is running
@@ -27,6 +27,7 @@ class DistributedGPUExecutor(ExecutorBase):
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
+        # TODO: unify into collective_rpc
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
@@ -77,7 +78,7 @@ class DistributedGPUExecutor(ExecutorBase):
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
-        self._run_workers(method, *args, **(kwargs or {}))
+        return self._run_workers(method, *args, **(kwargs or {}))
 
     @abstractmethod
     def _run_workers(

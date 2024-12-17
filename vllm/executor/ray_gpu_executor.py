@@ -7,7 +7,7 @@ import msgspec
 
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (
-    DistributedGPUExecutor)  # yapf: disable
+    DistributedExecutorBase)  # yapf: disable
 from vllm.executor.msgspec_utils import encode_hook
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class RayGPUExecutor(DistributedGPUExecutor):
+class RayGPUExecutor(DistributedExecutorBase):
 
     uses_ray: bool = True
 
@@ -488,7 +488,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.shutdown()
 
 
-class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutor):
+class RayGPUExecutorAsync(RayGPUExecutor, DistributedExecutorBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

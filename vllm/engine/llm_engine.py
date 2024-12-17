@@ -29,7 +29,6 @@ from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
@@ -499,8 +498,8 @@ class LLMEngine:
                     "Both start methods (spawn and fork) have issue "
                     "on XPU if you use mp backend, Please try ray instead.")
             else:
-                from vllm.executor.xpu_executor import XPUExecutor
-                executor_class = XPUExecutor
+                from vllm.executor.uniproc_executor import UniProcExecutor
+                executor_class = UniProcExecutor
         elif distributed_executor_backend == "ray":
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
@@ -513,6 +512,7 @@ class LLMEngine:
                 "support VLLM_USE_RAY_SPMD_WORKER=1")
             executor_class = MultiprocessingGPUExecutor
         else:
+            from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor
         return executor_class
 

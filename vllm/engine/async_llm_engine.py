@@ -666,9 +666,9 @@ class AsyncLLMEngine(EngineClient):
                 from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
                 executor_class = RayXPUExecutorAsync
             elif distributed_executor_backend == "mp":
-                from vllm.executor.multiproc_xpu_executor import (
-                    MultiprocessingXPUExecutorAsync)
-                executor_class = MultiprocessingXPUExecutorAsync
+                from vllm.executor.multiproc_gpu_executor import (
+                    MultiprocessingGPUExecutor)
+                executor_class = MultiprocessingGPUExecutor
             else:
                 raise RuntimeError(
                     "Not supported distributed execution model on XPU device.")
@@ -677,8 +677,8 @@ class AsyncLLMEngine(EngineClient):
             executor_class = RayGPUExecutorAsync
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
-                MultiprocessingGPUExecutorAsync)
-            executor_class = MultiprocessingGPUExecutorAsync
+                MultiprocessingGPUExecutor)
+            executor_class = MultiprocessingGPUExecutor
         else:
             from vllm.executor.gpu_executor import GPUExecutorAsync
             executor_class = GPUExecutorAsync
