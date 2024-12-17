@@ -469,8 +469,8 @@ class LLMEngine:
                 executor_class = RayTPUExecutor
             else:
                 assert distributed_executor_backend is None
-                from vllm.executor.tpu_executor import TPUExecutor
-                executor_class = TPUExecutor
+                from vllm.executor.uniproc_executor import UniProcExecutor
+                executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor

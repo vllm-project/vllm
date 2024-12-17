@@ -638,8 +638,8 @@ class AsyncLLMEngine(EngineClient):
                 executor_class = RayTPUExecutorAsync
             else:
                 assert distributed_executor_backend is None
-                from vllm.executor.tpu_executor import TPUExecutorAsync
-                executor_class = TPUExecutorAsync
+                from vllm.executor.uniproc_executor import UniProcExecutor
+                executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
