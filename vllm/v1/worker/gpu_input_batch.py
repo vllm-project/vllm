@@ -391,7 +391,6 @@ class InputBatch:
         device: torch.device,
     ) -> torch.Tensor:
         prompt_token_ids: List[List[int]] = []
-        
         for index in range(self.num_reqs):
             prompt_token_ids.append(self.token_ids_cpu[
                 index, :self.num_prompt_token_ids[index]].tolist())
