@@ -137,15 +137,8 @@ def triton_scaled_mm(input: torch.Tensor,
     assert weight.shape[0] == K
     assert input.dtype == weight.dtype
 
-    if scale_a.dim() == 0:
-        scale_a.data = scale_a.data.unsqueeze(dim=0)
-    if scale_a.dim() == 1:
-        scale_a.data = scale_a.data.unsqueeze(dim=1)
-
-    if scale_b.dim() == 0:
-        scale_b.data = scale_b.data.unsqueeze(dim=0)
-    if scale_b.dim() == 1:
-        scale_b.data = scale_b.data.unsqueeze(dim=1)
+    scale_a = scale_a.reshape(1, -1) if scale_a.dim() <= 1 else scale_a
+    scale_b = scale_b.reshape(1, -1) if scale_b.dim() <= 1 else scale_b
 
     assert scale_a.dtype == scale_b.dtype and scale_a.is_floating_point()
     assert scale_a.shape == torch.Size([1, 1]) or scale_a.shape == torch.Size(
