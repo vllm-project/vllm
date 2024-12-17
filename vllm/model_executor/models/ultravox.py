@@ -21,6 +21,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
@@ -30,11 +31,10 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils import is_list_of
 
-from .interfaces import SupportsMultiModal, SupportsPP, SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings_from_map)
@@ -319,12 +319,18 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
-    #TODO: not sure what is right thing to do here yet
-    packed_modules_mapping = {}
-    #should all llama3 modules be supported here?
-    #source: https://github.com/fixie-ai/ultravox/blob/812f58c5f50c02589c08668d9afe6e4f8c6d0d74/ultravox/model/ultravox_config.py#L20
+    # same as llamaforcasuallm (language model) minus embedding and other
+    # modules. embedding modules haven't been added as a caution
+    # since it could affect text but not audio
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
+
+    #lm_head is not added for now since it requires logits_processor
+    # which is missing from ultravox
     supported_lora_modules = [
-        'linear_k', 'linear_q', 'k_proj', 'q_proj'
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj"
     ]
     embedding_modules = {}
     embedding_padding_modules = []
@@ -339,10 +345,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self.config = config
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
-
-        #TODO: maybe log a warning if lora config is present in UltravoxConfig?
-        #TODO: figure out if these prefixes need tweaking to support LoRA and/or
-        #use LLMWrapper or not like this https://github.com/vllm-project/vllm/pull/7199/files#diff-7b8a4e258637b7c94389c745c449c52137d33cf92957f3e5bcb18a0ee204b21bR807
 
         self.secondary_weights = []
         self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
@@ -379,16 +381,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
         return get_sampler()
 
-    # Following PR: https://github.com/vllm-project/vllm/pull/7199/files
-    # check language_model and audio_tower prefixes
-    # can't tell if vLLM will apply audio lora or not based on following warning:
-    # https://github.com/vllm-project/vllm/pull/7199/files#diff-d3df23c3e3bcfe97ee8507061c6de54f0eff23a8c75d7f5999062c42245290f8R1033
     def get_mm_mapping(self) -> MultiModelKeys:
         """
         Get the module prefix in multimodal models
         """
-        return MultiModelKeys.from_string_field(language_model="language_model",
-                                                tower_model="audio_tower")
+        return MultiModelKeys.from_string_field(
+            language_model="language_model", tower_model="audio_tower")
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor) -> torch.Tensor:

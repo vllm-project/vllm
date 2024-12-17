@@ -1,24 +1,21 @@
+from typing import List, Tuple
 
-from typing import List
+from transformers import AutoTokenizer
 
-import pytest
-
-import vllm
-
-from transformers import  AutoTokenizer
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 
-MODEL_NAME = "fixie-ai/ultravox-v0_3"
+from ..models.utils import check_outputs_equal
+
+ULTRAVOX_MODEL_NAME = "fixie-ai/ultravox-v0_3"
+LLMA_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 
-EXPECTED_OUTPUT = [
-    "Fool mate"
-]
+PROMPT = "Tell me about a silly chess move in 20 words"
 
-def _get_prompt(audio_count, question, placeholder):
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+def _get_prompt(audio_count, question, placeholder, model_name) -> str:
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     placeholder = f"{placeholder}\n" * audio_count
 
     return tokenizer.apply_chat_template([{
@@ -28,44 +25,74 @@ def _get_prompt(audio_count, question, placeholder):
                                          tokenize=False,
                                          add_generation_prompt=True)
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
-    sampling_params = vllm.SamplingParams(
-        temperature=0,
-        max_tokens=1000,
+
+def test_ultravox_lora(vllm_runner, llama3_1_8b_chess_lora,
+                       llama3_1_8b_ultravox_chess_lora):
+    with vllm_runner(
+            ULTRAVOX_MODEL_NAME,
+            enforce_eager=True,
+            max_num_seqs=128,
+            enable_lora=True,
+            max_loras=4,
+            max_lora_rank=128,
+            dtype="bfloat16",
+            max_model_len=4096,
+    ) as vllm_model:
+        ultravox_outputs: List[Tuple[List[int],
+                                     str]] = vllm_model.generate_greedy(
+                                         [
+                                             _get_prompt(
+                                                 0, PROMPT, VLLM_PLACEHOLDER,
+                                                 ULTRAVOX_MODEL_NAME)
+                                         ],
+                                         256,
+                                         lora_request=LoRARequest(
+                                             str(1), 1,
+                                             llama3_1_8b_ultravox_chess_lora),
+                                     )
+
+    # run llama with and without lora to compare outputs with above
+    with vllm_runner(
+            LLMA_MODEL_NAME,
+            enforce_eager=True,
+            max_num_seqs=128,
+            enable_lora=True,
+            max_loras=4,
+            max_lora_rank=128,
+            dtype="bfloat16",
+            max_model_len=4096,
+    ) as vllm_model:
+        llama_outputs_no_lora: List[Tuple[List[int],
+                                          str]] = vllm_model.generate_greedy(
+                                              [
+                                                  _get_prompt(
+                                                      0, PROMPT,
+                                                      VLLM_PLACEHOLDER,
+                                                      LLMA_MODEL_NAME)
+                                              ],
+                                              256,
+                                          )
+        llama_outputs: List[Tuple[List[int],
+                                  str]] = vllm_model.generate_greedy(
+                                      [
+                                          _get_prompt(0, PROMPT,
+                                                      VLLM_PLACEHOLDER,
+                                                      LLMA_MODEL_NAME)
+                                      ],
+                                      256,
+                                      lora_request=LoRARequest(
+                                          str(1), 1, llama3_1_8b_chess_lora),
+                                  )
+
+    check_outputs_equal(
+        outputs_0_lst=ultravox_outputs,
+        outputs_1_lst=llama_outputs,
+        name_0="ultravox",
+        name_1="llama",
     )
 
-    inputs = [{
-        "prompt":_get_prompt(1, "Tell me about a silly chess move in 20 words", VLLM_PLACEHOLDER),
-    }]
+    _, llama_no_lora_str = llama_outputs_no_lora[0]
+    _, ultravox_str = ultravox_outputs[0]
 
-    outputs = llm.generate(
-        inputs,
-        sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None,
-    )
-    generated_texts: List[str] = []
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text.strip()
-        generated_texts.append(generated_text)
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    return generated_texts
-
-
-def test_fixie_lora(llama3_1_8b_chess_lora):
-    llm = vllm.LLM(
-        MODEL_NAME,
-        max_num_seqs=2,
-        enable_lora=True,
-        max_loras=4,
-        max_lora_rank=128,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        max_model_len=4096,
-        enforce_eager=True
-    )
-    output1 = do_sample(llm, llama3_1_8b_chess_lora, lora_id=1)
-    for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output1[i])
-    return None
+    # verify that text don't match with no lora
+    assert llama_no_lora_str != ultravox_str

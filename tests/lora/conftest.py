@@ -147,17 +147,28 @@ def sql_lora_huggingface_id():
     # huggingface repo id is used to test lora runtime downloading.
     return "yard1/llama-2-7b-sql-lora-test"
 
+
 @pytest.fixture(scope="session")
 def sql_lora_files(sql_lora_huggingface_id):
     return snapshot_download(repo_id=sql_lora_huggingface_id)
 
+
 @pytest.fixture(scope="session")
 def llama3_1_8b_chess_lora():
-    return snapshot_download(repo_id="mkopecki/chess-lora-adapter-llama-3.1-8b")
+    return snapshot_download(
+        repo_id="mkopecki/chess-lora-adapter-llama-3.1-8b")
+
+
+@pytest.fixture(scope="session")
+def llama3_1_8b_ultravox_chess_lora():
+    # ultravox chess lora is result of transformation of above chess llama lora
+    return snapshot_download(repo_id="thedebugger11/ultravox-chess-lora")
+
 
 @pytest.fixture(scope="session")
 def lora_bias_files():
     return snapshot_download(repo_id="followumesh/granite-3b-lora8-bias")
+
 
 @pytest.fixture(scope="session")
 def mixtral_lora_files():
@@ -214,6 +225,7 @@ def baichuan_zero_lora_files():
     # all the lora_B weights are initialized to zero.
     return snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init")
 
+
 @pytest.fixture(scope="session")
 def baichuan_regex_lora_files():
     return snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex")
@@ -223,6 +235,7 @@ def baichuan_regex_lora_files():
 def minicpmv_lora_files():
     return snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
 
+
 @pytest.fixture(scope="session")
 def qwen2vl_lora_files():
     return snapshot_download(repo_id="jeeejeee/qwen2-vl-lora-pokemon")
@@ -231,6 +244,7 @@ def qwen2vl_lora_files():
 @pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+
 
 @pytest.fixture(scope="session")
 def phi2_lora_files():
