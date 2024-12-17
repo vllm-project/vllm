@@ -8,6 +8,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
+from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
@@ -169,12 +170,12 @@ class ExecutorBase(ABC):
 
 class ExecutorAsyncBase(ExecutorBase):
 
-    @abstractmethod
     async def execute_model_async(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         """Executes one model step on the given sequences."""
-        raise NotImplementedError
+        output = await make_async(self.execute_model)(execute_model_req)
+        return output
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         """Releases parallel workers from model loop."""

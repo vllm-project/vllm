@@ -1,11 +1,8 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest, PoolerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async)
+from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -55,13 +52,4 @@ class UniProcExecutor(ExecutorBase):
         return
 
 
-class UniProcExecutorAsync(UniProcExecutor, ExecutorAsyncBase):
-
-    async def execute_model_async(
-        self,
-        execute_model_req: ExecuteModelRequest,
-    ) -> List[Union[SamplerOutput, PoolerOutput]]:
-        output = await make_async(self.collective_rpc
-                                  )(method="execute_model",
-                                    args=(execute_model_req, ))
-        return output
+UniProcExecutorAsync = ExecutorAsyncBase
