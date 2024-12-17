@@ -27,6 +27,9 @@ from .shape_prop import ShapeProp
 logger = init_logger(__name__)
 
 
+def pprint(x):
+    pass
+
 ID = 0
 PASSES = {}
 def get_dummy_pass(id: int):
@@ -638,12 +641,16 @@ class PiecewiseBackend:
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()
+            pprint(f"RUNNING GENERAL 1")
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
         if runtime_shape not in self.concrete_size_entries:
             # we don't need to do anything for this shape
+            pprint(f"RUNNING GENERAL 2, RS = {runtime_shape}, shapes = {[(x,e.use_cudagraph,e.runnable) for x,e in self.concrete_size_entries.items()]}")
             return self.compiled_graph_for_general_shape(*args)
+
+        pprint(f"GOT HERE RS = {runtime_shape}, shapes = {[(x,e.use_cudagraph,e.runnable) for x,e in self.concrete_size_entries.items()]}")
 
         entry = self.concrete_size_entries[runtime_shape]
 
@@ -669,6 +676,7 @@ class PiecewiseBackend:
                 self.check_for_ending_compilation()
 
         if not entry.use_cudagraph:
+            pprint(f"RUNNING STATIC {runtime_shape}!")
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
@@ -680,6 +688,7 @@ class PiecewiseBackend:
                         entry.num_finished_warmup,
                         self.compilation_config.cudagraph_num_of_warmups,
                         runtime_shape)
+                pprint(f"RUNNING CUDAGRAPH WARMUP {entry.runtime_shape}")
                 return entry.runnable(*args)
 
             if self.is_first_graph:
@@ -740,6 +749,8 @@ class PiecewiseBackend:
                 "Input addresses for cudagraphs are different during replay."
                 f" Expected {entry.input_addresses}, got {new_input_addresses}"
             )
+
+        pprint(f"RUNNING CUDAGRAPH {entry.runtime_shape}")
 
         entry.cudagraph.replay()
         return entry.output

@@ -1504,8 +1504,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         kv_caches[virtual_engine],
                         "attn_metadata":
                         attn_metadata,
-                        "memory_pool": None,
-                        "stream": None,
                     }
                     if previous_hidden_states is not None:
                         capture_inputs[
@@ -1525,9 +1523,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
-                    # TODO: put warmup loop here?
                     with set_forward_context(attn_metadata, self.vllm_config):
-                        graph_runner.capture(**capture_inputs)
+                        graph_runner.warmup(**capture_inputs)
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
 
@@ -1932,6 +1929,31 @@ class CUDAGraphRunner(nn.Module):
         assert self._graph is not None
         return self._graph
 
+    def warmup(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_inputs: Optional[IntermediateTensors],
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        **kwargs,
+    ):
+        assert self._graph is None
+        # Run the model a few times without capturing the graph.
+        # This is to make sure that the captured graph does not include the
+        # kernel launches for initial benchmarking (e.g., Triton autotune).
+        # Note one iteration is not enough for torch.compile
+
+        for i in range(_NUM_WARMUP_ITERS):
+            self.model(
+                input_ids=input_ids,
+                positions=positions,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
+                intermediate_tensors=intermediate_inputs,
+                **kwargs,
+            )
+
     def capture(
         self,
         input_ids: torch.Tensor,
@@ -1944,22 +1966,6 @@ class CUDAGraphRunner(nn.Module):
         **kwargs,
     ):
         assert self._graph is None
-        # Run the model a few times without capturing the graph.
-        # This is to make sure that the captured graph does not include the
-        # kernel launches for initial benchmarking (e.g., Triton autotune).
-        # Note one iteration is not enough for torch.compile
-
-        if memory_pool is None and stream is None:
-            for i in range(_NUM_WARMUP_ITERS):
-                self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    kv_caches=kv_caches,
-                    attn_metadata=attn_metadata,
-                    intermediate_tensors=intermediate_inputs,
-                    **kwargs,
-                )
-            return
 
         # Wait for the warm up operations to finish before proceeding with
         # Graph Capture.

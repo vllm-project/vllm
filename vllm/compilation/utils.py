@@ -19,6 +19,13 @@ def find_fn(nodes: Iterable[fx.Node], op) -> Optional[fx.Node]:
     return None
 
 
+def find_op(nodes: Iterable[fx.Node], op: str) -> Optional[fx.Node]:
+    for node in nodes:
+        if node.op == op:
+            return node
+    return None
+
+
 def find_auto_fn(nodes: Iterable[fx.Node], op) -> Optional[fx.Node]:
     for node in nodes:
         if (node.op == "call_function" and node.target == auto_functionalized

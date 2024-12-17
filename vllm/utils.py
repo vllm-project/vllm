@@ -1656,6 +1656,7 @@ def direct_register_custom_op(
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
     dispatch_key: str = "CUDA",
+    schema_str: Optional[str] = None,
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1686,13 +1687,14 @@ def direct_register_custom_op(
         return
 
     import torch.library
-    if hasattr(torch.library, "infer_schema"):
-        schema_str = torch.library.infer_schema(op_func,
-                                                mutates_args=mutates_args)
-    else:
-        # for pytorch 2.4
-        import torch._custom_op.impl
-        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
+    if schema_str is None:
+        if hasattr(torch.library, "infer_schema"):
+            schema_str = torch.library.infer_schema(op_func,
+                                                    mutates_args=mutates_args)
+        else:
+            # for pytorch 2.4
+            import torch._custom_op.impl
+            schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
@@ -1704,9 +1706,13 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     """
     Resolve an object by its fully qualified name.
     """
-    module_name, obj_name = qualname.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, obj_name)
+    names = qualname.rsplit(".", 1)
+    if len(names) > 1:
+        module = importlib.import_module(names[0])
+        return getattr(module, names[1])
+    else:
+        import __main__
+        return getattr(__main__, names[0])
 
 
 def kill_process_tree(pid: int):

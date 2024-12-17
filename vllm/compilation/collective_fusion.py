@@ -1,5 +1,5 @@
 import operator
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.fx as fx
@@ -8,7 +8,7 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
 
 import vllm.envs as envs
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
-                                    last_node_in_match)
+                                    find_op, last_node_in_match)
 from vllm.config import CompilationConfig
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
@@ -50,8 +50,32 @@ def use_cc_kernels(m_shape: int) -> bool:
 def residual_slice_shape(residual: torch.Tensor, rank: int) -> int:
     n_slices = get_tensor_model_parallel_world_size()
     chunk = residual.size(0) // n_slices
+    # TODO: can we just ignore the remainder?
     rem = residual.size(0) % n_slices
     return chunk if rank < n_slices - 1 or rem == 0 else rem
+
+
+def layer_setup(residual: torch.Tensor, rank: int, first_layer: bool) -> Tuple[int, int]:
+    use = int(use_cc_kernels(residual.size(0)))
+    first_split = int(first_layer and use)
+    slice_shape = (first_split * residual_slice_shape(residual, rank)) + ((1-first_split) * residual.size(0))
+    return use, slice_shape
+
+
+def layer_setup0(residual: torch.Tensor, rank: int, first_layer: bool) -> Tuple[int, int]:
+    use = 1 if use_cc_kernels(residual.size(0)) else 0
+    if first_layer and use:
+        slice_shape = residual_slice_shape(residual, rank)
+    else:
+        slice_shape = residual.size(0)
+    return use, slice_shape
+
+
+# TODO: put more gemm_rs_ag_gemm code in here to simulate function and get output meta info
+def layer_setup_size(residual: torch.Tensor, rank: int, first_layer: bool) -> torch.Tensor:
+    use = 1 if use_cc_kernels(residual.size(0)) else 0
+    size = (residual_slice_shape(residual, rank) if first_layer and use else residual.size(0), residual.size(1))
+    return torch.empty(size, device=residual.device, dtype=residual.dtype)
 
 
 def match_gemm_rs_ag_gemm(
@@ -84,7 +108,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
                         gemm_1_weights: torch.Size, gemm_2_type: torch.dtype,
                         gemm_2_weights: torch.Size,
                         tp_group_name: str,
-                        is_static_shape: bool) -> Callable:
+                        is_static_shape: bool) -> Tuple[Callable, Callable]:
 
     group = get_group_from_group_name(tp_group_name)
     device_group = group.device_group
@@ -152,17 +176,25 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
                     act, wt.transpose(1, 0), 'avg', 0, world_group_name)
 
             def ag_gemm(act, wt):
-                return torch.ops.symm_mem.fused_all_gather_matmul.default(
-                    act, [wt.transpose(1, 0)], 0, world_group_name)[1]
+                _, out = torch.ops.symm_mem.fused_all_gather_matmul.default(
+                    act, [wt.transpose(1, 0)], 0, world_group_name)
+                return out[0]
 
     def gemm_rs_ag_gemm(
-            residual: torch.Tensor, old_my_residual: torch.Tensor,
-            gemm_1_weights: torch.Tensor, gemm_1_activations: torch.Tensor,
-            rms_norm_weights: torch.Tensor, gemm_2_weights: torch.Tensor,
-            first_layer: bool
+            residual: torch.Tensor,
+            old_my_residual: torch.Tensor,
+            gemm_1_weights: torch.Tensor,
+            gemm_1_activations: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+            gemm_2_weights: torch.Tensor,
+            first_layer: bool,
+            #do_split: int,
+            #slice_shape: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-        if first_layer and use_cc_kernels(residual.size(0)):
+        do_split = use_cc_kernels(residual.size(0))
+
+        if first_layer and do_split:
             slice_shape = residual_slice_shape(residual, rank)
             residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
             my_residual = residual_chunk[0]
@@ -170,7 +202,17 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             my_residual = residual
             slice_shape = residual.size(0)
 
-        if not use_cc_kernels(residual.size(0)):
+        #print(f"RES {residual.size()}")
+        #print(f"flags {first_layer}, {do_split}/{use_cc_kernels(residual.size(0))}")
+        #print(f"slice_shape {slice_shape}, {residual_slice_shape(residual, rank)}")
+
+        #assert do_split == use_cc_kernels(residual.size(0))
+
+        #if False:
+        #    assert (do_split and slice_shape == residual_slice_shape(residual, rank)) or \
+        #        (not do_split and slice_shape == residual.size(0)), f"{do_split}, first={first_layer}, {slice_shape}, {residual_slice_shape(residual, rank)}, {residual.size(0)}"
+
+        if not do_split:
             #print(f"NAIVE DYNAMIC RES SHAPE={residual.size()}")
             output = torch.ops.aten.mm.default(gemm_1_activations,
                                                gemm_1_weights.transpose(1, 0))
@@ -202,25 +244,24 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
 
             mm_2 = ag_gemm(output, gemm_2_weights)
 
-            return mm_2[0], new_residual, slice_scatter
+            return mm_2, new_residual, slice_scatter
 
     def gemm_rs_ag_gemm_static(
             residual: torch.Tensor, old_my_residual: torch.Tensor,
             gemm_1_weights: torch.Tensor, gemm_1_activations: torch.Tensor,
             rms_norm_weights: torch.Tensor, gemm_2_weights: torch.Tensor,
-            first_layer: bool
+            first_layer: bool,
+            #do_split: int,
+            #slice_shape: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         #print(f"STATIC FLUX {residual.size()}, {first_layer}")
         if first_layer:
             slice_shape = residual_slice_shape(residual, rank)
-            #residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
-            #my_residual = residual_chunk[0]
-            my_residual = torch.empty((slice_shape, residual.size(1)),
-                                      device=residual.device,
-                                      dtype=residual.dtype)
+            residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
+            my_residual = residual_chunk[0]
         else:
-            my_residual = residual
             slice_shape = residual.size(0)
+            my_residual = residual
 
         output = gemm_rs(gemm_1_activations, gemm_1_weights)
 
@@ -230,21 +271,14 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
                                                 epsilon=1e-05)
 
         residual_1 = residual if first_layer else old_my_residual
-        #
-        # TODO: try to fake/empty this out too
-        #
-        #slice_scatter = torch.ops.aten.slice_scatter.default(
-        #    residual_1, my_residual, 0, 0, slice_shape)
-        #split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_shape)
-        #new_residual = split_2[0]
-        slice_scatter = residual_1
-        new_residual = torch.empty((slice_shape, residual_1.size(1)),
-                                   device=residual.device,
-                                   dtype=residual.dtype)
+        slice_scatter = torch.ops.aten.slice_scatter.default(
+            residual_1, my_residual, 0, 0, slice_shape)
+        split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_shape)
+        new_residual = split_2[0]
 
         mm_2 = ag_gemm(output, gemm_2_weights)
 
-        return mm_2[0], new_residual, slice_scatter
+        return mm_2, new_residual, slice_scatter
 
     def gemm_rs_ag_gemm_fake(
         residual: torch.Tensor,
@@ -254,12 +288,14 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
         rms_norm_weights: torch.Tensor,
         gemm_2_weights: torch.Tensor,
         first_layer: bool,
+        #do_split: int,
+        #slice_shape: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if first_layer and use_cc_kernels(gemm_1_activations.size(0)):
             slice_shape = residual_slice_shape(residual, rank)
-            # TODO: replace with empty with proper shape?
-            split_1 = torch.ops.aten.split.Tensor(residual, slice_shape)
-            my_residual = split_1[0]
+            my_residual = torch.empty((slice_shape, residual.size(1)),
+                                      device=residual.device,
+                                      dtype=residual.dtype)
         else:
             my_residual = residual
 
@@ -277,10 +313,12 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
         direct_register_custom_op(name,
                                   grag,
                                   mutates_args=[],
-                                  fake_impl=gemm_rs_ag_gemm_fake)
+                                  fake_impl=gemm_rs_ag_gemm_fake,
+                                  #schema_str="(Tensor residual, Tensor old_my_residual, Tensor gemm_1_weights, Tensor gemm_1_activations, Tensor rms_norm_weights, Tensor gemm_2_weights, bool first_layer, SymInt do_split, SymInt slice_shape) -> (Tensor, Tensor, Tensor)"
+                                  )
         assert getattr(torch.ops.vllm, name)
 
-    return getattr(torch.ops.vllm, name).default
+    return getattr(torch.ops.vllm, name).default, gemm_rs_ag_gemm_fake
 
 
 def match_final(
@@ -366,6 +404,43 @@ direct_register_custom_op("gemm_ag_final_static",
                           fake_impl=gemm_ag_final_fake)
 
 
+def trace_fn(fn: Any, args: Sequence[Any]) -> fx.GraphModule:
+    from torch._guards import detect_fake_mode
+
+    from torch._inductor.virtualized import NullHandler, V
+    context = (
+        V.fake_mode
+        if (not isinstance(V.fake_mode, NullHandler) or (V.fake_mode is None))
+        else contextlib.nullcontext()
+    )
+
+    with context:
+        return fwd_only(fn, args)
+
+
+# does this already exist?
+def simplify_getitems(graph):
+    def is_const_tuple(arg):
+        return isinstance(arg, tuple) and all([isinstance(elem, (torch.fx.Node,int,bool)) for elem in arg])
+    for n in graph.nodes:
+        if (n.op == 'call_function' and n.target == operator.getitem):
+            if (is_const_tuple(n.args[0]) and isinstance(n.args[1], int)):
+                n.replace_all_uses_with(n.args[0][n.args[1]])
+                # graph.erase_node(n)
+
+
+def inline_stuff(graph, max_n):
+    from torch.fx.experimental.const_fold import _inline_module
+
+    module_names = [f"layer_setup{n}" for n in range(1, max_n+1)]
+
+    for mod_name in module_names:
+        _inline_module(graph.owning_module, mod_name)
+
+    graph.owning_module.delete_all_unused_submodules()
+    simplify_getitems(graph)
+
+
 class CollectiveFusionPass(VllmInductorPass):
 
     _instance: 'Optional[CollectiveFusionPass]' = None
@@ -385,7 +460,7 @@ class CollectiveFusionPass(VllmInductorPass):
 
     def __init__(self, config: CompilationConfig):
         assert self.__class__._instance is None, \
-            "FusionPass singleton instance already exists"
+            "CollectiveFusionPass singleton instance already exists"
         super().__init__(config)
 
         self.gemm_rs_ag_gemm_pattern = PatternMatcherPass()
@@ -435,6 +510,31 @@ class CollectiveFusionPass(VllmInductorPass):
         # Return False to prevent automatic replacement.
         return False
 
+    def collect_args(self, kwargs) -> List[Any]:
+        arg_names = {"residual": 0,
+                     "old_my_residual":1,
+                     "gemm_1_weights":2,
+                     "gemm_1_activations":3,
+                     "rms_norm_weights":4,
+                     "gemm_2_weights":5,
+                     "first_layer":6,
+                     "do_split":7,
+                     "slice_shape":8}
+        args = [None]*9
+        node_args = [None]*9
+        for k,v in kwargs.items():
+            idx = arg_names[k]
+            if isinstance(v, torch.fx.Node):
+                if v.meta.get("val") is None:
+                    #print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! {k} {v}")
+                    pass #raise RuntimeError(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! {k} {v}")
+                else:
+                    args[idx] = v.meta["val"]
+            else:
+                args[idx] = v
+            node_args[idx] = v
+        return node_args, args
+
     def process_matches(self, graph: fx.Graph) -> None:
         def find_min_index(match: Match) -> int:
             return min(match.nodes, key=lambda x: nodes.index(x))
@@ -450,9 +550,11 @@ class CollectiveFusionPass(VllmInductorPass):
         max_m = self.config.max_num_batched_tokens
         logger.info("max m = %d", max_m)
 
+        n = 0
         for match in matches:
             last_node = last_node_in_match(match)
             first_layer = match == matches[0]
+            n = n + 1
 
             with graph.inserting_after(last_node):
                 kwargs = match.kwargs
@@ -474,9 +576,28 @@ class CollectiveFusionPass(VllmInductorPass):
                 assert ar_node is not None
                 tp_group_name = ar_node.args[1]
 
-                fused_gemm_func = get_gemm_rs_ag_gemm(
+                fused_gemm_func, fused_gemm_fake_func = get_gemm_rs_ag_gemm(
                     use_flux, max_m, gemm_1.dtype, gemm_1.shape, gemm_2.dtype,
                     gemm_2.shape, tp_group_name, self.is_static_shape())
+
+                if False:
+                    mod_name = f"layer_setup{n}"
+                    rank = get_group_from_group_name(tp_group_name).rank_in_group
+                    layer_setup_mod = trace_fn(layer_setup,
+                                               [kwargs["residual"].meta.get("val"), rank, first_layer])
+                    graph.owning_module.add_submodule(mod_name, layer_setup_mod)
+
+                    #print("LAYER_SETUP")
+                    #layer_setup_mod.print_readable()
+
+                    layer_setup_node = graph.call_module(mod_name, (kwargs["residual"], rank, first_layer))
+                    graph.inserting_after(layer_setup_node)
+                    kwargs["slice_shape"] = graph.call_function(
+                        operator.getitem, (layer_setup_node, 1))
+                    kwargs["do_split"] = graph.call_function(
+                        operator.getitem, (layer_setup_node, 0))
+
+                    graph.inserting_after(kwargs["slice_shape"])
 
                 fused_node = graph.call_function(fused_gemm_func,
                                                  kwargs=kwargs)
@@ -488,6 +609,7 @@ class CollectiveFusionPass(VllmInductorPass):
                     operator.getitem, (fused_node, 1))
                 my_residual_node_new = graph.call_function(
                     operator.getitem, (fused_node, 2))
+
                 res_replacements.append(residual_node_new)
                 my_res_replacements.append(my_residual_node_new)
 
@@ -501,10 +623,46 @@ class CollectiveFusionPass(VllmInductorPass):
             assert len(rms_node.users) == 2
             assert len(gemm_node.users) == 1 or len(gemm_node.users) == 2
 
+            #print(f"ATTR = {rms_node.meta['val']} {kwargs['slice_shape'].meta}")
+            # Try to update meta vals
+            #with torch._dynamo.utils.detect_fake_mode():
+            #    args = self.collect_args(kwargs)
+            #    res = fused_gemm_func(*args)
+
+            # XXXXXXXXXXXX TODO use the fake function here!!!!!!
+            if False:
+                arg = kwargs["residual"].meta.get("val") if first_layer else kwargs["old_my_residual"].meta.get("val")
+                layer_size_mod = trace_fn(layer_setup_size,
+                                          [arg, rank, first_layer])
+
+                res = find_fn(layer_size_mod.graph.nodes, torch.ops.aten.empty.memory_format)
+                res_meta = res.meta["val"]
+            elif False:
+                node_args, args = self.collect_args(kwargs)
+                #print(f"ff = {fused_gemm_fake_func}, {args}")
+                fake_mod = trace_fn(fused_gemm_fake_func, args)
+                outputs = [n for n in fake_mod.graph.nodes if n.op == 'output']
+                assert len(outputs) == 1
+                metas = []
+                for out in outputs[0].args[0]:
+                    #print(f"OUT META = {out.meta['val']}")
+                    metas.append(out.meta["val"])
+                tm = tuple(metas)
+
+                #print(f"TM = {tm}")
+                fused_node.meta["val"] = tm
+                result_node_new.meta["val"] = tm[0]
+                residual_node_new.meta["val"] = tm[1]
+                my_residual_node_new.meta["val"] = tm[2]
+
             residual_getter_node = find_getitem(rms_node, 2)
             assert residual_getter_node is not None
             residual_getter_node.replace_all_uses_with(residual_node_new)
             gemm_node.replace_all_uses_with(result_node_new)
+
+        #self.dump_graph(graph, "before_inline")
+        #inline_stuff(graph, n)
+        #self.dump_graph(graph, "after_inline")
 
         # Finally, remove matched nodes
         graph.eliminate_dead_code()
