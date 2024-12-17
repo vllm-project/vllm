@@ -917,7 +917,8 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-        if current_platform.is_cuda() and self.block_size not in [8, 16, 32]:
+        if (current_platform.is_cuda()
+                and self.block_size not in [None, 8, 16, 32]):
             raise ValueError(
                 "CUDA Paged Attention kernel only supports "
                 f"block sizes [8, 16, 32]. Got {self.block_size}.")
