@@ -50,14 +50,6 @@ class RayExecutor(Executor):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        if (self.parallel_config.tensor_parallel_size == 1
-                and self.parallel_config.pipeline_parallel_size == 1):
-            # For single GPU case, we use a ray worker with constrained memory.
-            num_gpus = self.cache_config.gpu_memory_utilization
-        else:
-            # Otherwise, the ray workers are allocated with a full GPU.
-            num_gpus = 1
-
         # A list of workers to run a model.
         self.workers: List[RayWorkerWrapper] = []
         if self.parallel_config.ray_workers_use_nsight:
@@ -78,7 +70,7 @@ class RayExecutor(Executor):
 
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=num_gpus,
+                num_gpus=1,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
