@@ -101,6 +101,45 @@ def sample_complex_json_schema():
 
 
 @pytest.fixture
+def sample_definition_json_schema():
+    return {
+        '$defs': {
+            'Step': {
+                'properties': {
+                    'explanation': {
+                        'title': 'Explanation',
+                        'type': 'string'
+                    },
+                    'output': {
+                        'title': 'Output',
+                        'type': 'string'
+                    }
+                },
+                'required': ['explanation', 'output'],
+                'title': 'Step',
+                'type': 'object'
+            }
+        },
+        'properties': {
+            'steps': {
+                'items': {
+                    '$ref': '#/$defs/Step'
+                },
+                'title': 'Steps',
+                'type': 'array'
+            },
+            'final_answer': {
+                'title': 'Final Answer',
+                'type': 'string'
+            }
+        },
+        'required': ['steps', 'final_answer'],
+        'title': 'MathReasoning',
+        'type': 'object'
+    }
+
+
+@pytest.fixture
 def sample_guided_choice():
     return [
         "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",

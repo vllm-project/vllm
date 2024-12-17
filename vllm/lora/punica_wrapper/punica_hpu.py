@@ -21,7 +21,7 @@ class PunicaWrapperHPU(PunicaWrapperBase):
                            y: torch.Tensor,
                            x: torch.Tensor,
                            lora_b_stacked: torch.Tensor,
-                           add_input: bool = True,
+                           add_inputs: bool = True,
                            **kwargs) -> None:
         dispatch_bgmv_embedding(y, x, lora_b_stacked, 0)
 
@@ -81,7 +81,7 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
         output_slices: Tuple[int, ...],
         offset_start: int = 0,
-        add_input=True,
+        add_inputs=True,
         **kwargs,
     ) -> None:
         raise NotImplementedError
