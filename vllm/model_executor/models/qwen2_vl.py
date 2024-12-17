@@ -749,7 +749,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         if min_pixels:
             hf_processor.image_processor.min_pixels = min_pixels
         if max_pixels:
-            hf_processor.image_processor.min_pixels = max_pixels
+            hf_processor.image_processor.max_pixels = max_pixels
         if max_pixels or min_pixels:
             hf_processor.image_processor.size = {
                 "min_pixels": hf_processor.image_processor.min_pixels,
