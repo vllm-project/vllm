@@ -1,5 +1,4 @@
 import dataclasses
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
@@ -7,14 +6,18 @@ import torch
 import torch.nn.functional as F
 from transformers import TopPLogitsWarper
 
+import ttnn
+
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig,
                          ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tt_loader import TTModelLoader
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata, Logprob, SequenceOutput, CompletionSequenceGroupOutput, SequenceGroup
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
+from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
@@ -42,6 +45,8 @@ class TTModelInput(ModelRunnerInputBase):
     block_tables: Optional[torch.Tensor] = None
     unpadded_batch_size: Optional[int] = None
     tt_sampling_params: Optional[TTSamplingParams] = None
+    multi_modal_kwargs: Optional[List[Dict[str, Any]]] = None
+    cross_block_tables: Optional[torch.Tensor] = None
     is_first_multi_step: bool = True
     is_last_step: bool = True
     async_callback: Optional[Callable] = None
@@ -56,6 +61,8 @@ class TTModelInput(ModelRunnerInputBase):
             "block_tables": self.block_tables,
             "unpadded_batch_size": self.unpadded_batch_size,
             "tt_sampling_params": self.tt_sampling_params,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+            "cross_block_tables": self.cross_block_tables,
             "is_first_multi_step": self.is_first_multi_step,
             "is_last_step": self.is_last_step,
         }
@@ -115,6 +122,17 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         self.execute_trace_kwargs = None  # kw args for trace execution (populated during first decode execution)
 
         self.cached_step_outputs: List[torch.Tensor] = []  # Only used for multi-step execution
+        
+        self.cached_enc_dec_data: Optional[Dict[int, Dict[str, Any]]] = None  # seq_id -> enc_dec_data
+
+        if self.model_is_mrope:
+            assert "TTModelRunner does not currently support models with mrope rope_scaling"
+        
+    @property
+    def model_is_mrope(self) -> bool:
+        """Detect if the model has "mrope" rope_scaling type.
+        mrope requires keep "rope_deltas" between prompt and decoding phases."""
+        return uses_mrope(self.model_config.hf_config)
 
     def load_model(self) -> None:
         # Note: using custom TT loader instead of selecting from default vllm loaders
@@ -175,6 +193,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         block_tables: List[List[int]] = []
         seq_groups: List[int] = []
         top_pk_sampling_params = {}
+        multi_modal_kwargs: Dict[str, Any] = {}
+        cross_block_tables: List[List[int]] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -182,6 +202,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             seq_id = seq_ids[0]
             seq_groups.append(seq_id)
 
+            multi_modal_data = seq_group_metadata.multi_modal_data
             seq_data = seq_group_metadata.seq_data[seq_id]
             
             if is_prompt:
@@ -190,8 +211,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 input_tokens.append(prompt_tokens)
                 
                 # prompt lengths
-                prompt_len = len(prompt_tokens)
-                prompt_lens.append(prompt_len)
+                prompt_lens.append(len(prompt_tokens))
             else:
                 # tokens
                 generation_token = seq_data.get_last_token_id()
@@ -203,6 +223,21 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 
             block_table = seq_group_metadata.block_tables[seq_id]
             block_tables.append(block_table)
+            
+            # Multi-modal data
+            # TODO: Replace with multi_modal_input_mapper (used by CPU/GPU model runners) once TT models no longer require raw PIL images
+            if (multi_modal_data := seq_group_metadata.multi_modal_data):
+                assert "image" in multi_modal_data, "Currently only supporting image multi-modal inputs"
+                image = multi_modal_data["image"]  # this is of type PIL.Image.Image
+                if "images" not in multi_modal_kwargs:
+                    multi_modal_kwargs["images"] = [image]
+                else:
+                    multi_modal_kwargs["images"].append(image)
+            
+            # Encoder-decoder data (currently only supporting cross attention metadata and not additional encoder data)
+            if self.model_config.is_encoder_decoder_model:
+                cross_block_table = seq_group_metadata.cross_block_table
+                cross_block_tables.append(cross_block_table)
             
             # Sampling params
             # TODO: Add support for different sampling params in the same batch
@@ -225,6 +260,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             top_p=top_pk_sampling_params["top_p"]
         )
         
+        # Remove cached encoder-decoder data for any seq ids that are not in the current batch (assume they were either finished or preempted)
+        if not is_prompt and self.cached_enc_dec_data:
+            seq_ids_to_del = []
+            for seq_id in self.cached_enc_dec_data:
+                if seq_id not in seq_groups:
+                    seq_ids_to_del.append(seq_id)
+            for seq_id in seq_ids_to_del:
+                del self.cached_enc_dec_data[seq_id]
+        
         # Convert lists to tensors and add padding
         
         block_tables = make_tensor_with_pad(
@@ -233,6 +277,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             device="cpu",
             pad=0
         )
+        if self.model_config.is_encoder_decoder_model:
+            cross_block_tables = make_tensor_with_pad(
+                cross_block_tables,
+                dtype=torch.int32,
+                device="cpu",
+                pad=0
+            )
+        else:
+            cross_block_tables = None
         if is_prompt:
             input_tokens = make_tensor_with_pad(
                 input_tokens, 
@@ -267,6 +320,11 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     block_tables,
                     torch.zeros(batch_pad_len, block_tables.shape[1], dtype=torch.int32, device="cpu")
                 ])
+                if self.model_config.is_encoder_decoder_model:
+                    cross_block_tables = torch.cat([
+                        cross_block_tables,
+                        torch.zeros(batch_pad_len, cross_block_tables.shape[1], dtype=torch.int32, device="cpu")
+                    ])
             
             # Pad block_tables to max num blocks so ttnn tracing can work (requires constant shape)
             if self.trace_mode:
@@ -275,7 +333,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     torch.zeros(block_tables.shape[0], self.cache_config.num_gpu_blocks - block_tables.shape[1], dtype=torch.int32, device="cpu")
                 ], dim=1)
         
-        return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables, unpadded_batch_size, tt_sampling_params)
+        return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables, unpadded_batch_size, tt_sampling_params, multi_modal_kwargs, cross_block_tables)
 
     @torch.no_grad()
     def execute_model(
@@ -378,6 +436,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 CompletionSequenceGroupOutput(seq_outputs, None))
         return SamplerOutput(sampler_outputs)
     
+    def _send_prev_step_async_out(self, model_input: TTModelInput, step_idx):
+        if step_idx > 0:
+            next_token_ids = self.cached_step_outputs.pop(0)
+            sampler_output = self._make_sampler_output(
+                next_token_ids,
+                model_input.seq_groups
+            )
+            self._send_async_out(sampler_output, model_input.async_callback, is_first_step_output=(step_idx == 1))
+    
     def _execute_model_single_step(self, model_input: TTModelInput, kv_caches: List[torch.Tensor], is_decode, async_out_proc_per_trace=False, step_idx=0):
         execute_model_kwargs = {
             "tokens": model_input.input_tokens,
@@ -385,46 +452,77 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             "page_table": model_input.block_tables,
             "kv_cache": kv_caches,
             "prompt_lens": model_input.prompt_lens,
+            **(model_input.multi_modal_kwargs or {}),
         }
+        if model_input.cross_block_tables is not None:
+            execute_model_kwargs["cross_page_table"] = model_input.cross_block_tables
         
-        if self.trace_mode and is_decode:  # Trace mode for decode
-            # Remove prompt_lens from execute_model_kwargs since it's not used for decode
-            execute_model_kwargs.pop("prompt_lens")
-            
-            # Capture trace for the first decode execution
-            if self.execute_trace_kwargs is None:
-                logger.info("Capturing trace for first decode execution")
-                trace_id, tt_inp, rot_idxs_tt, cache_idxs_tt, tt_logits, tt_page_table = self.model.capture_trace(
-                    **execute_model_kwargs
-                )
-                self.execute_trace_kwargs = {
-                    "trace_id": trace_id,
-                    "tt_inp": tt_inp,
-                    "rot_idxs_tt": rot_idxs_tt,
-                    "cache_idxs_tt": cache_idxs_tt,
-                    "tt_logits": tt_logits,
-                    "tt_page_table": tt_page_table,
-                    "read_from_device": False,
-                }
-            
-            # Remove kv_cache from execute_model_kwargs since it doesn't need to be copied to device for trace execution
-            execute_model_kwargs.pop("kv_cache")
-            
-            tt_logits = self.model.decode_forward_trace(
-                **execute_model_kwargs, **self.execute_trace_kwargs
-            )
-            if async_out_proc_per_trace:
-                # trigger output processor on host while device is executing next step
-                if step_idx > 0:
-                    next_token_ids = self.cached_step_outputs.pop(0)
-                    sampler_output = self._make_sampler_output(
-                        next_token_ids,
-                        model_input.seq_groups
+        if not self.model_config.is_encoder_decoder_model:  # Forward for decoder-only
+            if self.trace_mode and is_decode:  # Trace mode for decode
+                # Remove prompt_lens from execute_model_kwargs since it's not used for decode
+                execute_model_kwargs.pop("prompt_lens")
+                
+                # Capture trace for the first decode execution
+                if self.execute_trace_kwargs is None:
+                    logger.info("Capturing trace for first decode execution")
+                    trace_id, tt_inp, rot_idxs_tt, cache_idxs_tt, tt_logits, tt_page_table = self.model.capture_trace(
+                        **execute_model_kwargs
                     )
-                    self._send_async_out(sampler_output, model_input.async_callback, is_first_step_output=(step_idx == 1))
-            logits = self.model.read_forward_trace(tt_logits, model_input.unpadded_batch_size)
-        else:
-            logits = self.model.forward(**execute_model_kwargs)  # [batch_size, seq_len, vocab_size]
+                    self.execute_trace_kwargs = {
+                        "trace_id": trace_id,
+                        "tt_inp": tt_inp,
+                        "rot_idxs_tt": rot_idxs_tt,
+                        "cache_idxs_tt": cache_idxs_tt,
+                        "tt_logits": tt_logits,
+                        "tt_page_table": tt_page_table,
+                        "read_from_device": False,
+                    }
+                
+                # Remove kv_cache from execute_model_kwargs since it doesn't need to be copied to device for trace execution
+                execute_model_kwargs.pop("kv_cache")
+                
+                tt_logits = self.model.decode_forward_trace(
+                    **execute_model_kwargs, **self.execute_trace_kwargs
+                )
+                if async_out_proc_per_trace:
+                    # trigger output processor on host while device is executing next step
+                    self._send_prev_step_async_out(model_input, step_idx)
+                logits = self.model.read_forward_trace(tt_logits, model_input.unpadded_batch_size)
+            else:  # prefill or non-traced decode
+                logits = self.model.forward(**execute_model_kwargs)  # [batch_size, seq_len, vocab_size]
+        else: # Forward for encoder-decoder (may need to be updated for future models)
+            # TODO: remove different forward calls once TT models can manage intermediate outputs internally
+            if not is_decode:
+                # Remove start_pos from execute_model_kwargs since it's not used for prefill
+                execute_model_kwargs.pop("start_pos")
+                
+                logits, cross_attention_masks, full_text_row_masked_out_mask = self.model.prefill_forward(**execute_model_kwargs)
+                
+                # Save encoder-decoder data for use in subsequent decode steps
+                if self.cached_enc_dec_data is None:
+                    self.cached_enc_dec_data = {}
+                for i, seq_id in enumerate(model_input.seq_groups):
+                    enc_dec_data = {"cross_attention_masks": cross_attention_masks[i], 
+                                        "full_text_row_masked_out_mask": full_text_row_masked_out_mask[i]}
+                    self.cached_enc_dec_data[seq_id] = enc_dec_data
+            else:
+                # Remove prompt_lens from execute_model_kwargs since it's not used for decode
+                execute_model_kwargs.pop("prompt_lens")
+                
+                # Use encoder-decoder data from prefill step
+                cross_attention_masks = [self.cached_enc_dec_data[seq_id]["cross_attention_masks"] for seq_id in model_input.seq_groups]
+                full_text_row_masked_out_mask = [self.cached_enc_dec_data[seq_id]["full_text_row_masked_out_mask"] for seq_id in model_input.seq_groups]
+                
+                enc_dec_kwargs = {"cross_attention_masks": cross_attention_masks,
+                                        "full_text_row_masked_out_mask": full_text_row_masked_out_mask}
+                
+                tt_logits = self.model.decode_forward(
+                    **execute_model_kwargs, **enc_dec_kwargs, enable_trace=self.trace_mode, read_from_device=False
+                )
+                if async_out_proc_per_trace:
+                    # trigger output processor on host while device is executing next step
+                    self._send_prev_step_async_out(model_input, step_idx)
+                logits = self.model.read_decode_output(tt_logits, model_input.unpadded_batch_size)
 
         # Note: for other devices, vLLM applies vllm.model_executor.layers.logits_processor::LogitsProcessor::_apply_logits_processors on logits, we don't use this
         # Note: for other devices, vLLM applies vllm.model_executor.layers.sampler::Sampler for sampling tokens, we don't use this

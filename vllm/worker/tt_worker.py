@@ -3,6 +3,7 @@ import os
 from typing import List, Optional, Tuple
 import time
 import math
+from tqdm import tqdm
 
 import torch
 
@@ -11,7 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, is_pin_memory_available
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.worker.worker import raise_if_cache_size_invalid
 from vllm.worker.tt_model_runner import TTModelRunner, TTModelInput
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
@@ -49,7 +50,7 @@ class TTCacheEngine:
             parallel_config)
 
         self.num_kv_heads = TTCacheEngine.get_num_kv_heads(
-            model_config, parallel_config
+            model_config, parallel_config, device_config
         )
 
         self.block_size = cache_config.block_size
@@ -95,7 +96,7 @@ class TTCacheEngine:
                 kv_cache.append([cache_k, cache_v])
         else:
             cache_kv = torch.zeros(kv_cache_shape, dtype=self.dtype)
-            for _ in range(num_layers):
+            for _ in tqdm(range(num_layers), desc="Allocating TT kv caches for each layer"):
                 kv_tt = [ttnn.as_tensor(
                     lp,
                     device=self.device_config.device,
@@ -123,15 +124,15 @@ class TTCacheEngine:
     def get_num_kv_heads(
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        device_config: DeviceConfig,
     ) -> int:
         '''
         Returns the number of KV heads per attention layer. Makes the assumption
-        that we are tensor parallel by a factor of 8.
+        that we are tensor parallel by the number of devices.
         '''
+        num_devices = len(device_config.device.get_devices())
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        # TODO: get num devices from device_config.device (device_mesh)
-        # TODO: add get_num_devices to worker
-        num_kv_heads //= 8 # TP=8, tries to use distributed worker if you give LLM 8 TP
+        num_kv_heads //= num_devices # TP = num_devices
         return num_kv_heads
 
     @staticmethod
@@ -211,8 +212,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return self.tt_cache
 
     def init_device(self) -> None:
-        # TODO: Add support for devices other than T3K
-        self.mesh_device = self._open_t3k_mesh_device()
+        self.mesh_device = self._open_mesh_device()
         self.device_config.device = self.mesh_device
         
         # TODO: Add flag for enabling program cache
@@ -237,7 +237,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         appended to.
         """
         # TODO: Add proper implementation which runs profiling on TT devices
-        max_tokens_all_users = 131072
+        max_tokens_all_users = 131072  # Note: includes num vision tokens for multi-modal
         num_tt_blocks = math.ceil(max_tokens_all_users / self.cache_config.block_size)
         num_tt_blocks = int(num_tt_blocks * 1.01)  # Add 1% to account for vLLM's watermark_blocks
         num_cpu_blocks = 0
@@ -408,18 +408,33 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         dispatch_core_config = ttnn.DispatchCoreConfig(dispatch_core_type, dispatch_core_axis)
         return dispatch_core_config
 
-    def _open_t3k_mesh_device(self):
+    def _open_mesh_device(self):
+        num_devices_available = len(ttnn.get_device_ids())
+        
+        mesh_grid_dict = {"N150": (1, 1), "N300": (1, 2), "T3K_LINE": (1, 8), "T3K_RING": (2, 4)}
+        mesh_device = os.environ.get("MESH_DEVICE")
+        if mesh_device is not None:
+            assert mesh_device in mesh_grid_dict, f"Invalid MESH_DEVICE: {mesh_device}"
+        mesh_grid = mesh_grid_dict.get(mesh_device, (1, num_devices_available))
+        if mesh_device == "T3K_RING":
+            mesh_type=ttnn.MeshType.Ring
+        else:
+            mesh_type=ttnn.MeshType.RowMajor
+        
+        if mesh_grid[0] * mesh_grid[1] > num_devices_available:
+            assert f"Requested mesh grid shape {mesh_grid} is larger than number of available devices {num_devices_available}"
+        
         if self.trace_mode:
             device_params = {"trace_region_size": 14227456}  # TODO: make this configurable
         else:
             device_params = {}
         mesh_device = ttnn.open_mesh_device(
-            ttnn.MeshShape(2, 4),
+            ttnn.MeshShape(*mesh_grid),
             dispatch_core_config=self._get_dispatch_core_config(device_params),
             **device_params,
-            mesh_type=ttnn.MeshType.Ring,
+            mesh_type=mesh_type,
         )
-        logger.debug(f"multidevice with {mesh_device.get_num_devices()} devices is created")
+        logger.info(f"multidevice with {mesh_device.get_num_devices()} devices and grid {mesh_grid} is created")
         return mesh_device
     
     def _enable_program_cache(self):

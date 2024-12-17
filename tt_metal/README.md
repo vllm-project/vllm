@@ -30,15 +30,17 @@ Git-checkout the following branches in each repo separately:
     source $vllm_dir/tt_metal/setup-metal.sh && source $PYTHON_ENV_DIR/bin/activate
     ```
 
-## Accessing the Meta-Llama-3.1 Hugging Face Model
+## Accessing the Meta-Llama Hugging Face Models
 
-To run Meta-Llama-3.1, it is required to have access to the model on Hugging Face. To gain access:
-1. Request access on [https://huggingface.co/meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B).
+To run Meta-Llama-3.1/3.2, it is required to have access to the model on Hugging Face. To gain access:
+1. Request access on Hugging Face:
+    - Llama-3.1: [https://huggingface.co/meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B)
+    - Llama-3.2: [https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct](https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct)
 2. Once you have received access, create and copy your access token from the settings tab on Hugging Face.
 3. Run this code in python and paste your access token:
     ```python
-    from huggingface_hub import notebook_login
-    notebook_login()
+    from huggingface_hub import login
+    login()
     ```
 
 ## Preparing the tt-metal models
@@ -47,6 +49,9 @@ To run Meta-Llama-3.1, it is required to have access to the model on Hugging Fac
 2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1-70B, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b) for preparing the weights and environment variables.
 
 ## Running the offline inference example
+
+### Llama-3.1-70B
+
 To generate tokens for sample prompts:
 ```python
 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py
@@ -57,7 +62,24 @@ To measure performance for a single batch (with the default prompt length of 128
 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --measure_perf
 ```
 
-## Running the server example (experimental)
+### Llama-3.2-11B-Vision-Instruct
+
+To generate tokens for sample prompts:
+```python
+WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --multi_modal --max_seqs_in_batch 16 --num_repeat_prompts 8
+```
+
+To measure performance for a single batch (with the default prompt length of 128 tokens):
+```python
+WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --measure_perf --multi_modal --max_seqs_in_batch 16 --num_repeat_prompts 4
+```
+
+**Note**: By default, the multi-modal inference example will run with `MESH_DEVICE=N300`. To run on T3000, set `MESH_DEVICE=T3K_LINE` and `--max_seqs_in_batch 32 --num_repeat_prompts 16`.
+
+## Running the server example
+
 ```python
 VLLM_RPC_TIMEOUT=100000 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/server_example_tt.py
 ```
+
+**Note**: By default, the server will run with Llama-3.1-70B. To run with Llama-3.2-11B-Vision-Instruct instead, add `--multi_modal`.
