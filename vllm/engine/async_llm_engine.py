@@ -650,8 +650,8 @@ class AsyncLLMEngine(EngineClient):
                 from vllm.executor.ray_hpu_executor import RayHPUExecutorAsync
                 executor_class = RayHPUExecutorAsync
             else:
-                from vllm.executor.hpu_executor import HPUExecutorAsync
-                executor_class = HPUExecutorAsync
+                from vllm.executor.uniproc_executor import UniProcExecutor
+                executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "openvino":
             assert distributed_executor_backend is None, (
                 "Distributed execution is not supported with "
@@ -660,8 +660,8 @@ class AsyncLLMEngine(EngineClient):
             executor_class = OpenVINOExecutorAsync
         elif engine_config.device_config.device_type == "xpu":
             if distributed_executor_backend is None:
-                from vllm.executor.xpu_executor import XPUExecutorAsync
-                executor_class = XPUExecutorAsync
+                from vllm.executor.uniproc_executor import UniProcExecutor
+                executor_class = UniProcExecutor
             elif distributed_executor_backend == "ray":
                 from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
                 executor_class = RayXPUExecutorAsync

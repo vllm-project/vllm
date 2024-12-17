@@ -480,8 +480,8 @@ class LLMEngine:
                 from vllm.executor.ray_hpu_executor import RayHPUExecutor
                 executor_class = RayHPUExecutor
             else:
-                from vllm.executor.hpu_executor import HPUExecutor
-                executor_class = HPUExecutor
+                from vllm.executor.uniproc_executor import UniProcExecutor
+                executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "openvino":
             from vllm.executor.openvino_executor import OpenVINOExecutor
             executor_class = OpenVINOExecutor

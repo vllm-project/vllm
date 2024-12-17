@@ -5,14 +5,14 @@ import ray
 
 import vllm.envs as envs
 from vllm.executor.ray_gpu_executor import RayGPUExecutor, RayGPUExecutorAsync
-from vllm.executor.xpu_executor import XPUExecutor
+from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.logger import init_logger
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
 
-class RayXPUExecutor(RayGPUExecutor, XPUExecutor):
+class RayXPUExecutor(RayGPUExecutor, UniProcExecutor):
 
     def _get_env_vars_to_be_updated(self):
         # Get the set of GPU IDs used on each node.
