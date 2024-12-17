@@ -1,5 +1,4 @@
 import os
-from functools import partial
 from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
@@ -68,28 +67,24 @@ class CPUExecutor(ExecutorBase):
             self.workers = [
                 ProcessWorkerWrapper(
                     result_handler,
-                    partial(
-                        self._create_worker,
-                        rank=rank,
-                        local_rank=rank,
-                    )) for rank in range(0, world_size)
+                    WorkerWrapperBase,
+                    self.vllm_config,
+                    rank,
+                ) for rank in range(0, world_size)
             ]
             self.driver_worker = self.workers[0]
             self.workers = self.workers[1:]
             self.driver_method_invoker = _async_driver_method_invoker
         else:
-            self.driver_worker = self._create_worker()
+            self.driver_worker = WorkerWrapperBase(
+                vllm_config=self.vllm_config, rank=0)
             self.driver_method_invoker = _driver_method_invoker
 
             if world_size != 1:
                 self.workers = [
-                    ProcessWorkerWrapper(
-                        result_handler,
-                        partial(
-                            self._create_worker,
-                            rank=rank,
-                            local_rank=rank,
-                        )) for rank in range(1, world_size)
+                    ProcessWorkerWrapper(result_handler, WorkerWrapperBase,
+                                         self.vllm_config, rank)
+                    for rank in range(1, world_size)
                 ]
 
         self.worker_monitor = None
@@ -103,30 +98,20 @@ class CPUExecutor(ExecutorBase):
             result_handler.start()
             self.worker_monitor.start()
 
+        all_kwargs = []
+        for rank in range(world_size):
+            kwargs = dict(
+                vllm_config=self.vllm_config,
+                local_rank=rank,
+                rank=rank,
+                distributed_init_method=self.distributed_init_method,
+                kv_cache_dtype=self.cache_config.cache_dtype,
+                is_driver_worker=rank == 0,
+            )
+            all_kwargs.append(kwargs)
+        self._run_workers("init_worker", all_kwargs)
         self._run_workers("init_device")
         self._run_workers("load_model")
-
-    def _create_worker(
-        self,
-        local_rank: int = 0,
-        rank: int = 0,
-    ):
-
-        wrapper = WorkerWrapperBase(vllm_config=self.vllm_config, rank=rank)
-
-        assert self.distributed_init_method is not None
-
-        kwargs = dict(
-            vllm_config=self.vllm_config,
-            local_rank=local_rank,
-            rank=rank,
-            distributed_init_method=self.distributed_init_method,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=rank == 0,
-        )
-        wrapper.init_worker(**kwargs)
-
-        return wrapper.worker
 
     def _run_workers(
         self,

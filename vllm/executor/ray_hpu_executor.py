@@ -221,14 +221,19 @@ class RayHPUExecutor(DistributedGPUExecutor):
             driver_ip, get_open_port())
 
         # Initialize the actual workers inside worker wrapper.
-        init_worker_all_kwargs = [
-            self._get_worker_kwargs(
-                local_rank=node_workers[node_id].index(rank),
+        all_kwargs = []
+        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
+            local_rank = node_workers[node_id].index(rank)
+            kwargs = dict(
+                vllm_config=self.vllm_config,
+                local_rank=local_rank,
                 rank=rank,
                 distributed_init_method=distributed_init_method,
-            ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
-        ]
-        self._run_workers("init_worker", init_worker_all_kwargs)
+                is_driver_worker=(not self.parallel_config)
+                or (rank % self.parallel_config.tensor_parallel_size == 0),
+            )
+            all_kwargs.append(kwargs)
+        self._run_workers("init_worker", all_kwargs)
 
         self._run_workers("init_device")
         self._run_workers("load_model",

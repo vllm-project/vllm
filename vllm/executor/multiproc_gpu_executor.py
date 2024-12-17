@@ -1,11 +1,9 @@
 import asyncio
 import os
-from functools import partial
 from typing import Any, List, Optional
 
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
-from vllm.executor.gpu_executor import create_worker
 from vllm.executor.multiproc_worker_utils import (
     ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
     set_multiprocessing_worker_envs)
@@ -13,8 +11,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
-                        get_distributed_init_method, get_open_port, make_async,
-                        update_environment_variables)
+                        get_distributed_init_method, get_ip, get_open_port,
+                        make_async, update_environment_variables)
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -55,15 +54,9 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         else:
             result_handler = ResultHandler()
             for rank in range(1, world_size):
-                worker = ProcessWorkerWrapper(
-                    result_handler,
-                    partial(
-                        create_worker,
-                        **self._get_worker_kwargs(
-                            rank=rank,
-                            local_rank=rank,
-                            distributed_init_method=distributed_init_method,
-                        )))
+                worker = ProcessWorkerWrapper(result_handler,
+                                              WorkerWrapperBase,
+                                              self.vllm_config, rank)
                 self.workers.append(worker)
                 if rank % tensor_parallel_size == 0:
                     self.tp_driver_workers.append(worker)
@@ -77,8 +70,24 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Set up signal handlers to shutdown the executor cleanly
         # sometimes gc does not work well
 
-        self.driver_worker = self._create_worker(
-            distributed_init_method=distributed_init_method)
+        self.driver_worker = WorkerWrapperBase(self.vllm_config, 0)
+
+        all_kwargs = []
+        distributed_init_method = get_distributed_init_method(
+            get_ip(), get_open_port())
+        for i in range(world_size):
+            local_rank = i
+            rank = i
+            kwargs = dict(
+                vllm_config=self.vllm_config,
+                local_rank=local_rank,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                is_driver_worker=(not self.parallel_config)
+                or (rank % self.parallel_config.tensor_parallel_size == 0),
+            )
+            all_kwargs.append(kwargs)
+        self._run_workers("init_worker", all_kwargs)
         self._run_workers("init_device")
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.

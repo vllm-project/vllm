@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -13,14 +13,6 @@ from vllm.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
-def create_worker(**kwargs):
-    vllm_config = kwargs.get("vllm_config")
-    rank = kwargs.get("rank")
-    wrapper = WorkerWrapperBase(vllm_config=vllm_config, rank=rank)
-    wrapper.init_worker(**kwargs)
-    return wrapper.worker
-
-
 class GPUExecutor(ExecutorBase):
 
     uses_ray: bool = False
@@ -31,20 +23,13 @@ class GPUExecutor(ExecutorBase):
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
 
-        self.driver_worker = self._create_worker()
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
-
-    def _get_worker_kwargs(
-            self,
-            local_rank: int = 0,
-            rank: int = 0,
-            distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
-        """Return worker init args for a given rank."""
-        if distributed_init_method is None:
-            distributed_init_method = get_distributed_init_method(
-                get_ip(), get_open_port())
-        return dict(
+        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
+                                               rank=0)
+        distributed_init_method = get_distributed_init_method(
+            get_ip(), get_open_port())
+        local_rank = 0
+        rank = 0
+        kwargs = dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
@@ -52,15 +37,9 @@ class GPUExecutor(ExecutorBase):
             is_driver_worker=(not self.parallel_config)
             or (rank % self.parallel_config.tensor_parallel_size == 0),
         )
-
-    def _create_worker(self,
-                       local_rank: int = 0,
-                       rank: int = 0,
-                       distributed_init_method: Optional[str] = None):
-        return create_worker(**self._get_worker_kwargs(
-            local_rank=local_rank,
-            rank=rank,
-            distributed_init_method=distributed_init_method))
+        self.driver_worker.init_worker([kwargs])
+        self.driver_worker.init_device()
+        self.driver_worker.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
