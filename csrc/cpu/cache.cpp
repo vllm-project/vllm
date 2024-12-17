@@ -8,26 +8,32 @@ template <typename scalar_t>
 void copy_blocks_cpu_impl(std::vector<torch::Tensor>& key_caches,
                           std::vector<torch::Tensor>& value_caches,
                           const torch::Tensor& mapping_pairs,
-                          const int element_num_per_block,
+                          const int k_element_num_per_block,
+                          const int v_element_num_per_block,
                           const int layer_num) {
   const size_t pair_num = mapping_pairs.size(0);
-  const size_t block_bytes = sizeof(scalar_t) * element_num_per_block;
+  const size_t k_block_bytes = sizeof(scalar_t) * k_element_num_per_block;
+  const size_t v_block_bytes = sizeof(scalar_t) * v_element_num_per_block;
 #pragma omp parallel for collapse(2)
   for (int layer = 0; layer < layer_num; ++layer) {
     for (size_t pair = 0; pair < pair_num; ++pair) {
-      int64_t source_offset =
-          element_num_per_block * mapping_pairs[pair][0].item<int64_t>();
-      int64_t target_offset =
-          element_num_per_block * mapping_pairs[pair][1].item<int64_t>();
+      int64_t k_source_offset =
+          k_element_num_per_block * mapping_pairs[pair][0].item<int64_t>();
+      int64_t k_target_offset =
+          k_element_num_per_block * mapping_pairs[pair][1].item<int64_t>();
+      int64_t v_source_offset =
+          v_element_num_per_block * mapping_pairs[pair][0].item<int64_t>();
+      int64_t v_target_offset =
+          v_element_num_per_block * mapping_pairs[pair][1].item<int64_t>();
       scalar_t* key_cache_ptr = key_caches[layer].data_ptr<scalar_t>();
-      scalar_t* source_ptr = key_cache_ptr + source_offset;
-      scalar_t* target_ptr = key_cache_ptr + target_offset;
-      std::memcpy(target_ptr, source_ptr, block_bytes);
+      scalar_t* source_ptr = key_cache_ptr + k_source_offset;
+      scalar_t* target_ptr = key_cache_ptr + k_target_offset;
+      std::memcpy(target_ptr, source_ptr, k_block_bytes);
 
       scalar_t* value_cache_ptr = value_caches[layer].data_ptr<scalar_t>();
-      source_ptr = value_cache_ptr + source_offset;
-      target_ptr = value_cache_ptr + target_offset;
-      std::memcpy(target_ptr, source_ptr, block_bytes);
+      source_ptr = value_cache_ptr + v_source_offset;
+      target_ptr = value_cache_ptr + v_target_offset;
+      std::memcpy(target_ptr, source_ptr, v_block_bytes);
     }
   }
 }
@@ -91,12 +97,13 @@ void copy_blocks(std::vector<torch::Tensor>& key_caches,
     return;
   }
 
-  const int element_num_per_block = key_caches[0][0].numel();
+  const int k_element_num_per_block = key_caches[0][0].numel();
+  const int v_element_num_per_block = value_caches[0][0].numel();
   VLLM_DISPATCH_FLOATING_TYPES(
       key_caches[0].scalar_type(), "copy_blocks_cpu_impl", [&] {
         CPU_KERNEL_GUARD_IN(copy_blocks_cpu_impl)
         copy_blocks_cpu_impl<scalar_t>(key_caches, value_caches, block_mapping,
-                                       element_num_per_block, num_layers);
+                                       k_element_num_per_block, v_element_num_per_block, num_layers);
         CPU_KERNEL_GUARD_OUT(copy_blocks_cpu_impl)
       });
 }

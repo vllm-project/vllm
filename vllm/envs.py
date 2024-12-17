@@ -27,7 +27,8 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
-    VLLM_CPU_VNNI_KVCACHE_LAYOUT: bool = False
+    VLLM_CPU_VNNI_KEY_CACHE_LAYOUT: bool = False
+    VLLM_CPU_VNNI_VALUE_CACHE_LAYOUT: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -204,8 +205,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
 
-    "VLLM_CPU_VNNI_KVCACHE_LAYOUT":
-    lambda: bool(os.getenv("VLLM_CPU_VNNI_KVCACHE_LAYOUT", 0)),
+    "VLLM_CPU_VNNI_KEY_CACHE_LAYOUT":
+    lambda: bool(int(os.getenv("VLLM_CPU_VNNI_KEY_CACHE_LAYOUT", 0))),
+
+    "VLLM_CPU_VNNI_VALUE_CACHE_LAYOUT":
+    lambda: bool(int(os.getenv("VLLM_CPU_VNNI_VALUE_CACHE_LAYOUT", 0))),
 
     # If the env var is set, it uses the Ray's compiled DAG API
     # which optimizes the control plane overhead.

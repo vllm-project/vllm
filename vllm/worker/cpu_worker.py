@@ -102,7 +102,7 @@ class CPUCacheEngine:
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
 
-        if envs.VLLM_CPU_VNNI_KVCACHE_LAYOUT:
+        if envs.VLLM_CPU_VNNI_KEY_CACHE_LAYOUT or envs.VLLM_CPU_VNNI_VALUE_CACHE_LAYOUT:
             elem_width = torch.tensor([], dtype=model_config.dtype, device="cpu").element_size()
             if elem_width == 2:
                 padded_block_size = ((block_size + 1) // 2) * 2
@@ -112,8 +112,15 @@ class CPUCacheEngine:
                 padded_head_size = ((head_size + 3) // 4) * 4
             else:
                 assert False, "unsupported dtype for VNNI KV cache layout."
-            key_cache_block = num_heads * padded_head_size * block_size
-            value_cache_block = num_heads * padded_block_size * head_size
+            if envs.VLLM_CPU_VNNI_KEY_CACHE_LAYOUT:
+                key_cache_block = num_heads * padded_head_size * block_size
+            else:
+                key_cache_block = num_heads * head_size * block_size
+
+            if envs.VLLM_CPU_VNNI_VALUE_CACHE_LAYOUT:
+                value_cache_block = num_heads * padded_block_size * head_size
+            else:
+                value_cache_block = num_heads * block_size * head_size
         else:
             key_cache_block = block_size * num_heads * head_size
             value_cache_block = key_cache_block
