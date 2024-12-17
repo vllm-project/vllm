@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 
 class XPUPlatform(Platform):
     _enum = PlatformEnum.XPU
-    device_name: str = "xpu"
+    device_name: str = "XPU"
     device_type: str = "xpu"
     dispatch_key: str = "XPU"
 

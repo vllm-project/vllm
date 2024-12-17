@@ -76,7 +76,7 @@ class ExecutorBase(ABC):
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# %s blocks: %d, # CPU blocks: %d",
-                    current_platform.dispatch_key, num_gpu_blocks,
+                    current_platform.device_name, num_gpu_blocks,
                     num_cpu_blocks)
         max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
                            self.model_config.max_model_len)

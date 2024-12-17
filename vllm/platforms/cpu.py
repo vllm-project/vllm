@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
-    device_name: str = "cpu"
+    device_name: str = "CPU"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
 
