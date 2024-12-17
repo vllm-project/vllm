@@ -237,7 +237,7 @@ class XGrammarLogitsProcessor:
             self.token_bitmask = xgr.allocate_token_bitmask(
                 self.batch_size, self.config.vocab_size)
 
-        if len(input_ids) < 1:
+        if not self.prefilled:
             # Have not sampled a token yet
             self.prefilled = True
         else:
