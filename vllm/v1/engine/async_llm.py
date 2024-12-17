@@ -309,7 +309,9 @@ class AsyncLLM(EngineClient):
         """Process outputs by putting them into per-request AsyncStreams."""
 
         for request_output in request_outputs:
-            assert request_output.request_id in self.rid_to_state
+            if request_output.request_id not in self.rid_to_state:
+                raise RuntimeError(f"{request_output.request_id} "
+                                    "not in RequestStates")
 
             # Update the RequestState and alert generate() that there
             # is a RequestOutput ready to return to the user.
