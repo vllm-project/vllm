@@ -463,7 +463,7 @@ class LLMEngine:
                     RayDistributedExecutor)
                 executor_class = RayDistributedExecutor
             elif distributed_executor_backend == "mp":
-                from vllm.executor.multiproc_distributed_executor import (
+                from vllm.executor.mp_distributed_executor import (
                     MultiprocessingDistributedExecutor)
                 assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
                     "multiprocessing distributed executor backend does not "
