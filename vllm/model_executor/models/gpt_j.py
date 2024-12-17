@@ -321,8 +321,8 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0
-                                    else loaded_weight[0])
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue

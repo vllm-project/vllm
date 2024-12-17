@@ -79,10 +79,10 @@ class QuarkConfig(QuantizationConfig):
         kv_cache_group = cast(List[str], export_config.get("kv_cache_group"))
         pack_method = cast(str, export_config.get("pack_method"))
 
-        # In the export model of quark, the quantization configuration 
-        # of kv_cache is stored in layer_quant_config. First, it is 
-        # judged whether kv_cache_group exists, and then it is judged 
-        # whether layer_quant_config has a quantization configuration 
+        # In the export model of quark, the quantization configuration
+        # of kv_cache is stored in layer_quant_config. First, it is
+        # judged whether kv_cache_group exists, and then it is judged
+        # whether layer_quant_config has a quantization configuration
         # that matches kv_cache.
         if len(kv_cache_group) == 0:
             kv_cache_config = None
@@ -277,7 +277,7 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    def get_cache_scale(self, name: str) -> Optional[List[str]]:
+    def get_cache_scale(self, name: str) -> Optional[str]:
         """
         Check whether the param name matches the format for k/v cache scales
         in quark. If this is the case, return its equivalent param name 
@@ -300,9 +300,11 @@ class QuarkConfig(QuantizationConfig):
             elif len(kv_proj_names) == 2:
                 for kv_proj_name in kv_proj_names:
                     if kv_proj_name in name and kv_proj_name == "k_proj":
-                        return name.replace(".k_proj.output_scale", ".attn.k_scale")
+                        return name.replace(".k_proj.output_scale",
+                                            ".attn.k_scale")
                     elif kv_proj_name in name and kv_proj_name == "v_proj":
-                        return name.replace(".v_proj.output_scale", ".attn.v_scale")
+                        return name.replace(".v_proj.output_scale",
+                                            ".attn.v_scale")
 
         # If no matches, return None
         return None
