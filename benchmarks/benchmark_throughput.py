@@ -4,12 +4,14 @@ import dataclasses
 import json
 import random
 import time
+from functools import cache
 from typing import List, Optional
 
 import torch
 import uvloop
 from PIL import Image
 from tqdm import tqdm
+from huggingface_hub import snapshot_download
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
@@ -20,6 +22,8 @@ from vllm.inputs import TextPrompt
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
+from vllm.transformers_utils.tokenizer import get_lora_tokenizer
+from vllm.lora.request import LoRARequest
 
 
 @dataclasses.dataclass
@@ -28,15 +32,17 @@ class SampleRequest:
 
     Attributes:
         prompt: The input text prompt for the model.
-        multi_modal_data: Optional dictionary containing multi-modal data (e.g.
-            images).
         prompt_len: The length of the prompt in tokens.
         expected_output_len: The expected length of the output in tokens.
+        multi_modal_data: Optional dictionary containing multi-modal data (e.g.
+            images).
+        lora_request: Optional LoRARequest specifying the LoRA to use. 
     """
     prompt: str
     prompt_len: int
     expected_output_len: int
     multi_modal_data: Optional[MultiModalDataDict] = None
+    lora_request: Optional[LoRARequest] = None
 
 
 def _get_prompt_for_image_model(question: str, *, model: str) -> str:
@@ -60,8 +66,18 @@ def _get_prompt_for_image_model(question: str, *, model: str) -> str:
     raise ValueError(f"Unsupported model {model}")
 
 
+def get_random_lora_request(args: argparse.Namespace):
+    @cache
+    def lora_path() -> str:
+        return snapshot_download(args.lora_path)
+    lora_id = random.randint(0, args.max_loras) 
+    return LoRARequest(lora_name = str(lora_id),
+                       lora_int_id = lora_id,
+                       lora_path = lora_path())
+
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> List[SampleRequest]:
+
     dataset_path: str = args.dataset
     num_requests: int = args.num_prompts
     fixed_output_len: Optional[int] = args.output_len
@@ -102,9 +118,15 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                 continue
             prompt = _get_prompt_for_image_model(question=prompt, model=model)
 
+        lora_request: Optional[LoRARequest] = None
+        request_tokenizer = tokenizer
+        if args.enable_lora:
+            lora_request = get_random_lora_request(args)
+            request_tokenizer = get_lora_tokenizer(lora_request)
+
         # Tokenize the prompts and completions.
-        prompt_token_ids = tokenizer(prompt).input_ids
-        completion_token_ids = tokenizer(completion).input_ids
+        prompt_token_ids = request_tokenizer(prompt).input_ids
+        completion_token_ids = request_tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
         output_len = len(completion_token_ids
                          ) if fixed_output_len is None else fixed_output_len
@@ -118,7 +140,8 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             SampleRequest(prompt=prompt,
                           prompt_len=prompt_len,
                           expected_output_len=output_len,
-                          multi_modal_data=multi_modal_data))
+                          multi_modal_data=multi_modal_data,
+                          lora_request=lora_request))
 
     return filtered_dataset
 
@@ -146,14 +169,18 @@ def run_vllm(
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
             ))
+    lora_requests : Optional[List[LoRARequest]] = None
+    if engine_args.enable_lora:
+        lora_requests = [request.lora_request for request in requests]
 
     use_beam_search = False
 
     if not use_beam_search:
         start = time.perf_counter()
-        llm.generate(prompts, sampling_params, use_tqdm=True)
+        llm.generate(prompts, sampling_params, lora_request = lora_requests, use_tqdm=True)
         end = time.perf_counter()
     else:
+        assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
         # output_len should be the same for all requests.
         output_len = requests[0][2]
@@ -185,6 +212,7 @@ async def run_vllm_async(
         # Add the requests to the engine.
         prompts: List[TextPrompt] = []
         sampling_params: List[SamplingParams] = []
+        lora_requests: List[LoRARequest] = []
         for request in requests:
             prompts.append(
                 TextPrompt(prompt=request.prompt,
@@ -197,11 +225,12 @@ async def run_vllm_async(
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
                 ))
+            lora_requests.append(request.lora_request)
 
         generators = []
         start = time.perf_counter()
-        for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
-            generator = llm.generate(prompt, sp, request_id=f"test{i}")
+        for i, (prompt, sp, lr) in enumerate(zip(prompts, sampling_params, lora_requests)):
+            generator = llm.generate(prompt, sp, lora_request=lr, request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
@@ -422,6 +451,11 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Disable decoupled async engine frontend.")
+    # LoRA
+    parser.add_argument("--lora-path",
+                        type=str,
+                        default='yard1/llama-2-7b-sql-lora-test')
+
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     if args.tokenizer is None:
@@ -440,6 +474,9 @@ if __name__ == "__main__":
             raise ValueError("HF max batch size is required for HF backend.")
         if args.quantization is not None:
             raise ValueError("Quantization is only for vLLM backend.")
+        if args.enable_lora is not None:
+            raise ValueError("LoRA benchmarking is only supported for vLLM"
+                             " backend")
     elif args.backend == "mii":
         if args.dtype != "auto":
             raise ValueError("dtype must be auto for MII backend.")
@@ -452,4 +489,7 @@ if __name__ == "__main__":
         if args.tokenizer != args.model:
             raise ValueError("Tokenizer must be the same as the model for MII "
                              "backend.")
+        if args.enable_lora is not None:
+            raise ValueError("LoRA benchmarking is only supported for vLLM"
+                             " backend")
     main(args)
