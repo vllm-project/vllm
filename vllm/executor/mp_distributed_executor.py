@@ -1,8 +1,7 @@
 import asyncio
 from typing import Any, List, Optional
 
-from vllm.executor.executor_base import (
-    DistributedExecutorBase)  # yapf: disable
+from vllm.executor.executor_base import DistributedExecutorBase
 from vllm.executor.multiproc_worker_utils import (
     ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
     set_multiprocessing_worker_envs)
