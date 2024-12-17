@@ -25,7 +25,7 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import PickleEncoder, custom_enc_hook
 from vllm.v1.utils import make_zmq_socket
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -553,7 +553,7 @@ class EngineCoreProc(EngineCore):
         """Output socket IO thread."""
 
         # Msgpack serialization encoding.
-        encoder = msgpack.Encoder()
+        encoder = msgpack.Encoder(enc_hook=custom_enc_hook)
         # Reuse send buffer.
         buffer = bytearray()
 

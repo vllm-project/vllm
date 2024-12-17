@@ -13,7 +13,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequestType, EngineCoreRequestUnion)
 from vllm.v1.engine.core import (EngineCore, EngineCoreProc,
                                  EngineCoreProcHandle)
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import PickleEncoder, custom_ext_hook
 
 logger = init_logger(__name__)
 
@@ -134,7 +134,8 @@ class MPClient(EngineCoreClient):
     ):
         # Serialization setup.
         self.encoder = PickleEncoder()
-        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs,
+                                               ext_hook=custom_ext_hook)
 
         # ZMQ setup.
         if asyncio_mode:
