@@ -345,9 +345,21 @@ def main(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
+        lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
         vocab_size = tokenizer.vocab_size
         requests = []
+
         for _ in range(args.num_prompts):
+
+            request_tokenizer = tokenizer
+            lora_request: Optional[LoRARequest] = None
+            if args.enable_lora:
+                lora_request = get_random_lora_request(args)
+                lora_id = lora_request.lora_int_id
+                if lora_id not in lora_tokenizer_cache:
+                    lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
+                request_tokenizer = lora_tokenizer_cache[lora_id]
+
             # Synthesize a prompt with the given input length.
             candidate_ids = [
                 random.randint(0, vocab_size - 1)
@@ -356,8 +368,8 @@ def main(args: argparse.Namespace):
             # As tokenizer may add additional tokens like BOS, we need to try
             # different lengths to get the desired input length.
             for _ in range(5):  # Max attempts to correct
-                candidate_prompt = tokenizer.decode(candidate_ids)
-                tokenized_len = len(tokenizer.encode(candidate_prompt))
+                candidate_prompt = request_tokenizer.decode(candidate_ids)
+                tokenized_len = len(request_tokenizer.encode(candidate_prompt))
 
                 if tokenized_len == args.input_len:
                     break
@@ -374,7 +386,8 @@ def main(args: argparse.Namespace):
             requests.append(
                 SampleRequest(prompt=candidate_prompt,
                               prompt_len=args.input_len,
-                              expected_output_len=args.output_len))
+                              expected_output_len=args.output_len,
+                              lora_request = lora_request))
     else:
         requests = sample_requests(tokenizer, args)
 
