@@ -7,12 +7,12 @@ This document shows how to launch multiple vLLM serving containers and use Nginx
 Table of contents:
 
 1. [Build Nginx Container](#nginxloadbalancer-nginx-build)
-2. [Create Simple Nginx Config file](#nginxloadbalancer_nginx_conf)
-3. [Build vLLM Container](#nginxloadbalancer_nginx_vllm_container)
-4. [Create Docker Network](#nginxloadbalancer_nginx_docker_network)
-5. [Launch vLLM Containers](#nginxloadbalancer_nginx_launch_container)
-6. [Launch Nginx](#nginxloadbalancer_nginx_launch_nginx)
-7. [Verify That vLLM Servers Are Ready](#nginxloadbalancer_nginx_verify_nginx)
+2. [Create Simple Nginx Config file](#nginxloadbalancer-nginx-conf)
+3. [Build vLLM Container](#nginxloadbalancer-nginx-vllm-container)
+4. [Create Docker Network](#nginxloadbalancer-nginx-docker-network)
+5. [Launch vLLM Containers](#nginxloadbalancer-nginx-launch-container)
+6. [Launch Nginx](#nginxloadbalancer-nginx-launch-nginx)
+7. [Verify That vLLM Servers Are Ready](#nginxloadbalancer-nginx-verify-nginx)
 
 (nginxloadbalancer-nginx-build)=
 

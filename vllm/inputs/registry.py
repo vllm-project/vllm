@@ -301,7 +301,7 @@ class InputRegistry:
         happens before :meth:`~vllm.multimodal.MultiModalRegistry.map_input`.
 
         See also:
-            [input_processing_pipeline](#input-processing-pipeline)
+            [input-processing-pipeline](#input-processing-pipeline)
         """
 
         def wrapper(model_cls: N) -> N:
@@ -344,7 +344,7 @@ class InputRegistry:
         The model is identified by ``model_config``.
 
         See also:
-            [input_processing_pipeline](#input-processing-pipeline)
+            [input-processing-pipeline](#input-processing-pipeline)
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture

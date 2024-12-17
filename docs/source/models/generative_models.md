@@ -11,7 +11,7 @@ which are then passed through {class}`~vllm.model_executor.layers.Sampler` to ob
 ## Offline Inference
 
 The {class}`~vllm.LLM` class provides various methods for offline inference.
-See {ref}`Engine Arguments <engine_args>` for a list of options when initializing the model.
+See [Engine Arguments](#engine-args) for a list of options when initializing the model.
 
 For generative models, the only supported {code}`task` option is {code}`"generate"`.
 Usually, this is automatically inferred so you don't have to specify it.

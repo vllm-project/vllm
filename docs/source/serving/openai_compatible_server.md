@@ -44,6 +44,8 @@ We currently support the following OpenAI APIs:
     - This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.md) for details.
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
+(score-api-for-cross-encoder-models)=
+
 ## Score API for Cross Encoder Models
 
 vLLM supports *cross encoders models* at the **/v1/score** endpoint, which is not an OpenAI API standard endpoint. You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).

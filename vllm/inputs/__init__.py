@@ -13,7 +13,7 @@ The global :class:`~InputRegistry` which is used by :class:`~vllm.LLMEngine`
 to dispatch data processing according to the target model.
 
 See also:
-    [input_processing_pipeline](#input-processing-pipeline)
+    [input-processing-pipeline](#input-processing-pipeline)
 """
 
 __all__ = [

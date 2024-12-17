@@ -17,7 +17,7 @@ pooling models as they only work on the generation or decode stage, so performan
 ## Offline Inference
 
 The {class}`~vllm.LLM` class provides various methods for offline inference.
-See {ref}`Engine Arguments <engine_args>` for a list of options when initializing the model.
+See [Engine Arguments](#engine-args) for a list of options when initializing the model.
 
 For pooling models, we support the following {code}`task` options:
 
@@ -89,4 +89,4 @@ so it is not part of the OpenAI standard. Please see [this page](#multimodal-inp
 ### Score API
 
 Our Score API is similar to `LLM.score`.
-Please see [this page](../serving/openai_compatible_server#score-api-for-cross-encoder-models) for more details on how to use it.
+Please see [this page](#score-api-for-cross-encoder-models) for more details on how to use it.
