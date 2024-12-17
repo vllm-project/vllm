@@ -66,14 +66,19 @@ def _get_prompt_for_image_model(question: str, *, model: str) -> str:
     raise ValueError(f"Unsupported model {model}")
 
 
+@cache
+def download_lora(lora_path: str) -> str:
+    """
+    Given an huggingface path, downloads the LoRA model and returns the path
+    on disk.
+    """
+    return snapshot_download(lora_path)
+
 def get_random_lora_request(args: argparse.Namespace):
-    @cache
-    def lora_path() -> str:
-        return snapshot_download(args.lora_path)
     lora_id = random.randint(0, args.max_loras) 
     return LoRARequest(lora_name = str(lora_id),
                        lora_int_id = lora_id,
-                       lora_path = lora_path())
+                       lora_path = download_lora(args.lora_path))
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> List[SampleRequest]:
