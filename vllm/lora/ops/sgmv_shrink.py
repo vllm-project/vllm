@@ -72,7 +72,7 @@ def _sgmv_shrink_kernel(
 
     ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
-
+    # input ptr
     a_ptr = (input_ptr + cur_seq_start * xm_stride + ram[:, None] * xm_stride +
              offset_k[None, :] * xk_stride)
     if SAME_STRIDE:
@@ -85,8 +85,10 @@ def _sgmv_shrink_kernel(
         cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
 
     if SLICE_NUM == 1:
+        # current lora ptr
         cur_lora_ptr = lora_ptr
     else:
+        # current lora ptr
         cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
             tl.pointer_type(input_ptr.dtype.element_ty))
 

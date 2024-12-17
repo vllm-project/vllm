@@ -80,13 +80,13 @@ def _sgmv_expand_kernel(
         cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
         cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
         cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
-   
+
     if SLICE_NUM == 1:
         # input
         a_ptr = (input_ptr + cur_seq_start * input_d1_stride +
                  ram[:, None] * input_d1_stride +
                  offset_k[None, :] * input_d2_stride, )
-        # lora
+        # current lora ptr
         cur_lora_ptr = lora_ptr
 
     else:
@@ -95,7 +95,7 @@ def _sgmv_expand_kernel(
         a_ptr = (cur_input_ptr + cur_seq_start * input_d1_stride +
                  ram[:, None] * input_d1_stride +
                  offset_k[None, :] * input_d2_stride, )
-        # lora
+        # current lora ptr
         cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
             tl.pointer_type(out_ptr.dtype.element_ty))
 
@@ -146,7 +146,6 @@ def _sgmv_expand_kernel(
 _LORA_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
 
 
-#TODO Optimize
 def _get_lora_b_ptr(lora_weights, offset_start, device):
 
     key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
@@ -197,14 +196,9 @@ def _get_lora_b_ptr(lora_weights, offset_start, device):
                                                   device=device)
             same_stride = False
 
-        _LORA_PTR_DICT[key] = (
-            slice_start_tensor,
-            lora_ptr_tensor,
-            lora_strides_d0_tensor,
-            lora_strides_d1_tensor,
-            lora_strides_d2_tensor,
-            same_stride,
-        )
+        _LORA_PTR_DICT[key] = (slice_start_tensor, lora_ptr_tensor,
+                               lora_strides_d0_tensor, lora_strides_d1_tensor,
+                               lora_strides_d2_tensor, same_stride)
     return _LORA_PTR_DICT.get(key)
 
 
