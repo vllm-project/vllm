@@ -684,8 +684,8 @@ def _get_vision_info(
 def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
                                data_type_key: str,
                                *,
-                               min_pixels=None,
-                               max_pixels=None) -> int:
+                               min_pixels: Optional[int] = None,
+                               max_pixels: Optional[int] = None) -> int:
     hf_config = ctx.get_hf_config(Qwen2VLConfig)
     vision_config = hf_config.vision_config
     _, _, max_llm_image_tokens = _get_vision_info(
