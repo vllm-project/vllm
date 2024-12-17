@@ -1,12 +1,12 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 from vllm.worker.worker_base import WorkerWrapperBase
-from vllm.executor.executor_base import ExecutorBase, ExecutorAsyncBase
 
 logger = init_logger(__name__)
 
@@ -44,6 +44,8 @@ class UniProcExecutor(ExecutorBase):
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
+        if kwargs is None:
+            kwargs = {}
         answer = getattr(self.driver_worker, method)(*args, **kwargs)
         return [answer]
 
