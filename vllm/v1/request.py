@@ -60,7 +60,7 @@ class Request:
         if self.inputs.multi_modal_inputs:
             self.mm_inputs = self.inputs.multi_modal_inputs
 
-        self.mm_hashes: List[Optional[str]] = self.inputs.multi_modal_hashes
+        self.mm_hashes: List[str] = self.inputs.multi_modal_hashes
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
