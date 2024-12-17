@@ -302,8 +302,16 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
 
-def get_max_phi3v_image_tokens(ctx: InputContext) -> int:
-    processor = ctx.get_hf_processor()
+def get_max_phi3v_image_tokens(
+    ctx: InputContext,
+    *,
+    num_crops: Optional[int] = None,
+) -> int:
+    mm_processor_kwargs = {}
+    if num_crops:
+        mm_processor_kwargs["num_crops"] = num_crops
+
+    processor = ctx.get_hf_processor(**mm_processor_kwargs)
     image_processor = processor.image_processor  # type: ignore
 
     return image_processor.calc_num_image_tokens_from_image_size(
