@@ -365,8 +365,12 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
+        req_id_output_token_ids: Dict[str, List[int]] = \
+            {req_id: req.output_token_ids \
+                for req_id, req in self.requests.items()}
+
         sampling_metadata = self.input_batch.make_sampling_metadata(
-            self.requests, skip_copy)
+            req_id_output_token_ids, skip_copy)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):

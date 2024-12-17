@@ -169,12 +169,14 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
                                          vocab_size=1024)
     reqs: List[CachedRequestState] = []
     req_id_reqs = {}
+    req_id_output_token_ids = {}
     # Add requests
     for req_index in range(batch_size):
         req: CachedRequestState = _construct_cached_request_state(req_index)
         input_batch.add_request(req, req_index)
         reqs.append(req)
         req_id_reqs[req.req_id] = req
+        req_id_output_token_ids[req.req_id] = req.output_token_ids
 
     # Remove some requests
     req_ids_to_remove, req_indices_to_remove = _remove_requests(
@@ -185,8 +187,8 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     input_batch.condense(req_indices_to_remove)
 
     # Generate the sampling metadata
-    sampling_metadata = input_batch.make_sampling_metadata(req_id_reqs,
-                                                           skip_copy=False)
+    sampling_metadata = input_batch.make_sampling_metadata(
+        req_id_output_token_ids, skip_copy=False)
 
     # Create expected output.
     expected_sampling_metadata = _construct_expected_sampling_metadata(

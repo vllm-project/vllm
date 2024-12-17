@@ -66,6 +66,7 @@ class InputBatch:
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
+        self.num_prompt_token_ids = np.empty(max_num_reqs, dtype=np.int32)
 
         # Attention-related.
         self.block_table = torch.zeros(
@@ -180,6 +181,7 @@ class InputBatch:
 
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
+        self.num_prompt_token_ids[req_index] = num_prompt_tokens
         self.token_ids_cpu[
             req_index, :num_prompt_tokens] = request.prompt_token_ids
         start_idx = num_prompt_tokens
@@ -291,6 +293,8 @@ class InputBatch:
             # block_table_cpu.
             self.token_ids_cpu[empty_index] = self.token_ids_cpu[
                 last_req_index]
+            self.num_prompt_token_ids[empty_index] =\
+                self.num_prompt_token_ids[last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
             self.block_table_cpu[empty_index] = self.block_table_cpu[
@@ -317,7 +321,7 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
-        requests: Dict[str, CachedRequestState],
+        req_id_output_token_ids: Dict[str, List[int]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -345,13 +349,12 @@ class InputBatch:
                 # there are requests which need penalties to be applied.
                 self.prompt_tokens_tensor = \
                     self._construct_prompt_tokens_tensor(
-                        requests, self.vocab_size, device=self.device)
+                        self.vocab_size, device=self.device)
 
         output_token_ids: List[List[int]] = []
 
         for req_id in self.req_ids[:self.num_reqs]:
             assert req_id is not None
-            request = requests[req_id]
             # Currently we create a tensor for output_token_ids from scratch
             # at each step. However, for the penalties computation what we
             # need is stats about the token ids present in the output. This
@@ -359,7 +362,7 @@ class InputBatch:
             # from scratch at each step.
             # TODO - Replace this with incremental update to output token
             # statistics.
-            output_token_ids.append(request.output_token_ids)
+            output_token_ids.append(req_id_output_token_ids[req_id])
 
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],
@@ -384,15 +387,13 @@ class InputBatch:
 
     def _construct_prompt_tokens_tensor(
         self,
-        requests,
         vocab_size: int,
         device: torch.device,
     ) -> torch.Tensor:
         prompt_token_ids: List[List[int]] = []
-        for req_id in self.req_ids[:self.num_reqs]:
-            assert req_id is not None
-            request = requests[req_id]
-            prompt_token_ids.append(request.prompt_token_ids)
+        for index in range(self.num_reqs):
+            prompt_token_ids.append(self.token_ids_cpu[
+                index, :self.num_prompt_token_ids[index]].tolist())
         prompt_tokens_cpu_tensor = make_tensor_with_pad(
             prompt_token_ids,
             # use the value of vocab_size as a pad since we don't have a
