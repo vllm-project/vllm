@@ -1,5 +1,5 @@
-import atexit
 import os
+import weakref
 from typing import List, Optional
 
 import msgspec
@@ -166,15 +166,9 @@ class MPClient(EngineCoreClient):
             ready_path=ready_path,  # type: ignore[misc]
             **kwargs,
         )
-        atexit.register(self.shutdown)
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
     def shutdown(self):
-        # During final garbage collection in process shutdown, atexit may be
-        # None.
-        if atexit:
-            # in case shutdown gets called via __del__ first
-            atexit.unregister(self.shutdown)
-
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
 
@@ -197,9 +191,6 @@ class MPClient(EngineCoreClient):
                 if os and os.path.exists(socket_file):
                     os.remove(socket_file)
             self.proc_handle = None
-
-    def __del__(self):
-        self.shutdown()
 
 
 class SyncMPClient(MPClient):
