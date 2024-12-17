@@ -118,6 +118,7 @@ class InputPreprocessor:
 
         * prompt_token_ids
         '''
+
         bos_token_id = self.get_bos_token_id()
         assert bos_token_id is not None
         return [bos_token_id]

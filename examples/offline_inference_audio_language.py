@@ -61,23 +61,7 @@ def run_qwen2_audio(question: str, audio_count: int):
     return llm, prompt, stop_token_ids
 
 
-# Whisper
-def run_whisper(question: str, audio_count: int):
-    model_name = "openai/whisper-large-v3"
-
-    llm = LLM(model=model_name,
-              max_model_len=448,
-              max_num_seqs=1,
-              enforce_eager=True,
-              limit_mm_per_prompt={"audio": audio_count})
-
-    prompt = "<|startoftranscript|><|en|>"
-    stop_token_ids = None
-    return llm, prompt, stop_token_ids
-
-
-model_example_map = {"ultravox": run_ultravox, "qwen2_audio": run_qwen2_audio,
-                     "whisper": run_whisper}
+model_example_map = {"ultravox": run_ultravox, "qwen2_audio": run_qwen2_audio}
 
 
 def main(args):
@@ -106,7 +90,6 @@ def main(args):
 
     assert args.num_prompts > 0
     inputs = {"prompt": prompt, "multi_modal_data": mm_data}
-    #inputs = {"encoder_prompt": {"prompt": "", "multi_modal_data": mm_data}, "decoder_prompt": prompt}
     if args.num_prompts > 1:
         # Batch inference
         inputs = [inputs] * args.num_prompts

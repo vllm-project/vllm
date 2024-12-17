@@ -718,10 +718,7 @@ class FlashAttentionImpl(AttentionImpl):
         query = query[:num_prefill_query_tokens]
         prefill_output = output[:num_prefill_query_tokens]
         assert query.shape[0] == num_prefill_query_tokens
-        assert decode_query.shape[0] == num_decode_query_tokens, (
-            f"decode_query.shape: {decode_query.shape}, "
-            f"num_decode_query_tokens: {num_decode_query_tokens}"
-        )
+        assert decode_query.shape[0] == num_decode_query_tokens
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
