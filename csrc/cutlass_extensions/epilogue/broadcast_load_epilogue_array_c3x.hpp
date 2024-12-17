@@ -70,7 +70,7 @@ template<
   class StrideMNL = Stride<_0,_1,_0>,
   int Alignment = 128 / sizeof_bits_v<Element>
 >
-struct Sm90RowOrScalarBroadcast {
+struct Sm90RowOrScalarBroadcastArray {
   static_assert(Stages == 0, "Row broadcast doesn't support smem usage");
   static_assert(is_static_v<decltype(take<0,2>(StrideMNL{}))>); // batch stride can be dynamic or static
   static_assert(take<0,2>(StrideMNL{}) == Stride<_0,_1>{});
@@ -83,7 +83,7 @@ struct Sm90RowOrScalarBroadcast {
   // scalar that must be broadcast, instead of containing a scalar that is 
   // valid if ptr_row is null.
   struct Arguments {
-    Element const* ptr_row = nullptr;
+    const Element* const* ptr_row_array = nullptr;
     bool row_broadcast = true;
     StrideMNL dRow = {};
   };
@@ -116,10 +116,10 @@ struct Sm90RowOrScalarBroadcast {
   }
 
   CUTLASS_HOST_DEVICE
-  Sm90RowOrScalarBroadcast() { }
+  Sm90RowOrScalarBroadcastArray() { }
 
   CUTLASS_HOST_DEVICE
-  Sm90RowOrScalarBroadcast(Params const& params, SharedStorage const& shared_storage)
+  Sm90RowOrScalarBroadcastArray(Params const& params, SharedStorage const& shared_storage)
       : params(params)
       , smem(const_cast<Element*>(shared_storage.smem.data())) { }
 
@@ -138,7 +138,7 @@ struct Sm90RowOrScalarBroadcast {
 
   CUTLASS_DEVICE bool
   is_zero() const {
-    return (!params.row_broadcast && *(params.ptr_row) == Element(0));
+    return (!params.row_broadcast && *(params.ptr_row_array[group]) == Element(0));
   }
 
   template <class... Args>
@@ -154,7 +154,8 @@ struct Sm90RowOrScalarBroadcast {
         GS_GTensor tGS_gRow_, GS_STensor tGS_sRow_, 
         GS_CTensor tGS_cRow_, Tiled_G2S tiled_g2s_, 
         SR_STensor tSR_sRow_, SR_RTensor tSR_rRow_,
-        CTensor tCcRow_, ThrResidue residue_tCcRow_, ThrNum thr_num_, Params const& params_)
+        CTensor tCcRow_, ThrResidue residue_tCcRow_, ThrNum thr_num_,
+        int group, Params const& params_)
       : tGS_gRow(tGS_gRow_)
       , tGS_sRow(tGS_sRow_)
       , tGS_cRow(tGS_cRow_)
@@ -163,6 +164,7 @@ struct Sm90RowOrScalarBroadcast {
       , tSR_rRow(tSR_rRow_)
       , tCcRow(tCcRow_)
       , residue_tCcRow(residue_tCcRow_)
+      , group(group)
       , params(params_) {}
 
     GS_GTensor tGS_gRow;                                                         // (CPY,CPY_M,CPY_N)
@@ -176,12 +178,13 @@ struct Sm90RowOrScalarBroadcast {
     CTensor tCcRow;                                                              // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
     ThrResidue residue_tCcRow;                                                   // (m, n)
     ThrNum thr_num;
+    int group;
     Params const& params;
 
     CUTLASS_DEVICE void
     begin() {
       if (!params.row_broadcast) {
-        fill(tSR_rRow, *(params.ptr_row));
+        fill(tSR_rRow, *(params.ptr_row_array[group]));
         return;
       }
 
@@ -238,7 +241,11 @@ struct Sm90RowOrScalarBroadcast {
     auto [m, n, k, l] = args.tile_coord_mnkl;
     using ThreadCount = decltype(size(args.tiled_copy));
 
-    Tensor mRow = make_tensor(make_gmem_ptr(params.ptr_row), make_shape(M,N,L), params.dRow);
+    if (threadIdx.x ==128){
+      printf("ROW M: %d, N: %d, K: %d, L: %d, coord m: %d, n: %d, k: %d, l: %d\n", M, N, K, L, m, n, k, l);
+    }
+
+    Tensor mRow = make_tensor(make_gmem_ptr(params.ptr_row_array[l]), make_shape(M,N,1), params.dRow);
     Tensor gRow = local_tile(mRow(_,_,l), take<0,2>(args.tile_shape_mnk), make_coord(m, n));          // (CTA_M, CTA_N)
     Tensor sRow = make_tensor(make_smem_ptr(smem), 
         make_shape(size<0>(CtaTileShapeMNK{}), size<1>(CtaTileShapeMNK{})), make_shape(_0{}, _1{}));  // (CTA_M, CTA_N)
@@ -268,6 +275,7 @@ struct Sm90RowOrScalarBroadcast {
       args.tCcD, 
       args.residue_cD,
       ThreadCount{}, 
+      l,
       params);
   }
 };
@@ -282,7 +290,7 @@ template<
   class StrideMNL = Stride<_1,_0,_0>,
   int Alignment = 128 / sizeof_bits_v<Element>
 >
-struct Sm90ColOrScalarBroadcast {
+struct Sm90ColOrScalarBroadcastArray {
   static_assert(Stages == 0, "Column broadcast doesn't support smem usage yet");
   static_assert(Alignment * sizeof_bits_v<Element> % 128 == 0, "sub-16B alignment not supported yet");
   static_assert(
@@ -296,7 +304,7 @@ struct Sm90ColOrScalarBroadcast {
   // scalar that must be broadcast, instead of containing a scalar that is 
   // valid if ptr_col is null.
   struct Arguments {
-    Element const* ptr_col = nullptr;
+    const Element* const* ptr_col_array = nullptr;
     bool col_broadcast = true;
     StrideMNL dCol = {};
   };
@@ -340,14 +348,14 @@ struct Sm90ColOrScalarBroadcast {
 
   CUTLASS_DEVICE bool
   is_zero() const {
-    return (!params.col_broadcast && *(params.ptr_col) == Element(0));
+    return (!params.col_broadcast && *(params.ptr_col_array[group]) == Element(0));
   }
 
   CUTLASS_HOST_DEVICE
-  Sm90ColOrScalarBroadcast() { }
+  Sm90ColOrScalarBroadcastArray() { }
 
   CUTLASS_HOST_DEVICE
-  Sm90ColOrScalarBroadcast(Params const& params, SharedStorage const& shared_storage)
+  Sm90ColOrScalarBroadcastArray(Params const& params, SharedStorage const& shared_storage)
       : params(params) { }
 
   Params params;
@@ -366,12 +374,14 @@ struct Sm90ColOrScalarBroadcast {
       RTensor&& tCrCol,
       CTensor&& tCcCol,
       ProblemShape problem_shape,
+      int group,
       Params const& params
     ): 
       tCgCol(cute::forward<GTensor>(tCgCol)),
       tCrCol(cute::forward<RTensor>(tCrCol)),
       tCcCol(cute::forward<CTensor>(tCcCol)),
       m(get<0>(problem_shape)),
+      group(group),
       params(params) {}
 
     GTensor tCgCol;                                                                    // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
@@ -379,6 +389,7 @@ struct Sm90ColOrScalarBroadcast {
     CTensor tCcCol;                                                                    // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
     Params const& params;
     int m;
+    int group;
 
     CUTLASS_DEVICE void
     begin() {
@@ -389,7 +400,7 @@ struct Sm90ColOrScalarBroadcast {
       }
 
       if (!params.col_broadcast) {
-        fill(tCrCol, *(params.ptr_col));
+        fill(tCrCol, *(params.ptr_col_array[group]));
         return;
       }
 
@@ -424,10 +435,10 @@ struct Sm90ColOrScalarBroadcast {
     auto [M, N, K, L] = args.problem_shape_mnkl;
     auto [m, n, k, l] = args.tile_coord_mnkl;
 
-    if (threadIdx.x ==128){
-      printf("M: %d, N: %d, K: %d, L: %d, coord m: %d, n: %d, k: %d, l: %d\n", M, N, K, L, m, n, k, l);
-    }
-    Tensor mCol = make_tensor(make_gmem_ptr(params.ptr_col), make_shape(M,N,L), params.dCol);
+    // if (threadIdx.x ==128){
+    //   printf("COL M: %d, N: %d, K: %d, L: %d, coord m: %d, n: %d, k: %d, l: %d\n", M, N, K, L, m, n, k, l);
+    // }
+    Tensor mCol = make_tensor(make_gmem_ptr(params.ptr_col_array[l]), make_shape(M,N,1), params.dCol);
     Tensor tCgCol = sm90_partition_for_epilogue<ReferenceSrc>(                         // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
       mCol, args.tile_shape_mnk, args.tile_coord_mnkl, args.epi_tile, args.tiled_copy, args.thread_idx);
     Tensor tCrCol = make_tensor_like(tCgCol);                                          // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
@@ -443,7 +454,8 @@ struct Sm90ColOrScalarBroadcast {
       cute::move(tCgCol), 
       cute::move(tCrCol), 
       cute::move(tCcCol), 
-      args.problem_shape_mnkl, 
+      args.problem_shape_mnkl,
+      l,
       params
     );
   }

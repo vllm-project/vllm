@@ -38,11 +38,6 @@ using namespace cute;
 
 namespace {
 
-// A wrapper for the GEMM kernel that is used to guard against compilation on
-// architectures that will never use the kernel. The purpose of this is to
-// reduce the size of the compiled binary.
-// __CUDA_ARCH__ is not defined in host code, so this lets us smuggle the ifdef
-// into code that will be executed on the device where it is defined.
 template <typename Kernel>
 struct enable_sm90_or_later : Kernel {
   template <typename... Args>
@@ -54,19 +49,13 @@ struct enable_sm90_or_later : Kernel {
 };
 
 using ProblemShape =
-    cutlass::gemm::GroupProblemShape<cute::Shape<int, int, int>>;  // <M,N,K>
-                                                                   // per group
-using ElementAB_Type =
-    cutlass::float_e4m3_t;  // Element type for A matrix operand
-// using ElementB = cutlass::float_e4m3_t;                                    //
-// Element type for B matrix operand
+    cutlass::gemm::GroupProblemShape<cute::Shape<int, int, int>>;
+using ElementAB_Type = cutlass::float_e4m3_t;
 using ElementC_Type = cutlass::half_t;
 
-// Core kernel configurations
-using ElementAccumulator = float;     // Element type for internal accumulation
-using ArchTag = cutlass::arch::Sm90;  // Tag indicating the minimum SM that
-                                      // supports the intended feature
-using OperatorClass = cutlass::arch::OpClassTensorOp;  // Operator class tag
+using ElementAccumulator = float;
+using ArchTag = cutlass::arch::Sm90;
+using OperatorClass = cutlass::arch::OpClassTensorOp;
 
 using LayoutA = cutlass::layout::RowMajor;
 using LayoutB = cutlass::layout::ColumnMajor;
@@ -154,129 +143,109 @@ void print(const std::tuple<T...>& _tup) {
 }
 ////////////
 
-template <typename Gemm, typename... EpilogueArgs>
-void cutlass_group_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
-                               torch::Tensor const& b,
-                               torch::Tensor const& problem_sizes,
-                               torch::Tensor const& out_offsets,
-                               torch::Tensor const& a_offsets,
-                               torch::Tensor const& b_offsets,
-                               EpilogueArgs&&... epilogue_params) {
+template <typename Gemm>
+void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
+                               c10::List<at::Tensor> const& a_tensors,
+                               c10::List<at::Tensor> const& b_tensors,
+                               c10::List<at::Tensor> const& a_scales,
+                               c10::List<at::Tensor> const& b_scales) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementC = typename Gemm::ElementC;
-  using ElementAcc = float;
 
-  int groups = problem_sizes.size(0);
+  int groups = (int)a_tensors.size();
+  TORCH_CHECK((int)b_tensors.size() == groups,
+              "Number of B tensors must match number of groups.");
+  TORCH_CHECK((int)out_tensors.size() == groups,
+              "Number of output tensors must match number of groups.");
+
   std::vector<const ElementAB*> a_ptrs_host(groups);
   std::vector<const ElementAB*> b_ptrs_host(groups);
   std::vector<const ElementC*> c_ptrs_host(groups);
   std::vector<ElementC*> d_ptrs_host(groups);
+  std::vector<const ElementAccumulator*> a_scales_ptrs_host(groups);
+  std::vector<const ElementAccumulator*> b_scales_ptrs_host(groups);
+
+  std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes_host;
+  problem_sizes_host.reserve(groups);
 
   for (int g = 0; g < groups; ++g) {
-    a_ptrs_host.at(g) = static_cast<const ElementAB*>(a.data_ptr()) +
-                        a_offsets[g].item<int32_t>();
-    b_ptrs_host.at(g) = static_cast<const ElementAB*>(b.data_ptr()) +
-                        b_offsets[g].item<int32_t>();
-    c_ptrs_host.at(g) = static_cast<const ElementC*>(out.data_ptr()) +
-                        out_offsets[g].item<int32_t>();
-    d_ptrs_host.at(g) =
-        static_cast<ElementC*>(out.data_ptr()) + out_offsets[g].item<int32_t>();
-    printf("off: %d %d %d\n", a_offsets[g].item<int32_t>(),
-           b_offsets[g].item<int32_t>(), out_offsets[g].item<int32_t>());
+    a_ptrs_host[g] =
+        reinterpret_cast<const ElementAB*>(a_tensors[g].data_ptr());
+    b_ptrs_host[g] =
+        reinterpret_cast<const ElementAB*>(b_tensors[g].data_ptr());
+    c_ptrs_host[g] =
+        reinterpret_cast<const ElementC*>(out_tensors[g].data_ptr());
+    d_ptrs_host[g] = reinterpret_cast<ElementC*>(out_tensors[g].data_ptr());
+    a_scales_ptrs_host[g] =
+        reinterpret_cast<const ElementAccumulator*>(a_scales[g].data_ptr());
+    b_scales_ptrs_host[g] =
+        reinterpret_cast<const ElementAccumulator*>(b_scales[g].data_ptr());
+
+    int64_t m = a_tensors[g].size(0);
+    int64_t k = a_tensors[g].size(1);
+
+    int64_t k_b = b_tensors[g].size(0);
+    int64_t n = b_tensors[g].size(1);
+
+    TORCH_CHECK(k == k_b, "Dimension mismatch between A and B: A has k=", k,
+                " while B has k=", k_b);
+
+    // Optionally, verify output shape matches (m,n)
+    TORCH_CHECK(out_tensors[g].size(0) == m && out_tensors[g].size(1) == n,
+                "Output tensor shape does not match m,n from A,B: ", "Got ",
+                out_tensors[g].sizes(), " expected (", m, ", ", n, ")");
+
+    problem_sizes_host.push_back({(int)m, (int)n, (int)k});
   }
 
   using GemmKernel = typename Gemm::GemmKernel;
-
-  // using StrideA = typename GemmKernel::InternalStrideA;
-  // using StrideB = typename GemmKernel::InternalStrideB;
-  // using StrideC = typename GemmKernel::InternalStrideC;
-  // // using StrideD = typename GemmKernel::InternalStrideD;
-
-  int64_t lda = a.stride(0);
-  int64_t ldb = b.stride(1);
-  int64_t ldc = out.stride(0);
-
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
   using StrideB = Stride<int64_t, Int<1>, Int<0>>;
-  using StrideC =
-      typename GemmKernel::InternalStrideC;  // typename Gemm::StrideC;
+  using StrideC = typename GemmKernel::InternalStrideC;
 
-  // StrideA a_stride{lda, Int<1>{}, Int<0>{}};
-  // StrideB b_stride{ldb, Int<1>{}, Int<0>{}};
-  // StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
+  std::vector<StrideA> a_stride_host(groups);
+  std::vector<StrideB> b_stride_host(groups);
+  std::vector<StrideC> c_stride_host(groups);
 
-  std::vector<StrideA> a_stride_host(groups, StrideA{lda, Int<1>{}, Int<0>{}});
-  std::vector<StrideB> b_stride_host(groups, StrideB{ldb, Int<1>{}, Int<0>{}});
-  std::vector<StrideC> c_stride_host(groups, StrideC{ldc, Int<1>{}, Int<0>{}});
+  for (int32_t g = 0; g < groups; ++g) {
+    int64_t lda = a_tensors[g].stride(0);    // row-major (m x k)
+    int64_t ldb = b_tensors[g].stride(1);    // column-major (k x n)
+    int64_t ldc = out_tensors[g].stride(0);  // row-major (m x n)
 
-  printf("a: ");
-  print(a_stride_host[0]);
-  printf("\nb: ");
-  print(b_stride_host[0]);
-  printf("\nc: ");
-  print(c_stride_host[0]);
-  printf("\n");
-
-  // for (int g = 0; g < groups; ++g) {
-  //   int32_t m = problem_sizes[g][0].item<int32_t>();
-  //   int32_t n = problem_sizes[g][1].item<int32_t>();
-  //   int32_t k = problem_sizes[g][2].item<int32_t>();
-  //   a_stride_host[g] = StrideA{k, cute::Int<1>{}, cute::Int<0>{}};  // m x k,
-  //                                                                   // row
-  //   b_stride_host[g] = StrideB{k, cute::Int<1>{}, cute::Int<0>{}};  // k x n,
-  //                                                                   // col
-  //   c_stride_host[g] = StrideC{n, cute::Int<1>{}, cute::Int<0>{}};  // m x n,
-  //                                                                   // row
-  // }
+    a_stride_host[g] = StrideA{lda, Int<1>{}, Int<0>{}};
+    b_stride_host[g] = StrideB{ldb, Int<1>{}, Int<0>{}};
+    c_stride_host[g] = StrideC{ldc, Int<1>{}, Int<0>{}};
+  }
 
   cutlass::KernelHardwareInfo hw_info;
-  // Change device_id to another value if you are running on a machine with
-  // multiple GPUs and wish to use a GPU other than that with device ID 0.
   hw_info.device_id = 0;
   hw_info.sm_count =
       cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
           hw_info.device_id);
 
-  using SingleProblemShape = typename ProblemShape::UnderlyingProblemShape;
-
-  std::vector<SingleProblemShape> problem_sizes_host;
-  problem_sizes_host.reserve(groups);
-  for (int32_t g = 0; g < groups; ++g) {
-    int32_t m = problem_sizes[g][0].item<int32_t>();
-    int32_t n = problem_sizes[g][1].item<int32_t>();
-    int32_t k = problem_sizes[g][2].item<int32_t>();
-    problem_sizes_host.push_back({m, n, k});
-    printf("mnk: %d, %d, %d\n", m, n, k);
-  }
-
-  auto problem_sizes_ptr =
-      make_device_ptr<SingleProblemShape>(problem_sizes_host);
+  auto problem_sizes_ptr = make_device_ptr(problem_sizes_host);
   ProblemShape prob_shape{groups, problem_sizes_ptr.get(),
                           problem_sizes_host.data()};
 
-  // ElementAB* a_host_print;
-  // int numel = a.numel();
-  // cudaMalloc(&a_host_print, groups * sizeof(ElementAB));
-  // cudaMemcpy(a_host_print, static_cast<ElementAB*>(a.data_ptr()), numel*
-  // sizeof(ElementAB), cudaMemcpyDeviceToHost);
-  // cudaMemcpy(static_cast<ElementAB*>(a.data_ptr()), a_host_print, numel*
-  // sizeof(ElementAB), cudaMemcpyHostToDevice); cudaFree(a_host_print);
+  auto a_ptrs_ptr = make_device_ptr(a_ptrs_host);
+  auto b_ptrs_ptr = make_device_ptr(b_ptrs_host);
+  auto c_ptrs_ptr = make_device_ptr(c_ptrs_host);
+  auto d_ptrs_ptr = make_device_ptr(d_ptrs_host);
 
-  auto a_ptrs_ptr = make_device_ptr<const ElementAB*>(a_ptrs_host);
-  auto b_ptrs_ptr = make_device_ptr<const ElementAB*>(b_ptrs_host);
-  auto c_ptrs_ptr = make_device_ptr<const ElementC*>(c_ptrs_host);
-  auto d_ptrs_ptr = make_device_ptr<ElementC*>(d_ptrs_host);
+  auto a_scales_ptrs_ptr = make_device_ptr(a_scales_ptrs_host);
+  auto b_scales_ptrs_ptr = make_device_ptr(b_scales_ptrs_host);
 
-  auto a_stride_ptr = make_device_ptr<StrideA>(a_stride_host);
-  auto b_stride_ptr = make_device_ptr<StrideB>(b_stride_host);
-  auto c_stride_ptr = make_device_ptr<StrideC>(c_stride_host);
+  auto a_stride_ptr = make_device_ptr(a_stride_host);
+  auto b_stride_ptr = make_device_ptr(b_stride_host);
+  auto c_stride_ptr = make_device_ptr(c_stride_host);
 
   typename GemmKernel::MainloopArguments mainloop_args{
       a_ptrs_ptr.get(), a_stride_ptr.get(), b_ptrs_ptr.get(),
       b_stride_ptr.get()};
   typename GemmKernel::EpilogueArguments epilogue_args{
       Gemm::Epilogue::prepare_args(
-          std::forward<EpilogueArgs>(epilogue_params)...),
+          a_scales_ptrs_ptr.get(), b_scales_ptrs_ptr.get(),
+          a_scales[0].numel() != 1, b_scales[0].numel() != 1),
       c_ptrs_ptr.get(), c_stride_ptr.get(), d_ptrs_ptr.get(),
       c_stride_ptr.get()};
 
@@ -284,30 +253,26 @@ void cutlass_group_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
       cutlass::gemm::GemmUniversalMode::kGrouped, prob_shape, mainloop_args,
       epilogue_args, hw_info};
 
-  // Launch the CUTLASS GEMM kernel.
   using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   GemmOp gemm_op;
+  //   std::cout << "gemm_op.can_implement(args): "
+  //             << (int)gemm_op.can_implement(args) << std::endl;
   CUTLASS_CHECK(gemm_op.can_implement(args));
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
   auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
+      torch::TensorOptions().dtype(torch::kUInt8).device(a_tensors[0].device());
   auto workspace = torch::empty(workspace_size, workspace_options);
 
-  auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
-
+  auto stream = at::cuda::getCurrentCUDAStream(a_tensors[0].device().index());
   cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
   CUTLASS_CHECK(status);
 }
 
-// typedef InType = cutlass::float_e4m3_t;
-// typedef OutType = torch::half;
-
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_default {
-  // M in (128, inf)
-  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  static_assert(std::is_same_v<InType, cutlass::float_e4m3_t>);
   using KernelSchedule =
       cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongFP8FastAccum;
   using EpilogueSchedule =
@@ -354,18 +319,23 @@ struct sm90_fp8_config_M64 {
 
 }  // namespace
 
-// TODO hardcode types here?
-void cutlass_grouped_mm_sm90(
-    torch::Tensor& out, torch::Tensor const& a, torch::Tensor const& b,
-    torch::Tensor const& a_scales, torch::Tensor const& b_scales,
-    torch::Tensor const& problem_sizes, torch::Tensor const& out_offsets,
-    torch::Tensor const& a_offsets, torch::Tensor const& b_offsets) {
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
-  // int32_t m = a.size(1);
+void cutlass_grouped_mm_sm90(c10::List<at::Tensor> const& out_tensors,
+                             c10::List<at::Tensor> const& a_tensors,
+                             c10::List<at::Tensor> const& b_tensors,
+                             c10::List<at::Tensor> const& a_scales,
+                             c10::List<at::Tensor> const& b_scales) {
+  TORCH_CHECK(a_tensors.size() > 0, "No input A tensors provided.");
+  TORCH_CHECK(b_tensors.size() > 0, "No input B tensors provided.");
+  TORCH_CHECK(out_tensors.size() > 0, "No output tensors provided.");
+
+  TORCH_CHECK(a_tensors[0].dtype() == torch::kFloat8_e4m3fn,
+              "A tensors must be of type float8_e4m3fn.");
+  TORCH_CHECK(b_tensors[0].dtype() == torch::kFloat8_e4m3fn,
+              "B tensors must be of type float8_e4m3fn.");
 
   using Cutlass3xGemmDefault = typename sm90_fp8_config_default<
-      ElementAB_Type, ElementC_Type, vllm::c3x::ScaledEpilogue>::Cutlass3xGemm;
+      ElementAB_Type, ElementC_Type,
+      vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
   // using Cutlass3xGemmM64 =
   //     typename sm90_fp8_config_M64<ElementAB_Type, ElementC_Type,
   //     vllm::c3x::ScaledEpilogue>::Cutlass3xGemm;
@@ -388,7 +358,5 @@ void cutlass_grouped_mm_sm90(
   // } else {
   //   // m in (128, inf)
   cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
-      out, a, b, problem_sizes, out_offsets, a_offsets, b_offsets, a_scales,
-      b_scales);
-  // }
+      out_tensors, a_tensors, b_tensors, a_scales, b_scales);
 }

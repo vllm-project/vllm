@@ -313,10 +313,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // CUTLASS w8a8 grouped GEMM // TODO complete this
   ops.def(
-      "cutlass_grouped_mm(Tensor! out, Tensor a, Tensor b, Tensor a_scales, "
-      "                   Tensor b_scales, Tensor problem_sizes, "
-      "                   Tensor out_offsets, Tensor a_offsets, "
-      "                   Tensor b_offsets) -> ()");
+      "cutlass_grouped_mm(Tensor![] out_tensors,"
+      "                   Tensor[] a_tensors,"
+      "                   Tensor[] b_tensors, Tensor[] a_scales, "
+      "                   Tensor[] b_scales) -> ()");
   ops.impl("cutlass_grouped_mm", torch::kCUDA, &cutlass_grouped_mm);
 
   // Mamba selective scan kernel
