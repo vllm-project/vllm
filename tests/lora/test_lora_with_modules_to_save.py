@@ -7,14 +7,10 @@ import pytest
 from tests.models.utils import check_logprobs_close
 from vllm.lora.request import LoRARequest
 
-MODELS = [
-    #"/workspace/meta-llama3-8b-instruct"
-    "/workspace/t-lite-instruct/1/t-lite-instruct/"
-]
+MODELS = ["AnatoliiPotapov/T-lite-instruct-0.1"]
 
 LORAS = ["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
 
-os.environ['CUDA_VISIBLE_DEVICES']="1"
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
