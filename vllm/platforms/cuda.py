@@ -137,6 +137,28 @@ class CudaPlatformBase(Platform):
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
+        world_size = parallel_config.world_size
+        tensor_parallel_size = parallel_config.tensor_parallel_size
+
+        from vllm.utils import (cuda_device_count_stateless,
+                                update_environment_variables)
+
+        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            update_environment_variables({
+                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
+            })
+
+        cuda_device_count = cuda_device_count_stateless()
+        # Use confusing message for more common TP-only case.
+        assert tensor_parallel_size <= cuda_device_count, (
+            f"please set tensor_parallel_size ({tensor_parallel_size}) "
+            f"to less than max local gpu count ({cuda_device_count})")
+
+        assert world_size <= cuda_device_count, (
+            f"please ensure that world_size ({world_size}) "
+            f"is less than than max local gpu count ({cuda_device_count})")
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
