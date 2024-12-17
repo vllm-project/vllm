@@ -259,6 +259,8 @@ class AsyncLLM(EngineClient):
                 # a delta text. This way we do "dynamic chunked streaming", such
                 # that the API client does not fall behind the EngineCor,
                 # which happens at high QPS otherwise.
+                if len(state.out_list) > 1:
+                    logger.info(f"{len(state.out_list)=}")
                 out = state.out_list[-1]
 
             except asyncio.TimeoutError:
