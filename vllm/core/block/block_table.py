@@ -114,7 +114,7 @@ class BlockTable:
                          token_ids: List[int],
                          num_lookahead_slots: int = 0,
                          num_computed_slots: Optional[int] = None,
-                         extra_hash: Optional[int] = None) -> None:
+                         extra_hash: Optional[int] = None) -> bool:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -168,7 +168,13 @@ class BlockTable:
         for i, token_block in enumerate(token_blocks):
             self._blocks.append_token_ids(first_block_idx + i, token_block)
 
+        expect_previous_new_cache_slots = \
+            (self._num_full_slots + self._block_size - 1) \
+                // self._block_size * self._block_size
         self._num_full_slots += len(token_ids)
+
+        # if the new cached block is produced
+        return (expect_previous_new_cache_slots <= self._num_full_slots)
 
     def ensure_num_empty_slots(self,
                                num_empty_slots: int,

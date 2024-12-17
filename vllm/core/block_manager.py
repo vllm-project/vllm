@@ -264,7 +264,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         block_table = self.block_tables[seq.seq_id]
 
-        block_table.append_token_ids(
+        has_new_cached_blocks = block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
@@ -272,11 +272,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
-        blocks_to_swap_out, blocks_to_swap_in = \
-            self.block_allocator.get_and_reset_swaps()
-        if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
-            self.blocks_to_swap_of_sequence_id.append(
-                (seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
+        if (has_new_cached_blocks):
+            blocks_to_swap_out, blocks_to_swap_in = \
+                self.block_allocator.get_and_reset_swaps()
+            if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
+                self.blocks_to_swap_of_sequence_id.append(
+                    (seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
         return new_cows
 
     def free(self, seq: Sequence) -> None:
