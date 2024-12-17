@@ -1,9 +1,9 @@
-import atexit
 import os
 import pickle
 import signal
 import sys
 import time
+import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
@@ -37,7 +37,7 @@ class MultiprocExecutor(Executor):
     def __init__(self, vllm_config: VllmConfig) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
-        atexit.register(self.shutdown)
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
@@ -195,14 +195,10 @@ class MultiprocExecutor(Executor):
                 os.remove(socket_path)
 
     def shutdown(self):
-        if atexit:
-            # in case shutdown was called explicitly, we don't need to call it
-            # again
-            atexit.unregister(self.shutdown)
         """Properly shut down the executor and its workers"""
         if getattr(self, 'shutting_down', False):
             self.shutting_down = True
-            for w in self.workers:  #TODO: not sure if needed
+            for w in self.workers:
                 w.worker_response_mq = None
             self._ensure_worker_termination()
 
