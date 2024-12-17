@@ -16,7 +16,7 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import FastGELU
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -172,7 +172,7 @@ class WhisperCrossAttention(WhisperAttention):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        self.q_proj = RowParallelLinear(
+        self.q_proj = ColumnParallelLinear(
             input_size = embed_dim,
             output_size = embed_dim,
             bias = bias,
@@ -231,7 +231,7 @@ class WhisperEncoderLayer(nn.Module):
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = FastGELU()
-        self.fc1 = RowParallelLinear(
+        self.fc1 = ColumnParallelLinear(
             input_size = self.embed_dim,
             output_size = config.encoder_ffn_dim,
             bias = True,
@@ -305,7 +305,7 @@ class WhisperDecoderLayer(nn.Module):
             prefix=f"{prefix}.encoder_attn",
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.fc1 = RowParallelLinear(
+        self.fc1 = ColumnParallelLinear(
             input_size = self.embed_dim,
             output_size = config.decoder_ffn_dim,
             bias = True,

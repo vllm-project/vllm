@@ -61,7 +61,6 @@ for output in outputs:
     print(f"Encoder prompt: {encoder_prompt!r}, "
           f"Decoder prompt: {prompt!r}, "
           f"Generated text: {generated_text!r}")
-    print(output.outputs[0].token_ids)
 
 duration = time.time() - start
 
