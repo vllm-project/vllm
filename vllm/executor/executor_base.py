@@ -167,9 +167,6 @@ class ExecutorBase(ABC):
     def __del__(self):
         self.shutdown()
 
-
-class ExecutorAsyncBase(ExecutorBase):
-
     async def execute_model_async(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
@@ -185,3 +182,6 @@ class ExecutorAsyncBase(ExecutorBase):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
+
+
+ExecutorAsyncBase = ExecutorBase

@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple
 
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -52,5 +52,4 @@ class UniProcExecutor(ExecutorBase):
         return
 
 
-class UniProcExecutorAsync(ExecutorAsyncBase):
-    uses_ray: bool = False
+UniProcExecutorAsync = UniProcExecutor
