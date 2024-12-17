@@ -32,6 +32,9 @@ class MultiStepWorker(ProposerWorkerBase):
     requires more thought for MultiStepWorker support.
     """
 
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
+
     def __init__(self, *args, **kwargs):
         vllm_config: VllmConfig = kwargs.get("vllm_config")
         super().__init__(vllm_config=vllm_config)
@@ -42,10 +45,6 @@ class MultiStepWorker(ProposerWorkerBase):
 
     def init_device(self) -> None:
         self.worker.init_device()
-        self.device = self.worker.device
-        self.vocab_size = self.worker.vocab_size
-        self.max_model_len = self.worker.max_model_len
-        self.model_runner = self.worker.model_runner
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
             self.device,
@@ -60,18 +59,6 @@ class MultiStepWorker(ProposerWorkerBase):
     def set_should_modify_greedy_probs_inplace(self) -> None:
         self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
             True)
-
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        return self.worker.determine_num_available_blocks()
-
-    def get_cache_block_size_bytes(self) -> int:
-        return self.worker.get_cache_block_size_bytes()
-
-    def initialize_cache(self, *args, **kwargs) -> None:
-        self.worker.initialize_cache(*args, **kwargs)
-
-    def execute_model(self, *args, **kwargs) -> List[SamplerOutput]:
-        return self.worker.execute_model(*args, **kwargs)
 
     @torch.inference_mode()
     def sampler_output(
