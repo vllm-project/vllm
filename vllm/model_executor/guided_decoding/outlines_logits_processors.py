@@ -25,7 +25,7 @@ from lark import Lark
 from outlines import grammars
 from outlines.caching import cache
 from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
-from outlines.fsm.json_schema import build_regex_from_schema
+from outlines_core.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
@@ -99,7 +99,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
     def _get_guide(cls, regex_string: str,
                    tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
-        return RegexGuide(regex_string, tokenizer)
+        return RegexGuide.from_regex(regex_string, tokenizer)
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the regex-structured generation.

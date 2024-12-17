@@ -4,6 +4,6 @@ ninja
 packaging
 setuptools>=61
 setuptools-scm>=8
-torch==2.5.1
+torch==2.5.1; platform_machine != 'aarch64'
 wheel
 jinja2
