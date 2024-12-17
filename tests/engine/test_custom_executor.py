@@ -7,8 +7,7 @@ import pytest
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
-from vllm.executor.uniproc_executor import (UniProcExecutor,
-                                            UniProcExecutorAsync)
+from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.sampling_params import SamplingParams
 
 
@@ -29,12 +28,7 @@ class CustomUniExecutor(UniProcExecutor):
         return super().collective_rpc(method, timeout, args, kwargs)
 
 
-class CustomUniExecutorAsync(UniProcExecutorAsync):
-
-    async def execute_model_async(self, *args, **kwargs):
-        with open(".marker", "w"):
-            ...
-        return await super().execute_model_async(*args, **kwargs)
+CustomUniExecutorAsync = CustomUniExecutor
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
