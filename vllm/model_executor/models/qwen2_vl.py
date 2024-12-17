@@ -22,8 +22,8 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import cached_property, partial
-from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, Type, TypedDict, Union)
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+                    Type, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -53,7 +53,6 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
@@ -641,19 +640,8 @@ class Qwen2VisionTransformer(nn.Module):
 # === Vision input helpers === #
 
 
-def get_mm_processor_kwargs(
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None) -> Dict[str, int]:
-    mm_processor_kwargs = {}
-    if min_pixels:
-        mm_processor_kwargs["min_pixels"] = min_pixels
-    if max_pixels:
-        mm_processor_kwargs["max_pixels"] = max_pixels
-    return mm_processor_kwargs
-
-
 def _get_vision_info(
-    image_processor,
+    vision_config: Qwen2VLVisionConfig,
     height: int,
     width: int,
     min_pixels: int,
@@ -664,12 +652,15 @@ def _get_vision_info(
 ):
     """Get information (resized height / width and number of vision tokens)
     of input image / video frame."""
+    patch_size = vision_config.patch_size
+    merge_size = vision_config.spatial_merge_size
+    temporal_patch_size = vision_config.temporal_patch_size
 
     if do_resize:
         resized_height, resized_width = smart_resize(
             height=height,
             width=width,
-            factor=image_processor.patch_size * image_processor.merge_size,
+            factor=patch_size * merge_size,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
         )
@@ -680,39 +671,14 @@ def _get_vision_info(
         grid_t = mm_count
     else:
         assert data_type_key == "video"
-        grid_t = max(mm_count // image_processor.temporal_patch_size, 1)
+        grid_t = max(mm_count // temporal_patch_size, 1)
 
-    grid_h = resized_height // image_processor.patch_size
-    grid_w = resized_width // image_processor.patch_size
+    grid_h = resized_height // patch_size
+    grid_w = resized_width // patch_size
     vision_tokens = grid_t * grid_h * grid_w
-    llm_num_vision_tokens = (vision_tokens // image_processor.merge_size //
-                             image_processor.merge_size)
+    llm_num_vision_tokens = vision_tokens // (merge_size**2)
 
     return resized_height, resized_width, llm_num_vision_tokens
-
-
-def _get_max_image_info(
-    image_processor,
-    data_type_key: str = "image",
-    mm_count: int = 1,
-    min_pixels: Optional[int] = None,
-    max_pixels: Optional[int] = None,
-):
-    # Limit min / max pixels unless they're explicitly provided
-    if min_pixels is None:
-        min_pixels = max(image_processor.min_pixels, 28 * 28)
-    if max_pixels is None:
-        max_pixels = min(image_processor.max_pixels, 1280 * 28 * 28)
-
-    return _get_vision_info(
-        image_processor,
-        height=9999999,
-        width=9999999,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-        data_type_key=data_type_key,
-        mm_count=mm_count,
-    )
 
 
 def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
@@ -720,14 +686,16 @@ def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
                                *,
                                min_pixels=None,
                                max_pixels=None) -> int:
-    mm_processor_kwargs = get_mm_processor_kwargs(min_pixels=min_pixels,
-                                                  max_pixels=max_pixels)
-    image_processor = cached_get_image_processor(ctx.model_config.model,
-                                                 **mm_processor_kwargs)
-    max_resized_height, max_resized_width, max_llm_image_tokens = \
-        _get_max_image_info(image_processor, data_type_key=data_type_key,
-                            mm_count=1, min_pixels=min_pixels,
-                            max_pixels=max_pixels)
+    hf_config = ctx.get_hf_config(Qwen2VLConfig)
+    vision_config = hf_config.vision_config
+    _, _, max_llm_image_tokens = _get_vision_info(
+        vision_config,
+        height=9999999,
+        width=9999999,
+        min_pixels=min_pixels or 4 * 28 * 28,
+        max_pixels=max_pixels or 1280 * 28 * 28,
+        data_type_key=data_type_key,
+    )
     return max_llm_image_tokens
 
 
