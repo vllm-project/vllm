@@ -655,8 +655,8 @@ class AsyncLLMEngine(EngineClient):
             assert distributed_executor_backend is None, (
                 "Distributed execution is not supported with "
                 "the OpenVINO backend.")
-            from vllm.executor.openvino_executor import OpenVINOExecutorAsync
-            executor_class = OpenVINOExecutorAsync
+            from vllm.executor.uniproc_executor import UniProcExecutor
+            executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "xpu":
             if distributed_executor_backend is None:
                 from vllm.executor.uniproc_executor import UniProcExecutor

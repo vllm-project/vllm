@@ -483,8 +483,8 @@ class LLMEngine:
                 from vllm.executor.uniproc_executor import UniProcExecutor
                 executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "openvino":
-            from vllm.executor.openvino_executor import OpenVINOExecutor
-            executor_class = OpenVINOExecutor
+            from vllm.executor.uniproc_executor import UniProcExecutor
+            executor_class = UniProcExecutor
         elif engine_config.device_config.device_type == "xpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
