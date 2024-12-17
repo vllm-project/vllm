@@ -137,6 +137,10 @@ class CudaPlatformBase(Platform):
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
+        cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,

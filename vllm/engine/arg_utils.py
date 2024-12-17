@@ -112,9 +112,7 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
-    # NOTE(kzawora): default block size for Gaudi should be 128
-    # smaller sizes still work, but very inefficiently
-    block_size: int = 16 if not current_platform.is_hpu() else 128
+    block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
@@ -1036,9 +1034,7 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
         cache_config = CacheConfig(
-            # neuron needs block_size = max_model_len
-            block_size=self.block_size if self.device != "neuron" else
-            (self.max_model_len if self.max_model_len is not None else 0),
+            block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
