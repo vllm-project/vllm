@@ -1253,11 +1253,14 @@ class EngineArgs:
         # When no user override, set the default values based on the usage
         # context.
         # TODO(woosuk): Tune the default values for different hardware.
-        if self.max_num_batched_tokens is None:
-            if usage_context == UsageContext.LLM_CLASS:
-                self.max_num_batched_tokens = 8192
-            elif usage_context == UsageContext.OPENAI_API_SERVER:
-                self.max_num_batched_tokens = 2048
+        default_max_num_batched_tokens = {
+            UsageContext.LLM_CLASS: 8192,
+            UsageContext.OPENAI_API_SERVER: 2048,
+        }
+        if (self.max_num_batched_tokens is None
+                and usage_context in default_max_num_batched_tokens):
+            self.max_num_batched_tokens = default_max_num_batched_tokens[
+                usage_context]
             logger.warning(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, usage_context.value)
