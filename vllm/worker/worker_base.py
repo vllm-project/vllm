@@ -431,8 +431,9 @@ class WorkerWrapperBase:
         if self.rank in rank_mapping:
             self.rank = rank_mapping[self.rank]
 
-    @staticmethod
-    def update_environment_variables(envs: Dict[str, str]) -> None:
+    def update_environment_variables(self, envs_list: List[Dict[str,
+                                                                str]]) -> None:
+        envs = envs_list[self.rank]
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
