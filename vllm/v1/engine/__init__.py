@@ -1,5 +1,6 @@
 import enum
 from dataclasses import dataclass
+from multiprocessing.process import BaseProcess
 from typing import List, Optional, Union
 
 import msgspec
@@ -10,7 +11,18 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 
 @dataclass
-class DetokenizerRequest:
+class BackgroundProcHandle:
+    proc: BaseProcess
+    ready_path: str
+    input_path: str
+    output_path: str
+
+
+class DetokenizerRequest(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
 
     request_id: str
     prompt: Optional[str]
@@ -73,6 +85,15 @@ class EngineCoreOutputs(
 @dataclass
 class EngineCoreProfile:
     is_start: bool
+
+
+class DetokenizerRequestType(enum.Enum):
+    """
+    Request types defined as hex byte strings, so it can be sent over sockets
+    without separate encoding step.
+    """
+    NEW = b'\x00'
+    OUT = b'\x01'
 
 
 class EngineCoreRequestType(enum.Enum):

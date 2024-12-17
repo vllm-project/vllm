@@ -1,3 +1,5 @@
+from multiprocessing.process import BaseProcess
+
 from collections import OrderedDict
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -5,6 +7,7 @@ from typing import (Any, Generic, Iterator, List, Optional, TypeVar, Union,
                     overload)
 
 import zmq
+import zmq.asyncio
 
 from vllm.logger import init_logger
 
@@ -78,30 +81,63 @@ class ConstantList(Generic[T], Sequence):
         return len(self._x)
 
 
-@contextmanager
 def make_zmq_socket(
+        ctx: Union[zmq.asyncio.Context, zmq.Context],
+        path: str,
+        type: Any
+    ) -> Union[zmq.Socket, zmq.asyncio.Socket]:
+    """Make a ZMQ socket with the proper bind/connext semantics."""
+
+    socket = ctx.socket(type)
+
+    if type == zmq.constants.PULL:
+        socket.connect(path)
+    elif type == zmq.constants.PUSH:
+        socket.bind(path)
+    else:
+        raise ValueError(f"Unknown Socket Type: {type}")
+
+    return socket
+
+@contextmanager
+def zmq_socket_ctx(
         path: str,
         type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
-        socket = ctx.socket(type)
-
-        if type == zmq.constants.PULL:
-            socket.connect(path)
-        elif type == zmq.constants.PUSH:
-            socket.bind(path)
-        else:
-            raise ValueError(f"Unknown Socket Type: {type}")
-
-        yield socket
+        yield make_zmq_socket(ctx, path, type)
 
     except KeyboardInterrupt:
         logger.debug("Worker had Keyboard Interrupt.")
 
     finally:
         ctx.destroy(linger=0)
+
+
+def wait_for_startup(
+    proc: BaseProcess,
+    ready_path: str,
+    ready_str: str,
+    timeout_ms: int,
+) -> None:
+    """Wait until a background process is ready."""
+
+    with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
+        try:
+            while socket.poll(timeout=timeout_ms) == 0:
+                logger.debug("Waiting for background proc to startup.")
+
+                if not proc.is_alive():
+                    raise RuntimeError("Background process failed to start.")
+
+            message = socket.recv_string()
+            assert message == ready_str
+
+        except BaseException as e:
+            logger.exception(e)
+            raise e
 
 
 K = TypeVar('K')

@@ -7,13 +7,14 @@ import zmq
 import zmq.asyncio
 
 from vllm.logger import init_logger
-from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+from vllm.utils import kill_process_tree, get_open_zmq_ipc_path
+from vllm.v1.engine import (BackgroundProcHandle,
+                            EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
-from vllm.v1.engine.core import (EngineCore, EngineCoreProc,
-                                 EngineCoreProcHandle)
+from vllm.v1.engine.core import (EngineCore, EngineCoreProc)
 from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.utils import make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -129,6 +130,7 @@ class MPClient(EngineCoreClient):
     def __init__(
         self,
         *args,
+        output_path: str,
         asyncio_mode: bool,
         **kwargs,
     ):
@@ -142,27 +144,19 @@ class MPClient(EngineCoreClient):
         else:
             self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
-        # Path for IPC.
-        ready_path = get_open_zmq_ipc_path()
-        output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-
-        # Get output (EngineCoreOutput) from EngineCore.
-        self.output_socket = self.ctx.socket(zmq.constants.PULL)
-        self.output_socket.connect(output_path)
-
-        # Send input (EngineCoreRequest) to EngineCore.
-        self.input_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.input_socket.bind(input_path)
+        self.input_socket = make_zmq_socket(
+            self.ctx,
+            input_path,
+            zmq.constants.PUSH,
+        )
 
         # Start EngineCore in background process.
-        self.proc_handle: Optional[EngineCoreProcHandle]
+        self.proc_handle: Optional[BackgroundProcHandle]
         self.proc_handle = EngineCoreProc.make_engine_core_process(
             *args,
-            input_path=
-            input_path,  # type: ignore[misc]  # MyPy incorrectly flags duplicate keywords
-            output_path=output_path,  # type: ignore[misc]
-            ready_path=ready_path,  # type: ignore[misc]
+            input_path=input_path,
+            output_path=output_path,
             **kwargs,
         )
         atexit.register(self.shutdown)
@@ -207,12 +201,6 @@ class SyncMPClient(MPClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, asyncio_mode=False, **kwargs)
 
-    def get_output(self) -> List[EngineCoreOutput]:
-
-        (frame, ) = self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frame.buffer).outputs
-        return engine_core_outputs
-
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: EngineCoreRequestUnion) -> None:
 
@@ -236,13 +224,6 @@ class AsyncMPClient(MPClient):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, asyncio_mode=True, **kwargs)
-
-    async def get_output_async(self) -> List[EngineCoreOutput]:
-
-        frames = await self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-
-        return engine_core_outputs
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:

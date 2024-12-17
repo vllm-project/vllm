@@ -3,8 +3,6 @@ import queue
 import signal
 import threading
 import time
-from dataclasses import dataclass
-from multiprocessing.process import BaseProcess
 from typing import List, Tuple, Type
 
 import zmq
@@ -17,22 +15,25 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion)
+                            EngineCoreRequestType, EngineCoreRequestUnion,
+                            DetokenizerRequestType,
+                            BackgroundProcHandle)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
-from vllm.v1.utils import make_zmq_socket
+from vllm.v1.utils import zmq_socket_ctx, wait_for_startup
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
-LOGGING_TIME_S = 1
+LOGGING_TIME_S = 5
 
 
 class EngineCore:
@@ -134,14 +135,6 @@ class EngineCore:
         self.model_executor.profile(is_start)
 
 
-@dataclass
-class EngineCoreProcHandle:
-    proc: BaseProcess
-    ready_path: str
-    input_path: str
-    output_path: str
-
-
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -173,37 +166,8 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        with make_zmq_socket(ready_path, zmq.constants.PUSH) as ready_socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
             ready_socket.send_string(EngineCoreProc.READY_STR)
-
-    @staticmethod
-    def wait_for_startup(
-        proc: BaseProcess,
-        ready_path: str,
-    ) -> None:
-        """Wait until the EngineCore is ready."""
-
-        try:
-            sync_ctx = zmq.Context()  # type: ignore[attr-defined]
-            socket = sync_ctx.socket(zmq.constants.PULL)
-            socket.connect(ready_path)
-
-            # Wait for EngineCore to send EngineCoreProc.READY_STR.
-            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for EngineCoreProc to startup.")
-
-                if not proc.is_alive():
-                    raise RuntimeError("EngineCoreProc failed to start.")
-
-            message = socket.recv_string()
-            assert message == EngineCoreProc.READY_STR
-
-        except BaseException as e:
-            logger.exception(e)
-            raise e
-
-        finally:
-            sync_ctx.destroy(linger=0)
 
     @staticmethod
     def make_engine_core_process(
@@ -212,9 +176,9 @@ class EngineCoreProc(EngineCore):
         usage_context: UsageContext,
         input_path: str,
         output_path: str,
-        ready_path: str,
-    ) -> EngineCoreProcHandle:
+    ) -> BackgroundProcHandle:
         context = get_mp_context()
+        ready_path = get_open_zmq_ipc_path()
 
         process_kwargs = {
             "input_path": input_path,
@@ -228,10 +192,12 @@ class EngineCoreProc(EngineCore):
         proc = context.Process(target=EngineCoreProc.run_engine_core,
                                kwargs=process_kwargs)
         proc.start()
+        wait_for_startup(proc=proc,
+                         ready_path=ready_path,
+                         ready_str=EngineCoreProc.READY_STR,
+                         timeout_ms=POLLING_TIMEOUT_MS)
 
-        # Wait for startup
-        EngineCoreProc.wait_for_startup(proc, ready_path)
-        return EngineCoreProcHandle(proc=proc,
+        return BackgroundProcHandle(proc=proc,
                                     ready_path=ready_path,
                                     input_path=input_path,
                                     output_path=output_path)
@@ -339,7 +305,7 @@ class EngineCoreProc(EngineCore):
         decoder_add_req = PickleEncoder()
         decoder_abort_req = PickleEncoder()
 
-        with make_zmq_socket(input_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
@@ -367,9 +333,11 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        with make_zmq_socket(output_path, zmq.constants.PUSH) as socket:
+        with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ), copy=False)
+                # msg = (DetokenizerRequestType.OUT.value, buffer)
+                msg = (buffer, )
+                socket.send_multipart(msg, copy=False)

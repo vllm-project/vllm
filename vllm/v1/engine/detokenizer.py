@@ -1,17 +1,29 @@
+import pickle
+import zmq.asyncio
+import msgspec
+import signal
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
+from vllm.utils import get_open_zmq_ipc_path
+from vllm.v1.engine import (DetokenizerRequest, DetokenizerRequestType,
+                            EngineCoreOutput, EngineCoreOutputs, 
+                            BackgroundProcHandle,)
+from vllm.v1.utils import (make_zmq_socket, zmq_socket_ctx, 
+                           wait_for_startup)
+from vllm.v1.serial_utils import PickleEncoder
 
 logger = init_logger(__name__)
 
+POLLING_TIMEOUT_MS = 5000
 
 @dataclass
 class IncrementalDetokenizer:
@@ -265,8 +277,201 @@ class Detokenizer:
                 # Free completed requests.
                 if request_output.finished:
                     self.request_states.pop(request_id)
+                    # If Request finished but EngineCore not finished,
+                    # this was caused by a stop string + we need to send
+                    # an abort signal to the EngineCore.
                     if not engine_core_output.finished:
                         requests_to_abort.append(request_id)
 
         # Return to EngineClient.
         return request_outputs, requests_to_abort
+
+class DetokenizerProc(Detokenizer):
+    """ZMQ-wrapper for running Detokenizer in background process."""
+
+    READY_STR = "READY"
+
+    def __init__(
+        self,
+        *args,
+        engine_core_outputs_path: str,
+        input_path: str,
+        output_path: str,
+        ready_path: str,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.engine_core_outputs_path = engine_core_outputs_path
+        self.input_path = input_path
+        self.output_path = output_path
+
+        # Send readiness signal.
+        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
+            ready_socket.send_string(DetokenizerProc.READY_STR)
+
+
+    @staticmethod
+    def make_detokenizer_process(
+        engine_core_outputs_path: str,
+        input_path: str,
+        output_path: str,
+        tokenizer_name: str,
+        tokenizer_mode: str = "auto",
+        trust_remote_code: bool = False,
+        revision: Optional[str] = None,
+    ) -> BackgroundProcHandle:
+        context = get_mp_context()
+        ready_path = get_open_zmq_ipc_path()
+
+        process_kwargs = {
+            "engine_core_outputs_path": engine_core_outputs_path,
+            "input_path": input_path,
+            "output_path": output_path,
+            "ready_path": ready_path,
+            "tokenizer_name": tokenizer_name,
+            "tokenizer_mode": tokenizer_mode,
+            "trust_remote_code": trust_remote_code,
+            "revision": revision,
+        }
+        # Run Detokenizer busy loop in background process.
+        proc = context.Process(target=DetokenizerProc.run_detokenizer,
+                               kwargs=process_kwargs)
+        proc.start()
+        wait_for_startup(proc=proc,
+                         ready_path=ready_path,
+                         ready_str=DetokenizerProc.READY_STR,
+                         timeout_ms=POLLING_TIMEOUT_MS)
+
+        return BackgroundProcHandle(proc=proc,
+                                    ready_path=ready_path,
+                                    input_path=input_path,
+                                    output_path=output_path)
+    
+    @staticmethod
+    def run_detokenizer(*args, **kwargs):
+        """Launch Detokenizer busy loop in background process."""
+
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
+
+        def signal_handler(signum, frame):
+            nonlocal shutdown_requested
+            if not shutdown_requested:
+                shutdown_requested = True
+                raise SystemExit()
+
+        # Either SIGTERM or SIGINT will terminate the engine_core
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        detokenizer = None
+        try:
+            detokenizer = DetokenizerProc(*args, **kwargs)
+            detokenizer.run_busy_loop()
+
+        except SystemExit:
+            logger.debug("Detokenizer interrupted.")
+
+        except BaseException as e:
+            logger.exception(e)
+            raise e
+
+        finally:
+            if detokenizer is not None:
+                detokenizer = None
+
+    def run_busy_loop(self):
+        """Core busy loop of the Detokenizer."""
+
+        try:
+            # TODO: handle aborted due to client cancellation
+            # TODO: pickle -> msgpack
+            # TODO: send stop string aborts back to EngineCore directly
+
+            decoder_new = msgspec.msgpack.Decoder(DetokenizerRequest)
+            decoder_out = msgspec.msgpack.Decoder(EngineCoreOutputs)
+
+            with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.constants.PULL) as engine_core_outputs_socket, 
+                zmq_socket_ctx(self.input_path, zmq.constants.PULL) as input_socket,
+                zmq_socket_ctx(self.output_path, zmq.constants.PUSH) as output_socket):
+
+                # TODO: avoid poll by having both EngineCore
+                # and AsyncLLM send to the same socket (unclear why this 
+                # was not working when I originally tried it)
+                poller = zmq.Poller()
+                poller.register(engine_core_outputs_socket, zmq.POLLIN)
+                poller.register(input_socket, zmq.POLLIN)
+
+                while True:
+                    socks = dict(poller.poll())
+
+                    # Handle NewRequest.
+                    if input_socket in socks:
+                        (frame, ) = input_socket.recv_multipart(copy=False)
+                        detokenizer_request = decoder_new.decode(frame.buffer)
+                        self.add_request(detokenizer_request)
+
+                    # Handle EngineCoreOutput.
+                    if engine_core_outputs_socket in socks:
+                        (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
+                        engine_core_outputs = decoder_out.decode(frame.buffer).outputs
+                        outputs = self.step(engine_core_outputs)
+                        msg = pickle.dumps(outputs, protocol=pickle.HIGHEST_PROTOCOL)
+                        output_socket.send_multipart((msg, ), copy=False)
+        
+        except Exception as e:
+            logger.error(e)
+            raise e
+        
+class DetokenizerClient:
+    
+    def __init__(self, *args, engine_core_outputs_path: str, **kwargs):
+
+        # Serialization setup.
+        self.encoder = msgspec.msgpack.Encoder()
+        self.decoder = PickleEncoder()
+        
+        # ZMQ setup.
+        self.ctx = zmq.asyncio.Context()
+
+        # Get input (DetokenizerRequest) to Detokenizer.
+        input_path = get_open_zmq_ipc_path()
+        self.input_socket = make_zmq_socket(
+            self.ctx,
+            input_path,
+            zmq.constants.PUSH,
+        )
+
+        # Get output (RequestOutput) from Detokenizer.
+        output_path = get_open_zmq_ipc_path()
+        self.output_socket = make_zmq_socket(
+            self.ctx,
+            output_path,
+            zmq.constants.PULL,
+        )
+
+        # Start Detokenizer in background process.
+        self.proc_handle: Optional[BackgroundProcHandle]
+        self.proc_handle = DetokenizerProc.make_detokenizer_process(
+            *args,
+            engine_core_outputs_path=engine_core_outputs_path,
+            input_path=input_path,
+            output_path=output_path,
+            **kwargs,
+        )
+    
+    async def add_request_async(self, request: DetokenizerRequest):
+        """Send new DetokenizerRequest to Detokenizer."""
+
+        msg = (self.encoder.encode(request), )
+        await self.input_socket.send_multipart(msg, copy=False)
+
+
+    async def get_output_async(self) -> Tuple[List[RequestOutput], List[str]]:
+        """Get RequestOutputs, RequestsToAbort from Detokenizer."""
+
+        (frame, ) = await self.output_socket.recv_multipart(copy=False)
+        return self.decoder.decode(frame.buffer)
