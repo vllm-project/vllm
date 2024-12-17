@@ -5,7 +5,7 @@ import json
 import random
 import time
 from functools import cache
-from typing import Tuple, Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import uvloop
@@ -74,11 +74,17 @@ def download_lora(lora_path: str) -> str:
     """
     return snapshot_download(lora_path)
 
+
 lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
-def get_random_lora_request(args: argparse.Namespace) -> Tuple[LoRARequest, AnyTokenizer]:
+
+
+def get_random_lora_request(
+        args: argparse.Namespace) -> Tuple[LoRARequest, AnyTokenizer]:
     global lora_tokenizer_cache
     lora_id = random.randint(0, args.max_loras)
-    lora_request = LoRARequest(lora_name=str(lora_id), lora_int_id=lora_id, lora_path=download_lora(args.lora_path))
+    lora_request = LoRARequest(lora_name=str(lora_id),
+                               lora_int_id=lora_id,
+                               lora_path=download_lora(args.lora_path))
     if lora_id not in lora_tokenizer_cache:
         lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
     return lora_request, lora_tokenizer_cache[lora_id]
@@ -376,7 +382,7 @@ def main(args: argparse.Namespace):
                 SampleRequest(prompt=candidate_prompt,
                               prompt_len=args.input_len,
                               expected_output_len=args.output_len,
-                              lora_request = lora_request))
+                              lora_request=lora_request))
     else:
         requests = sample_requests(tokenizer, args)
 
