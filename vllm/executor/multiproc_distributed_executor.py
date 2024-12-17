@@ -2,7 +2,7 @@ import asyncio
 import os
 from typing import Any, List, Optional
 
-from vllm.executor.distributed_gpu_executor import (
+from vllm.executor.executor_base import (
     DistributedExecutorBase)  # yapf: disable
 from vllm.executor.multiproc_worker_utils import (
     ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
