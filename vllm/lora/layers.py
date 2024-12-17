@@ -1027,7 +1027,19 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         logits = lm_head.linear_method.apply(lm_head, hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
+
+        # TODO (varun) : Replace with base layer get_logits()
+        if self.use_gather:
+            # None may be returned for rank > 0
+            logits = tensor_model_parallel_gather(logits)
+        else:
+            # Gather is not supported for some devices such as TPUs.
+            # Use all-gather instead.
+            # NOTE(woosuk): Here, the outputs of every device should not be None
+            # because XLA requires strict SPMD among all devices. Every device
+            # should execute the same operations after gathering the logits.
+            logits = tensor_model_parallel_all_gather(logits)
+
         if logits is None:
             return None
 
