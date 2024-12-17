@@ -5,7 +5,7 @@ from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Tuple,
                     Union)
 
 import vllm.envs as envs
-from vllm.executor.executor_base import ExecutorAsyncBase
+from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.tpu_executor import TPUExecutor
 from vllm.logger import init_logger
@@ -285,7 +285,7 @@ class RayTPUExecutor(TPUExecutor):
         self._wait_for_tasks_completion(parallel_worker_tasks)
 
 
-class RayTPUExecutorAsync(RayTPUExecutor, ExecutorAsyncBase):
+class RayTPUExecutorAsync(RayTPUExecutor, ExecutorBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -131,7 +131,7 @@ class TPUExecutor(ExecutorBase):
         return
 
 
-class TPUExecutorAsync(TPUExecutor, ExecutorAsyncBase):
+class TPUExecutorAsync(TPUExecutor, ExecutorBase):
 
     async def execute_model_async(
         self,

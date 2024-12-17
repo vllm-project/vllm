@@ -6,7 +6,7 @@ import contextlib
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -191,7 +191,7 @@ class HPUExecutor(ExecutorBase):
         self.driver_worker.shutdown_inc()
 
 
-class HPUExecutorAsync(HPUExecutor, ExecutorAsyncBase):
+class HPUExecutorAsync(HPUExecutor, ExecutorBase):
 
     async def execute_model_async(
         self,

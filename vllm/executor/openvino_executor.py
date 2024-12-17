@@ -3,7 +3,7 @@ from typing import List, Set, Tuple
 import openvino as ov
 
 import vllm.envs as envs
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -110,7 +110,7 @@ class OpenVINOExecutor(ExecutorBase):
         return
 
 
-class OpenVINOExecutorAsync(OpenVINOExecutor, ExecutorAsyncBase):
+class OpenVINOExecutorAsync(OpenVINOExecutor, ExecutorBase):
 
     async def execute_model_async(
             self,

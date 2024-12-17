@@ -18,7 +18,7 @@ from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.protocol import EngineClient
-from vllm.executor.executor_base import ExecutorAsyncBase
+from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType
@@ -620,15 +620,15 @@ class AsyncLLMEngine(EngineClient):
             rt.new_requests_event.set()
 
     @classmethod
-    def _get_executor_cls(
-            cls, engine_config: VllmConfig) -> Type[ExecutorAsyncBase]:
+    def _get_executor_cls(cls,
+                          engine_config: VllmConfig) -> Type[ExecutorBase]:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         if isinstance(distributed_executor_backend, type):
-            if not issubclass(distributed_executor_backend, ExecutorAsyncBase):
+            if not issubclass(distributed_executor_backend, ExecutorBase):
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
-                    f"ExecutorAsyncBase. Got {distributed_executor_backend}.")
+                    f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
         elif engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutorAsync

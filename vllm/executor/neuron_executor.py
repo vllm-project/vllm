@@ -1,6 +1,6 @@
 from typing import List, Set, Tuple
 
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -98,7 +98,7 @@ class NeuronExecutor(ExecutorBase):
         return
 
 
-class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
+class NeuronExecutorAsync(NeuronExecutor, ExecutorBase):
 
     async def execute_model_async(
         self,

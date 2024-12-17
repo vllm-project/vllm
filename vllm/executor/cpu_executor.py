@@ -1,7 +1,7 @@
 import os
 from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
 from vllm.logger import init_logger
@@ -266,7 +266,7 @@ class CPUExecutor(ExecutorBase):
         self.driver_method_invoker(self.driver_worker, "stop_profile")
 
 
-class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
+class CPUExecutorAsync(CPUExecutor, ExecutorBase):
 
     async def execute_model_async(
             self,

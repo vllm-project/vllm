@@ -185,9 +185,6 @@ class ExecutorBase(ABC):
         self.check_health()
 
 
-ExecutorAsyncBase = ExecutorBase
-
-
 class DistributedExecutorBase(ExecutorBase):
     """Abstract superclass of distributed executor implementations."""
 
