@@ -36,7 +36,7 @@ def sample_mmmu_pro_vision_requests(
     image_hit_rate: float,
 ):
     sampled_requests = []
-    num_unique_images = min(int(num_requests * (1 - image_hit_rate)), 1)
+    num_unique_images = max(int(num_requests * (1 - image_hit_rate)), 1)
     print(
         f"Total {num_requests} requests with {num_unique_images} unique images"
     )
