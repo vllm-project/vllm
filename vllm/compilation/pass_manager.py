@@ -37,7 +37,7 @@ class PostGradPassManager:
             pass_(graph)
 
         # always run fix_functionalization last
-        # self.fix_functionalization(graph)
+        self.fix_functionalization(graph)
 
     def configure(self, pass_config: CompilationConfig.PassConfig):
         self.pass_config = pass_config

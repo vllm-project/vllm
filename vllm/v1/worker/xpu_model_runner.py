@@ -1,13 +1,9 @@
 import torch
-import numpy as np
-from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
+from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.attention.backends.ipex_attn import (IPEXAttentionBackend)
-if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import SchedulerOutput
 
 
 class XPUModelRunner(GPUModelRunner):

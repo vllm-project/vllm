@@ -437,7 +437,7 @@ class VllmBackend:
     ):
         global global_graph_pool
         if global_graph_pool is None:
-            global_graph_pool = torch.xpu.graph_pool_handle()
+            global_graph_pool = torch.cuda.graph_pool_handle()
 
         # TODO: in the future, if we want to use multiple
         # streams, it might not be safe to share a global pool.

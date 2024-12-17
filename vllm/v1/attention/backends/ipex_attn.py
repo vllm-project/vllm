@@ -1,12 +1,12 @@
 from typing import Any, Dict, List, Optional, Tuple, Type
-from dataclasses import dataclass
+
 import torch
 
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.v1.attention.backends.flash_attn import (FlashAttentionMetadata)
 from vllm.forward_context import get_forward_context
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
 
 class IPEXAttentionBackend(AttentionBackend):

@@ -2,8 +2,8 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from vllm.logger import init_logger
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 

@@ -9,7 +9,11 @@ import triton.language as tl
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.platforms import current_platform
 from vllm.utils import cdiv
+
+if current_platform.is_cuda():
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -184,8 +188,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_scale,
             v_scale,
         )
-        # FIXME
-        from vllm.vllm_flash_attn import flash_attn_varlen_func
+
         # Compute attention and update output up to `num_actual_tokens`.
         if not attn_metadata.use_cascade:
             # Regular attention (common case).
@@ -315,7 +318,6 @@ def cascade_attention(
     block_table: torch.Tensor,
     common_prefix_len: int,
 ) -> torch.Tensor:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
     # TODO: Support sliding window.

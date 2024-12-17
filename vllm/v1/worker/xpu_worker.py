@@ -1,18 +1,17 @@
-import os
 import gc
+import os
 from typing import Optional, Tuple
 
 import torch
 import torch.distributed
 
 from vllm.config import ParallelConfig
-from vllm.platforms import current_platform
-from vllm.v1.worker.gpu_worker import Worker, _get_cache_block_size
-from vllm.model_executor import set_random_seed
-
-from vllm.v1.worker.xpu_model_runner import XPUModelRunner
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
+from vllm.v1.worker.gpu_worker import Worker, _get_cache_block_size
+from vllm.v1.worker.xpu_model_runner import XPUModelRunner
 
 
 class XPUWorker(Worker):
