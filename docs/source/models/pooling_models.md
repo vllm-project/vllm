@@ -10,7 +10,7 @@ before returning them.
 
 ```{note}
 We currently support pooling models primarily as a matter of convenience.
-As shown in the {ref}`Compatibility Matrix <compatibility_matrix>`, most vLLM features are not applicable to
+As shown in the [Compatibility Matrix](#compatibility-matrix), most vLLM features are not applicable to
 pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 ```
 
@@ -76,7 +76,7 @@ Please click on the above link for more details on how to launch the server.
 
 ### Embeddings API
 
-Our Embeddings API is similar to `LLM.encode`, accepting both text and {ref}`multi-modal inputs <multimodal_inputs>`.
+Our Embeddings API is similar to `LLM.encode`, accepting both text and [multi-modal inputs](#multimodal-inputs).
 
 The text-only API is compatible with [OpenAI Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
 so that you can use OpenAI client to interact with it.
@@ -84,9 +84,9 @@ A code example can be found in [examples/openai_embedding_client.py](https://git
 
 The multi-modal API is an extension of the [OpenAI Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
 that incorporates [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat),
-so it is not part of the OpenAI standard. Please see {ref}`this page <multimodal_inputs>` for more details on how to use it.
+so it is not part of the OpenAI standard. Please see [this page](#multimodal-inputs) for more details on how to use it.
 
 ### Score API
 
 Our Score API is similar to `LLM.score`.
-Please see [this page](../serving/openai_compatible_server.html#score-api-for-cross-encoder-models) for more details on how to use it.
+Please see [this page](../serving/openai_compatible_server#score-api-for-cross-encoder-models) for more details on how to use it.

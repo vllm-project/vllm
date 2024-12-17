@@ -31,11 +31,11 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
    :widths: auto
 
    * - Feature
-     - :ref:`CP <chunked-prefill>`
-     - :ref:`APC <apc>`
-     - :ref:`LoRA <lora>`
+     - [CP](#chunked-prefill)
+     - [APC](#apc)
+     - [LoRA](#lora)
      - :abbr:`prmpt adptr (Prompt Adapter)`
-     - :ref:`SD <spec_decode>`
+     - [SD](#spec-decode)
      - CUDA graph
      - :abbr:`pooling (Pooling Models)`
      - :abbr:`enc-dec (Encoder-Decoder Models)`
@@ -47,7 +47,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - best-of
      - beam-search
      - :abbr:`guided dec (Guided Decoding)`
-   * - :ref:`CP <chunked-prefill>`
+   * - [CP](#chunked-prefill)
      -
      -
      -
@@ -64,7 +64,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :ref:`APC <apc>`
+   * - [APC](#apc)
      - ✅
      -
      -
@@ -81,7 +81,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :ref:`LoRA <lora>`
+   * - [LoRA](#lora)
      - `✗ <https://github.com/vllm-project/vllm/pull/9057>`__
      - ✅
      -
@@ -115,7 +115,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :ref:`SD <spec_decode>`
+   * - [SD](#spec-decode)
      - ✅
      - ✅
      - ✗
@@ -337,7 +337,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - Hopper
      - CPU
      - AMD
-   * - :ref:`CP <chunked-prefill>`
+   * - [CP](#chunked-prefill)
      - `✗ <https://github.com/vllm-project/vllm/issues/2729>`__
      - ✅
      - ✅
@@ -345,7 +345,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - :ref:`APC <apc>`
+   * - [APC](#apc)
      - `✗ <https://github.com/vllm-project/vllm/issues/3687>`__
      - ✅
      - ✅
@@ -353,7 +353,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - :ref:`LoRA <lora>`
+   * - [LoRA](#lora)
      - ✅
      - ✅
      - ✅
@@ -369,7 +369,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/issues/8475>`__
      - ✅
-   * - :ref:`SD <spec_decode>`
+   * - [SD](#spec-decode)
      - ✅
      - ✅
      - ✅

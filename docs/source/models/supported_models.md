@@ -37,8 +37,7 @@ print(output)
 If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 ````
 
-Otherwise, please refer to {ref}`Adding a New Model <adding_a_new_model>` and {ref}`Enabling Multimodal Inputs <enabling_multimodal_inputs>`
-for instructions on how to implement your model in vLLM.
+Otherwise, please refer to [Adding a New Model](#adding-a-new-model) and [Enabling Multimodal Inputs](#enabling-multimodal-inputs) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
 ### ModelScope
@@ -69,7 +68,7 @@ print(output)
 
 ### Generative Models
 
-See {ref}`this page <generative_models>` for more information on how to use generative models.
+See [this page](#generative-models) for more information on how to use generative models.
 
 #### Text Generation (`--task generate`)
 
@@ -81,8 +80,8 @@ See {ref}`this page <generative_models>` for more information on how to use gene
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
+    - [LoRA](#lora)
+    - [PP](#distributed-serving)
   * - :code:`AquilaForCausalLM`
     - Aquila, Aquila2
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
@@ -356,7 +355,7 @@ Currently, the ROCm version of vLLM supports Mistral and Mixtral only for contex
 
 ### Pooling Models
 
-See {ref}`this page <pooling_models>` for more information on how to use pooling models.
+See [this page](pooling-models) for more information on how to use pooling models.
 
 ```{important}
 Since some model architectures support both generative and pooling tasks,
@@ -381,8 +380,8 @@ The following table lists those that are tested in vLLM.
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
+    - [LoRA](#lora)
+    - [PP](#distributed-serving)
   * - :code:`BertModel`
     - BERT-based
     - :code:`BAAI/bge-base-en-v1.5`, etc.
@@ -438,8 +437,8 @@ despite being described otherwise on its model card.
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
+    - [LoRA](#lora)
+    - [PP](#distributed-serving)
   * - :code:`LlamaForCausalLM`
     - Llama-based
     - :code:`peiyi9979/math-shepherd-mistral-7b-prm`, etc.
@@ -467,8 +466,8 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
+    - [LoRA](#lora)
+    - [PP](#distributed-serving)
   * - :code:`Qwen2ForSequenceClassification`
     - Qwen2-based
     - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.
@@ -486,8 +485,8 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
+    - [LoRA](#lora)
+    - [PP](#distributed-serving)
   * - :code:`BertForSequenceClassification`
     - BERT-based
     - :code:`cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.
@@ -524,11 +523,11 @@ On the other hand, modalities separated by {code}`/` are mutually exclusive.
 
 - e.g.: {code}`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
-See {ref}`this page <multimodal_inputs>` on how to pass multi-modal inputs to the model.
+See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
 
 ### Generative Models
 
-See {ref}`this page <generative_models>` for more information on how to use generative models.
+See [this page](#generative-models) for more information on how to use generative models.
 
 #### Text Generation (`--task generate`)
 
@@ -541,8 +540,8 @@ See {ref}`this page <generative_models>` for more information on how to use gene
     - Models
     - Inputs
     - Example HF Models
-    - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
+    - [LoRA](#lora)
+    - [PP](#distributed-serving)
     - V1
   * - :code:`AriaForConditionalGeneration`
     - Aria
@@ -749,7 +748,7 @@ For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#is
 
 ### Pooling Models
 
-See {ref}`this page <pooling_models>` for more information on how to use pooling models.
+See [this page](pooling-models) for more information on how to use pooling models.
 
 ```{important}
 Since some model architectures support both generative and pooling tasks,
@@ -775,8 +774,8 @@ The following table lists those that are tested in vLLM.
     - Models
     - Inputs
     - Example HF Models
-    - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
+    - [LoRA](#lora)
+    - [PP](#distributed-serving)
   * - :code:`LlavaNextForConditionalGeneration`
     - LLaVA-NeXT-based
     - T / I

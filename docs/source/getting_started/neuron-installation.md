@@ -16,12 +16,12 @@ Data types currently supported in Neuron SDK are FP16 and BF16.
 
 Installation steps:
 
-- {ref}`Build from source <build_from_source_neuron>`
+- [Build from source](#build-from-source-neuron)
 
-  - {ref}`Step 0. Launch Trn1/Inf2 instances <launch_instances>`
-  - {ref}`Step 1. Install drivers and tools <install_drivers>`
-  - {ref}`Step 2. Install transformers-neuronx and its dependencies <install_tnx>`
-  - {ref}`Step 3. Install vLLM from source <install_vllm>`
+  - [Step 0. Launch Trn1/Inf2 instances](#launch-instances)
+  - [Step 1. Install drivers and tools](#install-drivers)
+  - [Step 2. Install transformers-neuronx and its dependencies](#install-tnx)
+  - [Step 3. Install vLLM from source](#install-vllm)
 
 (build-from-source-neuron)=
 

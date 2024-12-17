@@ -4,8 +4,8 @@
 
 This guide will help you quickly get started with vLLM to:
 
-- {ref}`Run offline batched inference <offline_batched_inference>`
-- {ref}`Run OpenAI-compatible inference <openai_compatible_server>`
+- [Run offline batched inference](#offline-batched-inference)
+- [Run OpenAI-compatible inference](#openai-compatible-server)
 
 ## Prerequisites
 
@@ -52,7 +52,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 ```
 
-The {class}`~vllm.LLM` class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found {ref}`here <supported_models>`.
+The {class}`~vllm.LLM` class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](#supported-models).
 
 ```python
 llm = LLM(model="facebook/opt-125m")

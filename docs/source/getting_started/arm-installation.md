@@ -11,9 +11,9 @@ vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CP
 ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 Contents:
 
-1. {ref}`Requirements <arm_backend_requirements>`
-2. {ref}`Quick Start with Dockerfile <arm_backend_quick_start_dockerfile>`
-3. {ref}`Building from Source <build_arm_backend_from_source>`
+1. [Requirements](#arm-backend-requirements)
+2. [Quick Start with Dockerfile](#arm-backend-quick-start-dockerfile)
+3. [Building from Source](#build-arm-backend-from-source)
 
 (arm-backend-requirements)=
 

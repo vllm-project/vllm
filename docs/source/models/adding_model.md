@@ -12,7 +12,7 @@ However, for models that include new operators (e.g., a new attention mechanism)
 
 ```{note}
 By default, vLLM models do not support multi-modal inputs. To enable multi-modal support,
-please follow {ref}`this guide <enabling_multimodal_inputs>` after implementing the model here.
+please follow [this guide](#enabling-multimodal-inputs) after implementing the model here.
 ```
 
 ```{tip}
@@ -22,7 +22,7 @@ We will be happy to help you out!
 
 ## 0. Fork the vLLM repository
 
-Start by forking our [GitHub] repository and then {ref}`build it from source <build_from_source>`.
+Start by forking our [GitHub] repository and then [build it from source](#build-from-source).
 This gives you the ability to modify the codebase and test your model.
 
 ```{tip}
@@ -127,7 +127,7 @@ Finally, register your {code}`*ForCausalLM` class to the {code}`_VLLM_MODELS` in
 
 ## 6. Out-of-Tree Model Integration
 
-You can integrate a model without modifying the vLLM codebase. Steps 2, 3, and 4 are still required, but you can skip steps 1 and 5. Instead, write a plugin to register your model. For general introduction of the plugin system, see {ref}`plugin_system`.
+You can integrate a model without modifying the vLLM codebase. Steps 2, 3, and 4 are still required, but you can skip steps 1 and 5. Instead, write a plugin to register your model. For general introduction of the plugin system, see [plugin-system](#plugin-system).
 
 To register the model, use the following code:
 
@@ -147,7 +147,7 @@ ModelRegistry.register_model("YourModelForCausalLM", "your_code:YourModelForCaus
 
 ```{important}
 If your model is a multimodal model, ensure the model class implements the {class}`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
-Read more about that {ref}`here <enabling_multimodal_inputs>`.
+Read more about that [here](#enabling-multimodal-inputs).
 ```
 
 ```{note}

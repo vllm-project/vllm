@@ -107,7 +107,7 @@ Note:
     This dictionary also accepts modality keys defined outside
     :class:`MultiModalProcessingMetadataBuiltins` as long as a customized plugin
     is registered through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
-    Read more on that :ref:`here <adding_multimodal_plugin>`.
+    Read more on that [here](#adding-multimodal-plugin).
 """
 
 

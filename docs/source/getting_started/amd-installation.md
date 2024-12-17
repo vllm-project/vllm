@@ -13,8 +13,8 @@ vLLM supports AMD GPUs with ROCm 6.2.
 
 Installation options:
 
-1. {ref}`Build from source with docker <build_from_source_docker_rocm>`
-2. {ref}`Build from source <build_from_source_rocm>`
+1. [Build from source with docker](#build-from-source-docker-rocm)
+2. [Build from source](#build-from-source-rocm)
 
 (build-from-source-docker-rocm)=
 

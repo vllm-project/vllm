@@ -12,12 +12,12 @@ vLLM initially supports basic model inferencing and serving on x86 CPU platform,
 
 Table of contents:
 
-1. {ref}`Requirements <cpu_backend_requirements>`
-2. {ref}`Quick start using Dockerfile <cpu_backend_quick_start_dockerfile>`
-3. {ref}`Build from source <build_cpu_backend_from_source>`
-4. {ref}`Related runtime environment variables <env_intro>`
-5. {ref}`Intel Extension for PyTorch <ipex_guidance>`
-6. {ref}`Performance tips <cpu_backend_performance_tips>`
+1. [Requirements](#cpu-backend-requirements)
+2. [Quick start using Dockerfile](#cpu-backend-quick-start-dockerfile)
+3. [Build from source](#build-cpu-backend-from-source)
+4. [Related runtime environment variables](#env-intro)
+5. [Intel Extension for PyTorch](#ipex-guidance)
+6. [Performance tips](#cpu-backend-performance-tips)
 
 (cpu-backend-requirements)=
 

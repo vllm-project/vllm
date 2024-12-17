@@ -132,7 +132,7 @@ A code example can be found in [examples/openai_completion_client.py](https://gi
 
 ### Chat API
 
-Our Chat API is similar to `LLM.chat`, accepting both text and {ref}`multi-modal inputs <multimodal_inputs>`.
+Our Chat API is similar to `LLM.chat`, accepting both text and [multi-modal inputs](#multimodal-inputs).
 It is compatible with [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
 so that you can use OpenAI client to interact with it.
 A code example can be found in [examples/openai_chat_completion_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client.py).

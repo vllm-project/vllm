@@ -6,9 +6,9 @@ vLLM initially supports basic model inferencing and serving on Intel GPU platfor
 
 Table of contents:
 
-1. {ref}`Requirements <xpu_backend_requirements>`
-2. {ref}`Quick start using Dockerfile <xpu_backend_quick_start_dockerfile>`
-3. {ref}`Build from source <build_xpu_backend_from_source>`
+1. [Requirements](#xpu-backend-requirements)
+2. [Quick start using Dockerfile](#xpu-backend-quick-start-dockerfile)
+3. [Build from source](#build-xpu-backend-from-source)
 
 (xpu-backend-requirements)=
 

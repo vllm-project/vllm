@@ -76,7 +76,7 @@ class MultiModalRegistry:
         Register a multi-modal plugin so it can be recognized by vLLM.
 
         See also:
-            :ref:`adding_multimodal_plugin`
+            [adding_multimodal_plugin](#adding-multimodal-plugin)
         """
         data_type_key = plugin.get_data_key()
 
@@ -294,8 +294,8 @@ class MultiModalRegistry:
         invoked to transform the data into a dictionary of model inputs.
 
         See also:
-            - :ref:`input_processing_pipeline`
-            - :ref:`enabling_multimodal_inputs`
+            - [input-processing-pipeline](#input-processing-pipeline)
+            - [enabling-multimodal-inputs](#enabling-multimodal-inputs)
         """
 
         def wrapper(model_cls: N) -> N:

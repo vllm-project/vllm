@@ -9,11 +9,11 @@ vLLM powered by OpenVINO supports all LLM models from {doc}`vLLM supported model
 
 **Table of contents**:
 
-- {ref}`Requirements <openvino_backend_requirements>`
-- {ref}`Quick start using Dockerfile <openvino_backend_quick_start_dockerfile>`
-- {ref}`Build from source <install_openvino_backend_from_source>`
-- {ref}`Performance tips <openvino_backend_performance_tips>`
-- {ref}`Limitations <openvino_backend_limitations>`
+- [Requirements](#openvino-backend-requirements)
+- [Quick start using Dockerfile](#openvino-backend-quick-start-dockerfile)
+- [Build from source](#install-openvino-backend-from-source)
+- [Performance tips](#openvino-backend-performance-tips)
+- [Limitations](#openvino-backend-limitations)
 
 (openvino-backend-requirements)=
 

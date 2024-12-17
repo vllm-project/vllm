@@ -4,8 +4,8 @@
 
 vLLM contains two sets of benchmarks:
 
-- {ref}`Performance benchmarks <performance_benchmarks>`
-- {ref}`Nightly benchmarks <nightly_benchmarks>`
+- [Performance benchmarks](#performance-benchmarks)
+- [Nightly benchmarks](#nightly-benchmarks)
 
 (performance-benchmarks)=
 

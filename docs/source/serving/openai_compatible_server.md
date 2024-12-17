@@ -342,7 +342,7 @@ to override which format to use.
 
 The `serve` module can also accept arguments from a config file in
 `yaml` format. The arguments in the yaml must be specified using the
-long form of the argument outlined [here](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server):
+long form of the argument outlined [here](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference):
 
 For example:
 
