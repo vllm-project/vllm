@@ -178,7 +178,7 @@ class RayTPUExecutor(TPUExecutor):
                 distributed_init_method=distributed_init_method,
             ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
         ]
-        self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
+        self._run_workers("init_worker", init_worker_all_kwargs)
 
         self._run_workers("init_device")
         self._run_workers("load_model",

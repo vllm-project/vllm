@@ -441,11 +441,12 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
-    def init_worker(self, *args, **kwargs):
+    def init_worker(self, all_kwargs: List[Dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
+        kwargs = all_kwargs[self.rank]
         enable_trace_function_call_for_thread(self.vllm_config)
 
         # see https://github.com/NVIDIA/nccl/issues/1234
@@ -456,7 +457,7 @@ class WorkerWrapperBase:
 
         worker_class = resolve_obj_by_qualname(
             self.vllm_config.parallel_config.worker_cls)
-        self.worker = worker_class(*args, **kwargs)
+        self.worker = worker_class(**kwargs)
         assert self.worker is not None
 
     def execute_method(self, method, *args, **kwargs):
