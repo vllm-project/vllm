@@ -1,7 +1,7 @@
 import dataclasses
 import os
 import time
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -22,7 +22,7 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 logger = init_logger(__name__)
 
 
-class WorkerBase:
+class WorkerBase(ABC):
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
@@ -45,12 +45,14 @@ class WorkerBase:
         self.observability_config = vllm_config.observability_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
 
+    @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
         """
         raise NotImplementedError
 
+    @abstractmethod
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
@@ -65,6 +67,7 @@ class WorkerBase:
         """
         raise NotImplementedError
 
+    @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
@@ -89,23 +92,71 @@ class WorkerBase:
     ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
+    @abstractmethod
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
         """
         raise NotImplementedError
 
+    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
+    @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    @abstractmethod
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
+
+
+class DelegateWorkerBase(WorkerBase):
+    """
+    A class that delegates all methods to another WorkerBase instance. This is
+    useful for creating a WorkerBase that wraps another WorkerBase instance,
+    e.g. speculative decoding.
+    """
+    worker: WorkerBase
+
+    def init_device(self) -> None:
+        self.worker.init_device()
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        return self.worker.determine_num_available_blocks()
+
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        return self.worker.execute_model(execute_model_req)
+
+    def get_cache_block_size_bytes(self) -> int:
+        return self.worker.get_cache_block_size_bytes()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.worker.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.worker.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.worker.pin_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.worker.list_loras()
+
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
 
 
 class LoraNotSupportedWorkerBase(WorkerBase):
