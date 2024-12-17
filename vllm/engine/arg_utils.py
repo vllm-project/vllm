@@ -1028,11 +1028,12 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        if model_config.is_multimodal_model and not envs.VLLM_USE_V1:
-            if self.enable_prefix_caching:
-                logger.warning("--enable-prefix-caching is currently not "
-                               "supported for multimodal models in v0 and "
-                               "has been disabled.")
+        if (model_config.is_multimodal_model and not envs.VLLM_USE_V1
+                and self.enable_prefix_caching):
+            logger.warning("--enable-prefix-caching is currently not "
+                           "supported for multimodal models in v0 and "
+                           "has been disabled.")
+            self.enable_prefix_caching = False
 
         cache_config = CacheConfig(
             # neuron needs block_size = max_model_len
