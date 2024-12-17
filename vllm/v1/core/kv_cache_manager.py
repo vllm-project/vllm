@@ -85,8 +85,11 @@ class KVCacheManager:
 
         # TODO(rickyx): potentially we could cache this so we don't have to
         # recompute it every time.
+        metadata_hash = (None if not request.lora_request else
+                         request.lora_request.lora_int_id)
         block_hashes = hash_request_tokens(self.block_size,
-                                           request.all_token_ids)
+                                           request.all_token_ids,
+                                           parent_hash=metadata_hash)
 
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -377,12 +380,14 @@ class KVCacheManager:
             prev_block: The previous block in the chain.
         """
         # Update the new blocks with the block hashes through the chain.
-        prev_block_hash_value = None
+        metadata_hash = (None if request.lora_request is None else
+                         request.lora_request.lora_int_id)
+        parent_hash = metadata_hash
         if prev_block is not None:
             # Previous block must have a block hash because it must be
             # a full, cached block.
             assert prev_block.block_hash is not None
-            prev_block_hash_value = prev_block.block_hash.hash_value
+            parent_hash = prev_block.block_hash.hash_value
 
         for i, blk in enumerate(full_blocks):
             blk_idx = blk_start_idx + i
@@ -397,9 +402,9 @@ class KVCacheManager:
                 f"{request.request_id}({request})")
 
             # Compute the hash of the current block.
-            block_hash = hash_block_tokens(prev_block_hash_value, block_tokens)
+            block_hash = hash_block_tokens(parent_hash, block_tokens)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
-            prev_block_hash_value = block_hash.hash_value
+            parent_hash = block_hash.hash_value
