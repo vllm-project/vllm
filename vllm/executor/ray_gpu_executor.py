@@ -5,7 +5,7 @@ from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import msgspec
-
+import time
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
@@ -61,7 +61,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
         # Create the parallel GPU workers.
+        start = time.perf_counter()
         self._init_workers_ray(placement_group)
+        end = time.perf_counter()
+        logger.info("time for _init_workers_ray: %f", end - start)
 
         self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
         self.output_decoder = msgspec.msgpack.Decoder(
@@ -123,6 +126,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Create the workers.
         driver_ip = get_ip()
+        start = time.perf_counter()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -152,6 +156,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 else:
                     # Else, added to the list of workers.
                     self.workers.append(worker)
+        end = time.perf_counter()
+        logger.info("time for creating workers: %f", end - start)
 
         logger.debug("workers: %s", self.workers)
         logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
@@ -239,8 +245,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
 
+        start = time.perf_counter()
         self._run_workers("update_environment_variables",
                           all_args=self._get_env_vars_to_be_updated())
+        end = time.perf_counter()
+        logger.info("time for _run_workers update_environment_variables: %f", end - start)
 
         if len(node_gpus) == 1:
             # in single node case, we don't need to get the IP address.
@@ -263,12 +272,22 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 distributed_init_method=distributed_init_method,
             ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
         ]
+        start = time.perf_counter()
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
+        end = time.perf_counter()
+        logger.info("time for _run_workers init_worker: %f", end - start)
 
+        start = time.perf_counter()
         self._run_workers("init_device")
+        end = time.perf_counter()
+        logger.info("time for _run_workers init_device: %f", end - start)
+
+        start = time.perf_counter()
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+        end = time.perf_counter()
+        logger.info("time for _run_workers load_model: %f", end - start)
 
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):

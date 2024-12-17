@@ -502,7 +502,9 @@ class LLMEngine:
                 from vllm.executor.xpu_executor import XPUExecutor
                 executor_class = XPUExecutor
         elif distributed_executor_backend == "ray":
+            start = time.perf_counter()
             initialize_ray_cluster(engine_config.parallel_config)
+            logger.info("time for initialize_ray_cluster: %f", time.perf_counter() - start)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
         elif distributed_executor_backend == "mp":
