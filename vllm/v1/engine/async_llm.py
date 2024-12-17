@@ -110,7 +110,8 @@ class AsyncLLM(EngineClient):
             usage_context=usage_context,
         )
 
-        self.output_handler: Optional[asyncio.Task] = None
+        # self.output_handler: Optional[asyncio.Task] = None
+        self.to_create_loop = True
 
     def __del__(self):
         self.shutdown()
@@ -239,9 +240,15 @@ class AsyncLLM(EngineClient):
         # We start the output_handler on the first call to generate() so that
         # we can call __init__ before the event loop starts, which enables us
         # to handle startup failure gracefully in the OpenAI server.
-        if self.output_handler is None:
-            self.output_handler = asyncio.create_task(
-                self._run_output_handler())
+        # if self.output_handler is None:
+        if self.to_create_loop:
+            loop = asyncio.get_event_loop()
+            print(f"{loop=}")
+            loop.create_task(self._run_output_handler())
+            self.to_create_loop = False
+            # self.output_handler = asyncio.create_task(
+            #     self._run_output_handler())
+            
 
         state = await self.add_request(
             request_id,
@@ -257,6 +264,7 @@ class AsyncLLM(EngineClient):
             try:
                 await asyncio.wait_for(state.event.wait(),
                                        timeout=WAITING_TIMEOUT_MS)
+                logger.info(f"{request_id} woke up.")
 
                 # NOTE(rob): out_list can have more than one item. However,
                 # in the streaming case, we use RequestOutputKind.CUMULATIVE,
@@ -272,7 +280,7 @@ class AsyncLLM(EngineClient):
 
             except asyncio.TimeoutError:
                 # TODO(rob): do request cancellation checking here.
-                logger.debug("Timeout waiting for %s", request_id)
+                logger.info("Timeout waiting for %s", request_id)
                 continue
 
             state.out_list = []
@@ -330,22 +338,35 @@ class AsyncLLM(EngineClient):
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
+        # idx = 0
 
+        # import pyinstrument
+
+        # prof = pyinstrument.Profiler()
+        # prof.start()
+        # i = 0
         try:
             while True:
                 # 1) Pull outputs from the Detokenizer.
                 request_outputs, reqs_to_abort = (
                     await self.detokenizer.get_output_async())
+                logger.info("AsyncLLM")
+                # logger.info(f"RECV: {idx}")
+                # idx+=1
 
                 # 2) Put the RequestOutputs into the per-request AsyncStreams.
                 self._process_request_outputs(request_outputs)
 
                 # 3) Abort any requests that finished due to stop strings.
-                await self.engine_core.abort_requests_async(reqs_to_abort)
+                # await self.engine_core.abort_requests_async(reqs_to_abort)
 
                 # 4) Abort any requests due to client cancellations.
                 # TODO: send back to detokenizer if this fails.
                 # await self._process_cancellations()
+
+        # except KeyboardInterrupt:
+        #     prof.stop()
+        #     prof.write_html("output_handler.prof")
 
         except Exception as e:
             logger.error(e)

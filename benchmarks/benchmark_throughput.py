@@ -170,7 +170,7 @@ def run_vllm(
         end = time.perf_counter()
     return end - start
 
-
+import asyncio
 async def run_vllm_async(
     requests: List[SampleRequest],
     n: int,
@@ -198,17 +198,23 @@ async def run_vllm_async(
                     max_tokens=request.expected_output_len,
                 ))
 
-        generators = []
+        tasks = []
         start = time.perf_counter()
         for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
-            generators.append(generator)
-        all_gens = merge_async_iterators(*generators)
-        async for i, res in all_gens:
-            pass
+            tasks.append(run(generator))
+        # all_gens = merge_async_iterators(*generators)
+        # async for i, res in all_gens:
+        #     pass
+
+        await asyncio.gather(*tasks)
+
         end = time.perf_counter()
         return end - start
 
+async def run(generator):
+    async for res in generator:
+        pass
 
 def run_hf(
     requests: List[SampleRequest],
@@ -331,7 +337,8 @@ def main(args: argparse.Namespace):
                          for request in requests)
     if args.backend == "vllm":
         if args.async_engine:
-            elapsed_time = uvloop.run(
+            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+            elapsed_time = asyncio.run(
                 run_vllm_async(
                     requests,
                     args.n,

@@ -409,6 +409,7 @@ class DetokenizerProc(Detokenizer):
                 poller.register(engine_core_outputs_socket, zmq.POLLIN)
                 poller.register(input_socket, zmq.POLLIN)
 
+                # idx = 0
                 while True:
                     socks = dict(poller.poll())
 
@@ -428,12 +429,16 @@ class DetokenizerProc(Detokenizer):
                         # if now - last_log > 0.1:
                         #     logger.info("Detok: Sending")
                         #     last_log = now
+                        # logger.info(f"SEND: {idx}: {len(engine_core_outputs)}")
+                        # idx += 1
                         output_socket.send_multipart((msg, ), copy=False)                        
         
         except Exception as e:
             logger.error(e)
             raise e
-        
+
+import time
+
 class DetokenizerClient:
     
     def __init__(self, *args, engine_core_outputs_path: str, **kwargs):
@@ -484,9 +489,13 @@ class DetokenizerClient:
         msg = (self.encoder.encode(request), )
         await self.input_socket.send_multipart(msg, copy=False)
 
-
     async def get_output_async(self) -> Tuple[List[RequestOutput], List[str]]:
         """Get RequestOutputs, RequestsToAbort from Detokenizer."""
 
         (frame, ) = await self.output_socket.recv_multipart(copy=False)
-        return self.decoder.decode(frame.buffer)
+        start = time.perf_counter()
+        out = self.decoder.decode(frame.buffer)
+        end = time.perf_counter()
+        if end - start > 0.1:
+            logger.info(f"{end - start}")
+        return out
