@@ -95,6 +95,8 @@ Documentation
    :caption: Models
 
    models/supported_models
+   models/generative_models
+   models/pooling_models
    models/adding_model
    models/enabling_multimodal_inputs
 
@@ -113,6 +115,7 @@ Documentation
    usage/engine_args
    usage/env_vars
    usage/usage_stats
+   usage/disagg_prefill
 
 .. toctree::
    :maxdepth: 1
@@ -172,6 +175,7 @@ Documentation
    design/input_processing/model_inputs_index
    design/kernel/paged_attention
    design/multimodal/multimodal_index
+   design/multiprocessing
 
 .. For Developers: contributing to the vLLM project
 
