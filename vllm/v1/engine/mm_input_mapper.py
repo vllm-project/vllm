@@ -54,6 +54,7 @@ class MMInputMapperClient:
             logger.debug("MMInputMapper: cache_hit_ratio = %.2f ",
                          self.mm_cache_hits / self.mm_cache_total)
 
+    # TODO: Support modalities beyond image.
     def process_inputs(
         self,
         mm_data: MultiModalDataDict,
