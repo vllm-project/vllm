@@ -594,14 +594,10 @@ class BaseMultiModalProcessor(ABC):
         return list(
             iter_placeholders(all_prompt_repls, new_token_ids, mm_item_counts))
 
-    def _apply_hf_processor(
+    def _get_processor_data(
         self,
-        prompt: str,
         mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        hf_processor = self._get_hf_processor(**mm_processor_kwargs)
-
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
         for k, v in mm_data.items():
@@ -619,6 +615,19 @@ class BaseMultiModalProcessor(ABC):
                     processor_data[f"{k}s"] = v
             else:
                 processor_data[k] = v
+        return processor_data, passthrough_data
+
+    def _apply_hf_processor(
+        self,
+        prompt: str,
+        mm_data: MultiModalDataDict,
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # some mm_processor_kwargs may be used in processor initialization
+        # instead of processor call
+        hf_processor = self._get_hf_processor(**mm_processor_kwargs)
+
+        processor_data, passthrough_data = self._get_processor_data(mm_data)
 
         assert callable(hf_processor)
         mm_processor_kwargs = self.ctx.resolve_hf_processor_call_kwargs(
