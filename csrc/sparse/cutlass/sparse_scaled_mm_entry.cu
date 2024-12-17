@@ -3,6 +3,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 
+#include "cutlass_extensions/common.hpp"
+
 #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
 void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                                    torch::Tensor const& b,
@@ -11,16 +13,6 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                                    torch::Tensor const& b_scales,
                                    c10::optional<torch::Tensor> const& bias);
 #endif
-
-int32_t test_get_sm_version_num() {
-  int32_t major_capability, minor_capability;
-  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
-                         0);
-  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor,
-                         0);
-  int32_t version_num = major_capability * 10 + minor_capability;
-  return version_num;
-}
 
 void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
                               torch::Tensor const& bt_nzs,
@@ -48,7 +40,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
   }
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
-  int32_t version_num = test_get_sm_version_num();
+  int32_t version_num = get_sm_version_num();
 
   // Guard against compilation issues for sm90 kernels
 #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X

@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16)
+from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
@@ -211,6 +212,8 @@ def test_compressed_tensors_kv_cache(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="Sparse FP8 is not yet supported on this GPU type.")
 def _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy):
     assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
     assert isinstance(qkv_proj.scheme, CompressedTensors24)
@@ -224,6 +227,8 @@ def _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy):
     assert sparsity_map.get("Linear").sparsity_structure == "2:4"
 
 
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="Sparse FP8 is not yet supported on this GPU type.")
 @pytest.mark.parametrize("args_2of4", [
     ("nm-testing/Meta-Llama-3-8B-Instruct-FP8-Dynamic-2of4-testing", "channel",
      "token"),
@@ -249,6 +254,8 @@ def test_compressed_tensors_2of4_quant_fp8(vllm_runner, args_2of4):
         assert output
 
 
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="Sparse FP8 is not yet supported on this GPU type.")
 @pytest.mark.parametrize("args_2of4", [
     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-INT8-Dynamic-IA-Per-Channel-Weight-testing",
      "channel", "token"),
@@ -272,6 +279,8 @@ def test_compressed_tensors_2of4_quant_int8(vllm_runner, args_2of4):
         assert output
 
 
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="Sparse FP8 is not yet supported on this GPU type.")
 @pytest.mark.parametrize(
     "args_2of4",
     [("nm-testing/TinyLlama-1.1B-Chat-v1.0-2of4-Sparse-Dense-Compressor")])

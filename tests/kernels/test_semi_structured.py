@@ -4,6 +4,7 @@ Run `pytest tests/kernels/test_semi_structured.py`.
 """
 from typing import Optional, Tuple, Type
 
+import pytest
 import torch
 
 from vllm import _custom_ops as ops
@@ -101,6 +102,8 @@ def baseline_scaled_mm(a: torch.Tensor,
     return output
 
 
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="Sparse FP8 is not yet supported on this GPU type.")
 # Test working with a subset of A and B for sparse matmul
 def test_cutlass_sparse_subset():
     big_m = 1024

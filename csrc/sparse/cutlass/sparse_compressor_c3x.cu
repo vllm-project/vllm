@@ -146,7 +146,7 @@ bool cutlass_sparse_compress(torch::Tensor& a_nzs, torch::Tensor& a_meta,
   return true;
 }
 
-bool cutlass_sparse_compress_entry(torch::Tensor& a_nzs, torch::Tensor& a_meta,
+bool cutlass_sparse_compress_sm90(torch::Tensor& a_nzs, torch::Tensor& a_meta,
                                    torch::Tensor const& a) {
   if (a.dtype() == torch::kBFloat16) {
     return cutlass_sparse_compress<cutlass::bfloat16_t, float>(a_nzs, a_meta,
