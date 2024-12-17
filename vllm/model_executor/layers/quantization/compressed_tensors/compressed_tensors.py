@@ -426,9 +426,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         :return: matching param name for KV cache scale in vLLM
         """
         if name.endswith(".output_scale") and ".k_proj" in name:
-            return [name.replace(".k_proj.output_scale", ".attn.k_scale")]
+            return name.replace(".k_proj.output_scale", ".attn.k_scale")
         if name.endswith(".output_scale") and ".v_proj" in name:
-            return [name.replace(".v_proj.output_scale", ".attn.v_scale")]
+            return name.replace(".v_proj.output_scale", ".attn.v_scale")
         # If no matches, return None
         return None
 
