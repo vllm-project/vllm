@@ -1,7 +1,7 @@
 import dataclasses
 import os
 import time
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -22,7 +22,7 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
 logger = init_logger(__name__)
 
 
-class WorkerBase(ABC):
+class WorkerBase:
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
@@ -45,14 +45,12 @@ class WorkerBase(ABC):
         self.observability_config = vllm_config.observability_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
 
-    @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
         """
         raise NotImplementedError
 
-    @abstractmethod
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
@@ -67,7 +65,6 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
@@ -86,33 +83,27 @@ class WorkerBase(ABC):
             if output is None:
                 return None
 
-    @abstractmethod
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
-    @abstractmethod
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
         """
         raise NotImplementedError
 
-    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
 
