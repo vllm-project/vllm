@@ -220,6 +220,24 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--batch-szie",
+        type=int,
+        default=4,
+        help="Batch size",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=128,
+        help="Sequence length",
+    )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=4096,
+        help="Hidden size (2nd dimension) of the sequence",
+    )
     parser.add_argument("--use-residual",
                         action="store_true",
                         help="Whether to use residual connection")
@@ -229,12 +247,13 @@ if __name__ == "__main__":
         default="./configs/rmsnorm/",
         help="Path to save rmsnorm benchmark results",
     )
+
     args = parser.parse_args()
 
     # Run correctness test
-    calculate_diff(batch_size=4,
-                   seq_len=128,
-                   hidden_size=4096,
+    calculate_diff(batch_size=args.batch_size,
+                   seq_len=args.seq_len,
+                   hidden_size=args.hidden_size,
                    use_residual=args.use_residual)
 
     # Get the benchmark function with proper use_residual setting
