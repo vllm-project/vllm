@@ -621,67 +621,7 @@ class AsyncLLMEngine(EngineClient):
     @classmethod
     def _get_executor_cls(cls,
                           engine_config: VllmConfig) -> Type[ExecutorBase]:
-        distributed_executor_backend = (
-            engine_config.parallel_config.distributed_executor_backend)
-        if isinstance(distributed_executor_backend, type):
-            if not issubclass(distributed_executor_backend, ExecutorBase):
-                raise TypeError(
-                    "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {distributed_executor_backend}.")
-            executor_class = distributed_executor_backend
-        elif engine_config.device_config.device_type == "neuron":
-            from vllm.executor.uniproc_executor import UniProcExecutor
-            executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "tpu":
-            if distributed_executor_backend == "ray":
-                from vllm.executor.ray_gpu_executor import RayGPUExecutor
-                executor_class = RayGPUExecutor
-            else:
-                assert distributed_executor_backend is None
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "cpu":
-            from vllm.executor.uniproc_executor import UniProcExecutor
-            executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "hpu":
-            if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_gpu_executor import RayGPUExecutor
-                executor_class = RayGPUExecutor
-            else:
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "openvino":
-            assert distributed_executor_backend is None, (
-                "Distributed execution is not supported with "
-                "the OpenVINO backend.")
-            from vllm.executor.uniproc_executor import UniProcExecutor
-            executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "xpu":
-            if distributed_executor_backend is None:
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-            elif distributed_executor_backend == "ray":
-                from vllm.executor.ray_gpu_executor import RayGPUExecutor
-                executor_class = RayGPUExecutor
-            elif distributed_executor_backend == "mp":
-                from vllm.executor.multiproc_distributed_executor import (
-                    MultiprocessingDistributedExecutor)
-                executor_class = MultiprocessingDistributedExecutor
-            else:
-                raise RuntimeError(
-                    "Not supported distributed execution model on XPU device.")
-        elif distributed_executor_backend == "ray":
-            from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
-            executor_class = RayGPUExecutorAsync
-        elif distributed_executor_backend == "mp":
-            from vllm.executor.multiproc_distributed_executor import (
-                MultiprocessingDistributedExecutor)
-            executor_class = MultiprocessingDistributedExecutor
-        else:
-            from vllm.executor.uniproc_executor import UniProcExecutor
-            executor_class = UniProcExecutor
-        return executor_class
+        return LLMEngine._get_executor_cls(engine_config)
 
     @classmethod
     def from_engine_args(

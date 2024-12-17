@@ -82,6 +82,14 @@ class XPUPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
+        if parallel_config.distributed_executor_backend == "mp":
+            # FIXME(kunshang):
+            # spawn needs calling `if __name__ == '__main__':``
+            # fork is not supported for xpu start new process.
+            logger.error(
+                "Both start methods (spawn and fork) have issue "
+                "on XPU if you use mp backend, Please try ray instead.")
+
         from vllm.envs import envs
         mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
         if mp_method != "spawn" and parallel_config.world_size > 1:

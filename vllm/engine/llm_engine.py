@@ -456,68 +456,24 @@ class LLMEngine:
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
                     f"ExecutorBase. Got {distributed_executor_backend}.")
-            if distributed_executor_backend.uses_ray:  # type: ignore
-                initialize_ray_cluster(engine_config.parallel_config)
             executor_class = distributed_executor_backend
-        elif engine_config.device_config.device_type == "neuron":
-            from vllm.executor.uniproc_executor import UniProcExecutor
-            executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "tpu":
+        elif engine_config.parallel_config.world_size > 1:
             if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_gpu_executor import RayGPUExecutor
-                executor_class = RayGPUExecutor
-            else:
-                assert distributed_executor_backend is None
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "cpu":
-            if engine_config.parallel_config.world_size == 1:
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-            else:
+                from vllm.executor.ray_distributed_executor import (
+                    RayDistributedExecutor)
+                executor_class = RayDistributedExecutor
+            elif distributed_executor_backend == "mp":
                 from vllm.executor.multiproc_distributed_executor import (
                     MultiprocessingDistributedExecutor)
-        elif engine_config.device_config.device_type == "hpu":
-            if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_gpu_executor import RayGPUExecutor
-                executor_class = RayGPUExecutor
-            else:
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "openvino":
-            from vllm.executor.uniproc_executor import UniProcExecutor
-            executor_class = UniProcExecutor
-        elif engine_config.device_config.device_type == "xpu":
-            if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_gpu_executor import RayGPUExecutor
-                executor_class = RayGPUExecutor
-            elif distributed_executor_backend == "mp":
-                # FIXME(kunshang):
-                # spawn needs calling `if __name__ == '__main__':``
-                # fork is not supported for xpu start new process.
-                logger.error(
-                    "Both start methods (spawn and fork) have issue "
-                    "on XPU if you use mp backend, Please try ray instead.")
-            else:
-                from vllm.executor.uniproc_executor import UniProcExecutor
-                executor_class = UniProcExecutor
-        elif distributed_executor_backend == "ray":
-            initialize_ray_cluster(engine_config.parallel_config)
-            from vllm.executor.ray_gpu_executor import RayGPUExecutor
-            executor_class = RayGPUExecutor
-        elif distributed_executor_backend == "mp":
-            from vllm.executor.multiproc_distributed_executor import (
-                MultiprocessingDistributedExecutor)
-            assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
-                "multiprocessing distributed executor backend does not "
-                "support VLLM_USE_RAY_SPMD_WORKER=1")
-            executor_class = MultiprocessingDistributedExecutor
+                assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
+                    "multiprocessing distributed executor backend does not "
+                    "support VLLM_USE_RAY_SPMD_WORKER=1")
+                executor_class = MultiprocessingDistributedExecutor
         else:
             from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor
+        if executor_class.uses_ray:  # type: ignore
+            initialize_ray_cluster(engine_config.parallel_config)
         return executor_class
 
     @classmethod
