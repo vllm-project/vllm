@@ -506,11 +506,11 @@ class LLMEngine:
             executor_class = RayGPUExecutor
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
-                MultiprocessingGPUExecutor)
+                MultiprocessingDistributedExecutor)
             assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
                 "multiprocessing distributed executor backend does not "
                 "support VLLM_USE_RAY_SPMD_WORKER=1")
-            executor_class = MultiprocessingGPUExecutor
+            executor_class = MultiprocessingDistributedExecutor
         else:
             from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor

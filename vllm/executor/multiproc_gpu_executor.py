@@ -18,8 +18,8 @@ from vllm.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
-class MultiprocessingGPUExecutor(DistributedExecutorBase):
-    """Python multiprocessing-based multi-GPU executor"""
+class MultiprocessingDistributedExecutor(DistributedExecutorBase):
+    """Python multiprocessing-based distributed executor"""
 
     uses_ray: bool = False
 
