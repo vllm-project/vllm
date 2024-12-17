@@ -2731,7 +2731,7 @@ class CompilationConfig(BaseModel):
         """
         dump_graph_stages: List[str] = Field(default_factory=list)
         dump_graph_dir: Path = Field(default=Path("."))
-        enable_collective_fusion: bool = False #True
+        enable_collective_fusion: bool = True
         enable_dynamic_collective_fusion: bool = True
         enable_fusion: bool = True
         enable_reshape: bool = True
