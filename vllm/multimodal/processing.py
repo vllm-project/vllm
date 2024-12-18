@@ -240,25 +240,13 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
     def images(self) -> Sequence[ImageItem]:
         return self.get("image", [])
 
-    @images.setter
-    def images(self, value: list[ImageItem]) -> None:
-        self["image"] = value
-
     @property
     def videos(self) -> Sequence[VideoItem]:
         return self.get("video", [])
 
-    @videos.setter
-    def videos(self, value: list[VideoItem]) -> None:
-        self["video"] = value
-
     @property
     def audios(self) -> Sequence[AudioItem]:
         return self.get("audio", [])
-
-    @audios.setter
-    def audios(self, value: list[AudioItem]) -> None:
-        self["audio"] = value
 
     def get_image_size(self, item_idx: int) -> ImageSize:
         image = self.images[item_idx]
@@ -305,7 +293,7 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
 
             new_audios.append(audio if drop_sr else (audio, new_sr))
 
-        self.audios = new_audios
+        self["audio"] = new_audios
 
 
 class _TokenMatch(NamedTuple):
