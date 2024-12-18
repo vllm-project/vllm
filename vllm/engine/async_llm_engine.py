@@ -1072,24 +1072,13 @@ class AsyncLLMEngine(EngineClient):
             >>> # Process and return the final output
             >>> ...
         """
-<<<<<<< HEAD
-        async for output in await self.add_request(
-                request_id,
-                inputs,
-                sampling_params,
-                lora_request=lora_request,
-                spec_decode_params=spec_decode_params,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-        ):
-            yield LLMEngine.validate_output(output, RequestOutput)
-=======
         try:
             async for output in await self.add_request(
                     request_id,
                     prompt,
                     sampling_params,
                     lora_request=lora_request,
+                    spec_decode_params=spec_decode_params,
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
@@ -1098,7 +1087,6 @@ class AsyncLLMEngine(EngineClient):
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
->>>>>>> main
 
     async def encode(
         self,
