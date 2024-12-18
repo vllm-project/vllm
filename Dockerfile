@@ -47,13 +47,13 @@ WORKDIR /workspace
 # install build and runtime dependencies
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
-COPY requirements-cuda-arm64.txt requirements-cuda-arm64.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install -r requirements-cuda-arm64.txt; \
+        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" \
+        && python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torchvision==0.22.0.dev20241215";  \
     fi
 
 # cuda arch list used by torch
@@ -76,11 +76,6 @@ COPY requirements-build.txt requirements-build.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install -r requirements-cuda-arm64.txt; \
-    fi
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -187,12 +182,6 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        pip uninstall -y torch && \
-        python3 -m pip install -r requirements-cuda-arm64.txt; \
-    fi
 
 RUN --mount=type=cache,target=/root/.cache/pip \
 . /etc/environment && \

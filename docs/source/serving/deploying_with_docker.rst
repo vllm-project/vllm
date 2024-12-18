@@ -52,6 +52,10 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 .. code-block:: console
 
     # Example of building on Nvidia GH200 server. (Memory usage: ~12GB, Build time: ~1475s / ~25 min, Image size: 7.26GB)
+    # Note: You should download the torch and torchvision wheels from the PyTorch nightly site, and run the use_existing_torch.py script to skip the download of other torch wheels during the build.
+    $ python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124"
+    $ python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torchvision==0.22.0.dev20241215"
+    $ python3 use_existing_torch.py
     $ DOCKER_BUILDKIT=1 sudo docker build . \
       --target vllm-openai \
       -platform "linux/arm64" \
