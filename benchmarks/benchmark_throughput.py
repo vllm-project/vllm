@@ -78,7 +78,7 @@ def get_random_lora_request(
         args: argparse.Namespace
 ) -> Tuple[LoRARequest, Optional[AnyTokenizer]]:
     global lora_tokenizer_cache
-    lora_id = random.randint(0, args.max_loras)
+    lora_id = random.randint(1, args.max_loras)
     lora_request = LoRARequest(lora_name=str(lora_id),
                                lora_int_id=lora_id,
                                lora_path=lora_path_on_disk(args.lora_path))
@@ -230,7 +230,7 @@ async def run_vllm_async(
         # Add the requests to the engine.
         prompts: List[TextPrompt] = []
         sampling_params: List[SamplingParams] = []
-        lora_requests: List[LoRARequest] = []
+        lora_requests: List[Optional[LoRARequest]] = []
         for request in requests:
             prompts.append(
                 TextPrompt(prompt=request.prompt,
