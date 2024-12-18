@@ -319,6 +319,7 @@ class Detokenizer:
                 detokenizer_outputs.outputs.append(
                     DetokenizerOutput(
                         request_id=request_id,
+                        token_ids=request_output.outputs[0].token_ids,
                         text=request_output.outputs[0].text,
                         finished=request_output.finished,
                     )

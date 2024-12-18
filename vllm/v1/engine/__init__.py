@@ -43,6 +43,7 @@ class DetokenizerOutput(
 
     request_id: str
     text: str
+    token_ids: List[int]
     finished: bool
 
 
