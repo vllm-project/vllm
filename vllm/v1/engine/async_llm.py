@@ -320,20 +320,12 @@ class AsyncLLM(EngineClient):
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
-        # idx = 0
 
-        # import pyinstrument
-
-        # prof = pyinstrument.Profiler()
-        # prof.start()
-        # i = 0
         try:
             while True:
                 # 1) Pull outputs from the Detokenizer.
                 detokenizer_outputs = (
                     await self.detokenizer.get_output_async()).outputs
-                # logger.info(f"RECV: {idx}")
-                # idx+=1
 
                 for out in detokenizer_outputs:
                     if out.request_id not in self.rid_to_state:
@@ -352,10 +344,6 @@ class AsyncLLM(EngineClient):
                 # 4) Abort any requests due to client cancellations.
                 # TODO: send back to detokenizer if this fails.
                 # await self._process_cancellations()
-
-        # except KeyboardInterrupt:
-        #     prof.stop()
-        #     prof.write_html("output_handler.prof")
 
         except Exception as e:
             logger.error(e)

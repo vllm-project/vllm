@@ -148,7 +148,7 @@ class MPClient(EngineCoreClient):
         self.input_socket = make_zmq_socket(
             self.ctx,
             input_path,
-            zmq.constants.PUSH,
+            zmq.PUSH,
         )
 
         if output_path is None:

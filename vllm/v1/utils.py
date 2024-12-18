@@ -100,11 +100,11 @@ def make_zmq_socket(
     else:
         buf_size = -1
 
-    if type == zmq.constants.PULL:
+    if type == zmq.PULL:
         socket.setsockopt(zmq.RCVHWM, 0)
         socket.setsockopt(zmq.RCVBUF, buf_size)
         socket.connect(path)
-    elif type == zmq.constants.PUSH:
+    elif type == zmq.PUSH:
         socket.setsockopt(zmq.SNDHWM, 0)
         socket.setsockopt(zmq.SNDBUF, buf_size)
         socket.bind(path)
@@ -138,7 +138,7 @@ def wait_for_startup(
 ) -> None:
     """Wait until a background process is ready."""
 
-    with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
+    with zmq_socket_ctx(ready_path, zmq.PULL) as socket:
         try:
             while socket.poll(timeout=timeout_ms) == 0:
                 logger.debug("Waiting for background proc to startup.")

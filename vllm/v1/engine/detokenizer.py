@@ -317,7 +317,7 @@ class DetokenizerProc(Detokenizer):
         self.output_path = output_path
 
         # Send readiness signal.
-        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
+        with zmq_socket_ctx(ready_path, zmq.PUSH) as ready_socket:
             ready_socket.send_string(DetokenizerProc.READY_STR)
 
 
@@ -409,9 +409,9 @@ class DetokenizerProc(Detokenizer):
             decoder_out = msgspec.msgpack.Decoder(EngineCoreOutputs)
             encoder = msgspec.msgpack.Encoder()
 
-            with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.constants.PULL) as engine_core_outputs_socket, 
-                zmq_socket_ctx(self.input_path, zmq.constants.PULL) as input_socket,
-                zmq_socket_ctx(self.output_path, zmq.constants.PUSH) as output_socket):
+            with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as engine_core_outputs_socket, 
+                  zmq_socket_ctx(self.input_path, zmq.PULL) as input_socket,
+                  zmq_socket_ctx(self.output_path, zmq.PUSH) as output_socket):
 
                 # TODO: avoid poll by having both EngineCore
                 # and AsyncLLM send to the same socket (unclear why this 
@@ -461,7 +461,7 @@ class DetokenizerClient:
         self.input_socket = make_zmq_socket(
             self.ctx,
             input_path,
-            zmq.constants.PUSH,
+            zmq.PUSH,
         )
 
         # Get output (RequestOutput) from Detokenizer.
@@ -469,7 +469,7 @@ class DetokenizerClient:
         self.output_socket = make_zmq_socket(
             self.ctx,
             output_path,
-            zmq.constants.PULL,
+            zmq.PULL,
         )
 
         # Start Detokenizer in background process.

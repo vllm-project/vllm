@@ -166,7 +166,7 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
+        with zmq_socket_ctx(ready_path, zmq.PUSH) as ready_socket:
             ready_socket.send_string(EngineCoreProc.READY_STR)
 
     @staticmethod
@@ -305,7 +305,7 @@ class EngineCoreProc(EngineCore):
         decoder_add_req = PickleEncoder()
         decoder_abort_req = PickleEncoder()
 
-        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(input_path, zmq.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
@@ -333,7 +333,7 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
+        with zmq_socket_ctx(output_path, zmq.PUSH) as socket:
             idx = 0
             while True:
                 engine_core_outputs = self.output_queue.get()
