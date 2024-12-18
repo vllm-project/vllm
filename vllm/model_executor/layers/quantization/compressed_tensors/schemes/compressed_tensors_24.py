@@ -9,25 +9,13 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    convert_to_channelwise)
+    convert_to_channelwise, sparse_cutlass_supported)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensors24"]
-
-
-def sparse_cutlass_supported() -> bool:
-    # sparse cutlass is not supported on Rocm
-    if current_platform.is_rocm():
-        return False
-
-    capability_tuple = current_platform.get_device_capability()
-    capability = -1 if capability_tuple is None else capability_tuple.to_int()
-
-    return ops.cutlass_sparse_scaled_mm_supported(capability)
 
 
 class CompressedTensors24(CompressedTensorsScheme):
