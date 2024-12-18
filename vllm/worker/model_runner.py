@@ -622,11 +622,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             inter_data.lora_requests.add(seq_group_metadata.lora_request)
         query_len = inter_data.query_lens[seq_idx]
         inter_data.lora_index_mapping.append([lora_id] * query_len)
-        inter_data.lora_prompt_mapping.append(
-            [lora_id] *
-            (query_len if seq_group_metadata.sampling_params
-             and seq_group_metadata.sampling_params.prompt_logprobs is not None
-             else 1))
+        sampling_params = seq_group_metadata.sampling_params
+        if sampling_params and sampling_params.prompt_logprobs is not None:
+            inter_data.lora_prompt_mapping.append([lora_id] * query_len)
+        elif not self.chunked_prefill_enabled or seq_group_metadata.do_sample:
+            inter_data.lora_prompt_mapping.append([lora_id])
+        else:
+            inter_data.lora_prompt_mapping.append([])
 
     def _compute_prompt_adapter_input(
             self, inter_data: InterDataForSeqGroup,
@@ -800,7 +802,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                         max_encoder_seq_len):
             return -1
 
-        graph_batch_size = VllmConfig.get_graph_batch_size(batch_size)
+        graph_batch_size = self.runner.vllm_config.pad_for_cudagraph(
+            batch_size)
         assert graph_batch_size >= batch_size
         return graph_batch_size - batch_size
 
@@ -1012,8 +1015,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
-        self.max_batchsize_to_capture = VllmConfig.get_max_graph_batch_size(
-            self.scheduler_config.max_num_seqs)
+        self.max_batchsize_to_capture = \
+            self.vllm_config.compilation_config.max_capture_size
 
         self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
@@ -1160,7 +1163,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         if self.vllm_config.compilation_config.level ==\
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
-            backend = self.vllm_config.compilation_config.init_backend()
+            backend = self.vllm_config.compilation_config.init_backend(
+                self.vllm_config)
             self.model = torch.compile(
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,

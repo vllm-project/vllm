@@ -17,7 +17,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
-from vllm.lora.punica import PunicaWrapper
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -31,9 +30,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    pass
+    from vllm.lora.punica_wrapper import PunicaWrapperBase
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
@@ -115,9 +115,9 @@ class BaseLayerWithLoRA(nn.Module):
 
     def set_mapping(
         self,
-        punica_wrapper: PunicaWrapper,
+        punica_wrapper,
     ):
-        self.punica_wrapper: PunicaWrapper = punica_wrapper
+        self.punica_wrapper: PunicaWrapperBase = punica_wrapper
 
     @classmethod
     def can_replace_layer(
@@ -1069,6 +1069,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         ).index_select(0, indices_padded).nan_to_num_(nan=float("-inf"),
                                                       posinf=float("inf"),
                                                       neginf=float("-inf")))
+
+        # HPU needs special handling to prune out dummy samples.
+        if current_platform.is_hpu():
+            lora_logits = lora_logits[:logits.shape[0], :]
+
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits

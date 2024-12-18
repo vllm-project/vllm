@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import psutil
 import torch
@@ -38,6 +38,10 @@ class CpuPlatform(Platform):
         return psutil.virtual_memory().total
 
     @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return False
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
@@ -55,6 +59,9 @@ class CpuPlatform(Platform):
             model_config.enforce_eager = True
 
         cache_config = vllm_config.cache_config
+
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
@@ -94,3 +101,8 @@ class CpuPlatform(Platform):
                     "vllm.worker.cpu_worker.CPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        logger.warning("Pin memory is not supported on CPU.")
+        return False

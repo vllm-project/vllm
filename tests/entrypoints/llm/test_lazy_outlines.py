@@ -36,7 +36,7 @@ def run_lmfe(sample_regex):
     llm = LLM(model="facebook/opt-125m",
               enforce_eager=True,
               guided_decoding_backend="lm-format-enforcer",
-              gpu_memory_utilization=0.6)
+              gpu_memory_utilization=0.3)
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
     outputs = llm.generate(
         prompts=[

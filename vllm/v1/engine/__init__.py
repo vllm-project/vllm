@@ -35,7 +35,8 @@ class EngineCoreRequest:
     # always be tokenized?
     prompt: Optional[str]
     prompt_token_ids: List[int]
-    mm_inputs: Optional[List[MultiModalKwargs]]
+    mm_inputs: Optional[List[Optional[MultiModalKwargs]]]
+    mm_hashes: Optional[List[str]]
     mm_placeholders: Optional[MultiModalPlaceholderDict]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
@@ -43,10 +44,11 @@ class EngineCoreRequest:
     lora_request: Optional[LoRARequest]
 
 
-class EngineCoreOutput(msgspec.Struct,
-                       array_like=True,
-                       omit_defaults=True,
-                       gc=False):
+class EngineCoreOutput(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
 
     request_id: str
     new_token_ids: List[int]
@@ -55,10 +57,11 @@ class EngineCoreOutput(msgspec.Struct,
     stop_reason: Union[int, str, None] = None
 
 
-class EngineCoreOutputs(msgspec.Struct,
-                        array_like=True,
-                        omit_defaults=True,
-                        gc=False):
+class EngineCoreOutputs(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        gc=False):  # type: ignore[call-arg]
 
     #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout and using an int enum for finish/stop reason
@@ -80,3 +83,6 @@ class EngineCoreRequestType(enum.Enum):
     ADD = b'\x00'
     ABORT = b'\x01'
     PROFILE = b'\x02'
+
+
+EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, List[str]]

@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -41,12 +41,20 @@ class XPUPlatform(Platform):
         device_props = torch.xpu.get_device_properties(device_id)
         return device_props.total_memory
 
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return True
+
     @staticmethod
     def inference_mode():
         return torch.no_grad()
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
         # check and update model config
         model_config = vllm_config.model_config
         if model_config.dtype == torch.bfloat16:
@@ -74,3 +82,8 @@ class XPUPlatform(Platform):
             parallel_config.distributed_executor_backend = "ray"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
+
+    @classmethod
+    def is_pin_memory_available(cls):
+        logger.warning("Pin memory is not supported on XPU.")
+        return False
