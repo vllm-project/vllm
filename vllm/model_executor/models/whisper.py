@@ -37,14 +37,18 @@ from .utils import AutoWeightsLoader, make_layers, maybe_prefix
 logger = init_logger(__name__)
 
 
-def sinusoids(length: int, channels: int, max_timescale: float = 10000) -> torch.Tensor:
+def sinusoids(
+        length: int, channels: int, max_timescale: float = 10000
+) -> torch.Tensor:
     """Returns sinusoids for positional embedding"""
     if channels % 2 != 0:
         raise ValueError(
-            f"Number of channels has to be divisible by 2 for sinusoidal positional embeddings, got {channels} channels."
+            f"Number of channels has to be divisible by 2 for sinusoidal "
+            f"positional embeddings, got {channels} channels."
         )
     log_timescale_increment = math.log(max_timescale) / (channels // 2 - 1)
-    inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
+    inv_timescales = torch.exp(-log_timescale_increment *
+                               torch.arange(channels // 2))
     scaled_time = torch.arange(length).view(-1, 1) * inv_timescales.view(1, -1)
     return torch.cat([scaled_time.sin(), scaled_time.cos()], dim=1)
 
@@ -269,10 +273,12 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         if hidden_states.dtype == torch.float16 and (
-            torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
+            torch.isinf(hidden_states).any() or
+            torch.isnan(hidden_states).any()
         ):
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
+            hidden_states = torch.clamp(hidden_states, min=-clamp_value,
+                                        max=clamp_value)
 
         return hidden_states
 
@@ -366,11 +372,15 @@ class WhisperEncoder(nn.Module):
         self.num_mel_bins = config.num_mel_bins
         self.padding_idx = config.pad_token_id
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
+        self.embed_scale = (
+            math.sqrt(embed_dim) if config.scale_embedding else 1.0)
 
-        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
-        self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
+        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3,
+                               padding=1)
+        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2,
+                               padding=1)
+        self.embed_positions = nn.Embedding(self.max_source_positions,
+                                            embed_dim)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(vllm_config=vllm_config,
@@ -380,7 +390,8 @@ class WhisperEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(config.d_model)
 
         with torch.no_grad():
-            self.embed_positions.weight.copy_(sinusoids(*self.embed_positions.weight.shape))
+            self.embed_positions.weight.copy_(
+                sinusoids(*self.embed_positions.weight.shape))
     
     def forward(
         self,
@@ -417,10 +428,13 @@ class WhisperDecoder(nn.Module):
         self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_target_positions
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
+        self.embed_scale = (
+            math.sqrt(config.d_model) if config.scale_embedding else 1.0)
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model, self.padding_idx)
-        self.embed_positions = WhisperPositionalEmbedding(self.max_target_positions, config.d_model)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model,
+                                         self.padding_idx)
+        self.embed_positions = WhisperPositionalEmbedding(
+            self.max_target_positions, config.d_model)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.decoder_layers,
             lambda prefix: WhisperDecoderLayer(vllm_config=vllm_config,
@@ -463,7 +477,7 @@ class WhisperModel(nn.Module):
 
     def forward(
         self,
-        input_features: Optional[torch.FloatTensor],
+        input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]],
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
@@ -550,32 +564,16 @@ def get_whisper_processor(
     **kwargs,
 ) -> WhisperProcessor:
     """Gets an whisper processor for the given model name via HuggingFace."""
-    try:
-        processor: WhisperProcessor = WhisperProcessor.from_pretrained(
-            processor_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            **kwargs)
-    except ValueError as e:
-        # If the error pertains to the processor class not existing or not
-        # currently being imported, suggest using the --trust-remote-code flag.
-        # Unlike AutoTokenizer, AutoImageProcessor does not separate such errors
-        if not trust_remote_code:
-            err_msg = (
-                "Failed to load the whisper processor. If the whisper processor is "
-                "a custom processor not yet available in the HuggingFace "
-                "transformers library, consider setting "
-                "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
-
-    return processor
+    return WhisperProcessor.from_pretrained(
+        processor_name,
+        *args,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
+        **kwargs,
+    )
 
 
-def input_processor_for_whisper(ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
+def input_processor_for_whisper(ctx: InputContext, inputs):
     multi_modal_data = inputs["encoder"]["multi_modal_data"]
     if isinstance(multi_modal_data["audio"], list):
         assert len(multi_modal_data["audio"]) == 1
@@ -625,7 +623,8 @@ def input_mapper_for_whisper(
 @INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_whisper)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_whisper)
 @MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_whisper)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens("audio", get_max_whisper_audio_tokens)
+@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
+    "audio", get_max_whisper_audio_tokens)
 class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -634,6 +633,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
+        self.dtype = vllm_config.model_config.dtype
 
         self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
         self.unpadded_vocab_size = config.vocab_size
@@ -655,7 +655,10 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
+        input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]]
         input_features = kwargs.get("input_features")
+        if input_features is not None:
+            input_features = [feat.to(self.dtype) for feat in input_features]
         decoder_outputs = self.model(
             input_features=input_features,
             input_ids=input_ids,

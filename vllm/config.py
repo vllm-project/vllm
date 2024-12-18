@@ -1961,6 +1961,7 @@ def _get_and_verify_max_len(
         # Command-R
         "model_max_length",
         # Others
+        "max_length",
         "max_sequence_length",
         "max_seq_length",
         "seq_len",
