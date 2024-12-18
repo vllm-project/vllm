@@ -17,7 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available, print_warning_once
+from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
@@ -621,7 +621,7 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
             if is_flash_attn_2_available():
                 selected_backend = _Backend.FLASH_ATTN
             else:
-                print_warning_once(
+                logger.warning_once(
                     "Current `vllm-flash-attn` has a bug inside vision module, "
                     "so we use xformers backend instead. You can run "
                     "`pip install flash-attn` to use flash-attention backend.")

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import sys
-from functools import partial
+from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
@@ -49,6 +49,35 @@ DEFAULT_LOGGING_CONFIG = {
 }
 
 
+@lru_cache
+def _print_info_once(logger: Logger, msg: str) -> None:
+    # Set the stacklevel to 4 to print the original caller's line info
+    logger.info(msg, stacklevel=4)
+
+
+@lru_cache
+def _print_warning_once(logger: Logger, msg: str) -> None:
+    # Set the stacklevel to 4 to print the original caller's line info
+    logger.warning(msg, stacklevel=4)
+
+
+class VllmLogger(Logger):
+
+    def info_once(self, msg: str) -> None:
+        """
+        As :meth:`info`, but subsequent calls with the same message
+        are silently dropped.
+        """
+        _print_info_once(self, msg)
+
+    def warning_once(self, msg: str) -> None:
+        """
+        As :meth:`warning`, but subsequent calls with the same message
+        are silently dropped.
+        """
+        _print_warning_once(self, msg)
+
+
 def _configure_vllm_root_logger() -> None:
     logging_config: Dict = {}
 
@@ -83,13 +112,17 @@ def _configure_vllm_root_logger() -> None:
     if logging_config:
         dictConfig(logging_config)
 
+    logging.setLoggerClass(VllmLogger)
 
-def init_logger(name: str) -> Logger:
+
+def init_logger(name: str) -> VllmLogger:
     """The main purpose of this function is to ensure that loggers are
     retrieved in such a way that we can be sure the root vllm logger has
     already been configured."""
 
-    return logging.getLogger(name)
+    logger = logging.getLogger(name)
+    assert isinstance(logger, VllmLogger)
+    return logger
 
 
 # The root logger is initialized when the module is imported.
