@@ -146,6 +146,8 @@ class InputProcessingContext(InputContext):
             base_kwargs,
             inference_kwargs,
             hf_processor,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
         )
 
 
