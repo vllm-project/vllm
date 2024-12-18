@@ -58,7 +58,6 @@ class GraniteToolParser(ToolParser):
                     f"Expected dict or list, got {type(raw_function_calls)}")
 
             logger.debug("Extracted %d tool calls", len(raw_function_calls))
-            print(raw_function_calls)
             tool_calls = [
                 ToolCall(
                     type="function",
