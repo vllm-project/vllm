@@ -10,14 +10,14 @@ before returning them.
 
 ```{note}
 We currently support pooling models primarily as a matter of convenience.
-As shown in the {ref}`Compatibility Matrix <compatibility_matrix>`, most vLLM features are not applicable to
+As shown in the [Compatibility Matrix](#compatibility-matrix), most vLLM features are not applicable to
 pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 ```
 
 ## Offline Inference
 
 The {class}`~vllm.LLM` class provides various methods for offline inference.
-See {ref}`Engine Arguments <engine_args>` for a list of options when initializing the model.
+See [Engine Arguments](#engine-args) for a list of options when initializing the model.
 
 For pooling models, we support the following {code}`task` options:
 
@@ -106,12 +106,12 @@ A code example can be found in [examples/offline_inference_scoring.py](https://g
 
 ## Online Inference
 
-Our [OpenAI Compatible Server](../serving/openai_compatible_server) can be used for online inference.
+Our [OpenAI Compatible Server](../serving/openai_compatible_server.md) can be used for online inference.
 Please click on the above link for more details on how to launch the server.
 
 ### Embeddings API
 
-Our Embeddings API is similar to `LLM.embed`, accepting both text and {ref}`multi-modal inputs <multimodal_inputs>`.
+Our Embeddings API is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs).
 
 The text-only API is compatible with [OpenAI Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
 so that you can use OpenAI client to interact with it.
@@ -119,7 +119,7 @@ A code example can be found in [examples/openai_embedding_client.py](https://git
 
 The multi-modal API is an extension of the [OpenAI Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
 that incorporates [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat),
-so it is not part of the OpenAI standard. Please see {ref}`this page <multimodal_inputs>` for more details on how to use it.
+so it is not part of the OpenAI standard. Please see [](#multimodal-inputs) for more details on how to use it.
 
 ### Score API
 
