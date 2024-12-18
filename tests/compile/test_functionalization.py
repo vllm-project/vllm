@@ -3,6 +3,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
+from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.fusion import (FUSED_OPS, FusionPass, QuantKey,
                                      kFp8DynamicTokenSym, kFp8StaticTensorSym)
@@ -15,18 +16,17 @@ from .backend import TestBackend
 OPS_IN_MODEL = [
     torch.ops._C.rotary_embedding.default,
     torch.ops._C.fused_add_rms_norm.default,
-    torch.ops._C.silu_and_mul.default,
 ]
 
 RMS_OP = torch.ops._C.rms_norm.default
 
-RMS_QUANT_OPS = {
+SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+
+SILU_MUL_QUANT_OPS = {
     "static_fp8": [
-        torch.ops._C.rms_norm_static_fp8_quant.default,
-        torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
+        torch.ops._C.silu_and_mul_quant.default,
     ],
 }
-
 prompts = [
     "Hello, my name is",
     "The president of the United States is",
@@ -49,10 +49,17 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
 
     config = CompilationConfig.PassConfig(enable_fusion=do_fusion,
                                           enable_reshape=True)
+    # compilation_config = CompilationConfig(level=3,
+    #                                        custom_ops=["+silu_and_mul"])
     reshape_pass = RedundantReshapesPass(config)
     fusion_pass = FusionPass.instance(config)
+    act_quant_fusion_pass = ActivationQuantFusionPass.instance(config)
 
-    passes = [reshape_pass, fusion_pass] if do_fusion else [reshape_pass]
+    passes = [
+        reshape_pass,
+        fusion_pass,
+        act_quant_fusion_pass,
+    ] if do_fusion else [reshape_pass]
     func_pass = FixFunctionalizationPass(config)
     backend_func = TestBackend(*passes, func_pass)
     backend_no_func = TestBackend(*passes)
@@ -75,8 +82,12 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
     model_runner.model = torch.compile(orig_model,
                                        fullgraph=True,
                                        backend=backend_no_func)
+
     gen_no_func = llm.generate(prompts, sampling_params)
 
+    # print(
+    #     backend_func.graph_pre_pass.python_code(root_module="self",
+    #                                             verbose=True).src)
     for output_func, output_no_func in zip(gen_func, gen_no_func):
         assert output_func.outputs[0].text == output_no_func.outputs[0].text
 
@@ -84,7 +95,12 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
     # and replaced by fused quantized ops in RMS_QUANT_OPS.
     rms_ops = [FUSED_OPS[(quant_key, True)], FUSED_OPS[(quant_key, False)]
                ] if do_fusion else [RMS_OP]
-    ops = OPS_IN_MODEL + rms_ops
+    silu_mul_ops = SILU_MUL_QUANT_OPS[
+        "static_fp8"] if do_fusion and quant_key == kFp8StaticTensorSym else [
+            SILU_MUL_OP
+        ]
+
+    ops = OPS_IN_MODEL + rms_ops + silu_mul_ops
 
     for op in ops:
         find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
