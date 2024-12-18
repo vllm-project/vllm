@@ -58,7 +58,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     $ python3 use_existing_torch.py
     $ DOCKER_BUILDKIT=1 sudo docker build . \
       --target vllm-openai \
-      -platform "linux/arm64" \
+      --platform "linux/arm64" \
       -t vllm/vllm-gh200-openai:latest \
       --build-arg max_jobs=66 \
       --build-arg nvcc_threads=2 \
