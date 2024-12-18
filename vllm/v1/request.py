@@ -1,5 +1,5 @@
 import enum
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -11,6 +11,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.utils import ConstantList
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_utils import BlockHashType
 
 
 class Request:
@@ -78,6 +81,7 @@ class Request:
                 dtype=np.int32))
         self.num_computed_tokens = 0
 
+        # Multi-modal input metadata.
         mm_positions = self.inputs.multi_modal_placeholders
         if mm_positions:
             # FIXME(woosuk): Support other modalities.
@@ -89,6 +93,12 @@ class Request:
         if self.inputs.multi_modal_inputs:
             self.mm_inputs = self.inputs.multi_modal_inputs
 
+        self.mm_hashes: List[str] = self.inputs.multi_modal_hashes
+
+        # Cache the computed kv block hashes of the request to avoid
+        # recomputing.
+        self._kv_block_hashes: List[BlockHashType] = []
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(
@@ -98,6 +108,7 @@ class Request:
                 prompt=request.prompt,
                 multi_modal_data=None,
                 multi_modal_inputs=request.mm_inputs,
+                multi_modal_hashes=request.mm_hashes,
                 multi_modal_placeholders=request.mm_placeholders,
                 mm_processor_kwargs=None,
             ),
@@ -153,6 +164,17 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
+
+    @property
+    def kv_block_hashes(self) -> ConstantList["BlockHashType"]:
+        # Prevent directly appending to the kv_block_hashes.
+        return ConstantList(self._kv_block_hashes)
+
+    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
+        self._kv_block_hashes = value
+
+    def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
+        self._kv_block_hashes.append(block_hash)
 
 
 class RequestStatus(enum.IntEnum):
