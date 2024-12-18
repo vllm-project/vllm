@@ -415,8 +415,9 @@ class PartialPrefillMetadata:
             waiting_partial_prefills += 1
 
         return PartialPrefillMetadata(
-            partial_prefills + waiting_partial_prefills,
-            long_partial_prefills,
+            partial_prefills=min(partial_prefills + waiting_partial_prefills,
+                                 scheduler_config.max_num_partial_prefills),
+            long_partial_prefills=long_partial_prefills,
             scheduler_config=scheduler_config,
         )
 
