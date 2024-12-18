@@ -51,7 +51,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
 .. code-block:: console
 
-    # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 7.26GB)
+    # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 3.23GB)
     $ python3 use_existing_torch.py
     $ DOCKER_BUILDKIT=1 sudo docker build . \
       --target vllm-openai \
