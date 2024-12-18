@@ -13,7 +13,7 @@ einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests
 peft
-ray[adag]==2.35
+ray[adag]==2.40.0
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 timm # required for internvl test
@@ -25,7 +25,7 @@ datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.4 # required for model evaluation test
 
 # quantization
-bitsandbytes>=0.44.0
+bitsandbytes>=0.45.0
 buildkite-test-collector==0.1.9
 
 numpy < 2.0.0

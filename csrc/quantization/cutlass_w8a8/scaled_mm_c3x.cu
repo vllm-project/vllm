@@ -24,7 +24,8 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-#include "common.hpp"
+#include "core/math.hpp"
+#include "cutlass_extensions/common.hpp"
 // clang-format on
 
 using namespace cute;

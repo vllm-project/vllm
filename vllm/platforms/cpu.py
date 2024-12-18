@@ -60,6 +60,9 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
         if kv_cache_space >= 0:
@@ -98,3 +101,8 @@ class CpuPlatform(Platform):
                     "vllm.worker.cpu_worker.CPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        logger.warning("Pin memory is not supported on CPU.")
+        return False

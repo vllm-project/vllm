@@ -22,7 +22,7 @@ inference:
       url: http://127.0.0.1:8000
 ```
 
-Please refer to [this guide](https://github.com/meta-llama/llama-stack/blob/main/docs/source/getting_started/distributions/self_hosted_distro/remote_vllm.md) for more details on this remote vLLM provider.
+Please refer to [this guide](https://llama-stack.readthedocs.io/en/latest/distributions/self_hosted_distro/remote-vllm.html) for more details on this remote vLLM provider.
 
 ## Inference via Embedded vLLM
 

@@ -113,6 +113,7 @@ usage/faq
 usage/engine_args
 usage/env_vars
 usage/usage_stats
+usage/disagg_prefill
 ```
 
 ```{toctree}
@@ -178,6 +179,7 @@ design/plugin_system
 design/input_processing/model_inputs_index
 design/kernel/paged_attention
 design/multimodal/multimodal_index
+design/multiprocessing
 ```
 
 % For Developers: contributing to the vLLM project

@@ -72,7 +72,7 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     image_token_id = mm_encoder.special_ids.img
 
-    mm_config = ctx.model_config.multimodal_config
+    mm_config = ctx.get_mm_config()
     num_images = mm_config.limit_per_prompt.get("image", 1)
 
     # dummy size
@@ -244,6 +244,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         if len(split_indices) <= 1:
             # Do not split, return as tensor of shape [1, fs, hs]
             return image_embeds.unsqueeze(0)
+
+        # If the last split index is the last index in image_tokens, we
+        # ignore it to avoid empty split tensor
+        if split_indices[-1] == len(image_tokens):
+            split_indices = split_indices[:-1]
 
         image_embeds = image_embeds.tensor_split(split_indices.cpu())
         return image_embeds

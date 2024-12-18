@@ -309,7 +309,95 @@ $ export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
 
 ### Audio
 
-Instead of {code}`image_url`, you can pass an audio file via {code}`audio_url`.
+Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
+Here is a simple example using Ultravox-v0.3.
+
+First, launch the OpenAI-compatible server:
+
+```bash
+vllm serve fixie-ai/ultravox-v0_3
+```
+
+Then, you can use the OpenAI client as follows:
+
+```python
+import base64
+import requests
+from openai import OpenAI
+from vllm.assets.audio import AudioAsset
+
+def encode_base64_content_from_url(content_url: str) -> str:
+    """Encode a content retrieved from a remote url to base64 format."""
+
+    with requests.get(content_url) as response:
+        response.raise_for_status()
+        result = base64.b64encode(response.content).decode('utf-8')
+
+    return result
+
+openai_api_key = "EMPTY"
+openai_api_base = "http://localhost:8000/v1"
+
+client = OpenAI(
+    api_key=openai_api_key,
+    base_url=openai_api_base,
+)
+
+# Any format supported by librosa is supported
+audio_url = AudioAsset("winning_call").url
+audio_base64 = encode_base64_content_from_url(audio_url)
+
+chat_completion_from_base64 = client.chat.completions.create(
+    messages=[{
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "What's in this audio?"
+            },
+            {
+                "type": "input_audio",
+                "input_audio": {
+                    "data": audio_base64,
+                    "format": "wav"
+                },
+            },
+        ],
+    }],
+    model=model,
+    max_completion_tokens=64,
+)
+
+result = chat_completion_from_base64.choices[0].message.content
+print("Chat completion output from input audio:", result)
+```
+
+Alternatively, you can pass {code}`audio_url`, which is the audio counterpart of {code}`image_url` for image input:
+
+```python
+chat_completion_from_url = client.chat.completions.create(
+    messages=[{
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "What's in this audio?"
+            },
+            {
+                "type": "audio_url",
+                "audio_url": {
+                    "url": audio_url
+                },
+            },
+        ],
+    }],
+    model=model,
+    max_completion_tokens=64,
+)
+
+result = chat_completion_from_url.choices[0].message.content
+print("Chat completion output from audio url:", result)
+```
 
 A full code example can be found in [examples/openai_chat_completion_client_for_multimodal.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client_for_multimodal.py).
 
@@ -338,12 +426,12 @@ Refer to the examples below for illustration.
 Here is an end-to-end example using VLM2Vec. To serve the model:
 
 ```bash
-vllm serve TIGER-Lab/VLM2Vec-Full --task embedding \
+vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
   --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
 ```
 
 ```{important}
-Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embedding`
+Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
 to run this model in embedding mode instead of text generation mode.
 
 The custom chat template is completely different from the original one for this model,
@@ -379,12 +467,12 @@ print("Embedding output:", response_json["data"][0]["embedding"])
 Below is another example, this time using the `MrLight/dse-qwen2-2b-mrl-v1` model.
 
 ```bash
-vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embedding \
+vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
   --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
 ```
 
 ```{important}
-Like with VLM2Vec, we have to explicitly pass `--task embedding`.
+Like with VLM2Vec, we have to explicitly pass `--task embed`.
 
 Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
 by [this custom chat template](https://github.com/vllm-project/vllm/blob/main/examples/template_dse_qwen2_vl.jinja).

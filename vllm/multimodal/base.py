@@ -99,7 +99,7 @@ class MultiModalPlugin(ABC):
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._input_mappers:
+            if self._input_mappers.contains(model_cls, strict=True):
                 logger.warning(
                     "Model class %s already has an input mapper "
                     "registered to %s. It is overwritten by the new one.",
@@ -194,7 +194,7 @@ class MultiModalPlugin(ABC):
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._max_mm_tokens:
+            if self._max_mm_tokens.contains(model_cls, strict=True):
                 logger.warning(
                     "Model class %s already calculates maximum number of "
                     "tokens in %s. It is overwritten by the new one.",

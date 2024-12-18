@@ -132,7 +132,7 @@ def get_tokenizer(
     if is_from_mistral_org and tokenizer_mode != "mistral":
         warnings.warn(
             'It is strongly recommended to run mistral models with '
-            '`--tokenizer_mode "mistral"` to ensure correct '
+            '`--tokenizer-mode "mistral"` to ensure correct '
             'encoding and decoding.',
             FutureWarning,
             stacklevel=2)
