@@ -130,6 +130,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
 
         self.num_gpu_blocks = gpu_block_allocator.get_num_total_blocks()
         self.num_cpu_blocks = cpu_block_allocator.get_num_total_blocks()
+        self.touched_blocks = set()
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
@@ -238,9 +239,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 Device.CPU].block_is_computed(cpu_block_id)
             if cpu_block_computed:
                 # CPU cache hit
-                # mark the GPU block as computed
-                self._allocators[Device.GPU].mark_blocks_as_computed(
-                    [block_id])
+                # mark the GPU block as computed later
+                self.touched_blocks.add(block_id)
                 # copy the CPU cache to GPU
                 self._swap_mapping[cpu_block_id] = block_id
                 # and don't free this block until `get_and_reset_swap` is called
@@ -316,7 +316,6 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
 
         new_uncached_blocks: Deque[Block] = deque()
 
-        # XXX(lixiaobai09): may slow for each request to iterate over all?
         while self._uncached_blocks:
             block = self._uncached_blocks.pop()
             block_id = block.block_id
@@ -342,9 +341,6 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 )
                 assert cpu_block.block_id is not None
                 self._allocated_cpu_blocks.append(cpu_block)
-
-                # mark CPU block as computed
-                cpu_allocator.mark_blocks_as_computed([cpu_block.block_id])
 
                 # copy the GPU block to CPU
                 assert cpu_block.block_id is not None
@@ -392,9 +388,12 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             cpu_block = self._allocated_cpu_blocks.pop()
             assert cpu_block.block_id is not None
             # update the access time
+            cpu_allocator.mark_blocks_as_computed([cpu_block.block_id])
             cpu_allocator.mark_blocks_as_accessed([cpu_block.block_id], now)
             # free the block
             cpu_allocator.free(cpu_block)
+        self._allocators[Device.GPU].mark_blocks_as_computed(
+            list(self.touched_blocks))
 
     def will_swap_in_cpu_blocks(self):
         """Check if there are CPU blocks that will be swapped in

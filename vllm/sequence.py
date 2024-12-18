@@ -58,13 +58,14 @@ class SequenceStatus(enum.IntEnum):
     """Status of a sequence."""
     WAITING = 0
     RUNNING = 1
-    SWAPPED = 2
+    PREFIX_CACHED = 2
+    SWAPPED = 3
     # Note: anything after SWAPPED (2) will be considered
     # as a finished status.
-    FINISHED_STOPPED = 3
-    FINISHED_LENGTH_CAPPED = 4
-    FINISHED_ABORTED = 5
-    FINISHED_IGNORED = 6
+    FINISHED_STOPPED = 4
+    FINISHED_LENGTH_CAPPED = 5
+    FINISHED_ABORTED = 6
+    FINISHED_IGNORED = 7
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:

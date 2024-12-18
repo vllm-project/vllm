@@ -144,3 +144,7 @@ class BlockSpaceManager(ABC):
             source to destination block IDs.
         """
         pass
+
+    @abstractmethod
+    def need_to_swap_in(self, seq_group: SequenceGroup) -> bool:
+        return False

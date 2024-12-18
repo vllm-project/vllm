@@ -117,6 +117,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.blocks_to_swap_of_sequence_id: List[
             Tuple[int, Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]]] = \
                 []
+        self.seq_ids_to_swap_out: set[int] = set()
+        self.seq_ids_to_swap_in: set[int] = set()
 
     def can_allocate(self,
                      seq_group: SequenceGroup,
@@ -184,6 +186,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
             self.blocks_to_swap_of_sequence_id.append(
                 (seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
+            if (len(blocks_to_swap_out) > 0):
+                self.seq_ids_to_swap_out.add(seq.seq_id)
+            if (len(blocks_to_swap_in) > 0):
+                self.seq_ids_to_swap_in.add(seq.seq_id)
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
@@ -278,6 +284,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
                 self.blocks_to_swap_of_sequence_id.append(
                     (seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
+                if (len(blocks_to_swap_out) > 0):
+                    self.seq_ids_to_swap_out.add(seq.seq_id)
+                if (len(blocks_to_swap_in) > 0):
+                    self.seq_ids_to_swap_in.add(seq.seq_id)
         return new_cows
 
     def free(self, seq: Sequence) -> None:
@@ -566,4 +576,20 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         ret = self.blocks_to_swap_of_sequence_id
         self.block_allocator.access_cpu_hit_blocks(now)
         self.blocks_to_swap_of_sequence_id = []
+        self.seq_ids_to_swap_out.clear()
+        self.seq_ids_to_swap_in.clear()
+        return ret
+
+    def need_to_swap_in(self, seq_group: SequenceGroup) -> bool:
+        if (len(seq_group.get_seqs(status=SequenceStatus.WAITING)) == 0):
+            return False
+        ret = False
+        seq_id = seq_group.get_seqs(status=SequenceStatus.WAITING)[0].seq_id
+        if seq_id in self.seq_ids_to_swap_in:
+            ret = True
+        if seq_group.is_encoder_decoder():
+            encoder_seq = seq_group.get_encoder_seq()
+            assert encoder_seq is not None
+            if encoder_seq.seq_id in self.seq_ids_to_swap_in:
+                ret = True
         return ret

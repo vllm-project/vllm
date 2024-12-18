@@ -935,17 +935,26 @@ class Scheduler:
             seq_group = waiting_queue[0]
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
-            assert len(waiting_seqs) == 1, (
+            prefix_cached_seqs = \
+                seq_group.get_seqs(status=SequenceStatus.PREFIX_CACHED)
+            assert len(waiting_seqs) + len(prefix_cached_seqs) == 1, (
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
+            seq_group_status = SequenceStatus.WAITING
+            if (len(prefix_cached_seqs) == 1):
+                seq_group_status = SequenceStatus.PREFIX_CACHED
             num_new_tokens_uncached, num_new_tokens_cached = (
                 self._get_num_new_uncached_and_cached_tokens(
-                    seq_group, SequenceStatus.WAITING, enable_chunking,
+                    seq_group, seq_group_status, enable_chunking,
                     budget))
             num_new_tokens = num_new_tokens_uncached + num_new_tokens_cached
 
             if not enable_chunking:
-                num_prompt_tokens = waiting_seqs[0].get_len()
+                num_prompt_tokens = 0
+                if (len(prefix_cached_seqs) == 1):
+                    num_prompt_tokens += prefix_cached_seqs[0].get_len()
+                if (len(waiting_seqs) == 1):
+                    num_prompt_tokens += waiting_seqs[0].get_len()
                 assert num_new_tokens == num_prompt_tokens
 
             prompt_limit = self._get_prompt_limit(seq_group)
@@ -955,6 +964,7 @@ class Scheduler:
                     " and exceeds limit of %d", num_new_tokens, prompt_limit)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
+                assert(len(prefix_cached_seqs) == 0)
                 ignored_seq_groups.append(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -965,8 +975,10 @@ class Scheduler:
                     True, enable_chunking)
 
             # If the sequence group cannot be allocated, stop.
-            can_allocate = self.block_manager.can_allocate(
-                seq_group, num_lookahead_slots=num_lookahead_slots)
+            can_allocate = AllocStatus.OK
+            if (len(waiting_seqs) == 1):
+                can_allocate = self.block_manager.can_allocate(
+                    seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:
@@ -1011,8 +1023,18 @@ class Scheduler:
             # Can schedule this request.
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
+            if (len(waiting_seqs) == 1):
+                self._allocate(seq_group)
+
+            if self.block_manager.need_to_swap_in(seq_group):
+                seq_group.get_seqs(status=SequenceStatus.WAITING)[0].status = \
+                    SequenceStatus.PREFIX_CACHED
+                leftover_waiting_sequences.appendleft(seq_group)
+                waiting_queue.popleft()
+                continue
+
             waiting_queue.popleft()
-            self._allocate_and_set_running(seq_group)
+            self._set_running(seq_group)
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
@@ -1539,9 +1561,13 @@ class Scheduler:
 
             self._async_stopped.clear()
 
-    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
+    def _allocate(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
+
+    def _set_running(self, seq_group: SequenceGroup) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
+            seq.status = SequenceStatus.RUNNING
+        for seq in seq_group.get_seqs(status=SequenceStatus.PREFIX_CACHED):
             seq.status = SequenceStatus.RUNNING
 
     def _append_slots(self,

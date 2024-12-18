@@ -97,3 +97,6 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
             List[Tuple[int,
                        Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]]]:
         return [(-1, ([], []))]
+
+    def need_to_swap_in(self, seq_group: SequenceGroup) -> bool:
+        return False
