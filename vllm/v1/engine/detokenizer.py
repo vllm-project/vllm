@@ -14,7 +14,8 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
-from vllm.v1.engine import (DetokenizerRequest, DetokenizerRequestType,
+from vllm.v1.engine import (DetokenizerRequest, DetokenizerOutputs,
+                            DetokenizerOutput,
                             EngineCoreOutput, EngineCoreOutputs, 
                             BackgroundProcHandle,)
 from vllm.v1.utils import (make_zmq_socket, zmq_socket_ctx, 
@@ -251,10 +252,11 @@ class Detokenizer:
 
     def step(
         self, encore_core_outputs: List[EngineCoreOutput]
-    ) -> Tuple[List[RequestOutput], List[str]]:
+    ) -> DetokenizerOutputs:
         """Update state and request the RequestOutputs to the LLMEngine."""
 
-        request_outputs: List[RequestOutput] = []
+        # request_outputs: List[RequestOutput] = []
+        detokenizer_outputs = DetokenizerOutputs(outputs=[])
         requests_to_abort: List[str] = []
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
@@ -269,22 +271,30 @@ class Detokenizer:
                 finish_reason=engine_core_output.finish_reason,
                 stop_reason=engine_core_output.stop_reason,
             )
-
+            
             if request_output is not None:
-                # Add to RequestOutputs list.
-                request_outputs.append(request_output)
+                detokenizer_outputs.outputs.append(
+                    DetokenizerOutput(
+                        request_id=request_id,
+                        text=request_output.outputs[0].text,
+                        finished=request_output.finished,
+                    )
+                )   
+                # # Add to RequestOutputs list.
+                # request_outputs.append(request_output)
 
-                # Free completed requests.
-                if request_output.finished:
-                    self.request_states.pop(request_id)
-                    # If Request finished but EngineCore not finished,
-                    # this was caused by a stop string + we need to send
-                    # an abort signal to the EngineCore.
-                    if not engine_core_output.finished:
-                        requests_to_abort.append(request_id)
+                # # Free completed requests.
+                # if request_output.finished:
+                #     self.request_states.pop(request_id)
+                #     # If Request finished but EngineCore not finished,
+                #     # this was caused by a stop string + we need to send
+                #     # an abort signal to the EngineCore.
+                #     if not engine_core_output.finished:
+                #         requests_to_abort.append(request_id)
 
         # Return to EngineClient.
-        return request_outputs, requests_to_abort
+        # return request_outputs, requests_to_abort
+        return detokenizer_outputs, []
 
 class DetokenizerProc(Detokenizer):
     """ZMQ-wrapper for running Detokenizer in background process."""
@@ -397,6 +407,7 @@ class DetokenizerProc(Detokenizer):
 
             decoder_new = msgspec.msgpack.Decoder(DetokenizerRequest)
             decoder_out = msgspec.msgpack.Decoder(EngineCoreOutputs)
+            encoder = msgspec.msgpack.Encoder()
 
             with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.constants.PULL) as engine_core_outputs_socket, 
                 zmq_socket_ctx(self.input_path, zmq.constants.PULL) as input_socket,
@@ -423,14 +434,8 @@ class DetokenizerProc(Detokenizer):
                     if engine_core_outputs_socket in socks:
                         (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
-                        outputs = self.step(engine_core_outputs)
-                        msg = pickle.dumps(outputs, protocol=pickle.HIGHEST_PROTOCOL)
-                        # now = time.perf_counter()
-                        # if now - last_log > 0.1:
-                        #     logger.info("Detok: Sending")
-                        #     last_log = now
-                        # logger.info(f"SEND: {idx}: {len(engine_core_outputs)}")
-                        # idx += 1
+                        detokenizer_outputs, _ = self.step(engine_core_outputs)
+                        msg = encoder.encode(detokenizer_outputs)
                         output_socket.send_multipart((msg, ), copy=False)                        
         
         except Exception as e:
@@ -445,7 +450,8 @@ class DetokenizerClient:
 
         # Serialization setup.
         self.encoder = msgspec.msgpack.Encoder()
-        self.decoder = PickleEncoder()
+        # self.decoder = PickleEncoder()
+        self.decoder = msgspec.msgpack.Decoder(DetokenizerOutputs)
         
         # ZMQ setup.
         self.ctx = zmq.asyncio.Context(io_threads=2)
@@ -489,13 +495,8 @@ class DetokenizerClient:
         msg = (self.encoder.encode(request), )
         await self.input_socket.send_multipart(msg, copy=False)
 
-    async def get_output_async(self) -> Tuple[List[RequestOutput], List[str]]:
+    async def get_output_async(self) -> DetokenizerOutputs:
         """Get RequestOutputs, RequestsToAbort from Detokenizer."""
 
         (frame, ) = await self.output_socket.recv_multipart(copy=False)
-        start = time.perf_counter()
-        out = self.decoder.decode(frame.buffer)
-        end = time.perf_counter()
-        if end - start > 0.1:
-            logger.info(f"{end - start}")
-        return out
+        return self.decoder.decode(frame.buffer)

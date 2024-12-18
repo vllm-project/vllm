@@ -243,12 +243,8 @@ class AsyncLLM(EngineClient):
         # if self.output_handler is None:
         if self.to_create_loop:
             loop = asyncio.get_event_loop()
-            print(f"{loop=}")
             loop.create_task(self._run_output_handler())
             self.to_create_loop = False
-            # self.output_handler = asyncio.create_task(
-            #     self._run_output_handler())
-            
 
         state = await self.add_request(
             request_id,
@@ -264,7 +260,7 @@ class AsyncLLM(EngineClient):
             try:
                 await asyncio.wait_for(state.event.wait(),
                                        timeout=WAITING_TIMEOUT_MS)
-                logger.info(f"{request_id} woke up.")
+                # logger.info(f"{request_id} woke up.")
 
                 # NOTE(rob): out_list can have more than one item. However,
                 # in the streaming case, we use RequestOutputKind.CUMULATIVE,
@@ -322,20 +318,6 @@ class AsyncLLM(EngineClient):
         # Remove from EngineCore.
         await self.engine_core.abort_requests_async(reqs_to_abort)
 
-    def _process_request_outputs(self, request_outputs: List[RequestOutput]):
-        """Process outputs by putting them into per-request AsyncStreams."""
-
-        for request_output in request_outputs:
-            if request_output.request_id not in self.rid_to_state:
-                raise RuntimeError(f"{request_output.request_id} "
-                                    "not in RequestStates")
-
-            # Update the RequestState and alert generate() that there
-            # is a RequestOutput ready to return to the user.
-            state = self.rid_to_state[request_output.request_id]
-            state.out_list.append(request_output)
-            state.event.set()
-
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
         # idx = 0
@@ -348,14 +330,21 @@ class AsyncLLM(EngineClient):
         try:
             while True:
                 # 1) Pull outputs from the Detokenizer.
-                request_outputs, reqs_to_abort = (
-                    await self.detokenizer.get_output_async())
-                logger.info("AsyncLLM")
+                detokenizer_outputs = (
+                    await self.detokenizer.get_output_async()).outputs
                 # logger.info(f"RECV: {idx}")
                 # idx+=1
 
-                # 2) Put the RequestOutputs into the per-request AsyncStreams.
-                self._process_request_outputs(request_outputs)
+                for out in detokenizer_outputs:
+                    if out.request_id not in self.rid_to_state:
+                        raise RuntimeError(f"{out.request_id} "
+                                            "not in RequestStates")
+
+                    # Update the RequestState and alert generate() that there
+                    # is a RequestOutput ready to return to the user.
+                    state = self.rid_to_state[out.request_id]
+                    state.out_list.append(out)
+                    state.event.set()
 
                 # 3) Abort any requests that finished due to stop strings.
                 # await self.engine_core.abort_requests_async(reqs_to_abort)
