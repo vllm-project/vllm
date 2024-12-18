@@ -5,13 +5,15 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Dict, List, Tuple
+from typing import List
 
 import torch
 import triton
 import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
+
+from .utils import _get_lora_b_ptr
 
 
 @triton.jit
@@ -132,64 +134,6 @@ def _sgmv_expand_kernel(
         tiled_out = tl.load(c_ptr, mask=c_mask)
         tiled_c += tiled_out
     tl.store(c_ptr, tiled_c, mask=c_mask)
-
-
-_LORA_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
-
-
-def _get_lora_b_ptr(lora_weights, offset_start, device):
-
-    key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
-    if _LORA_PTR_DICT.get(key) is None:
-        slice_offset_lst = []
-        tensor_ptrs = []
-        lora_strides_d0 = []
-        lora_strides_d1 = []
-        lora_strides_d2 = []
-        slice_offset = offset_start
-        for lora_b_weight in lora_weights:
-            if lora_b_weight.ndim == 4:  # shape:(lora_num,1,size,rank)
-                assert lora_b_weight.size(1) == 1
-                lora_b_weight = lora_b_weight.squeeze(dim=1)
-            else:
-                assert lora_b_weight.ndim == 3  # shape:(lora_num,size,rank)
-            assert lora_b_weight.is_contiguous()
-            tensor_ptrs.append(lora_b_weight.data_ptr())
-            lora_strides_d0.append(lora_b_weight.stride(0))
-            lora_strides_d1.append(lora_b_weight.stride(1))
-            lora_strides_d2.append(lora_b_weight.stride(2))
-            slice_offset_lst.append(slice_offset)
-            slice_offset += lora_b_weight.size(1)
-
-        if len(lora_weights) > 1:
-            # note these are device tensors
-            lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
-            slice_start_tensor = torch.tensor(slice_offset_lst, device=device)
-        else:
-            slice_start_tensor = slice_offset_lst[0]
-            lora_ptr_tensor = lora_b_weight[0]
-
-        # If each lora has the same stride, there's no need to use a
-        # tensor for storage.
-        if (len(set(lora_strides_d0)) == 1 and len(set(lora_strides_d1)) == 1
-                and len(set(lora_strides_d2)) == 1):
-            lora_strides_d0_tensor = lora_strides_d0[0]
-            lora_strides_d1_tensor = lora_strides_d1[0]
-            lora_strides_d2_tensor = lora_strides_d2[0]
-            same_stride = True
-
-        else:
-            lora_strides_d0_tensor = torch.tensor(lora_strides_d0,
-                                                  device=device)
-            lora_strides_d1_tensor = torch.tensor(lora_strides_d1,
-                                                  device=device)
-            lora_strides_d2_tensor = torch.tensor(lora_strides_d2,
-                                                  device=device)
-            same_stride = False
-        _LORA_PTR_DICT[key] = (slice_start_tensor, lora_ptr_tensor,
-                               lora_strides_d0_tensor, lora_strides_d1_tensor,
-                               lora_strides_d2_tensor, same_stride)
-    return _LORA_PTR_DICT.get(key)
 
 
 @torch.inference_mode()
