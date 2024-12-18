@@ -28,26 +28,27 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 ```{eval-rst}
 .. list-table::
    :header-rows: 1
+   :stub-columns: 1
    :widths: auto
 
    * - Feature
-     - [CP](#chunked-prefill)
-     - [APC](#apc)
-     - [LoRA](#lora)
-     - :abbr:`prmpt adptr (Prompt Adapter)`
-     - [SD](#spec-decode)
+     - Chunked-Prefill
+     - APC
+     - LoRA
+     - Prompt Adapter
+     - Speculative Decoding
      - CUDA graph
-     - :abbr:`pooling (Pooling Models)`
-     - :abbr:`enc-dec (Encoder-Decoder Models)`
-     - :abbr:`logP (Logprobs)`
-     - :abbr:`prmpt logP (Prompt Logprobs)`
-     - :abbr:`async output (Async Output Processing)`
+     - Pooling Models
+     - Encoder-Decoder
+     - Logprobs
+     - Prompt Logprobs
+     - Async Output Processing
      - multi-step
-     - :abbr:`mm (Multimodal Inputs)`
+     - Multimodal Inputs
      - best-of
      - beam-search
-     - :abbr:`guided dec (Guided Decoding)`
-   * - [CP](#chunked-prefill)
+     - Guided Decoding
+   * - Chunked-Prefill
      -
      -
      -
@@ -64,7 +65,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - [APC](#apc)
+   * - APC
      - ✅
      -
      -
@@ -81,7 +82,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - [LoRA](#lora)
+   * - LoRA
      - `✗ <https://github.com/vllm-project/vllm/pull/9057>`__
      - ✅
      -
@@ -98,7 +99,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :abbr:`prmpt adptr (Prompt Adapter)`
+   * - Prompt Adapter
      - ✅
      - ✅
      - ✅
@@ -115,7 +116,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - [SD](#spec-decode)
+   * - Speculative Decoding
      - ✅
      - ✅
      - ✗
@@ -149,7 +150,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :abbr:`pooling (Pooling Models)`
+   * - Pooling Models
      - ✗
      - ✗
      - ✗
@@ -166,12 +167,12 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :abbr:`enc-dec (Encoder-Decoder Models)`
-     - ✗
-     - `✗ <https://github.com/vllm-project/vllm/issues/7366>`__
-     - ✗
+   * - Encoder-Decoder
      - ✗
      - `✗ <https://github.com/vllm-project/vllm/issues/7366>`__
+     - ✗
+     - ✗
+     - `✗ <https://github.com/vllm-project/vllm/issues/7366>`__
      - ✅
      - ✅
      -
@@ -183,7 +184,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :abbr:`logP (Logprobs)`
+   * - Logprobs
      - ✅
      - ✅
      - ✅
@@ -200,7 +201,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :abbr:`prmpt logP (Prompt Logprobs)`
+   * - Prompt Logprobs
      - ✅
      - ✅
      - ✅
@@ -217,7 +218,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :abbr:`async output (Async Output Processing)`
+   * - Async Output Processing
      - ✅
      - ✅
      - ✅
@@ -251,7 +252,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - :abbr:`mm (Multimodal Inputs)`
+   * - Multimodal Inputs
      - ✅
      -  `✗ <https://github.com/vllm-project/vllm/pull/8348>`__
      -  `✗ <https://github.com/vllm-project/vllm/pull/7199>`__
@@ -302,7 +303,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      -
      -
-   * - :abbr:`guided dec (Guided Decoding)`
+   * - Guided Decoding
      - ✅
      - ✅
      - ?
@@ -327,6 +328,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 ```{eval-rst}
 .. list-table::
    :header-rows: 1
+   :stub-columns: 1
    :widths: auto
 
    * - Feature
@@ -337,7 +339,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - Hopper
      - CPU
      - AMD
-   * - [CP](#chunked-prefill)
+   * - Chunked-Prefill
      - `✗ <https://github.com/vllm-project/vllm/issues/2729>`__
      - ✅
      - ✅
@@ -345,7 +347,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - [APC](#apc)
+   * - APC
      - `✗ <https://github.com/vllm-project/vllm/issues/3687>`__
      - ✅
      - ✅
@@ -353,7 +355,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - [LoRA](#lora)
+   * - LoRA
      - ✅
      - ✅
      - ✅
@@ -361,7 +363,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/pull/4830>`__
      - ✅
-   * - :abbr:`prmpt adptr (Prompt Adapter)`
+   * - Prompt Adapter
      - ✅
      - ✅
      - ✅
@@ -369,7 +371,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/issues/8475>`__
      - ✅
-   * - [SD](#spec-decode)
+   * - Speculative Decoding
      - ✅
      - ✅
      - ✅
@@ -385,7 +387,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✗
      - ✅
-   * - :abbr:`pooling (Pooling Models)`
+   * - Pooling Models
      - ✅
      - ✅
      - ✅
@@ -393,7 +395,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ?
-   * - :abbr:`enc-dec (Encoder-Decoder Models)`
+   * - Encoder-Decoder
      - ✅
      - ✅
      - ✅
@@ -401,7 +403,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✗
-   * - :abbr:`mm (Multimodal Inputs)`
+   * - Multimodal Inputs
      - ✅
      - ✅
      - ✅
@@ -409,7 +411,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - :abbr:`logP (Logprobs)`
+   * - Logprobs
      - ✅
      - ✅
      - ✅
@@ -417,7 +419,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - :abbr:`prmpt logP (Prompt Logprobs)`
+   * - Prompt Logprobs
      - ✅
      - ✅
      - ✅
@@ -425,7 +427,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - :abbr:`async output (Async Output Processing)`
+   * - Async Output Processing
      - ✅
      - ✅
      - ✅
@@ -457,7 +459,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - :abbr:`guided dec (Guided Decoding)`
+   * - Guided Decoding
      - ✅
      - ✅
      - ✅
