@@ -206,6 +206,7 @@ class KVCacheManager:
             # when allocating this request.
             num_evictable_computed_blocks = len(
                 [blk for blk in computed_blocks if blk.ref_cnt == 0])
+            assert num_evictable_computed_blocks == 0
         else:
             assert not computed_blocks, (
                 "Computed blocks should be empty when "
