@@ -26,8 +26,10 @@ from typing import (Any, Iterable, List, Mapping, Optional, Set, Tuple,
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, Qwen2AudioConfig, Qwen2AudioProcessor
-from transformers.models.qwen2_audio import Qwen2AudioEncoder
+from transformers import BatchFeature, ProcessorMixin
+from transformers.models.qwen2_audio import (Qwen2AudioConfig,
+                                             Qwen2AudioEncoder,
+                                             Qwen2AudioProcessor)
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.attention import AttentionMetadata
@@ -102,6 +104,35 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
 
         return super()._get_processor_data(mm_items)
 
+    def _call_hf_processor(
+        self,
+        hf_processor: ProcessorMixin,
+        prompt: str,
+        processor_data: Mapping[str, object],
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processor_data = dict(processor_data)
+        audios = processor_data.pop("audios", [])
+
+        if audios:
+            processor_data["audios"] = audios
+
+            feature_extractor = self._get_feature_extractor()
+            mm_processor_kwargs = dict(
+                **mm_processor_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
+        else:
+            # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
+            pass
+
+        return super()._call_hf_processor(
+            hf_processor,
+            prompt=prompt,
+            processor_data=processor_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
@@ -111,8 +142,12 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         hf_config = self.ctx.get_hf_config(Qwen2AudioConfig)
         placeholder = hf_config.audio_token_index
 
-        _, audio_output_lengths = _get_feat_extract_output_lengths(
-            hf_inputs.feature_attention_mask.sum(-1))
+        feature_attention_mask = hf_inputs.get("feature_attention_mask")
+        if feature_attention_mask is None:
+            audio_output_lengths = []
+        else:
+            _, audio_output_lengths = _get_feat_extract_output_lengths(
+                feature_attention_mask.sum(-1))
 
         def get_replacement_qwen2_audio(item_idx: int):
             return [placeholder] * audio_output_lengths[item_idx]
