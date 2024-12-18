@@ -552,6 +552,109 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     return out
 
 
+def cutlass_sparse_compress(a: torch.Tensor) \
+    -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compresses a sparse matrix for use with Cutlass sparse operations.
+
+    This function takes a dense tensor and compresses it into two components:
+    non-zero elements and metadata. The compressed representation is compatible
+    with Cutlass sparse kernels.
+
+    Args:
+        a (torch.Tensor): 
+            The input tensor to be compressed. Must have one of the following data types:
+            - `torch.int8`
+            - `torch.float8_e4m3fn`
+            - `torch.bfloat16`
+            - `torch.float16`
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: 
+            A tuple containing:
+            - `a_nzs` (torch.Tensor): A tensor containing non-zero elements of `a`.
+            - `a_meta` (torch.Tensor): A tensor containing metadata for the sparse representation.
+
+    Raises:
+        ValueError: If the compression operation fails.
+
+    Notes:
+        - The `a_meta` tensor has a data type of `torch.uint8`.
+        - Each metadata element encodes the sparsity of 4 non-zero elements (i.e., `elemsPerMetaElem = 4`).
+        - The shape of `a_nzs` is `(m, k // 2)`, where `m` and `k` are the dimensions of the input tensor.
+        - The shape of `a_meta` is `(m, k // 2 // elemsPerMetaElem)`.
+    """
+    assert (a.dtype in [
+        torch.int8, torch.float8_e4m3fn, torch.bfloat16, torch.float16
+    ])
+    assert (a.is_contiguous())
+
+    # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
+    elemsPerMetaElem = 4
+
+    m = a.shape[0]
+    k = a.shape[1]
+    assert (k % 2 == 0)
+    a_nzs = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
+    a_meta = torch.empty((m, k // 2 // elemsPerMetaElem),
+                         dtype=torch.uint8,
+                         device=a.device)
+
+    if not (torch.ops._C.cutlass_sparse_compress_entry(a_nzs, a_meta, a)):
+        raise ValueError
+
+    assert (a_nzs.is_contiguous())
+    assert (a_meta.is_contiguous())
+
+    return a_nzs, a_meta
+
+
+def cutlass_scaled_sparse_mm(
+        a: torch.Tensor,
+        bt_nzs: torch.Tensor,
+        bt_meta: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Performs a scaled sparse matrix multiplication using Cutlass.
+
+    Steps:
+    1. Create a dense matrix `a` of shape (m, k) on the CUDA device:
+    `a = torch.randn((m, k), device='cuda')`.
+
+    2. Create a dense matrix `b` of shape (k, n) on the CUDA device:
+    `b = torch.randn((k, n), device='cuda')`.
+
+    3. Prune matrix `b` to 2:4 sparsity along the specified dimension:
+    `b = prune_to_2_4(b, dim=0)`.
+
+    4. Compress the transposed sparse matrix `b.t()`:
+    `bt_nzs, bt_meta = cutlass_sparse_compress(b.t())`.
+
+    5. Perform sparse matrix multiplication using the compressed matrix,
+    applying scaling factors for `a` and `b`, and the output data type:
+    `out = cutlass_scaled_sparse_mm(a, bt_nzs, bt_meta, scale_a, scale_b, out_dtype)`.
+
+    Returns:
+    - The result of the scaled sparse matrix multiplication.
+    """
+    assert (bt_nzs.shape[0] % 16 == 0 and bt_nzs.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.shape[0] == bt_nzs.shape[0] \
+        and bias.dtype == out_dtype
+
+    m = a.shape[0]
+    n = bt_nzs.shape[0]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_scaled_sparse_mm(out, a, bt_nzs, bt_meta, scale_a,
+                                          scale_b, bias)
+
+    return out
+
+
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,

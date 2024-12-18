@@ -321,6 +321,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
 
+  // CUTLASS sparse GEMM, supporting symmetric per-tensor or per-row/column
+  // quantization, as well as bias
+  ops.def(
+      "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
+      "                         Tensor bt_nzs,"
+      "                         Tensor bt_meta, Tensor a_scales,"
+      "                         Tensor b_scales, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
+
+  // CUTLASS sparse matrix compressor
+  ops.def(
+      "cutlass_sparse_compress_entry(Tensor! a_nzs, Tensor! a_meta,"
+      "                              Tensor a) -> bool");
+  ops.impl("cutlass_sparse_compress_entry", &cutlass_sparse_compress_entry);
+
   // Mamba selective scan kernel
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"
