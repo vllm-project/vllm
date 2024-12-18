@@ -449,7 +449,7 @@ main() {
   upload_to_buildkite
 
   # run genai-perf tests
-  # run_genai_perf_tests "$BENCHMARK_ROOT/tests/genai-perf-tests.json"
+  run_genai_perf_tests "$BENCHMARK_ROOT/tests/genai-perf-tests.json"
 
 }
 
