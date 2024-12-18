@@ -1,0 +1,655 @@
+diff --git a/changes.patch b/changes.patch
+deleted file mode 100644
+index 3756b7f7..00000000
+--- a/changes.patch
++++ /dev/null
+@@ -1,303 +0,0 @@
+-diff --git a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
+-index 16c39f86..5870070a 100644
+---- a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
+-+++ b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
+-@@ -143,7 +143,7 @@ class SimpleConnector(KVConnectorBase):
+- 
+-             keys = torch.cat(keys, dim=0)
+-             values = torch.cat(values, dim=0)
+--            logger.debug("DEBUGG hidden_or_intermediate_states={}".format(hidden_or_intermediate_states))
+-+
+-             self.insert(current_tokens,
+-                         torch.ones_like(current_tokens,
+-                                         dtype=bool), keys, values,
+-@@ -190,7 +190,6 @@ class SimpleConnector(KVConnectorBase):
+-             ret = self.select(current_tokens,
+-                               torch.ones_like(current_tokens, dtype=bool))
+-             if ret[0] is None:
+--                logger.info("DEBUGG did't find any match")
+-                 # didn't find any match.
+-                 bypass_model_exec = False
+-                 num_computed_tokens_list.append(0)
+-@@ -208,7 +207,6 @@ class SimpleConnector(KVConnectorBase):
+-             # If not, need to redo the forwarding to compute missing states
+-             if not all([(num_computed_tokens == num_tokens), hidden is not None
+-                         ]):
+--                logger.info("DEBUGG KVCache and HiddenStates are not received.")
+-                 bypass_model_exec = False
+- 
+-             # update the end position based on how many tokens are cached.
+-@@ -256,8 +254,6 @@ class SimpleConnector(KVConnectorBase):
+- 
+-         return hidden_or_intermediate_states, bypass_model_exec, model_input
+- 
+--
+--
+-     def close(self):
+-         self.producer_data_pipe.close()
+-         self.producer_signal_pipe.close()
+-diff --git a/vllm/distributed/kv_transfer/kv_transfer_agent.py b/vllm/distributed/kv_transfer/kv_transfer_agent.py
+-index 08b19064..9ce97851 100644
+---- a/vllm/distributed/kv_transfer/kv_transfer_agent.py
+-+++ b/vllm/distributed/kv_transfer/kv_transfer_agent.py
+-@@ -47,8 +47,6 @@ class KVTransferAgent:
+- 
+-         self.connector = KVConnectorFactory.create_connector(
+-             rank, local_rank, config)
+--        
+--        self.is_first_decode = True
+- 
+-     def send_kv_caches_and_hidden_states(
+-         self,
+-@@ -75,39 +73,3 @@ class KVTransferAgent:
+- 
+-         return self.connector.recv_kv_caches_and_hidden_states(
+-             model_executable, model_input, kv_caches)
+--
+--    def recv_kv_caches_and_hidden_states_by_layer(
+--        self, model_executable: torch.nn.Module,
+--        model_input: "ModelInputForGPUWithSamplingMetadata",
+--        kv_caches: List[torch.Tensor],
+--        layer_by_layer_start: int,
+--        layer_by_layer_end: int
+--    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+--               "ModelInputForGPUWithSamplingMetadata"]:
+--        temp_start_layer = model_executable.model.start_layer
+--        temp_end_layer = model_executable.model.end_layer
+--        model_executable.model.start_layer = layer_by_layer_start
+--        model_executable.model.end_layer = layer_by_layer_end
+--        ret = self.recv_kv_caches_and_hidden_states(model_executable, model_input, kv_caches)
+--        model_executable.model.start_layer = temp_start_layer
+--        model_executable.model.end_layer = temp_end_layer
+--
+--        return ret
+--
+--    def send_kv_caches_and_hidden_states_by_layer(
+--        self,
+--        model_executable: torch.nn.Module,
+--        model_input: "ModelInputForGPUWithSamplingMetadata",
+--        kv_caches: List[torch.Tensor],
+--        hidden_or_intermediate_states: Union[torch.Tensor,
+--                                             IntermediateTensors],
+--        layer_by_layer_start: int,
+--        layer_by_layer_end: int
+--    ) -> None:
+--        temp_start_layer = model_executable.model.start_layer
+--        temp_end_layer = model_executable.model.end_layer
+--        model_executable.model.start_layer = layer_by_layer_start
+--        model_executable.model.end_layer = layer_by_layer_end
+--        self.send_kv_caches_and_hidden_states(model_executable, model_input, kv_caches, hidden_or_intermediate_states)
+--        model_executable.model.start_layer = temp_start_layer
+--        model_executable.model.end_layer = temp_end_layer
+-\ No newline at end of file
+-diff --git a/vllm/model_executor/models/qwen2.py b/vllm/model_executor/models/qwen2.py
+-index 85ca5220..3ce4eb58 100644
+---- a/vllm/model_executor/models/qwen2.py
+-+++ b/vllm/model_executor/models/qwen2.py
+-@@ -49,13 +49,13 @@ from vllm.model_executor.model_loader.weight_utils import (
+- from vllm.model_executor.pooling_metadata import PoolingMetadata
+- from vllm.model_executor.sampling_metadata import SamplingMetadata
+- from vllm.sequence import IntermediateTensors, PoolerOutput
+--from vllm.distributed import get_kv_transfer_group
+-+
+- from .interfaces import SupportsLoRA, SupportsPP
+- from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
+-                     is_pp_missing_parameter,
+-                     make_empty_intermediate_tensors_factory, make_layers,
+-                     maybe_prefix)
+--from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+-+
+- logger = init_logger(__name__)
+- 
+- 
+-@@ -324,8 +324,6 @@ class Qwen2Model(nn.Module):
+-         attn_metadata: AttentionMetadata,
+-         intermediate_tensors: Optional[IntermediateTensors] = None,
+-         inputs_embeds: Optional[torch.Tensor] = None,
+--        layer_by_layer_trunk: Optional[int] = None,
+--        model_input: Optional[ModelInputForGPUWithSamplingMetadata] = None,
+-     ) -> Union[torch.Tensor, IntermediateTensors]:
+-         if get_pp_group().is_first_rank:
+-             if inputs_embeds is not None:
+-@@ -475,104 +473,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+-         attn_metadata: AttentionMetadata,
+-         intermediate_tensors: Optional[IntermediateTensors] = None,
+-         inputs_embeds: Optional[torch.Tensor] = None,
+--        layer_by_layer_trunk: Optional[int] = None,
+--        model_input: Optional[ModelInputForGPUWithSamplingMetadata] = None,
+-     ) -> Union[torch.Tensor, IntermediateTensors]:
+--        if (kv_caches[0].numel() == 0):
+--            return self.model(input_ids, positions, kv_caches, attn_metadata,
+--                          intermediate_tensors)
+--        
+--        with torch.profiler.profile(
+--                    activities=[
+--                        torch.profiler.ProfilerActivity.CPU,
+--                        torch.profiler.ProfilerActivity.CUDA,
+--                    ], with_stack=True,
+--                    on_trace_ready=torch.profiler.tensorboard_trace_handler(
+--                        '/root/root/profile@{}@{}'.format(
+--                            get_kv_transfer_group().config.kv_transfer_config.kv_role,
+--                            get_kv_transfer_group().is_first_decode
+--                        ))) as p:
+--            if layer_by_layer_trunk is not None:
+--                print("DEBUGG get_kv_transfer_group().config.kv_transfer_config={}".format(
+--                    get_kv_transfer_group().config.kv_transfer_config))
+--                    
+--                if get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_producer':
+--                    layer_by_layer_start = 0
+--                    layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk) 
+--                    for i in range(layer_by_layer_trunk):
+--                        for _ in range(layer_by_layer_start, layer_by_layer_interval):
+--                            if layer_by_layer_start == 0:
+--                                if inputs_embeds is not None:
+--                                    hidden_states = inputs_embeds
+--                                else:
+--                                    hidden_states = self.model.get_input_embeddings(input_ids)
+--                                residual = None
+--                                
+--                            hidden_states, residual = self.model.layers[i](
+--                                positions,
+--                                hidden_states,
+--                                kv_caches[i - self.model.start_layer],
+--                                attn_metadata,
+--                                residual,
+--                            )
+--                        
+--                        get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
+--                            self,
+--                            model_input,
+--                            kv_caches,
+--                            hidden_or_intermediate_states=hidden_states,
+--                            layer_by_layer_start=layer_by_layer_start,
+--                            layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+--                        )
+--                        layer_by_layer_start += layer_by_layer_interval
+--
+--                elif get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_consumer':
+--                    print("DEBUGG get_kv_transfer_group().config={}".format(
+--                        get_kv_transfer_group().config.__dict__
+--                    ))
+--                    layer_by_layer_start = 0
+--                    layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk)
+--
+--                    hidden_or_intermediate_states = None
+--                    logger.info("DEBUGG is_first_decode={}".format(get_kv_transfer_group().is_first_decode))
+--                    if get_kv_transfer_group().is_first_decode:
+--                        for i in range(layer_by_layer_trunk):
+--                            hidden_or_intermediate_states, bypass_model_exec, _ = \
+--                                get_kv_transfer_group().recv_kv_caches_and_hidden_states_by_layer(
+--                                    self,
+--                                    model_input,
+--                                    kv_caches,
+--                                    layer_by_layer_start=layer_by_layer_start,
+--                                    layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+--                                )
+--                            layer_by_layer_start += layer_by_layer_interval
+--                    
+--                        get_kv_transfer_group().is_first_decode = False
+--                        # logger.info("DEBUGG hidden_or_intermediate_states.shape={}".format(hidden_or_intermediate_states.shape))
+--                        # logger.info("DEBUGG bypass_model_exec={}".format(bypass_model_exec))
+--                        # logger.info("DEBUGG model_input={}".format(model_input))
+--                    logger.info("DEBUGG kv is received.")
+--                    logger.info("DEBUGG is_first_decode={}".format(get_kv_transfer_group().is_first_decode))
+--                    logger.info("DEBUGG self.model.start_layer={}, self.model.end_layer={}".format(
+--                        self.model.start_layer, self.model.end_layer))
+--                    for i in range(self.model.start_layer, self.model.end_layer):
+--                        if i == 0:
+--                            if inputs_embeds is not None:
+--                                hidden_states = inputs_embeds
+--                            else:
+--                                hidden_states = self.model.get_input_embeddings(input_ids)
+--                            residual = None
+--                            
+--                        hidden_states, residual = self.model.layers[i](
+--                            positions,
+--                            hidden_states,
+--                            kv_caches[i - self.model.start_layer],
+--                            attn_metadata,
+--                            residual,
+--                        )
+--                else:
+--                    raise ValueError("GG!")
+--
+-+        hidden_states = self.model(input_ids, positions, kv_caches,
+-+                                   attn_metadata, intermediate_tensors,
+-+                                   inputs_embeds)
+-         return hidden_states
+- 
+-     def compute_logits(
+-diff --git a/vllm/worker/model_runner.py b/vllm/worker/model_runner.py
+-index b6b9556f..1bc5f65c 100644
+---- a/vllm/worker/model_runner.py
+-+++ b/vllm/worker/model_runner.py
+-@@ -1652,16 +1652,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+-         # NOTE: The receive operation is blocking
+-         bypass_model_exec = False
+-         if self.need_recv_kv(model_input, kv_caches):
+--            pass
+--            # hidden_or_intermediate_states, bypass_model_exec, model_input = \
+--            #     get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+--            #         # model is used to know which layer the current worker
+--            #         # is working on, so that we can receive KV for only those
+--            #         # layers.
+--            #         model_executable,
+--            #         model_input,
+--            #         kv_caches=kv_caches
+--            #     )
+-+            hidden_or_intermediate_states, bypass_model_exec, model_input = \
+-+                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+-+                    # model is used to know which layer the current worker
+-+                    # is working on, so that we can receive KV for only those
+-+                    # layers.
+-+                    model_executable,
+-+                    model_input,
+-+                    kv_caches=kv_caches
+-+                )
+- 
+-         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+-         seqlen_agnostic_kwargs = {
+-@@ -1673,7 +1672,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+-             model_forward_start = torch.cuda.Event(enable_timing=True)
+-             model_forward_end = torch.cuda.Event(enable_timing=True)
+-             model_forward_start.record()
+--        
+-+
+-         if not bypass_model_exec:
+-             with set_forward_context(model_input.attn_metadata,
+-                                      self.vllm_config):
+-@@ -1683,8 +1682,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+-                     kv_caches=kv_caches,
+-                     attn_metadata=model_input.attn_metadata,
+-                     intermediate_tensors=intermediate_tensors,
+--                    layer_by_layer_trunk=4,
+--                    model_input=model_input,
+-                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+-                                                  device=self.device),
+-                     **seqlen_agnostic_kwargs)
+-@@ -1696,16 +1693,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+-         # Sending KV cache in distributed KV cache transfer setting
+-         # NOTE: the send operation is non-blocking
+-         if self.need_send_kv(model_input, kv_caches):
+--            pass
+--            # get_kv_transfer_group().send_kv_caches_and_hidden_states(
+--            #     # model_executable is used to know which layer the current
+--            #     # worker is working on, so that we can send KV for only those
+--            #     # layers.
+--            #     model_executable,
+--            #     model_input,
+--            #     kv_caches,
+--            #     hidden_or_intermediate_states,
+--            # )
+-+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+-+                # model_executable is used to know which layer the current
+-+                # worker is working on, so that we can send KV for only those
+-+                # layers.
+-+                model_executable,
+-+                model_input,
+-+                kv_caches,
+-+                hidden_or_intermediate_states,
+-+            )
+- 
+-         # Compute the logits in the last pipeline stage.
+-         if not get_pp_group().is_last_rank:
+diff --git a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
+index 3416ff54..5870070a 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/simple_connector.py
+@@ -143,7 +143,7 @@ class SimpleConnector(KVConnectorBase):
+ 
+             keys = torch.cat(keys, dim=0)
+             values = torch.cat(values, dim=0)
+-            # logger.debug("DEBUGG hidden_or_intermediate_states={}".format(hidden_or_intermediate_states))
++
+             self.insert(current_tokens,
+                         torch.ones_like(current_tokens,
+                                         dtype=bool), keys, values,
+@@ -190,7 +190,6 @@ class SimpleConnector(KVConnectorBase):
+             ret = self.select(current_tokens,
+                               torch.ones_like(current_tokens, dtype=bool))
+             if ret[0] is None:
+-                logger.info("DEBUGG did't find any match")
+                 # didn't find any match.
+                 bypass_model_exec = False
+                 num_computed_tokens_list.append(0)
+@@ -208,7 +207,6 @@ class SimpleConnector(KVConnectorBase):
+             # If not, need to redo the forwarding to compute missing states
+             if not all([(num_computed_tokens == num_tokens), hidden is not None
+                         ]):
+-                logger.info("DEBUGG KVCache and HiddenStates are not received.")
+                 bypass_model_exec = False
+ 
+             # update the end position based on how many tokens are cached.
+@@ -256,8 +254,6 @@ class SimpleConnector(KVConnectorBase):
+ 
+         return hidden_or_intermediate_states, bypass_model_exec, model_input
+ 
+-
+-
+     def close(self):
+         self.producer_data_pipe.close()
+         self.producer_signal_pipe.close()
+diff --git a/vllm/distributed/kv_transfer/kv_transfer_agent.py b/vllm/distributed/kv_transfer/kv_transfer_agent.py
+index 08b19064..9ce97851 100644
+--- a/vllm/distributed/kv_transfer/kv_transfer_agent.py
++++ b/vllm/distributed/kv_transfer/kv_transfer_agent.py
+@@ -47,8 +47,6 @@ class KVTransferAgent:
+ 
+         self.connector = KVConnectorFactory.create_connector(
+             rank, local_rank, config)
+-        
+-        self.is_first_decode = True
+ 
+     def send_kv_caches_and_hidden_states(
+         self,
+@@ -75,39 +73,3 @@ class KVTransferAgent:
+ 
+         return self.connector.recv_kv_caches_and_hidden_states(
+             model_executable, model_input, kv_caches)
+-
+-    def recv_kv_caches_and_hidden_states_by_layer(
+-        self, model_executable: torch.nn.Module,
+-        model_input: "ModelInputForGPUWithSamplingMetadata",
+-        kv_caches: List[torch.Tensor],
+-        layer_by_layer_start: int,
+-        layer_by_layer_end: int
+-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+-               "ModelInputForGPUWithSamplingMetadata"]:
+-        temp_start_layer = model_executable.model.start_layer
+-        temp_end_layer = model_executable.model.end_layer
+-        model_executable.model.start_layer = layer_by_layer_start
+-        model_executable.model.end_layer = layer_by_layer_end
+-        ret = self.recv_kv_caches_and_hidden_states(model_executable, model_input, kv_caches)
+-        model_executable.model.start_layer = temp_start_layer
+-        model_executable.model.end_layer = temp_end_layer
+-
+-        return ret
+-
+-    def send_kv_caches_and_hidden_states_by_layer(
+-        self,
+-        model_executable: torch.nn.Module,
+-        model_input: "ModelInputForGPUWithSamplingMetadata",
+-        kv_caches: List[torch.Tensor],
+-        hidden_or_intermediate_states: Union[torch.Tensor,
+-                                             IntermediateTensors],
+-        layer_by_layer_start: int,
+-        layer_by_layer_end: int
+-    ) -> None:
+-        temp_start_layer = model_executable.model.start_layer
+-        temp_end_layer = model_executable.model.end_layer
+-        model_executable.model.start_layer = layer_by_layer_start
+-        model_executable.model.end_layer = layer_by_layer_end
+-        self.send_kv_caches_and_hidden_states(model_executable, model_input, kv_caches, hidden_or_intermediate_states)
+-        model_executable.model.start_layer = temp_start_layer
+-        model_executable.model.end_layer = temp_end_layer
+\ No newline at end of file
+diff --git a/vllm/engine/llm_engine.py b/vllm/engine/llm_engine.py
+index 83ed1ba0..560f84a0 100644
+--- a/vllm/engine/llm_engine.py
++++ b/vllm/engine/llm_engine.py
+@@ -1400,6 +1400,7 @@ class LLMEngine:
+             if allow_async_output_proc:
+                 execute_model_req.async_callback = self.async_callbacks[
+                     virtual_engine]
++
+             outputs = self.model_executor.execute_model(
+                 execute_model_req=execute_model_req)
+ 
+diff --git a/vllm/model_executor/models/qwen2.py b/vllm/model_executor/models/qwen2.py
+index 14c849dd..3ce4eb58 100644
+--- a/vllm/model_executor/models/qwen2.py
++++ b/vllm/model_executor/models/qwen2.py
+@@ -22,11 +22,11 @@
+ # limitations under the License.
+ """Inference-only Qwen2 model compatible with HuggingFace weights."""
+ from typing import Iterable, List, Optional, Set, Tuple, Union
+-from concurrent.futures import ThreadPoolExecutor
++
+ import torch
+ from torch import nn
+ from transformers import Qwen2Config
+-import time
++
+ from vllm.attention import Attention, AttentionMetadata, AttentionType
+ from vllm.compilation.decorators import support_torch_compile
+ from vllm.config import CacheConfig, VllmConfig
+@@ -49,13 +49,13 @@ from vllm.model_executor.model_loader.weight_utils import (
+ from vllm.model_executor.pooling_metadata import PoolingMetadata
+ from vllm.model_executor.sampling_metadata import SamplingMetadata
+ from vllm.sequence import IntermediateTensors, PoolerOutput
+-from vllm.distributed import get_kv_transfer_group
++
+ from .interfaces import SupportsLoRA, SupportsPP
+ from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
+                     is_pp_missing_parameter,
+                     make_empty_intermediate_tensors_factory, make_layers,
+                     maybe_prefix)
+-from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
++
+ logger = init_logger(__name__)
+ 
+ 
+@@ -324,8 +324,6 @@ class Qwen2Model(nn.Module):
+         attn_metadata: AttentionMetadata,
+         intermediate_tensors: Optional[IntermediateTensors] = None,
+         inputs_embeds: Optional[torch.Tensor] = None,
+-        layer_by_layer_trunk: Optional[int] = None,
+-        model_input: Optional[ModelInputForGPUWithSamplingMetadata] = None,
+     ) -> Union[torch.Tensor, IntermediateTensors]:
+         if get_pp_group().is_first_rank:
+             if inputs_embeds is not None:
+@@ -475,96 +473,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+         attn_metadata: AttentionMetadata,
+         intermediate_tensors: Optional[IntermediateTensors] = None,
+         inputs_embeds: Optional[torch.Tensor] = None,
+-        layer_by_layer_trunk: Optional[int] = None,
+-        model_input: Optional[ModelInputForGPUWithSamplingMetadata] = None,
+     ) -> Union[torch.Tensor, IntermediateTensors]:
+-        if (kv_caches[0].numel() == 0):
+-            return self.model(input_ids, positions, kv_caches, attn_metadata,
+-                          intermediate_tensors)
+-        
+-        if layer_by_layer_trunk is not None:
+-            # print("DEBUGG get_kv_transfer_group().config.kv_transfer_config={}".format(
+-            #     get_kv_transfer_group().config.kv_transfer_config))
+-            if get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_producer':
+-                layer_by_layer_start = 0
+-                layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk) 
+-                for _ in range(layer_by_layer_trunk):
+-                    for i in range(layer_by_layer_start, layer_by_layer_start + layer_by_layer_interval):
+-                        if layer_by_layer_start == 0:
+-                            if inputs_embeds is not None:
+-                                hidden_states = inputs_embeds
+-                            else:
+-                                hidden_states = self.model.get_input_embeddings(input_ids)
+-                            residual = None
+-                            
+-                        hidden_states, residual = self.model.layers[i](
+-                            positions,
+-                            hidden_states,
+-                            kv_caches[i - self.model.start_layer],
+-                            attn_metadata,
+-                            residual,
+-                        )
+-                    
+-                    # logger.info("DEBUGG kv_producer.forward={}".format(time.perf_counter() - s))
+-                    get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
+-                        self,
+-                        model_input,
+-                        kv_caches,
+-                        hidden_or_intermediate_states=hidden_states,
+-                        layer_by_layer_start=layer_by_layer_start,
+-                        layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+-                    )
+-                    # logger.info("DEBUGG kv_producer.send_kvcache={}".format(time.perf_counter() - s))
+-                    layer_by_layer_start += layer_by_layer_interval
+-                hidden_states, _ = self.model.norm(hidden_states, residual)
+-            elif get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_consumer':
+-                layer_by_layer_start = 0
+-                layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk)
+-                
+-                # logger.info("DEBUGG is_first_decode={}".format(get_kv_transfer_group().is_first_decode))
+-                hidden_or_intermediate_states = None
+-                if get_kv_transfer_group().is_first_decode:
+-                    for i in range(layer_by_layer_trunk):
+-                        s = time.perf_counter()
+-                        hidden_or_intermediate_states, _, _  = get_kv_transfer_group().recv_kv_caches_and_hidden_states_by_layer(
+-                            self,
+-                            model_input,
+-                            kv_caches,
+-                            layer_by_layer_start=layer_by_layer_start,
+-                            layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+-                        )
+-                        
+-                        logger.info("DEBUGG receive_kv_and_hidden_states of {}-{}, cost={}".format(
+-                            layer_by_layer_start,
+-                            layer_by_layer_start + layer_by_layer_interval,
+-                            time.perf_counter() - s
+-                        ))
+-                        layer_by_layer_start += layer_by_layer_interval
+-                    get_kv_transfer_group().is_first_decode = False
+-                    return hidden_or_intermediate_states
+-                    # logger.info("DEBUGG receive_kvcache.time={}".format(time.perf_counter() - s))
+-
+-                s = time.perf_counter()
+-                for i in range(self.model.start_layer, self.model.end_layer):
+-                    if i == 0:
+-                        if inputs_embeds is not None:
+-                            hidden_states = inputs_embeds
+-                        else:
+-                            hidden_states = self.model.get_input_embeddings(input_ids)
+-                        residual = None
+-                        
+-                    hidden_states, residual = self.model.layers[i](
+-                        positions,
+-                        hidden_states,
+-                        kv_caches[i - self.model.start_layer],
+-                        attn_metadata,
+-                        residual,
+-                    )
+-                hidden_states, _ = self.model.norm(hidden_states, residual)
+-                # logger.info("DEBUGG decode.time={}".format(time.perf_counter() - s))
+-            else:
+-                raise ValueError("GG!")
+-
++        hidden_states = self.model(input_ids, positions, kv_caches,
++                                   attn_metadata, intermediate_tensors,
++                                   inputs_embeds)
+         return hidden_states
+ 
+     def compute_logits(
+diff --git a/vllm/worker/model_runner.py b/vllm/worker/model_runner.py
+index aff85515..1bc5f65c 100644
+--- a/vllm/worker/model_runner.py
++++ b/vllm/worker/model_runner.py
+@@ -1650,18 +1650,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+         # In KV cache database setting, it will change the model input so that
+         # we can skip prefilling on tokens that successfully received KV caches
+         # NOTE: The receive operation is blocking
+-        # bypass_model_exec = False
+-        # if self.need_recv_kv(model_input, kv_caches):
+-        #     pass
+-            # hidden_or_intermediate_states, bypass_model_exec, model_input = \
+-            #     get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+-            #         # model is used to know which layer the current worker
+-            #         # is working on, so that we can receive KV for only those
+-            #         # layers.
+-            #         model_executable,
+-            #         model_input,
+-            #         kv_caches=kv_caches
+-            #     )
++        bypass_model_exec = False
++        if self.need_recv_kv(model_input, kv_caches):
++            hidden_or_intermediate_states, bypass_model_exec, model_input = \
++                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
++                    # model is used to know which layer the current worker
++                    # is working on, so that we can receive KV for only those
++                    # layers.
++                    model_executable,
++                    model_input,
++                    kv_caches=kv_caches
++                )
+ 
+         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+         seqlen_agnostic_kwargs = {
+@@ -1673,40 +1672,36 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+             model_forward_start = torch.cuda.Event(enable_timing=True)
+             model_forward_end = torch.cuda.Event(enable_timing=True)
+             model_forward_start.record()
+-        
+-        # if not bypass_model_exec:
+-        with set_forward_context(model_input.attn_metadata,
+-                                self.vllm_config):
+-            s = time.perf_counter()
+-            hidden_or_intermediate_states = model_executable(
+-                input_ids=model_input.input_tokens,
+-                positions=model_input.input_positions,
+-                kv_caches=kv_caches,
+-                attn_metadata=model_input.attn_metadata,
+-                intermediate_tensors=intermediate_tensors,
+-                layer_by_layer_trunk=4,
+-                model_input=model_input,
+-                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+-                                            device=self.device),
+-                **seqlen_agnostic_kwargs)
+-            logger.info("DEBUGG model_executable.time={}".format(time.perf_counter() - s))
++
++        if not bypass_model_exec:
++            with set_forward_context(model_input.attn_metadata,
++                                     self.vllm_config):
++                hidden_or_intermediate_states = model_executable(
++                    input_ids=model_input.input_tokens,
++                    positions=model_input.input_positions,
++                    kv_caches=kv_caches,
++                    attn_metadata=model_input.attn_metadata,
++                    intermediate_tensors=intermediate_tensors,
++                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
++                                                 device=self.device),
++                    **seqlen_agnostic_kwargs)
++
+         if (self.observability_config is not None
+                 and self.observability_config.collect_model_forward_time):
+             model_forward_end.record()
+ 
+         # Sending KV cache in distributed KV cache transfer setting
+         # NOTE: the send operation is non-blocking
+-        # if self.need_send_kv(model_input, kv_caches):
+-        #     pass
+-            # get_kv_transfer_group().send_kv_caches_and_hidden_states(
+-            #     # model_executable is used to know which layer the current
+-            #     # worker is working on, so that we can send KV for only those
+-            #     # layers.
+-            #     model_executable,
+-            #     model_input,
+-            #     kv_caches,
+-            #     hidden_or_intermediate_states,
+-            # )
++        if self.need_send_kv(model_input, kv_caches):
++            get_kv_transfer_group().send_kv_caches_and_hidden_states(
++                # model_executable is used to know which layer the current
++                # worker is working on, so that we can send KV for only those
++                # layers.
++                model_executable,
++                model_input,
++                kv_caches,
++                hidden_or_intermediate_states,
++            )
+ 
+         # Compute the logits in the last pipeline stage.
+         if not get_pp_group().is_last_rank:

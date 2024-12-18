@@ -189,6 +189,7 @@ class SimpleConnector(KVConnectorBase):
 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
+            logger.debug("DEBUGG hidden_or_intermediate_states={}".format(hidden_or_intermediate_states))
 
             self.insert(current_tokens,
                         torch.ones_like(current_tokens,

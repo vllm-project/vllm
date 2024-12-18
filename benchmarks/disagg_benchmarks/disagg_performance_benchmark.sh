@@ -34,32 +34,32 @@ wait_for_server() {
 }
 
 
-launch_chunked_prefill() {
-  model="meta-llama/Meta-Llama-3.1-8B-Instruct"
-  # disagg prefill
-  CUDA_VISIBLE_DEVICES=0 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
-    --port 8100 \
-    --max-model-len 10000 \
-    --enable-chunked-prefill \
-    --gpu-memory-utilization 0.6 &
-  CUDA_VISIBLE_DEVICES=1 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
-    --port 8200 \
-    --max-model-len 10000 \
-    --enable-chunked-prefill \
-    --gpu-memory-utilization 0.6 &
-  wait_for_server 8100
-  wait_for_server 8200
-  python3 round_robin_proxy.py &
-  sleep 1
-}
+# launch_chunked_prefill() {
+#   model="meta-llama/Meta-Llama-3.1-8B-Instruct"
+#   # disagg prefill
+#   CUDA_VISIBLE_DEVICES=0 python3 \
+#     -m vllm.entrypoints.openai.api_server \
+#     --model $model \
+#     --port 8100 \
+#     --max-model-len 10000 \
+#     --enable-chunked-prefill \
+#     --gpu-memory-utilization 0.6 &
+#   CUDA_VISIBLE_DEVICES=1 python3 \
+#     -m vllm.entrypoints.openai.api_server \
+#     --model $model \
+#     --port 8200 \
+#     --max-model-len 10000 \
+#     --enable-chunked-prefill \
+#     --gpu-memory-utilization 0.6 &
+#   wait_for_server 8100
+#   wait_for_server 8200
+#   python3 round_robin_proxy.py &
+#   sleep 1
+# }
 
 
 launch_disagg_prefill() {
-  model="meta-llama/Meta-Llama-3.1-8B-Instruct" 
+  model="/models/Meta-Llama-3.1-8B-Instruct" 
   # disagg prefill
   CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
@@ -144,10 +144,10 @@ main() {
 
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
-  launch_chunked_prefill
-  for qps in 2 4 6 8; do
-  benchmark $qps $default_output_len chunked_prefill
-  done
+  # launch_chunked_prefill
+  # for qps in 2 4 6 8; do
+  # benchmark $qps $default_output_len chunked_prefill
+  # done
   kill_gpu_processes
 
   launch_disagg_prefill
@@ -156,7 +156,7 @@ main() {
   done
   kill_gpu_processes
 
-  python3 visualize_benchmark_results.py
+  # python3 visualize_benchmark_results.py
 
 }
 

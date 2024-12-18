@@ -47,29 +47,48 @@ class KVTransferAgent:
 
         self.connector = KVConnectorFactory.create_connector(
             rank, local_rank, config)
+        
+        self.is_first_decode = True
 
-    def send_kv_caches_and_hidden_states(
+    def send_kv_caches_and_hidden_states_by_layer(
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
+        layer_by_layer_start: int,
+        layer_by_layer_end: int
     ) -> None:
 
-        self.connector.send_kv_caches_and_hidden_states(
-            model_executable, model_input, kv_caches,
-            hidden_or_intermediate_states)
+        temp_start_layer = model_executable.model.start_layer
+        temp_end_layer = model_executable.model.end_layer
+        model_executable.model.start_layer = layer_by_layer_start
+        model_executable.model.end_layer = layer_by_layer_end
+        self.send_kv_caches_and_hidden_states(model_executable, model_input, kv_caches, hidden_or_intermediate_states)
+        model_executable.model.start_layer = temp_start_layer
+        model_executable.model.end_layer = temp_end_layer
 
     def close(self) -> None:
         self.connector.close()
 
-    def recv_kv_caches_and_hidden_states(
+    def recv_kv_caches_and_hidden_states_by_layer(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]
+        kv_caches: List[torch.Tensor],
+        layer_by_layer_start: int,
+        layer_by_layer_end: int
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
-        return self.connector.recv_kv_caches_and_hidden_states(
-            model_executable, model_input, kv_caches)
+        # return self.connector.recv_kv_caches_and_hidden_states(
+        #     model_executable, model_input, kv_caches)
+        temp_start_layer = model_executable.model.start_layer
+        temp_end_layer = model_executable.model.end_layer
+        model_executable.model.start_layer = layer_by_layer_start
+        model_executable.model.end_layer = layer_by_layer_end
+        ret = self.recv_kv_caches_and_hidden_states(model_executable, model_input, kv_caches)
+        model_executable.model.start_layer = temp_start_layer
+        model_executable.model.end_layer = temp_end_layer
+
+        return ret
