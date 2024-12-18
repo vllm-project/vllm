@@ -141,7 +141,7 @@ class EngineArgs:
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
-    mm_cache_preprocessor: bool = True
+    disable_mm_cache_preprocessor: bool = False
     enable_lora: bool = False
     enable_lora_bias: bool = False
     max_loras: int = 1
@@ -983,7 +983,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            mm_cache_preprocessor=self.mm_cache_preprocessor,
+            disable_mm_cache_preprocessor=self.disable_mm_cache_preprocessor,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern)

@@ -43,7 +43,7 @@ class MMInputMapperClient:
         self.mm_registry.init_mm_limits_per_prompt(model_config)
 
         # Init cache
-        self.use_cache = model_config.mm_cache_preprocessor
+        self.use_cache = not model_config.disable_mm_cache_preprocessor
         self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
@@ -119,7 +119,7 @@ class MMInputMapperClient:
 class MMInputMapperServer:
 
     def __init__(self, model_config):
-        self.use_cache = model_config.mm_cache_preprocessor
+        self.use_cache = not model_config.disable_mm_cache_preprocessor
         self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
     def process_inputs(
