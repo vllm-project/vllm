@@ -33,6 +33,12 @@ class NeuronPlatform(Platform):
             parallel_config.worker_cls = \
                 "vllm.worker.neuron_worker.NeuronWorker"
 
+        cache_config = vllm_config.cache_config
+        if cache_config:
+            # neuron needs block_size = max_model_len
+            vllm_config.cache_config.block_size = \
+                vllm_config.model_config.max_model_len
+
     @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Neuron.")

@@ -111,6 +111,37 @@ def test_guided_complex_json_completion(sample_complex_json_schema, llm,
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json,
                             schema=sample_complex_json_schema)
+        
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+def test_guided_definition_json_completion(sample_definition_json_schema, llm,
+                                  guided_decoding_backend: str):
+    sampling_params = SamplingParams(temperature=1.0,
+                                     max_tokens=1000,
+                                     guided_decoding=GuidedDecodingParams(
+                                         json=sample_definition_json_schema,
+                                         backend=guided_decoding_backend))
+    outputs = llm.generate(prompts=[
+        f"Give an example JSON for solving 8x + 7 = -23 "
+        f"that fits this schema: {sample_definition_json_schema}"
+    ] * 2,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
+
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json,
+                            schema=sample_definition_json_schema)
 
 
 @pytest.mark.skip_global_cleanup
