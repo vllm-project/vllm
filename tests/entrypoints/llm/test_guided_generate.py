@@ -111,12 +111,12 @@ def test_guided_complex_json_completion(sample_complex_json_schema, llm,
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json,
                             schema=sample_complex_json_schema)
-        
+
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_definition_json_completion(sample_definition_json_schema, llm,
-                                  guided_decoding_backend: str):
+                                           guided_decoding_backend: str):
     sampling_params = SamplingParams(temperature=1.0,
                                      max_tokens=1000,
                                      guided_decoding=GuidedDecodingParams(

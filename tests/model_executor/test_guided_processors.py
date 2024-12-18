@@ -78,7 +78,7 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
         f"Give an employee profile that fits this schema: {sample_json_schema}"
     )
     json_request = GuidedDecodingParams(json=sample_json_schema,
-                                        backend=guided_decoding_backend)
+                                        backend=backend)
     json_lp = await get_guided_decoding_logits_processor(
         json_request, tokenizer, config)
     assert json_lp is not None
