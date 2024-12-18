@@ -46,8 +46,7 @@ def _init_attn_metadata_from_tensor_dict(
     # Extract the fields used to create AttentionMetadata.
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-        if field.name in tensor_dict and field.name != \
-            'enable_kv_scales_calculation':
+        if field.name in tensor_dict:
             valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
 
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)

@@ -224,6 +224,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
+            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=self.max_query_len,
@@ -268,6 +269,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=seq_lens_tensor,
             max_decode_query_len=self.max_decode_query_len,
@@ -550,6 +552,7 @@ class FlashAttentionMetadataBuilder(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=True,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
             max_decode_query_len=max_decode_query_len,
