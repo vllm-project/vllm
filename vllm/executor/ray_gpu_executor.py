@@ -161,6 +161,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     worker_ips.pop(i)
                     self.workers = workers
                     break
+        else:
+            self.workers = workers
 
         logger.debug("workers: %s", self.workers)
         logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
