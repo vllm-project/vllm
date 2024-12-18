@@ -224,8 +224,12 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/model_executor/layers
+  - vllm/model_executor/guided_decoding
   - tests/test_logits_processor
-  command: pytest -v -s test_logits_processor.py
+  - tests/model_executor/test_guided_processors
+  commands: 
+    - pytest -v -s test_logits_processor.py
+    - pytest -v -s model_executor/test_guided_processors.py
 
 - label: Speculative decoding tests # 30min
   source_file_dependencies:
