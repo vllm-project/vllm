@@ -56,17 +56,17 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
+  - block: "Build CPU docker on release only"
+    depends_on: ~
+
   - label: "Build and publish CPU release image"
     depends_on: ~
     if: build.tag != null
     agents:
       queue: cpu_queue_postmerge
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag vllm/vllm-cpu:$BUILDKITE_TAG --progress plain -f Dockerfile.cpu ."
-      - "docker push vllm/vllm-cpu:$BUILDKITE_TAG"
-    plugins:
-      - docker-login#v3.0.0:
-          username: vllm
-          password-env: DOCKERHUB_TOKEN
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_TAG --progress plain -f Dockerfile.cpu ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_TAG"
     env:
       DOCKER_BUILDKIT: "1"
