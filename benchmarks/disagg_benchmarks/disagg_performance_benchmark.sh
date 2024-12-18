@@ -59,25 +59,25 @@ wait_for_server() {
 
 
 launch_disagg_prefill() {
-  model="/models/Meta-Llama-3.1-8B-Instruct" 
+  model="/models/Qwen2-7B-Instruct" 
   # disagg prefill
   CUDA_VISIBLE_DEVICES=0 python3 \
-    -m vllm.entrypoints.openai.api_server \
+    /root/vllm/vllm/entrypoints/openai/api_server.py \
     --model $model \
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
     --kv-transfer-config \
-    '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
+    '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9}'  >& kv_producer.log &
 
   CUDA_VISIBLE_DEVICES=1 python3 \
-    -m vllm.entrypoints.openai.api_server \
+    /root/vllm/vllm/entrypoints/openai/api_server.py \
     --model $model \
     --port 8200 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
     --kv-transfer-config \
-    '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
+    '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":5e9}' >& kv_consumer.log & 
 
   wait_for_server 8100
   wait_for_server 8200
@@ -88,7 +88,7 @@ launch_disagg_prefill() {
 
 benchmark() {
   results_folder="./results"
-  model="meta-llama/Meta-Llama-3.1-8B-Instruct"
+  model="/models/Qwen2-7B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
   num_prompts=100
@@ -111,7 +111,7 @@ benchmark() {
           --save-result \
           --result-dir $results_folder \
           --result-filename "$tag"-qps-"$qps".json \
-          --request-rate "$qps"
+          --request-rate "$qps" >& asyn_$qps.log
 
   sleep 2
 
@@ -120,11 +120,11 @@ benchmark() {
 
 main() {
 
-  (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
-  (which jq) || (apt-get -y install jq)
-  (which socat) || (apt-get -y install socat)
+  # (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
+  # (which jq) || (apt-get -y install jq)
+  # (which socat) || (apt-get -y install socat)
 
-  pip install quart httpx matplotlib aiohttp
+  # pip install quart httpx matplotlib aiohttp
 
   cd "$(dirname "$0")"
 
@@ -151,7 +151,7 @@ main() {
   kill_gpu_processes
 
   launch_disagg_prefill
-  for qps in 2 4 6 8; do
+  for qps in 2 4; do
   benchmark $qps $default_output_len disagg_prefill
   done
   kill_gpu_processes

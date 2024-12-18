@@ -495,7 +495,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         torch.profiler.ProfilerActivity.CUDA,
                     ], with_stack=True,
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                        '/root/root/profile@{}@{}'.format(
+                        '/root/profile@{}@{}'.format(
                             get_kv_transfer_group().config.kv_transfer_config.kv_role,
                             get_kv_transfer_group().is_first_decode
                         ))) as p:
@@ -524,31 +524,31 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 residual,
                             )
                         
-                        # get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
-                        #     self,
-                        #     model_input,
-                        #     kv_caches,
-                        #     hidden_or_intermediate_states=hidden_states,
-                        #     layer_by_layer_start=layer_by_layer_start,
-                        #     layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
-                        # )
+                        get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
+                            self,
+                            model_input,
+                            kv_caches,
+                            hidden_or_intermediate_states=hidden_states,
+                            layer_by_layer_start=layer_by_layer_start,
+                            layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+                        )
                         
-                        # layer_by_layer_start += layer_by_layer_interval
-                        import asyncio
-                        task = asyncio.create_task(
-                            get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
-                                self,
-                                model_input,
-                                kv_caches,
-                                hidden_or_intermediate_states=hidden_states,
-                                layer_by_layer_start=layer_by_layer_start,
-                                layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
-                            ))
-                        tasks.append(task)
                         layer_by_layer_start += layer_by_layer_interval
+                        # import asyncio
+                        # task = asyncio.create_task(
+                        #     get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
+                        #         self,
+                        #         model_input,
+                        #         kv_caches,
+                        #         hidden_or_intermediate_states=hidden_states,
+                        #         layer_by_layer_start=layer_by_layer_start,
+                        #         layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+                        #     ))
+                        # tasks.append(task)
+                        # layer_by_layer_start += layer_by_layer_interval
 
 
-                    await asyncio.gather(*tasks)
+                    # await asyncio.gather(*tasks)
 
                 elif get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_consumer':
                     print("DEBUGG get_kv_transfer_group().config={}".format(
@@ -572,6 +572,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                             layer_by_layer_start += layer_by_layer_interval
                     
                         get_kv_transfer_group().is_first_decode = False
+                        return hidden_or_intermediate_states
                     logger.info("DEBUGG kv is received.")
                     logger.info("DEBUGG is_first_decode={}".format(get_kv_transfer_group().is_first_decode))
                     logger.info("DEBUGG self.model.start_layer={}, self.model.end_layer={}".format(self.model.start_layer, self.model.end_layer))
