@@ -919,6 +919,10 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+        if (current_platform.is_cuda() and self.block_size is not None
+                and self.block_size > 32):
+            raise ValueError("CUDA Paged Attention kernel only supports "
+                             f"block sizes up to 32. Got {self.block_size}.")
 
         if self.block_allocator not in [
                 "CpuGpuBlockAllocator", "CpuOffloadingBlockAllocator"
@@ -1288,6 +1292,14 @@ class SchedulerConfig:
     enable_chunked_prefill: bool = False
 
     is_multimodal_model: bool = False
+
+    # FIXME(woosuk & ywang96): Below are placeholder values. We need to
+    # calculate the actual values from the configurations.
+    # Multimodal encoder run compute budget, only used in V1
+    max_num_encoder_input_tokens = 16384
+
+    # Multimodal encoder cache size, only used in V1
+    encoder_cache_size = 16384
 
     # Whether to perform preemption by swapping or
     # recomputation. If not specified, we determine the mode as follows:
