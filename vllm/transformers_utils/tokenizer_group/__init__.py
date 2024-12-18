@@ -17,18 +17,11 @@ def init_tokenizer_from_configs(model_config: ModelConfig,
                                 scheduler_config: SchedulerConfig,
                                 parallel_config: ParallelConfig,
                                 lora_config: LoRAConfig):
-    add_special_tokens = None
-    if model_config.hf_config.model_type == "whisper":
-        # For Whisper models, the special tokens should be provided by the user
-        # based on the task and language of their request. Also needed to avoid
-        # appending an EOS token to the prompt which disrupts generation.
-        add_special_tokens = False
     init_kwargs = dict(tokenizer_id=model_config.tokenizer,
                        enable_lora=bool(lora_config),
                        max_num_seqs=scheduler_config.max_num_seqs,
                        max_loras=lora_config.max_loras if lora_config else 0,
                        max_input_length=None,
-                       add_special_tokens=add_special_tokens,
                        tokenizer_mode=model_config.tokenizer_mode,
                        trust_remote_code=model_config.trust_remote_code,
                        revision=model_config.tokenizer_revision)

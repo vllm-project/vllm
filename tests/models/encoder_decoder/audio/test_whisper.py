@@ -35,8 +35,8 @@ PROMPTS = [
 EXPECTED = {
     "openai/whisper-medium": [
         " The first words I spoke in the original phonograph, a little piece"
-        " of practical poetry. Mary had a little lamb, its fleece was quite as"
-        " slow, and everywhere that Mary went the lamb was sure to go.",
+        " of practical poetry. Mary had a little lamb, its fleece was white as"
+        " snow, and everywhere that Mary went the lamb would shun it all.",
         " And the old one pitch on the way to Edgar Martinez swung on the line"
         " down the left field line for Obeysmith. Here comes Joy. Here is"
         " Jorgen at third base. They're gonna wave him in. The throw to the"

@@ -184,10 +184,16 @@ class InputPreprocessor:
         corresponding token IDs.
         """
         tokenizer = self.get_tokenizer_group()
-
+        add_special_tokens = None
+        if self.model_config.hf_config.model_type == "whisper":
+            # For Whisper, special tokens should be provided by the user based
+            # on the task and language of their request. Also needed to avoid
+            # appending an EOS token to the prompt which disrupts generation.
+            add_special_tokens = False
         return tokenizer.encode(request_id=request_id,
                                 prompt=prompt,
-                                lora_request=lora_request)
+                                lora_request=lora_request,
+                                add_special_tokens=add_special_tokens)
 
     async def _tokenize_prompt_async(
         self,
@@ -197,10 +203,15 @@ class InputPreprocessor:
     ) -> List[int]:
         """Async version of :meth:`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group()
-
-        return await tokenizer.encode_async(request_id=request_id,
-                                            prompt=prompt,
-                                            lora_request=lora_request)
+        add_special_tokens = None
+        if self.model_config.hf_config.model_type == "whisper":
+            # For Whisper, special tokens should be provided by the user based
+            # on the task and language of their request. Also needed to avoid
+            # appending an EOS token to the prompt which disrupts generation.
+            add_special_tokens = False
+        return await tokenizer.encode_async(
+            request_id=request_id, prompt=prompt, lora_request=lora_request,
+            add_special_tokens=add_special_tokens)
 
     def _can_process_multimodal(self) -> bool:
         model_config = self.model_config

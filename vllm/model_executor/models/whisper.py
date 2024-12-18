@@ -6,16 +6,15 @@ import librosa
 import numpy as np
 import torch
 from torch import nn
-from transformers import WhisperConfig, WhisperProcessor
+from transformers import WhisperProcessor
+from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import INPUT_REGISTRY, DummyData, InputContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import FastGELU
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -24,33 +23,15 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import SequenceData
 
 from .interfaces import SupportsMultiModal
-from .utils import AutoWeightsLoader, make_layers, maybe_prefix
+from .utils import AutoWeightsLoader, make_layers, WeightsMapper
 
 logger = init_logger(__name__)
-
-
-def sinusoids(
-        length: int, channels: int, max_timescale: float = 10000
-) -> torch.Tensor:
-    """Returns sinusoids for positional embedding"""
-    if channels % 2 != 0:
-        raise ValueError(
-            f"Number of channels has to be divisible by 2 for sinusoidal "
-            f"positional embeddings, got {channels} channels."
-        )
-    log_timescale_increment = math.log(max_timescale) / (channels // 2 - 1)
-    inv_timescales = torch.exp(-log_timescale_increment *
-                               torch.arange(channels // 2))
-    scaled_time = torch.arange(length).view(-1, 1) * inv_timescales.view(1, -1)
-    return torch.cat([scaled_time.sin(), scaled_time.cos()], dim=1)
 
 
 class WhisperPositionalEmbedding(nn.Embedding):
@@ -216,6 +197,39 @@ class WhisperCrossAttention(WhisperAttention):
         return output
 
 
+class WhisperMLP(nn.Module):
+
+    def __init__(
+        self,
+        embed_dim: int,
+        ffn_dim: int,
+        act_fn: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        self.activation_fn = get_act_fn(act_fn)
+        self.fc1 = ColumnParallelLinear(
+            input_size=embed_dim,
+            output_size=ffn_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
+        )
+        self.fc2 = RowParallelLinear(
+            input_size=ffn_dim,
+            output_size=embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
+        )
+
+    def forward(self, hidden_states: torch.Tensor):
+        hidden_states, _ = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
+        return hidden_states
+
+
 class WhisperEncoderLayer(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -234,20 +248,12 @@ class WhisperEncoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.activation_fn = FastGELU()
-        self.fc1 = ColumnParallelLinear(
-            input_size = self.embed_dim,
-            output_size = config.encoder_ffn_dim,
-            bias = True,
+        self.mlp = WhisperMLP(
+            embed_dim=config.d_model,
+            ffn_dim=config.encoder_ffn_dim,
+            act_fn=config.activation_function,
             quant_config=quant_config,
-            prefix=f"{prefix}.fc1",
-        )
-        self.fc2 = RowParallelLinear(
-            input_size = config.encoder_ffn_dim,
-            output_size = self.embed_dim,
-            bias = True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc2",
+            prefix=f"{prefix}.mlp",
         )
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
     
@@ -267,9 +273,7 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         if hidden_states.dtype == torch.float16 and (
@@ -291,41 +295,31 @@ class WhisperDecoderLayer(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.embed_dim = config.d_model
         self.self_attn = WhisperAttention(
-            embed_dim=self.embed_dim,
+            embed_dim=config.d_model,
             num_heads=config.decoder_attention_heads,
             attn_type=AttentionType.DECODER,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.activation_fn = FastGELU()
-
-        self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.self_attn_layer_norm = nn.LayerNorm(config.d_model)
         self.encoder_attn = WhisperCrossAttention(
-            embed_dim=self.embed_dim,
+            embed_dim=config.d_model,
             num_heads=config.decoder_attention_heads,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder_attn",
         )
-        self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.fc1 = ColumnParallelLinear(
-            input_size = self.embed_dim,
-            output_size = config.decoder_ffn_dim,
-            bias = True,
+        self.encoder_attn_layer_norm = nn.LayerNorm(config.d_model)
+        self.mlp = WhisperMLP(
+            embed_dim=config.d_model,
+            ffn_dim=config.decoder_ffn_dim,
+            act_fn=config.activation_function,
             quant_config=quant_config,
-            prefix=f"{prefix}.fc1",
+            prefix=f"{prefix}.mlp",
         )
-        self.fc2 = RowParallelLinear(
-            input_size = config.decoder_ffn_dim,
-            output_size = self.embed_dim,
-            bias = True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc2",
-        )
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.final_layer_norm = nn.LayerNorm(config.d_model)
     
     def forward(
         self,
@@ -355,9 +349,7 @@ class WhisperDecoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -685,5 +677,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
-        return loader.load_weights((name, loaded_weight)
-                                   for name, loaded_weight in weights)
+        loaded_weights = [(name, loaded_weight)
+                          for name, loaded_weight in weights]
+        mapper = WeightsMapper({".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."})
+        return loader.load_weights(loaded_weights, mapper=mapper)
