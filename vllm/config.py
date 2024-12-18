@@ -2305,8 +2305,8 @@ class CompilationConfig(BaseModel):
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
     splitting_ops: List[str] = Field(default_factory=lambda: [
-        "vllm.unified_attention",
-        "vllm.unified_attention_with_output",
+        #      "vllm.unified_attention",
+        #      "vllm.unified_attention_with_output",
     ])
 
     use_inductor: bool = True
