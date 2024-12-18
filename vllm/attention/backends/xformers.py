@@ -412,8 +412,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         value: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
