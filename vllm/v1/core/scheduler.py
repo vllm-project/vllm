@@ -428,6 +428,8 @@ class Scheduler:
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
                     request_id=req_id,
+                    prompt=request.prompt,
+                    prompt_token_ids=request.prompt_token_ids,
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),

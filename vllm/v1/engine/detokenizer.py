@@ -106,6 +106,37 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
         )
 
+    @classmethod
+    def from_eco(
+        cls,
+        tokenizer: AnyTokenizer,
+        eco: EngineCoreOutput,
+    ):
+        tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
+            tokenizer=tokenizer,
+            prompt_ids=eco.prompt_token_ids,
+            skip_special_tokens=True,
+        )
+
+        return cls(
+            output_text="",
+            tokens=tokens,
+            token_ids=eco.prompt_token_ids,
+            stop=[],
+            include_stop_str_in_output=False,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=True,
+            spaces_between_special_tokens=True,
+            output_kind=RequestOutputKind.CUMULATIVE,
+            request_id=eco.request_id,
+            prompt=eco.prompt,
+            prompt_token_ids=eco.prompt_token_ids,
+            tokenizer=tokenizer,
+            stop_buffer_length=0,
+        )
+        
+
     def add_tokens(
         self,
         new_token_ids: List[int],
@@ -157,8 +188,6 @@ class IncrementalDetokenizer:
                     self.output_text = self.output_text[:truncate_to]
                 finish_reason = "stop"  # TODO: use constant
                 stop_reason = stop_str
-
-        # TODO: handle stop_token_ids here too?
 
         # 3) Update the RequestOutput object with the new text.
         finished = bool(finish_reason)
@@ -250,16 +279,30 @@ class Detokenizer:
             self.tokenizer, request)
         self.request_states[request.request_id] = request_state
 
+    def add_request_eco(
+        self,
+        eco: EngineCoreOutput,
+    ):
+        request_state = IncrementalDetokenizer.from_eco(
+            self.tokenizer, eco)
+        self.request_states[eco.request_id] = request_state
+        
+        
     def step(
         self, encore_core_outputs: List[EngineCoreOutput]
     ) -> DetokenizerOutputs:
         """Update state and request the RequestOutputs to the LLMEngine."""
 
         # request_outputs: List[RequestOutput] = []
+        # requests_to_abort: List[str] = []
         detokenizer_outputs = DetokenizerOutputs(outputs=[])
-        requests_to_abort: List[str] = []
+
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
+
+            if request_id not in self.request_states:
+                self.add_request_eco(engine_core_output)
+
             detokenizer = self.request_states.get(request_id)
             if detokenizer is None:
                 # Ignore output for already-aborted request.

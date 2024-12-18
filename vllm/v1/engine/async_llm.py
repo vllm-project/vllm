@@ -187,14 +187,14 @@ class AsyncLLM(EngineClient):
         self.rid_to_state[request_id] = RequestState.new()
 
         # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
-        detokenizer_req, engine_core_req = self.processor.process_inputs(
+        _, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
         # 3) Add the DetokenizerRequest to Detokenizer.
         # TODO: sending these separately is a race condition. We should instead
         # have the EngineCore do the "AddRequest" logic.
-        await self.detokenizer.add_request_async(detokenizer_req)
+        # await self.detokenizer.add_request_async(detokenizer_req)
 
         # 4) Add the EngineCoreRequest to EngineCore.
         await self.engine_core.add_request_async(engine_core_req)
@@ -268,8 +268,8 @@ class AsyncLLM(EngineClient):
                 # that the API client does not fall behind the EngineCor,
                 # which happens at high QPS otherwise.
                 out = state.out_list[-1]
-                if len(state.out_list) > 1:
-                    logger.info(f"{len(state.out_list)=}")
+                # if len(state.out_list) > 1:
+                #     logger.info(f"{len(state.out_list)=}")
 
             except asyncio.TimeoutError:
                 # TODO(rob): do request cancellation checking here.
