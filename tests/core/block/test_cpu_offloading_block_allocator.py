@@ -136,11 +136,11 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
     delta = num_cpu_blocks - num_gpu_blocks
     assert allocator.get_num_free_blocks(Device.CPU) == delta
     assert allocator.get_num_free_blocks(Device.GPU) == 0
-    assert all([
-        allocator._allocators[Device.GPU].block_is_computed(block.block_id)
-        for block in gpu_blocks
-    ])
 
     blocks_to_swap_out, blocks_to_swap_in = allocator.get_and_reset_swaps()
     allocator.access_cpu_hit_blocks(3.0)
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
+    assert all([
+        allocator._allocators[Device.GPU].block_is_computed(block.block_id)
+        for block in gpu_blocks
+    ])
