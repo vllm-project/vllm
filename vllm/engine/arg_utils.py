@@ -606,11 +606,10 @@ class EngineArgs:
             help=('Overrides for the multimodal input mapping/processing, '
                   'e.g., image processor. For example: {"num_crops": 4}.'))
         parser.add_argument(
-            '--mm-cache-preprocessor',
+            '--disable-mm-cache-preprocessor',
             action='store_true',
-            help='If true, then enables caching of the multi-modal '
-            'preprocessor/mapper. Otherwise, the mapper executes each time'
-            ', and for better performance consider enabling frontend process.')
+            help='If true, then disables caching of the multi-modal '
+            'preprocessor/mapper. (not recommended)')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',

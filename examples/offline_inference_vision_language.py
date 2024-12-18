@@ -653,7 +653,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--disable-mm-cache-preprocessor',
         action='store_true',
-        help='If True, disable caching of multi-modal preprocessor/mapper.')
+        help='If True, disables caching of multi-modal preprocessor/mapper.')
 
     parser.add_argument(
         '--time-generate',
