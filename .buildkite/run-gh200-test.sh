@@ -15,6 +15,11 @@ apt-get update -y \
   && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
   && python3 --version && python3 -m pip --version
 
+# Install the nightly version of torch and torchvision
+python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124"
+python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torchvision==0.22.0.dev20241215"
+
+# Skip the new torch installation during build since we are using the specified version
 python3 use_existing_torch.py
 
 # Try building the docker image
