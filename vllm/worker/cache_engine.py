@@ -2,7 +2,7 @@
 from typing import List
 
 import torch
-
+import copy
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
@@ -73,15 +73,26 @@ class CacheEngine:
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
+        tensor_zeros = None
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
-            kv_cache.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.dtype,
-                            pin_memory=pin_memory,
-                            device=device))
+            if device == "cpu":
+                if tensor_zeros is None:
+                    tensor_zeros = torch.zeros(kv_cache_shape,
+                                               dtype=self.dtype,
+                                               pin_memory=pin_memory,
+                                               device=device)
+                    kv_cache.append(tensor_zeros)
+                else:
+                    kv_cache.append(copy.deepcopy(tensor_zeros))
+            else:
+                kv_cache.append(
+                    torch.zeros(kv_cache_shape,
+                                dtype=self.dtype,
+                                pin_memory=pin_memory,
+                                device=device))
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
