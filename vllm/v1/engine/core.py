@@ -66,6 +66,8 @@ class EngineCore:
                                    vllm_config.lora_config)
 
         self._last_logging_time = time.time()
+        self.parallel_config = vllm_config.parallel_config
+        self.microbatches_in_progress = []
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -132,6 +134,16 @@ class EngineCore:
             engine_core_outputs = self.scheduler.update_from_output(
                 output[1], output[0])
             self.output_queue.put_nowait(engine_core_outputs)
+
+    async def step_async(self):
+        if not self.scheduler.has_unfinished_requests():
+            return []
+
+        scheduler_output = self.scheduler.schedule()
+        output = self.model_executor.execute_model_async(scheduler_output)
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, output)
+        return engine_core_outputs
 
     def shutdown(self):
         self.model_executor.shutdown()
@@ -283,28 +295,18 @@ class EngineCoreProc(EngineCore):
             self.run_engine_core_async())
 
     async def run_engine_core_async(self):
+        # We have one engine, so managing the microbatches in inner layers
+        # TODO: make external loop not blocking on async step
         while True:
-            # 1) Poll the input queue until there is work to do.
-            if not self.scheduler.has_unfinished_requests():
-                while True:
-                    try:
-                        req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
-                        self._handle_client_request(req)
-                        break
-                    except queue.Empty:
-                        self._log_stats()
-                        logger.debug("EngineCore busy loop waiting.")
-                    except BaseException:
-                        raise
-
-            # 2) Handle any new client requests (Abort or Add).
+            # Handle any new client requests (Abort or Add).
+            # TODO: make queue async
+            # TODO: tokenizer step
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
                 self._handle_client_request(req)
 
-            # 3) Step the engine core.
-            self.step2()
-
+            engine_core_outputs = await self.step_async()
+            self.output_queue.put_nowait(engine_core_outputs)
             self._log_stats()
 
     def run_busy_loop(self):
