@@ -628,7 +628,7 @@ class GPUModelRunner:
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
-            dummy_mm_kwargs, _ = self.mm_input_mapper.process_inputs(
+            dummy_mm_kwargs = self.mm_input_mapper.process_inputs(
                 mm_data=dummy_mm_data,
                 mm_hashes=None,
                 mm_processor_kwargs=None,
