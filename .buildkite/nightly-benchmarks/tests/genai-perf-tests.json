@@ -6,6 +6,7 @@
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
             "tp": 1,
             "port": 8000,
+            "num_prompts": 500,
             "reuse_server": false
         },
         "vllm_server_parameters": {
