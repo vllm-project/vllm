@@ -13,7 +13,7 @@ This implementation also allows vLLM to gracefully handle preemption by
 recomputation.
 """
 from collections import deque
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
@@ -130,7 +130,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
 
         self.num_gpu_blocks = gpu_block_allocator.get_num_total_blocks()
         self.num_cpu_blocks = cpu_block_allocator.get_num_total_blocks()
-        self.touched_blocks = set()
+        self.touched_blocks: Set[int] = set()
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],

@@ -945,8 +945,7 @@ class Scheduler:
                 seq_group_status = SequenceStatus.PREFIX_CACHED
             num_new_tokens_uncached, num_new_tokens_cached = (
                 self._get_num_new_uncached_and_cached_tokens(
-                    seq_group, seq_group_status, enable_chunking,
-                    budget))
+                    seq_group, seq_group_status, enable_chunking, budget))
             num_new_tokens = num_new_tokens_uncached + num_new_tokens_cached
 
             if not enable_chunking:
@@ -964,7 +963,7 @@ class Scheduler:
                     " and exceeds limit of %d", num_new_tokens, prompt_limit)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
-                assert(len(prefix_cached_seqs) == 0)
+                assert (len(prefix_cached_seqs) == 0)
                 ignored_seq_groups.append(seq_group)
                 waiting_queue.popleft()
                 continue
