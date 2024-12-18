@@ -14,8 +14,20 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensors24"]
+
+
+def sparse_cutlass_supported() -> bool:
+    # sparse cutlass is not supported on Rocm
+    if current_platform.is_rocm():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_sparse_scaled_mm_supported(capability)
 
 
 class CompressedTensors24(CompressedTensorsScheme):
@@ -39,6 +51,11 @@ class CompressedTensors24(CompressedTensorsScheme):
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+
+        if not sparse_cutlass_supported():
+            raise ValueError(
+                "Sparse CUTLASS not supported. vLLM must be built with"
+                "CUDA 12.2 or later to use this feature")
 
         self.output_dtype = params_dtype
         layer.logical_widths = output_partition_sizes
