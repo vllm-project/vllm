@@ -45,19 +45,20 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
 .. note::
 
-        Multiple modules must be compiled, so this process can take a while.
+        Multiple modules must be compiled, so this process can take a while. Recommend using `--build-arg max_jobs=` & `--build-arg nvcc_threads=`
+        flags to speed up build process. However, ensure your 'max_jobs' is substantially larger than 'nvcc_threads' to get the most benefits.
+        Keep an eye on memory usage with parallel jobs as it can be substantial (see example below).
 
 .. code-block:: console
 
     # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 7.26GB)
-    # Note: You should download the torch and torchvision wheels from the PyTorch nightly site, and run the use_existing_torch.py script to skip the download of other torch wheels during the build.
-    $ python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124"
-    $ python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torchvision==0.22.0.dev20241215"
     $ python3 use_existing_torch.py
     $ DOCKER_BUILDKIT=1 sudo docker build . \
       --target vllm-openai \
       --platform "linux/arm64" \
       -t vllm/vllm-gh200-openai:latest \
+      --build-arg max_jobs=66 \
+      --build-arg nvcc_threads=2 \
       --build-arg torch_cuda_arch_list="9.0+PTX" \
       --build-arg vllm_fa_cmake_gpu_arches="90-real"
 

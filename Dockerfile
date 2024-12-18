@@ -45,16 +45,16 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-cuda.txt
-
+# for arm64, we need to install torch and torchvision from the nightly builds first, so that it won't be overwritten by the requirements
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" \
         && python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torchvision==0.22.0.dev20241215";  \
     fi
+COPY requirements-common.txt requirements-common.txt
+COPY requirements-cuda.txt requirements-cuda.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r requirements-cuda.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
