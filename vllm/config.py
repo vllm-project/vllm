@@ -174,7 +174,6 @@ class ModelConfig:
         factors.append(self.model)
         factors.append(self.dtype)
         factors.append(self.quantization)
-        factors.append(self.quantization_param_path)
         factors.append(self.revision)
         factors.append(self.code_revision)
         factors.append(self.trust_remote_code)
