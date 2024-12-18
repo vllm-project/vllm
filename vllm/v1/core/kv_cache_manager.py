@@ -197,7 +197,6 @@ class KVCacheManager:
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
         # Touch the computed blocks to make sure they won't be evicted.
-        num_evictable_computed_blocks = 0
         if self.enable_caching:
             self._touch(computed_blocks)
         else:
