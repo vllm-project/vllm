@@ -141,7 +141,7 @@ class EngineArgs:
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
-    mm_cache_preprocessor: bool = False
+    mm_cache_preprocessor: bool = True
     enable_lora: bool = False
     enable_lora_bias: bool = False
     max_loras: int = 1

@@ -216,7 +216,7 @@ class ModelConfig:
                  config_format: ConfigFormat = ConfigFormat.AUTO,
                  hf_overrides: Optional[HfOverrides] = None,
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-                 mm_cache_preprocessor: bool = False,
+                 mm_cache_preprocessor: bool = True,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  override_pooler_config: Optional["PoolerConfig"] = None,
                  logits_processor_pattern: Optional[str] = None) -> None:
