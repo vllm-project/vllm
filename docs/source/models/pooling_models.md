@@ -124,4 +124,4 @@ so it is not part of the OpenAI standard. Please see [](#multimodal-inputs) for 
 ### Score API
 
 Our Score API is similar to `LLM.score`.
-Please see [this page](../serving/openai_compatible_server#score-api) for more details on how to use it.
+Please see [this page](#score-api) for more details on how to use it.
