@@ -174,6 +174,8 @@ Recommended flags: `--tool-call-parser granite --chat-template examples/tool_cha
 
 Recommended flags: `--tool-call-parser granite`
 
+The chat template from Huggingface can be used directly. Parallel function calls are supported.
+
 * `ibm-granite/granite-20b-functioncalling`
 
 Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
