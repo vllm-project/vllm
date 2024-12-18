@@ -87,8 +87,19 @@ def test_traces(trace_service):
             f"The fake trace service didn't receive a trace within "
             f"the {timeout} seconds timeout")
 
-    attributes = decode_attributes(trace_service.request.resource_spans[0].
-                                   scope_spans[0].spans[0].attributes)
+    request = trace_service.request
+    assert len(request.resource_spans) == 1, (
+        f"Expected 1 resource span, "
+        f"but got {len(request.resource_spans)}")
+    assert len(request.resource_spans[0].scope_spans) == 1, (
+        f"Expected 1 scope span, "
+        f"but got {len(request.resource_spans[0].scope_spans)}")
+    assert len(request.resource_spans[0].scope_spans[0].spans) == 1, (
+        f"Expected 1 span, "
+        f"but got {len(request.resource_spans[0].scope_spans[0].spans)}")
+
+    attributes = decode_attributes(
+        request.resource_spans[0].scope_spans[0].spans[0].attributes)
     assert attributes.get(SpanAttributes.LLM_RESPONSE_MODEL) == model
     assert attributes.get(
         SpanAttributes.LLM_REQUEST_ID) == outputs[0].request_id
@@ -98,8 +109,6 @@ def test_traces(trace_service):
         SpanAttributes.LLM_REQUEST_TOP_P) == sampling_params.top_p
     assert attributes.get(
         SpanAttributes.LLM_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
-    assert attributes.get(
-        SpanAttributes.LLM_REQUEST_BEST_OF) == sampling_params.best_of
     assert attributes.get(SpanAttributes.LLM_REQUEST_N) == sampling_params.n
     assert attributes.get(SpanAttributes.LLM_USAGE_PROMPT_TOKENS) == len(
         outputs[0].prompt_token_ids)
@@ -144,8 +153,19 @@ def test_traces_with_detailed_steps(trace_service):
             f"The fake trace service didn't receive a trace within "
             f"the {timeout} seconds timeout")
 
-    attributes = decode_attributes(trace_service.request.resource_spans[0].
-                                   scope_spans[0].spans[0].attributes)
+    request = trace_service.request
+    assert len(request.resource_spans) == 1, (
+        f"Expected 1 resource span, "
+        f"but got {len(request.resource_spans)}")
+    assert len(request.resource_spans[0].scope_spans) == 1, (
+        f"Expected 1 scope span, "
+        f"but got {len(request.resource_spans[0].scope_spans)}")
+    assert len(request.resource_spans[0].scope_spans[0].spans) == 1, (
+        f"Expected 1 span, "
+        f"but got {len(request.resource_spans[0].scope_spans[0].spans)}")
+
+    attributes = decode_attributes(
+        request.resource_spans[0].scope_spans[0].spans[0].attributes)
     assert attributes.get(SpanAttributes.LLM_RESPONSE_MODEL) == model
     assert attributes.get(
         SpanAttributes.LLM_REQUEST_ID) == outputs[0].request_id
@@ -155,8 +175,6 @@ def test_traces_with_detailed_steps(trace_service):
         SpanAttributes.LLM_REQUEST_TOP_P) == sampling_params.top_p
     assert attributes.get(
         SpanAttributes.LLM_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
-    assert attributes.get(
-        SpanAttributes.LLM_REQUEST_BEST_OF) == sampling_params.best_of
     assert attributes.get(SpanAttributes.LLM_REQUEST_N) == sampling_params.n
     assert attributes.get(SpanAttributes.LLM_USAGE_PROMPT_TOKENS) == len(
         outputs[0].prompt_token_ids)

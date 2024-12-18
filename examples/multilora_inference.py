@@ -44,15 +44,6 @@ def create_test_prompts(
                            stop_token_ids=[32003]),
             LoRARequest("sql-lora", 1, lora_path)),
         (
-            "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",  # noqa: E501
-            SamplingParams(n=3,
-                           best_of=3,
-                           use_beam_search=True,
-                           temperature=0,
-                           max_tokens=128,
-                           stop_token_ids=[32003]),
-            LoRARequest("sql-lora", 1, lora_path)),
-        (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
             SamplingParams(temperature=0.0,
                            logprobs=1,
@@ -60,15 +51,6 @@ def create_test_prompts(
                            max_tokens=128,
                            stop_token_ids=[32003]),
             LoRARequest("sql-lora2", 2, lora_path)),
-        (
-            "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",  # noqa: E501
-            SamplingParams(n=3,
-                           best_of=3,
-                           use_beam_search=True,
-                           temperature=0,
-                           max_tokens=128,
-                           stop_token_ids=[32003]),
-            LoRARequest("sql-lora", 1, lora_path)),
     ]
 
 

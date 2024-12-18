@@ -3,7 +3,7 @@
 Enabling Multimodal Inputs
 ==========================
 
-This document walks you through the steps to extend a vLLM model so that it accepts :ref:`multi-modal <multi_modality>` inputs.
+This document walks you through the steps to extend a vLLM model so that it accepts :ref:`multi-modal inputs <multimodal_inputs>`.
 
 .. seealso::
     :ref:`adding_a_new_model`
@@ -66,7 +66,7 @@ A default mapper is available for each modality in the core vLLM library. This i
 3. Register maximum number of multi-modal tokens
 ------------------------------------------------
 
-For each modality type that the model accepts as input, calculate the maximum possible number of tokens per data instance
+For each modality type that the model accepts as input, calculate the maximum possible number of tokens per data item
 and register it via :meth:`INPUT_REGISTRY.register_dummy_data <vllm.inputs.registry.InputRegistry.register_max_multimodal_tokens>`.
 
 .. code-block:: diff

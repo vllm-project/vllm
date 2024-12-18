@@ -9,9 +9,20 @@ prompts = [
 ]
 
 # Create an LLM.
-model = LLM(model="intfloat/e5-mistral-7b-instruct", enforce_eager=True)
+# You should pass task="embed" for embedding models
+model = LLM(
+    model="intfloat/e5-mistral-7b-instruct",
+    task="embed",
+    enforce_eager=True,
+)
+
 # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-outputs = model.encode(prompts)
+outputs = model.embed(prompts)
+
 # Print the outputs.
-for output in outputs:
-    print(output.outputs.embedding)  # list of 4096 floats
+for prompt, output in zip(prompts, outputs):
+    embeds = output.outputs.embedding
+    embeds_trimmed = ((str(embeds[:16])[:-1] +
+                       ", ...]") if len(embeds) > 16 else embeds)
+    print(f"Prompt: {prompt!r} | "
+          f"Embeddings: {embeds_trimmed} (size={len(embeds)})")

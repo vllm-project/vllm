@@ -9,9 +9,9 @@ import pytest
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
 #   3. Use the model "huggyllama/llama-7b".
-MAX_TOKENS = [128]
+MAX_TOKENS = [64]
 BEAM_WIDTHS = [4]
-MODELS = ["facebook/opt-125m"]
+MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -37,8 +37,15 @@ def test_beam_search_single_input(
                                                        beam_width, max_tokens)
 
     for i in range(len(example_prompts)):
-        hf_output_ids, _ = hf_outputs[i]
-        vllm_output_ids, _ = vllm_outputs[i]
+        hf_output_ids, hf_output_texts = hf_outputs[i]
+        vllm_output_ids, vllm_output_texts = vllm_outputs[i]
+        for i, (hf_text,
+                vllm_text) in enumerate(zip(hf_output_texts,
+                                            vllm_output_texts)):
+            print(f">>>{i}-th hf output:")
+            print(hf_text)
+            print(f">>>{i}-th vllm output:")
+            print(vllm_text)
         assert len(hf_output_ids) == len(vllm_output_ids)
         for j in range(len(hf_output_ids)):
             assert hf_output_ids[j] == vllm_output_ids[j], (

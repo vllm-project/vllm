@@ -7,8 +7,31 @@ from typing import Optional, Type
 import pytest
 import torch
 
+from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+
+MNK_FACTORS = [
+    (1, 256, 128),
+    (1, 16384, 1024),
+    (1, 24576, 496),
+    (16, 256, 496),
+    (16, 16384, 128),
+    (16, 24576, 4096),
+    (32, 8192, 4096),
+    (32, 16384, 4096),
+    (33, 1024, 1024),
+    (33, 8192, 128),
+    (64, 2048, 496),
+    (64, 16384, 1024),
+    (100, 8192, 496),
+    (128, 32768, 4096),
+    (256, 4096, 4096),
+    (512, 256, 1024),
+    (512, 8192, 4096),
+    (512, 16384, 128),
+    (512, 24576, 128),
+]
 
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -76,6 +99,9 @@ def cutlass_fp8_gemm_helper(m: int,
 
     torch.testing.assert_close(out, baseline, rtol=1e-2, atol=5e-2)
 
+    opcheck(torch.ops._C.cutlass_scaled_mm,
+            (out, a, b, scale_a, scale_b, bias))
+
 
 def cutlass_int8_gemm_helper(m: int,
                              n: int,
@@ -108,23 +134,22 @@ def cutlass_int8_gemm_helper(m: int,
 
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
+    opcheck(torch.ops._C.cutlass_scaled_mm,
+            (out, a, b, scale_a, scale_b, bias))
 
-@pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 100, 33])
-@pytest.mark.parametrize("n", [2048, 4096, 8192, 16384, 24576, 256, 1024])
-@pytest.mark.parametrize("k", [128, 496, 1024])
+
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
-@pytest.mark.skipif(capability < 89,
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
                           per_out_ch: bool, use_bias: bool):
     cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, use_bias)
 
 
-@pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 33, 1])
-@pytest.mark.parametrize("n", [2048, 8192, 16384, 256, 1024])
-@pytest.mark.parametrize("k", [128, 496, 1024])
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
@@ -153,7 +178,7 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
-@pytest.mark.skipif(capability < 89,
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                        out_dtype: Type[torch.dtype],
@@ -171,7 +196,7 @@ def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.skipif(capability < 89,
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool,
                                   use_bias: bool, device: str):
@@ -203,7 +228,7 @@ def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
-@pytest.mark.skipif(capability < 89,
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
                                   use_bias: bool):
@@ -341,6 +366,15 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
     torch.testing.assert_close(out, baseline_dq, rtol=rtol, atol=atol)
     torch.testing.assert_close(out, baseline_q, rtol=rtol, atol=atol)
 
+    if azp_per_token:
+        opcheck(torch.ops._C.cutlass_scaled_mm_azp,
+                (out, aq_i8, bq_i8, scale_a, scale_b, azp_adj_i32, azp_i32,
+                 func_bias))
+    else:
+        opcheck(torch.ops._C.cutlass_scaled_mm_azp,
+                (out, aq_i8, bq_i8, scale_a, scale_b, azp_with_adj_i32, None,
+                 func_bias))
+
 
 # Test working with a subset of A and B
 def test_cutlass_subset():
@@ -415,3 +449,7 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b * b.to(dtype=torch.float32)).to(torch.bfloat16)
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+
+
+def test_cutlass_support_opcheck():
+    opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability, ))

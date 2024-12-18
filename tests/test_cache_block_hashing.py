@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import pytest
 
+from vllm.inputs import token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Sequence
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -66,15 +67,12 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
 
             hashes.append([])
             prompts = [prefix + prompt for prompt in sample_prompts]
-            seq_id = 0
-            for prompt in prompts:
+            for seq_id, prompt in enumerate(prompts):
                 hashes[-1].append([])
                 prompt_token_ids = tokenizer.encode(prompt)
                 seq = Sequence(seq_id,
-                               inputs={
-                                   "prompt": prompt,
-                                   "prompt_token_ids": prompt_token_ids,
-                               },
+                               inputs=token_inputs(prompt_token_ids,
+                                                   prompt=prompt),
                                block_size=block_size,
                                eos_token_id=tokenizer.tokenizer.eos_token_id,
                                lora_request=lora_request)
@@ -82,8 +80,6 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
                 num_blocks = len(prompt_token_ids) // block_size
                 for idx in range(num_blocks):
                     hashes[-1][-1].append(seq.hash_of_block(idx))
-
-                seq_id += 1
 
     # Check that hashes made with two prefixes with different first blocks are
     # different everywhere.

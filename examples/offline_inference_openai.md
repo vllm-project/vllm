@@ -1,45 +1,48 @@
 # Offline Inference with the OpenAI Batch file format
 
- **NOTE:** This is a guide to performing batch inference using the OpenAI batch file format, **NOT** the complete Batch (REST) API.
+```{important}
+This is a guide to performing batch inference using the OpenAI batch file format, **not** the complete Batch (REST) API.
+```
+
+## File Format
  
- ## File Format
+The OpenAI batch file format consists of a series of json objects on new lines.
  
- The OpenAI batch file format consists of a series of json objects on new lines.
+[See here for an example file.](https://github.com/vllm-project/vllm/blob/main/examples/openai_example_batch.jsonl)
  
- [See here for an example file.](https://github.com/vllm-project/vllm/blob/main/examples/openai_example_batch.jsonl)
+Each line represents a separate request. See the [OpenAI package reference](https://platform.openai.com/docs/api-reference/batch/requestInput) for more details.
  
- Each line represents a separate request. See the [OpenAI package reference](https://platform.openai.com/docs/api-reference/batch/requestInput) for more details.
+```{note}
+We currently only support `/v1/chat/completions` and `/v1/embeddings` endpoints (completions coming soon).
+```
  
- **NOTE:** We currently only support `/v1/chat/completions` and `/v1/embeddings` endpoints (completions coming soon).
- 
- ## Pre-requisites
- 
-* Ensure you are using `vllm >= 0.4.3`. You can check by running `python -c "import vllm; print(vllm.__version__)"`.
+## Pre-requisites
+
 * The examples in this document use `meta-llama/Meta-Llama-3-8B-Instruct`.
   - Create a [user access token](https://huggingface.co/docs/hub/en/security-tokens)
   - Install the token on your machine (Run `huggingface-cli login`).
   - Get access to the gated model by [visiting the model card](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and agreeing to the terms and conditions.
  
  
- ## Example 1: Running with a local file
- 
- ### Step 1: Create your batch file
- 
- To follow along with this example, you can download the example batch, or create your own batch file in your working directory.
- 
- ```
- wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/openai_example_batch.jsonl
- ```
- 
- Once you've created your batch file it should look like this
- 
- ```
- $ cat openai_example_batch.jsonl
-{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Hello world!"}],"max_tokens": 1000}}
-{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are an unhelpful assistant."},{"role": "user", "content": "Hello world!"}],"max_tokens": 1000}}
- ```
- 
- ### Step 2: Run the batch
+## Example 1: Running with a local file
+
+### Step 1: Create your batch file
+
+To follow along with this example, you can download the example batch, or create your own batch file in your working directory.
+
+```
+wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/openai_example_batch.jsonl
+```
+
+Once you've created your batch file it should look like this
+
+```
+$ cat openai_example_batch.jsonl
+{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are an unhelpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
+```
+
+### Step 2: Run the batch
  
 The batch running tool is designed to be used from the command line.
 
@@ -85,18 +88,18 @@ To integrate with cloud blob storage, we recommend using presigned urls.
 ### Step 1: Upload your input script
 
 To follow along with this example, you can download the example batch, or create your own batch file in your working directory.
- 
- ```
- wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/openai_example_batch.jsonl
- ```
- 
- Once you've created your batch file it should look like this
- 
- ```
- $ cat openai_example_batch.jsonl
-{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Hello world!"}],"max_tokens": 1000}}
-{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are an unhelpful assistant."},{"role": "user", "content": "Hello world!"}],"max_tokens": 1000}}
- ```
+
+```
+wget https://raw.githubusercontent.com/vllm-project/vllm/main/examples/openai_example_batch.jsonl
+```
+
+Once you've created your batch file it should look like this
+
+```
+$ cat openai_example_batch.jsonl
+{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are an unhelpful assistant."},{"role": "user", "content": "Hello world!"}],"max_completion_tokens": 1000}}
+```
 
 Now upload your batch file to your S3 bucket.
 
@@ -104,7 +107,6 @@ Now upload your batch file to your S3 bucket.
 aws s3 cp openai_example_batch.jsonl s3://MY_BUCKET/MY_INPUT_FILE.jsonl
 ```
 
-  
 ### Step 2: Generate your presigned urls
 
 Presigned urls can only be generated via the SDK. You can run the following python script to generate your presigned urls. Be sure to replace the `MY_BUCKET`, `MY_INPUT_FILE.jsonl`, and `MY_OUTPUT_FILE.jsonl` placeholders with your bucket and file names.
@@ -179,20 +181,18 @@ aws s3 cp s3://MY_BUCKET/MY_OUTPUT_FILE.jsonl -
 
 ### Step 1: Create your batch file
  
- Add embedding requests to your batch file. The following is an example:
+Add embedding requests to your batch file. The following is an example:
  
- ```
- {"custom_id": "request-1", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}
+```
+{"custom_id": "request-1", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}
 {"custom_id": "request-2", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are an unhelpful assistant."}}
 ```
- 
- You can even mix chat completion and embedding requests in the batch file, as long as the model you are using supports both chat completion and embeddings (note that all requests must use the same model).
 
+You can even mix chat completion and embedding requests in the batch file, as long as the model you are using supports both chat completion and embeddings (note that all requests must use the same model).
 
- ### Step 2: Run the batch
+### Step 2: Run the batch
 
 You can run the batch using the same command as in earlier examples.
-
 
 ### Step 3: Check your results
 
@@ -201,5 +201,5 @@ You can check your results by running `cat results.jsonl`
 ```
 $ cat results.jsonl
 {"id":"vllm-db0f71f7dec244e6bce530e0b4ef908b","custom_id":"request-1","response":{"status_code":200,"request_id":"vllm-batch-3580bf4d4ae54d52b67eee266a6eab20","body":{"id":"embd-33ac2efa7996430184461f2e38529746","object":"list","created":444647,"model":"intfloat/e5-mistral-7b-instruct","data":[{"index":0,"object":"embedding","embedding":[0.016204833984375,0.0092010498046875,0.0018358230590820312,-0.0028228759765625,0.001422882080078125,-0.0031147003173828125,...]}],"usage":{"prompt_tokens":8,"total_tokens":8,"completion_tokens":0}}},"error":null}
-...```
+...
 ```
