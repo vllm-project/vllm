@@ -73,14 +73,13 @@ class Scheduler:
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed). Currently, we assume that the encoder also
         # has the Transformer architecture (e.g., ViT).
-        # FIXME(woosuk): Below are placeholder values. We need to calculate the
-        # actual values from the configurations.
-        self.max_num_encoder_input_tokens = 16384
+        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  #noqa: E501
         # NOTE(woosuk): For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized and used, regardless of
         # the cache size. This is because the memory space for the encoder cache
         # is preallocated in the profiling run.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=16384)
+        self.encoder_cache_manager = EncoderCacheManager(
+            cache_size=self.scheduler_config.encoder_cache_size)
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
@@ -517,6 +516,7 @@ class NewRequestData:
     prompt_token_ids: List[int]
     prompt: Optional[str]
     mm_inputs: List["MultiModalKwargs"]
+    mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     block_ids: List[int]
@@ -534,6 +534,7 @@ class NewRequestData:
             prompt_token_ids=request.prompt_token_ids,
             prompt=request.prompt,
             mm_inputs=request.mm_inputs,
+            mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
             block_ids=block_ids,
