@@ -174,10 +174,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
-        worker_to_ip = {
-            worker: ip
-            for worker, ip in zip(self.workers, worker_ips)
-        }
+        worker_to_ip = dict(zip(self.workers, worker_ips))
 
         def sort_by_driver_then_worker_ip(worker):
             """
