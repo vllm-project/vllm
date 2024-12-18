@@ -907,6 +907,8 @@ class CacheConfig:
         self.num_gpu_blocks: Optional[int] = None
         self.num_cpu_blocks: Optional[int] = None
 
+        self.kv_cache_transporter = None
+
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info

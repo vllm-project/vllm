@@ -31,6 +31,11 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
+from vllm.distributed.kv_transfer.utils import (
+    ForwardPassType,
+    prepare_kv_cache_transport,
+    finalize_kv_cache_transport,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -300,6 +305,7 @@ class LlamaModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
+        self.cache_config = cache_config
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
@@ -344,6 +350,11 @@ class LlamaModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+
+        fp_type, kv_cache_transporter, input_token_hashes, offsets = (
+            prepare_kv_cache_transport(input_ids, attn_metadata,
+                                       self.cache_config))
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -355,11 +366,37 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        if fp_type == ForwardPassType.FIRST_DECODE:
+            for i in range(self.start_layer, self.end_layer):
+                kv_cache_transporter.read_kv_cache(input_token_hashes,
+                                                   attn_metadata.seq_lens,
+                                                   offsets, i, kv_caches[i])
+            kv_cache_transporter.read_hidden_states(input_token_hashes,
+                                                    attn_metadata.seq_lens,
+                                                    hidden_states)
+            kv_cache_transporter.synchronize()
+
+            return hidden_states
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i - self.start_layer],
                                             attn_metadata, residual)
+
+            if i > 0 and fp_type == ForwardPassType.PREFILL:
+                kv_cache_transporter.synchronize()
+                kv_cache_transporter.publish_kv_cache_prefill_done(
+                    input_token_hashes, attn_metadata.seq_lens, i - 1)
+
+            if fp_type == ForwardPassType.PREFILL:
+                kv_cache_transporter.save_kv_cache(input_token_hashes, offsets,
+                                                   i, kv_caches[i])
+
+        if fp_type == ForwardPassType.PREFILL:
+            kv_cache_transporter.synchronize()
+            kv_cache_transporter.publish_kv_cache_prefill_done(
+                input_token_hashes, attn_metadata.seq_lens, self.end_layer - 1)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -368,6 +405,11 @@ class LlamaModel(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        finalize_kv_cache_transport(fp_type, kv_cache_transporter,
+                                    input_token_hashes, attn_metadata,
+                                    hidden_states)
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -568,6 +610,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         model_output = self.model(input_ids, positions, kv_caches,
                                   attn_metadata, intermediate_tensors,
                                   inputs_embeds)
+
         return model_output
 
     def compute_logits(
