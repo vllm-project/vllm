@@ -190,8 +190,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposer_worker, draft_tp, target_tp)
 
             worker_list: Dict[str, ProposerWorkerBase] = {}
-            worker_list[
-                draft_worker_kwargs['model_config'].model] = proposer_worker
+            worker_list[draft_model_config.model] = proposer_worker
 
             # Currently, MultiProposerWorker is designed to support NGram
             # proposer as a backup to pair up with another slower but more
