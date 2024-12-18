@@ -15,7 +15,7 @@
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
 // TODO(luka/varun): use FP8_TYPE macro after refactoring
-#ifndef USE_ROCM
+#ifdef USE_CUDA_FP8_FORMAT
   #define VLLM_DISPATCH_CASE_QUANT_TYPES(...)                    \
     AT_DISPATCH_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__) \
     AT_DISPATCH_CASE(at::ScalarType::Char, __VA_ARGS__)
