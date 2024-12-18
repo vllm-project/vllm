@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import uvloop
-from huggingface_hub import snapshot_download
 from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -23,6 +22,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
+from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
 
@@ -67,24 +67,20 @@ def _get_prompt_for_image_model(question: str, *, model: str) -> str:
 
 
 @cache
-def download_lora(lora_path: str) -> str:
-    """
-    Given an huggingface path, downloads the LoRA model and returns the path
-    on disk.
-    """
-    return snapshot_download(lora_path)
+def lora_path_on_disk(lora_path: str) -> str:
+    return get_adapter_absolute_path(lora_path)
 
 
 lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
 
 
 def get_random_lora_request(
-        args: argparse.Namespace) -> Tuple[LoRARequest, AnyTokenizer]:
+        args: argparse.Namespace) -> Tuple[LoRARequest, Optional[AnyTokenizer]]:
     global lora_tokenizer_cache
     lora_id = random.randint(0, args.max_loras)
     lora_request = LoRARequest(lora_name=str(lora_id),
                                lora_int_id=lora_id,
-                               lora_path=download_lora(args.lora_path))
+                               lora_path=lora_path_on_disk(args.lora_path))
     if lora_id not in lora_tokenizer_cache:
         lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
     return lora_request, lora_tokenizer_cache[lora_id]
@@ -135,10 +131,12 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                 continue
             prompt = _get_prompt_for_image_model(question=prompt, model=model)
 
-        lora_request: Optional[LoRARequest] = None
         request_tokenizer = tokenizer
+        lora_request: Optional[LoRARequest] = None
         if args.enable_lora:
-            lora_request, request_tokenizer = get_random_lora_request(args)
+            lora_request, lora_tokenizer = get_random_lora_request(args)
+            if lora_tokenizer:
+                request_tokenizer = lora_tokenizer
 
         # Tokenize the prompts and completions.
         prompt_token_ids = request_tokenizer(prompt).input_ids
@@ -353,7 +351,9 @@ def main(args: argparse.Namespace):
             request_tokenizer = tokenizer
             lora_request: Optional[LoRARequest] = None
             if args.enable_lora:
-                lora_request, request_tokenizer = get_random_lora_request(args)
+                lora_request, lora_tokenizer = get_random_lora_request(args)
+                if lora_tokenizer:
+                    request_tokenizer = lora_tokenizer 
 
             # Synthesize a prompt with the given input length.
             candidate_ids = [
@@ -484,7 +484,8 @@ if __name__ == "__main__":
     # LoRA
     parser.add_argument("--lora-path",
                         type=str,
-                        default='yard1/llama-2-7b-sql-lora-test')
+                        default=None,
+                        help="Path to the lora adapters to use. This can be an absolute path, a relative path, or a Hugging Face model identifier.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -495,6 +496,8 @@ if __name__ == "__main__":
         assert args.output_len is not None
     else:
         assert args.input_len is None
+    if args.enable_lora:
+        assert args.lora_path is not None
 
     if args.backend == "vllm":
         if args.hf_max_batch_size is not None:
