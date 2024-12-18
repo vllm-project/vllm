@@ -25,9 +25,6 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
-WAITING_TIMEOUT_MS = 5
-
-
 @dataclass
 class RequestState:
     """
@@ -259,7 +256,7 @@ class AsyncLLM(EngineClient):
         while True:
             try:
                 await asyncio.wait_for(state.event.wait(),
-                                       timeout=WAITING_TIMEOUT_MS)
+                                       timeout=4)
                 # logger.info(f"{request_id} woke up.")
 
                 # NOTE(rob): out_list can have more than one item. However,
@@ -271,12 +268,12 @@ class AsyncLLM(EngineClient):
                 # that the API client does not fall behind the EngineCor,
                 # which happens at high QPS otherwise.
                 out = state.out_list[-1]
-                if len(state.out_list) > 10:
+                if len(state.out_list) > 1:
                     logger.info(f"{len(state.out_list)=}")
 
             except asyncio.TimeoutError:
                 # TODO(rob): do request cancellation checking here.
-                logger.info("Timeout waiting for %s", request_id)
+                logger.debug("Timeout waiting for %s", request_id)
                 continue
 
             state.out_list = []
