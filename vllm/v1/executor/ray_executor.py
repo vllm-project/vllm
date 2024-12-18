@@ -24,27 +24,16 @@ class RayExecutor(Executor):
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
-        self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
-        self.observability_config = vllm_config.observability_config
-        self._init_executor()
-
-    def _init_executor(self) -> None:
+        self.model_config = vllm_config.model_config
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
-        placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
         if ray_usage != "1":
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
+        placement_group = self.parallel_config.placement_group
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
@@ -85,6 +74,8 @@ class RayExecutor(Executor):
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
+        worker_to_ip = dict(zip(self.workers, worker_ips))
+
         def sort_by_driver_then_worker_ip(worker):
             """
             Sort the workers based on 3 properties:
@@ -95,7 +86,7 @@ class RayExecutor(Executor):
             3. Finally, if the work is on a node with smaller IP address, it
                 should be placed first.
             """
-            ip = ray.get(worker.get_node_ip.remote())
+            ip = worker_to_ip[worker]
             return (ip != driver_ip, ip_counts[ip], ip)
 
         # After sorting, the workers on the same node will be
@@ -274,10 +265,6 @@ class RayExecutor(Executor):
         ways:
 
         Args:
-        - async_run_tensor_parallel_workers_only: If True the method will be
-          run only in the remote TP workers, not the driver worker.
-          It will also be run asynchronously and return a list of futures
-          rather than blocking on the results.
         - args/kwargs: All workers share the same args/kwargs
         - all_args/all_kwargs: args/kwargs for each worker are specified
           individually
@@ -288,20 +275,13 @@ class RayExecutor(Executor):
         all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
             else islice(all_kwargs, 0, None)
 
-        # Start the ray workers first.
-        ray_workers = self.workers
-        ray_worker_outputs = [
+        ray_worker_refs = [
             worker.execute_method.remote(  # type: ignore[attr-defined]
                 method, *worker_args, **worker_kwargs)
             for (worker, worker_args, worker_kwargs
-                 ) in zip(ray_workers, all_worker_args, all_worker_kwargs)
+                 ) in zip(self.workers, all_worker_args, all_worker_kwargs)
         ]
-
-        # Get the results of the ray workers.
-        if self.workers:
-            ray_worker_outputs = ray.get(ray_worker_outputs)
-
-        return ray_worker_outputs
+        return ray.get(ray_worker_refs)
 
     def execute_model(
         self,
@@ -309,8 +289,8 @@ class RayExecutor(Executor):
     ) -> ModelRunnerOutput:
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag()
-        # All workers are supposed to produce the same output. Only
-        # get the first output.
+        # Only the first worker (with rank 0) returns the execution result.
+        # Others return None.
         output = ray.get(self.forward_dag.execute(scheduler_output))[0]
         return output
 
