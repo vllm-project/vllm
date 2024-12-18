@@ -1,3 +1,4 @@
+import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
+
 
 class RayExecutor:
 
@@ -39,6 +42,7 @@ class RayExecutor:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.compiled_dag_refs = []
+        self.microbatches_in_progress = []
         self._init_executor()
 
     def _init_executor(self) -> None:
@@ -342,6 +346,30 @@ class RayExecutor:
         ref = self.forward_dag.execute(scheduler_output)
         self.compiled_dag_refs.append((ref, scheduler_output))
         return outputs
+
+    async def execute_model_async(
+        self,
+        scheduler_output,
+    ) -> List[ModelRunnerOutput]:
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag()
+
+        if len(self.microbatches_in_progress
+               ) < self.parallel_config.pipeline_parallel_size:
+            self.microbatches_in_progress.append(
+                self.forward_dag.execute_async(scheduler_output))
+
+        done, _ = await asyncio.wait(self.microbatches_in_progress,
+                                     timeout=ENGINE_ITERATION_TIMEOUT_S,
+                                     return_when=asyncio.FIRST_COMPLETED)
+
+        model_runner_outputs = []
+        for microbatch in done:
+            self.microbatches_in_progress.remove(microbatch)
+            dag_future = microbatch.result()
+            outputs = await dag_future
+            model_runner_outputs.append(outputs[0])
+        return model_runner_outputs
 
     def profile(self, is_start=True):
         raise NotImplementedError
