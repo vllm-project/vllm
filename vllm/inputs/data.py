@@ -162,6 +162,11 @@ class TokenInputs(TypedDict):
     Placeholder ranges for the multi-modal data.
     """
 
+    multi_modal_hashes: NotRequired[List[str]]
+    """
+    The hashes of the multi-modal data.
+    """
+
     mm_processor_kwargs: NotRequired[Dict[str, Any]]
     """
     Optional multi-modal processor kwargs to be forwarded to the
@@ -177,6 +182,7 @@ def token_inputs(
     prompt: Optional[str] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
     multi_modal_inputs: Optional["MultiModalKwargs"] = None,
+    multi_modal_hashes: Optional[List[str]] = None,
     multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> TokenInputs:
@@ -191,6 +197,8 @@ def token_inputs(
         inputs["multi_modal_data"] = multi_modal_data
     if multi_modal_inputs is not None:
         inputs["multi_modal_inputs"] = multi_modal_inputs
+    if multi_modal_hashes is not None:
+        inputs["multi_modal_hashes"] = multi_modal_hashes
     if multi_modal_placeholders is not None:
         inputs["multi_modal_placeholders"] = multi_modal_placeholders
     if mm_processor_kwargs is not None:
@@ -292,6 +300,18 @@ class SingletonInputsAdapter:
 
         if inputs["type"] == "multimodal":
             return inputs.get("mm_kwargs", {})
+
+        assert_never(inputs)
+
+    @cached_property
+    def multi_modal_hashes(self) -> List[str]:
+        inputs = self.inputs
+
+        if inputs["type"] == "token":
+            return inputs.get("multi_modal_hashes", [])
+
+        if inputs["type"] == "multimodal":
+            return inputs.get("mm_hashes", [])
 
         assert_never(inputs)
 

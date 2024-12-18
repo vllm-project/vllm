@@ -205,6 +205,7 @@ class EngineArgs:
         # by user.
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = bool(envs.VLLM_USE_V1)
+
         # Override max_num_seqs if it's not set by user.
         if self.max_num_seqs is None:
             self.max_num_seqs = 256 if not envs.VLLM_USE_V1 else 1024
@@ -1026,11 +1027,11 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        if model_config.is_multimodal_model:
-            if self.enable_prefix_caching:
-                logger.warning(
-                    "--enable-prefix-caching is currently not "
-                    "supported for multimodal models and has been disabled.")
+        if (model_config.is_multimodal_model and not envs.VLLM_USE_V1
+                and self.enable_prefix_caching):
+            logger.warning("--enable-prefix-caching is currently not "
+                           "supported for multimodal models in v0 and "
+                           "has been disabled.")
             self.enable_prefix_caching = False
 
         cache_config = CacheConfig(
@@ -1249,11 +1250,14 @@ class EngineArgs:
         # When no user override, set the default values based on the usage
         # context.
         # TODO(woosuk): Tune the default values for different hardware.
-        if self.max_num_batched_tokens is None:
-            if usage_context == UsageContext.LLM_CLASS:
-                self.max_num_batched_tokens = 8192
-            elif usage_context == UsageContext.OPENAI_API_SERVER:
-                self.max_num_batched_tokens = 2048
+        default_max_num_batched_tokens = {
+            UsageContext.LLM_CLASS: 8192,
+            UsageContext.OPENAI_API_SERVER: 2048,
+        }
+        if (self.max_num_batched_tokens is None
+                and usage_context in default_max_num_batched_tokens):
+            self.max_num_batched_tokens = default_max_num_batched_tokens[
+                usage_context]
             logger.warning(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, usage_context.value)
@@ -1263,9 +1267,6 @@ class EngineArgs:
         Override the EngineConfig's configs based on the usage context for V1.
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
-        if engine_config.model_config.is_multimodal_model:
-            # TODO (ywang96): Enable APC by default when VLM supports it.
-            assert not engine_config.cache_config.enable_prefix_caching
 
 
 @dataclass
