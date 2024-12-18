@@ -56,11 +56,12 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build CPU docker on release only"
+  - block: "Build CPU release image"
+    key: block-cpu-release-image-build
     depends_on: ~
 
   - label: "Build and publish CPU release image"
-    depends_on: ~
+    depends_on: block-cpu-release-image-build
     if: build.tag != null
     agents:
       queue: cpu_queue_postmerge
