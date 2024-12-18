@@ -65,9 +65,6 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
       --build-arg torch_cuda_arch_list="9.0+PTX" \
       --build-arg vllm_fa_cmake_gpu_arches="90-real"
 
-
-
-
 To run vLLM:
 
 .. code-block:: console
