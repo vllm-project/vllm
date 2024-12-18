@@ -19,10 +19,10 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt
 from vllm.lora.request import LoRARequest
+from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
-from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
 
@@ -75,7 +75,8 @@ lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
 
 
 def get_random_lora_request(
-        args: argparse.Namespace) -> Tuple[LoRARequest, Optional[AnyTokenizer]]:
+        args: argparse.Namespace
+) -> Tuple[LoRARequest, Optional[AnyTokenizer]]:
     global lora_tokenizer_cache
     lora_id = random.randint(0, args.max_loras)
     lora_request = LoRARequest(lora_name=str(lora_id),
@@ -353,7 +354,7 @@ def main(args: argparse.Namespace):
             if args.enable_lora:
                 lora_request, lora_tokenizer = get_random_lora_request(args)
                 if lora_tokenizer:
-                    request_tokenizer = lora_tokenizer 
+                    request_tokenizer = lora_tokenizer
 
             # Synthesize a prompt with the given input length.
             candidate_ids = [
@@ -482,10 +483,12 @@ if __name__ == "__main__":
                         default=False,
                         help="Disable decoupled async engine frontend.")
     # LoRA
-    parser.add_argument("--lora-path",
-                        type=str,
-                        default=None,
-                        help="Path to the lora adapters to use. This can be an absolute path, a relative path, or a Hugging Face model identifier.")
+    parser.add_argument(
+        "--lora-path",
+        type=str,
+        default=None,
+        help="Path to the lora adapters to use. This can be an absolute path, "
+        "a relative path, or a Hugging Face model identifier.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
