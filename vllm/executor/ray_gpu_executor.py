@@ -139,11 +139,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
 
-            if self.use_ray_spmd_worker:
-                self.workers.append(worker)
-            else:
+            if (not self.use_ray_spmd_worker
+                    and self.driver_dummy_worker is None):
                 worker_ip = ray.get(worker.get_node_ip.remote())
-                if worker_ip == driver_ip and self.driver_dummy_worker is None:
+                if worker_ip == driver_ip:
                     # If the worker is on the same node as the driver, we use it
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
@@ -152,6 +151,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 else:
                     # Else, added to the list of workers.
                     self.workers.append(worker)
+            else:
+                self.workers.append(worker)
 
         logger.debug("workers: %s", self.workers)
         logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
