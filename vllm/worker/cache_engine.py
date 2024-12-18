@@ -79,7 +79,7 @@ class CacheEngine:
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
             if device=="cpu":
-                if not tensor_zeros:
+                if tensor_zeros==None:
                     tensor_zeros = torch.zeros(kv_cache_shape,
                                 dtype=self.dtype,
                                 pin_memory=pin_memory,
