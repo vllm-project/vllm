@@ -575,7 +575,8 @@ def test_decode_schedule_preempted():
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
                                            block_size=block_size)
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate(seq_group)
+        scheduler._set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._add_seq_group_to_running(seq_group)
     scheduler.block_manager.can_append_slots = MagicMock()
@@ -619,7 +620,8 @@ def test_schedule_decode_blocks_to_copy_update():
                                        best_of=2,
                                        block_size=block_size)
     curr_loras = None
-    scheduler._allocate_and_set_running(seq_group)
+    scheduler._allocate(seq_group)
+    scheduler._set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
     scheduler._add_seq_group_to_running(seq_group)
 
@@ -659,7 +661,8 @@ def test_schedule_swapped_max_loras():
                                                lora_name=str(i),
                                                lora_int_id=i + 1,
                                                lora_path="abc"))
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate(seq_group)
+        scheduler._set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         scheduler._add_seq_group_to_swapped(seq_group)
@@ -687,7 +690,8 @@ def test_schedule_swapped_cannot_swap_in():
                                            prompt_length=60,
                                            best_of=2,
                                            block_size=block_size)
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate(seq_group)
+        scheduler._set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         scheduler._add_seq_group_to_swapped(seq_group)
@@ -718,7 +722,8 @@ def test_infeasible_swap():
                                            prompt_length=60,
                                            best_of=2,
                                            block_size=block_size)
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate(seq_group)
+        scheduler._set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         scheduler._add_seq_group_to_swapped(seq_group)
@@ -748,7 +753,8 @@ def test_schedule_swapped_blocks_to_copy():
                                        prompt_length=60,
                                        best_of=2,
                                        block_size=block_size)
-    scheduler._allocate_and_set_running(seq_group)
+    scheduler._allocate(seq_group)
+    scheduler._set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
     blocks_to_swap_out: List[Tuple[int, int]] = []
     scheduler._swap_out(seq_group, blocks_to_swap_out)
