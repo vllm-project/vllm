@@ -19,7 +19,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -79,8 +79,14 @@ class GPUModelRunner:
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
-        # NOTE: mm_input_mapper is only used for memory profiling.
-        self.mm_input_mapper = MMInputMapperClient(self.model_config)
+
+        # NOTE: mm_input_mapper_client and mm_hasher are only used for memory
+        # profiling.
+        self.mm_input_mapper_client = MMInputMapperClient(self.model_config)
+        self.mm_hasher = MMHasher()
+        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
+            cache_config.enable_prefix_caching
+
         self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
         self.encoder_cache_size = self.scheduler_config.encoder_cache_size
 
@@ -628,9 +634,15 @@ class GPUModelRunner:
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
-            dummy_mm_kwargs, _ = self.mm_input_mapper.process_inputs(
+
+            # Compute MM hashes (if enabled)
+            mm_hashes = None
+            if self.use_hash:
+                mm_hashes = self.mm_hasher.hash_mm_data(dummy_mm_data)
+
+            dummy_mm_kwargs = self.mm_input_mapper_client.process_inputs(
                 mm_data=dummy_mm_data,
-                mm_hashes=None,
+                mm_hashes=mm_hashes,
                 mm_processor_kwargs=None,
                 precomputed_mm_inputs=None)
 
