@@ -191,7 +191,7 @@ def generate_block_hash_extra_keys(
         raise ValueError(
             "The number of multi-modal positions and hashes must match. This "
             "is likely because you do not enable MM preprocessor hashing. "
-            "Please set mm_cache_preprocessor=True.")
+            "Please set disable_mm_preprocessor_cache=False.")
 
     # Note that we assume mm_positions is sorted by offset.
     # We do not need to check all mm inputs if the start token index is out of

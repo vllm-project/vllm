@@ -46,7 +46,7 @@ class Processor:
         self.mm_input_mapper_client = MMInputMapperClient(model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = model_config.mm_cache_preprocessor or \
+        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
             cache_config.enable_prefix_caching
         self.mm_hasher = MMHasher()
 
@@ -80,7 +80,7 @@ class Processor:
         # Compute MM hashes (if enabled)
         mm_hashes = None
         if self.use_hash:
-            mm_hashes = self.mm_hasher.hash(prompt)
+            mm_hashes = self.mm_hasher.hash_prompt(prompt)
 
         # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(

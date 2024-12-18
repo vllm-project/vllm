@@ -141,7 +141,7 @@ class EngineArgs:
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
-    mm_cache_preprocessor: bool = False
+    disable_mm_preprocessor_cache: bool = False
     enable_lora: bool = False
     enable_lora_bias: bool = False
     max_loras: int = 1
@@ -606,11 +606,10 @@ class EngineArgs:
             help=('Overrides for the multimodal input mapping/processing, '
                   'e.g., image processor. For example: {"num_crops": 4}.'))
         parser.add_argument(
-            '--mm-cache-preprocessor',
+            '--disable-mm-preprocessor-cache',
             action='store_true',
-            help='If true, then enables caching of the multi-modal '
-            'preprocessor/mapper. Otherwise, the mapper executes each time'
-            ', and for better performance consider enabling frontend process.')
+            help='If true, then disables caching of the multi-modal '
+            'preprocessor/mapper. (not recommended)')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
@@ -983,7 +982,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            mm_cache_preprocessor=self.mm_cache_preprocessor,
+            disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern)

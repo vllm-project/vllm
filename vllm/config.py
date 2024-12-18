@@ -148,9 +148,8 @@ class ModelConfig:
             HuggingFace config.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
-        mm_cache_preprocessor: If true, then enables caching of the multi-modal 
-            preprocessor/mapper. Otherwise, the mapper executes each time, and 
-            for better performance consider enabling frontend process.
+        disable_mm_preprocessor_cache: If true, then disables caching of the
+            multi-modal preprocessor/mapper. (not recommended)
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
@@ -216,7 +215,7 @@ class ModelConfig:
                  config_format: ConfigFormat = ConfigFormat.AUTO,
                  hf_overrides: Optional[HfOverrides] = None,
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-                 mm_cache_preprocessor: bool = False,
+                 disable_mm_preprocessor_cache: bool = False,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  override_pooler_config: Optional["PoolerConfig"] = None,
                  logits_processor_pattern: Optional[str] = None) -> None:
@@ -286,7 +285,7 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
-        self.mm_cache_preprocessor = mm_cache_preprocessor
+        self.disable_mm_preprocessor_cache = disable_mm_preprocessor_cache
 
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:
@@ -3155,7 +3154,7 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
-            f"mm_cache_preprocessor={self.model_config.mm_cache_preprocessor!r}, "  # noqa
+            f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r}, "  # noqa
             f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")
