@@ -206,7 +206,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
-  set(CUTLASS_REVISION "v3.5.1" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "v3.6.0" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -223,13 +223,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        GIT_TAG v3.5.1
+        GIT_TAG 8aa95dbb888be6d81c6fbf7169718c5244b53227
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
+        GIT_SHALLOW FALSE
     )
   endif()
   FetchContent_MakeAvailable(cutlass)
@@ -241,7 +241,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu")
+    "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
+    "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
+    "csrc/sparse/cutlass/sparse_compressor_entry.cu"
+    "csrc/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -271,11 +274,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   #
-  # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
+  # The cutlass_scaled_mm cutlass_scaled_sparse_mm, and cutlass_compressor kernels
+  # For Hopper (c3x, i.e. CUTLASS 3.x) require
   # CUDA 12.0 or later (and only work on Hopper, 9.0/9.0a for now).
   cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0;9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
+    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
+             "csrc/sparse/cutlass/sparse_compressor_c3x.cu"
+             "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
@@ -284,12 +290,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-      message(STATUS "Not building scaled_mm_c3x as CUDA Compiler version is "
+      message(STATUS "Not building cutlass_c3x kernels as CUDA Compiler version is "
                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running FP8 quantized models on "
+                     "later if you intend on running FP8 sparse or quantized models on "
                      "Hopper.")
     else()
-      message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
+      message(STATUS "Not building cutlass_c3x as no compatible archs found "
                      "in CUDA target architectures")
     endif()
 
@@ -404,7 +410,7 @@ define_gpu_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 
