@@ -188,8 +188,8 @@ See [this page](#generative-models) for more information on how to use generativ
     -
     - ✅︎
   * - :code:`GraniteForCausalLM`
-    - Granite 3.0, PowerLM
-    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.0-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
+    - Granite 3.0, Granite 3.1, PowerLM
+    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.1-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`GraniteMoeForCausalLM`
@@ -476,8 +476,13 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
   * - Architecture
     - Models
     - Example HF Models
-    - [LoRA](#lora)
-    - [PP](#distributed-serving)
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`JambaForSequenceClassification`
+    - Jamba
+    - :code:`ai21labs/Jamba-tiny-reward-dev`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`Qwen2ForSequenceClassification`
     - Qwen2-based
     - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.

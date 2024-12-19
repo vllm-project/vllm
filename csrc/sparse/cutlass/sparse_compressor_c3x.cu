@@ -2,6 +2,7 @@
 // clang-format off
 #include <cudaTypedefs.h>
 
+#if defined CUDA_VERSION && CUDA_VERSION >= 12020
 #include "sparse_scaled_mm_c3x.cuh"
 
 #include "cutlass/numeric_conversion.h"
@@ -161,3 +162,4 @@ bool cutlass_sparse_compress_sm90(torch::Tensor& a_nzs, torch::Tensor& a_meta,
   }
   return false;
 }
+#endif
