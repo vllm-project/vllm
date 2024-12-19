@@ -2,7 +2,7 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, DefaultDict, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
@@ -36,12 +36,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # which optimizes the control plane overhead.
         # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
         # Currently, this requires USE_RAY_SPMD_WORKER=True.
-        self.use_ray_compiled_dag = envs.VLLM_USE_RAY_COMPILED_DAG
+        self.use_ray_compiled_dag: bool = envs.VLLM_USE_RAY_COMPILED_DAG
         # If the env var is set, then we do not distinguish between the
         # "driver worker" vs other workers. Also, the rank 0 worker will
         # be executed in a remote Ray worker. Currently this requires
         # USE_RAY_COMPILED_DAG=True.
-        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
+        self.use_ray_spmd_worker: bool = envs.VLLM_USE_RAY_SPMD_WORKER
         if self.use_ray_compiled_dag:
             assert self.use_ray_spmd_worker, (
                 "VLLM_USE_RAY_COMPILED_DAG=1 requires "
@@ -53,7 +53,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 "VLLM_USE_RAY_COMPILED_DAG=1")
 
         assert self.uses_ray
-        placement_group = self.parallel_config.placement_group
+        placement_group: Optional["PlacementGroup"] = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
@@ -197,7 +197,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.workers = sorted(self.workers, key=sort_by_driver_then_worker_ip)
 
         # Get the set of GPU IDs used on each node.
-        worker_node_and_gpu_ids = []
+        worker_node_and_gpu_ids: List[Tuple[str, List[Union[int, str]]]] = []
         for worker in [self.driver_dummy_worker] + self.workers:
             if worker is None:
                 # driver_dummy_worker can be None when using ray spmd worker.
@@ -206,8 +206,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 ray.get(worker.get_node_and_gpu_ids.remote()) \
             ) # type: ignore
 
-        node_workers = defaultdict(list)  # node id -> list of worker ranks
-        node_gpus = defaultdict(list)  # node id -> list of gpu ids
+        node_workers: DefaultDict[str, List[int]] = defaultdict(list)  # node id -> list of worker ranks
+        node_gpus: DefaultDict[str: List[Union[int, str]]] = defaultdict(list)  # node id -> list of gpu ids
 
         for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
             node_workers[node_id].append(i)
