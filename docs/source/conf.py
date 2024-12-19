@@ -162,6 +162,7 @@ def linkcode_resolve(domain, info):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
+    "blake3",
     "compressed_tensors",
     "cpuinfo",
     "cv2",
