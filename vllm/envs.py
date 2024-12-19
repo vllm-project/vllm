@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_USE_TRITON_PAGED_ATTN_DECODE: bool = False
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
@@ -200,6 +201,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
+
+    # flag to control if vllm should use triton paged attention decode
+    "VLLM_USE_TRITON_PAGED_ATTN_DECODE":
+    lambda:
+    (os.environ.get("VLLM_USE_TRITON_PAGED_ATTN_DECODE", "False").lower() in
+     ("true", "1")),
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
