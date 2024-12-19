@@ -1,33 +1,20 @@
-"""
-Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
-Punica: Multi-Tenant LoRA Serving. 
-https://arxiv.org/abs/2310.18547
-"""
-
 from typing import Callable, Optional, Tuple, Union, final
 
 import torch
 
-from vllm.triton_utils import HAS_TRITON
-
-if HAS_TRITON:
-    from vllm.lora.ops.triton_ops.bgmv_expand import bgmv_expand
-    from vllm.lora.ops.triton_ops.bgmv_expand_slice import bgmv_expand_slice
-    from vllm.lora.ops.triton_ops.bgmv_shrink import bgmv_shrink
-    from vllm.lora.ops.triton_ops.sgmv_expand import sgmv_expand
-    from vllm.lora.ops.triton_ops.sgmv_expand_slice import sgmv_expand_slice
-    from vllm.lora.ops.triton_ops.sgmv_shrink import sgmv_shrink
+from vllm.lora.ops.torch_ops.lora_ops import (bgmv_expand, bgmv_expand_slice,
+                                              bgmv_shrink, sgmv_expand,
+                                              sgmv_expand_slice, sgmv_shrink)
 
 from .punica_base import PunicaWrapperBase
 
 
 @final
-class PunicaWrapperGPU(PunicaWrapperBase):
+class PunicaWrapperCPU(PunicaWrapperBase):
     """
-    PunicaWrapperGPU is designed to manage and provide metadata for the punica 
+    PunicaWrapperCPU is designed to manage and provide metadata for the punica 
     kernel. The main function is to maintain the state information for 
-    Multi-LoRA, and to provide the interface for the punica triton kernel.
+    Multi-LoRA, and to provide the interface for the pytorch punica ops.
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
@@ -94,8 +81,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_inputs: bool,
     ):
         #No LoRA request, so return directly
@@ -116,8 +103,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_inputs: bool,
     ):
         bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
@@ -128,8 +115,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_inputs: bool = True,
     ):
         """
