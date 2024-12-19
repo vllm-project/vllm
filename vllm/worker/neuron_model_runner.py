@@ -309,6 +309,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         kv_caches: Optional[List[torch.Tensor]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(

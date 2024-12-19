@@ -5,6 +5,8 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.cpu_offloading_block_allocator import (
+    CpuOffloadingBlockAllocator)
 from vllm.core.block.interfaces import Block
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
@@ -15,6 +17,11 @@ from vllm.utils import Device
 
 SeqId = int
 EncoderSeqId = str
+
+block_allocator_creator = {
+    "CpuGpuBlockAllocator": CpuGpuBlockAllocator.create,
+    "CpuOffloadingBlockAllocator": CpuOffloadingBlockAllocator.create,
+}
 
 
 class SelfAttnBlockSpaceManager(BlockSpaceManager):
@@ -65,6 +72,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
+        block_allocator: str = "CpuGpuBlockAllocator",
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -90,7 +98,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
-        self.block_allocator = CpuGpuBlockAllocator.create(
+        self.block_allocator = block_allocator_creator[block_allocator](
             allocator_type="prefix_caching" if enable_caching else "naive",
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
@@ -104,6 +112,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             self.block_allocator, self.block_size, self.enable_caching)
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
+
+        # request_id -> (blocks_to_swap_out, blocks_to_swap_in)
+        self.blocks_to_swap_of_sequence_id: List[
+            Tuple[int, Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]]] = \
+                []
+        self.seq_ids_to_swap_out: set[int] = set()
+        self.seq_ids_to_swap_in: set[int] = set()
 
     def can_allocate(self,
                      seq_group: SequenceGroup,
@@ -159,6 +174,22 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             block_table.allocate(token_ids=seq.get_token_ids(),
                                  extra_hash=extra_hash)
 
+        # If the block allocator is CpuOffloadingBlockAllocator, we need to
+        # tell the computed_blocks_tracker to invalidate the previous computed
+        # num cached tokens
+        if isinstance(self.block_allocator, CpuOffloadingBlockAllocator) and \
+                self.block_allocator.will_swap_in_cpu_blocks():
+            self._computed_blocks_tracker.on_swap_in_cpu_blocks(seq.seq_id)
+
+        blocks_to_swap_out, blocks_to_swap_in = \
+            self.block_allocator.get_and_reset_swaps()
+        if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
+            self.blocks_to_swap_of_sequence_id.append(
+                (seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
+            if (len(blocks_to_swap_out) > 0):
+                self.seq_ids_to_swap_out.add(seq.seq_id)
+            if (len(blocks_to_swap_in) > 0):
+                self.seq_ids_to_swap_in.add(seq.seq_id)
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
@@ -239,7 +270,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         block_table = self.block_tables[seq.seq_id]
 
-        block_table.append_token_ids(
+        has_new_cached_blocks = block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
@@ -247,6 +278,16 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
+        if (has_new_cached_blocks):
+            blocks_to_swap_out, blocks_to_swap_in = \
+                self.block_allocator.get_and_reset_swaps()
+            if (len(blocks_to_swap_out) + len(blocks_to_swap_in) > 0):
+                self.blocks_to_swap_of_sequence_id.append(
+                    (seq.seq_id, (blocks_to_swap_out, blocks_to_swap_in)))
+                if (len(blocks_to_swap_out) > 0):
+                    self.seq_ids_to_swap_out.add(seq.seq_id)
+                if (len(blocks_to_swap_in) > 0):
+                    self.seq_ids_to_swap_in.add(seq.seq_id)
         return new_cows
 
     def free(self, seq: Sequence) -> None:
@@ -514,3 +555,41 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         cached in the block manager for the sequence.
         """
         return self._computed_blocks_tracker.get_num_cached_tokens(seq)
+
+    def get_and_reset_swaps(self,
+                            now: float) -> \
+            List[Tuple[int,
+                       Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]]]:
+        """Returns and clears the mapping of source to destination block IDs.
+        Will be called after every swapping operations for now, and after every
+        schedule when BlockManagerV2 become default. 
+        
+        Args:
+            now (float): The time stamp.
+
+        Returns:
+            A tuple of two lists: (blocks_to_swap_out, blocks_to_swap_in).
+            Each list is a List[Tuple[int, int]], containing the mapping of 
+            source to destination block IDs. The block IDs are physical block
+            IDs and it's expected to be used by the cache engine directly.
+        """
+        ret = self.blocks_to_swap_of_sequence_id
+        self.block_allocator.access_cpu_hit_blocks(now)
+        self.blocks_to_swap_of_sequence_id = []
+        self.seq_ids_to_swap_out.clear()
+        self.seq_ids_to_swap_in.clear()
+        return ret
+
+    def need_to_swap_in(self, seq_group: SequenceGroup) -> bool:
+        if (len(seq_group.get_seqs(status=SequenceStatus.WAITING)) == 0):
+            return False
+        ret = False
+        seq_id = seq_group.get_seqs(status=SequenceStatus.WAITING)[0].seq_id
+        if seq_id in self.seq_ids_to_swap_in:
+            ret = True
+        if seq_group.is_encoder_decoder():
+            encoder_seq = seq_group.get_encoder_seq()
+            assert encoder_seq is not None
+            if encoder_seq.seq_id in self.seq_ids_to_swap_in:
+                ret = True
+        return ret
