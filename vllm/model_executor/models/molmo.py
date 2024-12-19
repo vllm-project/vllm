@@ -928,7 +928,11 @@ def image_input_mapper_for_molmo(
     data: object,
 ):
     if isinstance(data, list):
+        assert len(data) == 1, "Molmo supports only one image per prompt."
         data = data[0]
+
+    # Remove unused dummy PIL image
+    data.pop('raw_mm_data', None)
     return MultiModalKwargs(data)
 
 
