@@ -486,14 +486,31 @@ class LoRAModelManager(AdapterModelManager):
                     new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
-                logits_processor_module = self.model.get_submodule(
-                    "logits_processor")
-                new_module = replace_submodule(
-                    self.model, "logits_processor",
-                    from_layer_logits_processor(logits_processor_module,
-                                                module, self.lora_slots,
-                                                self.lora_config,
-                                                self.model.config))
+                if hasattr(self.model.config, "num_output_head") and \
+                        self.model.config.num_output_head > 1:
+                    # hack for multi-head output
+                    # we need to replace the logits processor for each head
+                    for i in range(self.model.config.num_output_head):
+                        logits_processor_module = self.model.get_submodule(f"logits_processor.{i}")
+                        new_module = replace_submodule(
+                            self.model, f"logits_processor.{i}",
+                            from_layer_logits_processor(logits_processor_module,
+                                                        module[i], self.lora_slots,
+                                                        self.lora_config,
+                                                        self.model.config))
+                        self.register_module(f"{module_name}.{i}", new_module)
+                        self._register_packed_modules(f"{module_name}.{i}")
+                        new_module.set_mapping(self.punica_wrapper)
+                    continue
+                else:
+                    logits_processor_module = self.model.get_submodule(
+                        "logits_processor")
+                    new_module = replace_submodule(
+                        self.model, "logits_processor",
+                        from_layer_logits_processor(logits_processor_module,
+                                                    module, self.lora_slots,
+                                                    self.lora_config,
+                                                    self.model.config))
 
             # In some models, especially multimodal ones, layers with the same
             # name may have different types, such as nn.Linear and

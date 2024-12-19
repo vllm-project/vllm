@@ -92,6 +92,7 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
         self.num_text_tokens = config.num_text_tokens
         self.num_output_head = config.num_output_head
         self.audio_start_token_id = config.audio_start_token_id
+        self.audio_ref_token_id = config.audio_ref_start_token_id
 
         self.gpt = LlamaModel(config, lora_config=lora_config)
         self.model_dim = self.gpt.config.hidden_size
@@ -100,9 +101,12 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
             VocabParallelEmbedding(self.num_audio_tokens, self.model_dim) for _ in range(self.num_output_head)
         ])
         
+        unpadded_vocab_size = self.num_audio_tokens
+        if lora_config:
+            unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.lm_head = nn.ModuleList([
             ParallelLMHead(
-                self.num_audio_tokens,
+                unpadded_vocab_size,
                 self.model_dim,
                 org_num_embeddings=self.num_audio_tokens,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE
@@ -112,7 +116,7 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
                 quant_config=quant_config,
             ) for _ in range(self.num_output_head)
         ])
-        self.logits_processor = LogitsProcessor(self.num_audio_tokens)
+        self.logits_processor = nn.ModuleList([LogitsProcessor(unpadded_vocab_size, self.num_audio_tokens) for _ in range(self.num_output_head)])
         self.sampler = MultiheadSampler()
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -155,9 +159,9 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
                 except KeyError:
                     pass
 
-    def get_input_embeddings(self, input_ids: torch.Tensor, is_prompt: bool) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor, audio_ref: torch.Tensor, is_prompt: bool) -> torch.Tensor:
         if is_prompt:
-            emb = self.emb_text(input_ids)
+            emb: torch.Tensor = self.emb_text(input_ids)
             audio_start = torch.tensor([1024, 1024], device=input_ids.device)
             code_emb = [
                 self.emb_code[i](audio_start[i])
@@ -165,10 +169,19 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
             ]
             start_token = torch.stack(code_emb, 1).sum(1).to(emb.dtype)
 
-            # find the index of the speaker token
+            # find the index of the audio BOS token
             indices = (input_ids == self.audio_start_token_id).nonzero(as_tuple=True)
             if indices[0].size(0) != 0:
                 emb.index_put_(indices, start_token)
+
+            # batch size = 2
+            # inpudId 7004 7004  XXXX 7004 7001  1 2 34 | 7003 7004 7004  XXXX 7004 7001  1 2 34 7003
+            # speaker ref [16*2, 1536]
+            indices = (input_ids == self.audio_ref_token_id).nonzero(as_tuple=True)
+            if indices[0].size(0) != 0:
+                for idx, audio_ref_start in enumerate(indices[0]):
+                    emb[audio_ref_start:audio_ref_start+16] = audio_ref[idx].to(emb.dtype)
+
         else:
             code_emb = [
                 self.emb_code[i](input_ids[:,i]) for i in range(self.num_output_head)
@@ -179,7 +192,7 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = [
-            self.logits_processor(self.lm_head[i], hidden_states, sampling_metadata)
+            self.logits_processor[i](self.lm_head[i], hidden_states, sampling_metadata)
             for i in range(self.num_output_head)
         ]
         logits = torch.stack(logits, 0).permute(1, 0, 2)
@@ -207,7 +220,8 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
-            hidden_states = self.get_input_embeddings(input_ids, is_prompt)
+            audio_ref = kwargs.get("audio", None)
+            hidden_states = self.get_input_embeddings(input_ids, audio_ref, is_prompt)
         model_output = self.gpt(
             input_ids=input_ids,
             inputs_embeds=hidden_states,
