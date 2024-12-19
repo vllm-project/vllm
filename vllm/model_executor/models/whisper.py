@@ -2,7 +2,6 @@ import math
 from functools import lru_cache
 from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
 
-import librosa
 import numpy as np
 import torch
 from torch import nn
@@ -583,7 +582,17 @@ def get_whisper_processor(
     )
 
 
+def _resample(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    try:
+        import librosa
+    except ImportError as exc:
+        raise ImportError(
+            "Please install vllm[audio] for audio support.") from exc
+    return librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
+
+
 def input_processor_for_whisper(ctx: InputContext, inputs):
+    
     multi_modal_data = inputs["encoder"]["multi_modal_data"]
     if isinstance(multi_modal_data["audio"], list):
         assert len(multi_modal_data["audio"]) == 1
@@ -592,7 +601,7 @@ def input_processor_for_whisper(ctx: InputContext, inputs):
     audio, orig_sr = multi_modal_data["audio"]
     processor = get_whisper_processor(ctx.model_config.model)
     target_sr = processor.feature_extractor.sampling_rate
-    audio = librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
+    audio = _resample(audio, orig_sr=orig_sr, target_sr=target_sr)
     if audio.size > 30 * target_sr:
         # Truncate audio to 30 seconds
         audio = audio[:30 * target_sr]
