@@ -32,7 +32,6 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
-from vllm.utils import iterate_with_cancellation
 
 logger = init_logger(__name__)
 
@@ -233,10 +232,6 @@ class OpenAIServingChat(OpenAIServing):
 
         assert len(generators) == 1
         result_generator, = generators
-
-        if raw_request:
-            result_generator = iterate_with_cancellation(
-                result_generator, raw_request.is_disconnected)
 
         # Streaming response
         if request.stream:
