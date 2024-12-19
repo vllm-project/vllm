@@ -603,35 +603,15 @@ class ProcessingCache:
         self._mm_cache = LRUCache[str, BatchFeature](capacity)
         self._coarse_cache = LRUCache[str, BatchFeature](capacity)
 
-    def maybe_log_text_cache_stats(self) -> None:
+    def maybe_log_cache_stats(self, cache: LRUCache, name: str) -> None:
         steps = self.debug_cache_hit_ratio_steps
         if not steps:
             return
 
-        text_cache_stats = self._text_cache.stat()
-        if text_cache_stats.total % steps == 0:
-            logger.debug("ProcessingCache: text_cache.hit_ratio = %.2f",
-                         text_cache_stats.hit_ratio)
-
-    def maybe_log_mm_cache_stats(self) -> None:
-        steps = self.debug_cache_hit_ratio_steps
-        if not steps:
-            return
-
-        mm_cache_stats = self._mm_cache.stat()
-        if mm_cache_stats.total % steps == 0:
-            logger.debug("ProcessingCache: mm_cache.hit_ratio = %.2f",
-                         mm_cache_stats.hit_ratio)
-
-    def maybe_log_coarse_cache_stats(self) -> None:
-        steps = self.debug_cache_hit_ratio_steps
-        if not steps:
-            return
-
-        coarse_cache_stats = self._mm_cache.stat()
-        if coarse_cache_stats.total % steps == 0:
-            logger.debug("ProcessingCache: coarse_cache.hit_ratio = %.2f",
-                         coarse_cache_stats.hit_ratio)
+        cache_stats = cache.stat()
+        if cache_stats.total % steps == 0:
+            logger.debug("ProcessingCache: %s.hit_ratio = %.2f",
+                         name, cache_stats.hit_ratio)
 
     def _iter_bytes_to_hash(self, key: str, obj: object) -> Iterable[bytes]:
         # Recursive cases
@@ -694,7 +674,7 @@ class ProcessingCache:
         for idx in range(num_items):
             mm_item = {k: [v[idx]] for k, v in mm_data.items()}
 
-            self.maybe_log_mm_cache_stats()
+            self.maybe_log_cache_stats(self._mm_cache, "mm_cache")
 
             processed_mm_item = self._mm_cache.get_or_put(
                 self._hash_kwargs(**mm_item, **mm_kwargs),
@@ -713,7 +693,7 @@ class ProcessingCache:
         # we have to fallback to processing `prompt` and `mm_data` together
         # Therefore, we place the text processing last to avoid redundant
         # computation
-        self.maybe_log_text_cache_stats()
+        self.maybe_log_cache_stats(self._text_cache, "text_cache")
 
         processed_text = self._text_cache.get_or_put(
             prompt,
@@ -735,7 +715,7 @@ class ProcessingCache:
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        self.maybe_log_coarse_cache_stats()
+        self.maybe_log_cache_stats(self._coarse_cache, "coarse_cache")
 
         return self._coarse_cache.get_or_put(
             self._hash_kwargs(text=prompt, **mm_data, **mm_kwargs),
@@ -767,7 +747,7 @@ class ProcessingCache:
                     mm_kwargs,
                 )
             except Exception:
-                pass
+                pass  # See NOTE in `_call_cache_fine`
 
         return self._call_cache_coarse(
             ctx,
