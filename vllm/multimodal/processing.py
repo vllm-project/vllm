@@ -220,15 +220,18 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
         multi_data = MultiModalDataItems()
 
         for k, v in data.items():
+            # TODO: Make a separate modality for embedding inputs
+            # to avoid confusion
             # yapf: disable
             if k == "video":
                 # Special case since even a single item can be a list
                 multi_data[k] = (  # type: ignore[index]
-                    v if is_list_of(v, (list, torch.Tensor)) else [v]
+                    v if (isinstance(v, torch.Tensor)
+                          or is_list_of(v, list)) else [v]
                 )
             elif k in ("image", "audio"):
                 multi_data[k] = (  # type: ignore[index]
-                    v if isinstance(v, (list, torch.Tensor)) else [v]
+                    v if isinstance(v, (torch.Tensor, list)) else [v]
                 )
             else:
                 multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
@@ -251,6 +254,9 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
     @property
     def audios(self) -> Sequence[AudioItem]:
         return self.get("audio", [])
+
+    def get_item_counts(self) -> Mapping[str, int]:
+        return {m: len(items) for m, items in self.items()}
 
     def get_image_size(self, item_idx: int) -> ImageSize:
         image = self.images[item_idx]
@@ -612,6 +618,12 @@ class BaseMultiModalProcessor(ABC):
     def _get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
+    def _get_mm_items(
+        self,
+        mm_data: MultiModalDataDict,
+    ) -> MultiModalDataItems:
+        return MultiModalDataItems.from_dict(mm_data)
+
     @abstractmethod
     def _get_prompt_replacements(
         self,
@@ -778,7 +790,7 @@ class BaseMultiModalProcessor(ABC):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        mm_items = MultiModalDataItems.from_dict(mm_data)
+        mm_items = self._get_mm_items(mm_data)
 
         hf_inputs = self._apply_hf_processor(prompt_text, mm_items,
                                              mm_processor_kwargs)
@@ -791,7 +803,7 @@ class BaseMultiModalProcessor(ABC):
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        mm_item_counts = {m: len(items) for m, items in mm_items.items()}
+        mm_item_counts = mm_items.get_item_counts()
         all_placeholders = self._find_placeholders(all_prompt_repls,
                                                    prompt_ids, mm_item_counts)
 
