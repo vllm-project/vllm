@@ -257,7 +257,7 @@ class ModelConfig:
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
-        self.pull_model_tokenizer_for_s3(model, tokenizer)
+        self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
 
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
@@ -360,7 +360,17 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
-    def pull_model_tokenizer_for_s3(self, model: str, tokenizer: str) -> None:
+    def maybe_pull_model_tokenizer_for_s3(self, model: str,
+                                          tokenizer: str) -> None:
+        """
+        Pull the model config or tokenizer to a temporary 
+        directory in case of S3.
+
+        Args:
+            model: The model name or path.
+            tokenizer: The tokenizer name or path.
+
+        """
         if is_s3(model) or is_s3(tokenizer):
             try:
                 from vllm.transformers_utils.s3_utils import S3Model

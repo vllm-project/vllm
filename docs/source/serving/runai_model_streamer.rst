@@ -33,14 +33,17 @@ To run model from a S3 compatible object store run:
 
 Tunable parameters
 ------------------
+You can tune parameters using `--model-loader-extra-config`:
 
-You can control the level of concurrency by using the `concurrency` parameter in `--model-loader-extra-config`:
+You can tune `concurrency` that controls the level of concurrency and number of OS threads reading tensors from the file to the CPU buffer.
+For reading from S3, it will be the number of client instances the host is opening to the S3 server.
 
  .. code-block:: console
 
     $ vllm serve /home/meta-llama/Llama-3.2-3B-Instruct --load-format runai_streamer --model-loader-extra-config '{"concurrency":16}'
 
-You can control the amount of CPU memory used to stream tensors by using the `memory_limit` parameter in `--model-loader-extra-config`:
+You can controls the size of the CPU Memory buffer to which tensors are read from the file, and limit this size.
+You can read further about CPU buffer memory limiting `here <https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md#runai_streamer_memory_limit>`_.
 
  .. code-block:: console
 

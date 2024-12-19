@@ -1236,7 +1236,10 @@ class GGUFModelLoader(BaseModelLoader):
 
 
 class RunaiModelStreamerLoader(BaseModelLoader):
-    """Model loader that can load different safetensors ."""
+    """
+        Model loader that can load safetensors 
+        files from local FS or S3 bucket.
+    """
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
@@ -1301,7 +1304,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 model_name_or_path, index_file, self.load_config.download_dir,
                 revision)
 
-        if len(hf_weights_files) == 0:
+        if not hf_weights_files:
             raise RuntimeError(
                 f"Cannot find any safetensors model weights with "
                 f"`{model_name_or_path}`")
@@ -1316,9 +1319,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return runai_safetensors_weights_iterator(hf_weights_files)
 
     def download_model(self, model_config: ModelConfig) -> None:
+        """Download model if necessary"""
         self._prepare_weights(model_config.model, model_config.revision)
 
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        """Perform streaming of the model to destination"""
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
 

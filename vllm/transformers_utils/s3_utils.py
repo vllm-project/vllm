@@ -1,11 +1,10 @@
-from __future__ import annotations
-
 import fnmatch
 import os
 import shutil
 import signal
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import boto3
 
@@ -26,7 +25,18 @@ def _filter_ignore(paths: list[str], patterns: list[str]) -> list[str]:
 
 def glob(s3=None,
          path: str = "",
-         allow_pattern: list[str] | None = None) -> list[str]:
+         allow_pattern: Optional[list[str]] = None) -> list[str]:
+    """
+    List full file names from S3 path and filter by allow pattern.
+
+    Args:
+        s3: S3 client to use.
+        path: The S3 path to list from.
+        allow_pattern: A list of patterns of which files to pull.
+
+    Returns:
+        list[str]: List of full S3 paths allowed by the pattern
+    """
     if s3 is None:
         s3 = boto3.client("s3")
     bucket_name, _, paths = list_files(s3,
@@ -38,8 +48,26 @@ def glob(s3=None,
 def list_files(
         s3,
         path: str,
-        allow_pattern: list[str] | None = None,
-        ignore_pattern: list[str] | None = None) -> tuple[str, str, list[str]]:
+        allow_pattern: Optional[list[str]] = None,
+        ignore_pattern: Optional[list[str]] = None
+) -> tuple[str, str, list[str]]:
+    """
+    List files from S3 path and filter by pattern.
+
+    Args:
+        s3: S3 client to use.
+        path: The S3 path to list from.
+        allow_pattern: A list of patterns of which files to pull.
+        ignore_pattern: A list of patterns of which files not to pull.
+
+    Returns:
+        tuple[str, str, list[str]]: A tuple where:
+            - The first element is the bucket name
+            - The second element is string represent the bucket 
+              and the prefix as a dir like string
+            - The third element is a list of files allowed or 
+              disallowed by pattern
+    """
     parts = path.removeprefix('s3://').split('/')
     prefix = '/'.join(parts[1:])
     bucket_name = parts[0]
@@ -58,25 +86,35 @@ def list_files(
 
 
 class S3Model:
+    """
+    A class representing a S3 model mirrored into a temporary directory.
+
+    Attributes:
+        s3: S3 client.
+        dir: The temporary created directory.
+
+    Methods:
+        pull_files(): Pull model from S3 to the temporary directory.
+    """
 
     def __init__(self) -> None:
         self.s3 = boto3.client('s3')
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
-            signal.signal(sig, self.close_by_signal(existing_handler))
+            signal.signal(sig, self._close_by_signal(existing_handler))
         self.dir = tempfile.mkdtemp()
 
     def __del__(self):
-        self.close()
+        self._close()
 
-    def close(self) -> None:
+    def _close(self) -> None:
         if os.path.exists(self.dir):
             shutil.rmtree(self.dir)
 
-    def close_by_signal(self, existing_handler=None):
+    def _close_by_signal(self, existing_handler=None):
 
         def new_handler(signum, frame):
-            self.close()
+            self._close()
             if existing_handler:
                 existing_handler(signum, frame)
 
@@ -84,8 +122,17 @@ class S3Model:
 
     def pull_files(self,
                    s3_model_path: str = "",
-                   allow_pattern: list[str] | None = None,
-                   ignore_pattern: list[str] | None = None) -> None:
+                   allow_pattern: Optional[list[str]] = None,
+                   ignore_pattern: Optional[list[str]] = None) -> None:
+        """
+        Pull files from S3 storage into the temporary directory.
+
+        Args:
+            s3_model_path: The S3 path of the model.
+            allow_pattern: A list of patterns of which files to pull.
+            ignore_pattern: A list of patterns of which files not to pull.
+
+        """
         bucket_name, base_dir, files = list_files(self.s3, s3_model_path,
                                                   allow_pattern,
                                                   ignore_pattern)
