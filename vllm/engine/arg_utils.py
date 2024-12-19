@@ -531,7 +531,7 @@ class EngineArgs:
             default=EngineArgs.long_prefill_threshold,
             help="For chunked prefill, a request is considered long "
             "if the prompt is longer than the "
-            "max_model_length * long_prefill_threshold. Defaults to 0.04%",
+            "max_model_length * long_prefill_threshold. Defaults to 0.04",
         )
         parser.add_argument('--max-num-seqs',
                             type=int,

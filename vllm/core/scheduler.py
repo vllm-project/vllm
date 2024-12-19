@@ -343,12 +343,12 @@ class PartialPrefillMetadata:
     phase faster.
     """
 
-    # A minimum bound on the total number of prefills running during this
-    # scheduling step
-    partial_prefills: int
+    # A minimum bound on the total number of prefills to be scheduled during
+    # this iteration
+    schedulable_prefills: int
 
     # The number of long prefill requests currently running
-    long_partial_prefills: int
+    long_prefills: int
 
     scheduler_config: SchedulerConfig
 
@@ -359,7 +359,7 @@ class PartialPrefillMetadata:
         concurrently"""
         return (seq_group.first_seq.get_num_new_tokens() >
                 self.scheduler_config.long_prefill_token_threshold
-                and self.long_partial_prefills >=
+                and self.long_prefills >=
                 self.scheduler_config.max_long_partial_prefills
                 and self.scheduler_config.max_num_partial_prefills > 1)
 
@@ -368,7 +368,7 @@ class PartialPrefillMetadata:
         # long request
         if (seq_group.first_seq.get_num_new_tokens() >
                 self.scheduler_config.long_prefill_token_threshold):
-            self.long_partial_prefills += 1
+            self.long_prefills += 1
 
     @classmethod
     def from_queues(
@@ -382,42 +382,42 @@ class PartialPrefillMetadata:
         This accounts for the currently running prefill requests, and peeks into
         the waiting queue to see if there are more prefills to potentially be
         scheduled during this iteration."""
-        partial_prefills = 0
-        long_partial_prefills = 0
+        prefills = 0
+        long_prefills = 0
 
-        waiting_partial_prefills = 0
         waiting_long_prefills = 0
 
         for sg in running:
-            # TODO: Check if this stage is correctly updated before scheduling
             if sg.first_seq.data.stage == SequenceStage.PREFILL:
-                partial_prefills += 1
+                prefills += 1
                 if (sg.first_seq.get_num_new_tokens() >
                         scheduler_config.long_prefill_token_threshold):
-                    long_partial_prefills += 1
+                    long_prefills += 1
 
         for sg in waiting:
             # Don't bother looping through the rest of the queue if we know
             # there are already at
             # least max_partial_prefills requests to fill
-            if (partial_prefills + waiting_partial_prefills >=
-                    scheduler_config.max_num_partial_prefills):
+            if prefills >= scheduler_config.max_num_partial_prefills:
                 break
 
             # Don't count long requests from the waiting queue if we aren't
             # going to schedule them anyway
             if (sg.first_seq.get_num_new_tokens() >
                     scheduler_config.long_prefill_token_threshold):
-                if (long_partial_prefills + waiting_long_prefills >=
+                if (long_prefills + waiting_long_prefills >=
                         scheduler_config.max_long_partial_prefills):
                     continue
                 waiting_long_prefills += 1
-            waiting_partial_prefills += 1
+            prefills += 1
 
+        # NB: long_prefills and waiting_long_prefills are tracked separately.
+        # We don't account for the waiting requests here because we need to use
+        # this metadata to track how many have actually been scheduled.
         return PartialPrefillMetadata(
-            partial_prefills=min(partial_prefills + waiting_partial_prefills,
-                                 scheduler_config.max_num_partial_prefills),
-            long_partial_prefills=long_partial_prefills,
+            schedulable_prefills=min(
+                prefills, scheduler_config.max_num_partial_prefills),
+            long_prefills=long_prefills,
             scheduler_config=scheduler_config,
         )
 
@@ -1995,10 +1995,10 @@ class Scheduler:
                 remaining_token_budget else num_new_tokens
 
         # Get the number of tokens to allocate to this prefill slot
-        prefill_slot_budget = (remaining_token_budget
-                               if partial_prefill_metadata is None else
-                               partial_prefill_budget_lookup_list[
-                                   partial_prefill_metadata.partial_prefills])
+        prefill_slot_budget = (
+            remaining_token_budget if partial_prefill_metadata is None else
+            partial_prefill_budget_lookup_list[
+                partial_prefill_metadata.schedulable_prefills])
 
         if cache_config.enable_prefix_caching:
             # When prefix caching is enabled and we're partially prefilling
