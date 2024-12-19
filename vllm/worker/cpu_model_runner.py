@@ -116,6 +116,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.input_tokens: List[int] = []
             self.input_positions: Optional[
                 List[int]] = [] if not self.use_mrope else None
+            self.num_orig_input_tokens_list: List[int] = []
             self.token_type_ids: Optional[List[int]] = []
             self.seq_lens: List[int] = []
             self.query_lens: List[int] = []
@@ -170,6 +171,10 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             if not input_data.use_mrope else input_data.input_mrope_positions,
             dtype=torch.long,
             device="cpu")
+        num_orig_input_tokens_list = torch.tensor(
+            input_data.num_orig_input_tokens_list,
+            dtype=torch.long,
+            device="cpu")
         token_type_ids = torch.tensor(input_data.token_type_ids,
                                     dtype=torch.long,
                                     device="cpu") \
@@ -182,7 +187,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 input_data.multi_modal_inputs_list)
 
         attn_metadata = self.att_metadata_builder.build(
-            input_data.seq_lens, input_data.query_lens, -1, -1)
+            input_data.seq_lens, input_data.query_lens,
+            num_orig_input_tokens_list, -1, -1)
 
         return self.model_input_cls(
             input_tokens=input_tokens,
@@ -247,6 +253,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     next_pos[idx])
         else:
             data.input_positions.append(token_positions)  # type: ignore
+            data.num_orig_input_tokens_list.append(seq_data.get_prompt_len())
 
         # Update fields
         data.input_tokens.append(tokens)
@@ -322,6 +329,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         data.query_lens.append(len(tokens))
         data.prefill_block_tables.append(block_table)
         data.seq_lens.append(seq_len)
+        data.num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] *
+                                               (seq_len - context_len))
 
     def _compute_multi_modal_input(self,
                                    seq_group_metadata: SequenceGroupMetadata,

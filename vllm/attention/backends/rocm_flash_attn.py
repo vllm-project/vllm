@@ -144,6 +144,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         assert self.context_lens_tensor is not None
         assert self.block_tables is not None
         assert self.seq_start_loc is not None
+        assert self.num_orig_input_tokens_tensor is not None
 
         self._cached_prefill_metadata = ROCmFlashAttentionMetadata(
             num_prefills=self.num_prefills,
@@ -154,6 +155,8 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             multi_modal_placeholder_index_maps,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+            num_orig_input_tokens_tensor=self.
+            num_orig_input_tokens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_seq_len=0,
@@ -174,6 +177,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             return self._cached_decode_metadata
         assert self.block_tables is not None
         assert self.seq_lens_tensor is not None
+        assert self.num_orig_input_tokens_tensor is not None
 
         self._cached_decode_metadata = ROCmFlashAttentionMetadata(
             num_prefills=0,
@@ -183,6 +187,8 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             multi_modal_placeholder_index_maps=None,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+            num_orig_input_tokens_tensor=self.
+            num_orig_input_tokens_tensor[:self.num_prefills],
             max_query_len=None,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,

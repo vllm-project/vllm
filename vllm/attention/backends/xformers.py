@@ -204,6 +204,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                            self.seq_lens_tensor[:self.num_prefills])
         context_lens_tensor = (None if self.context_lens_tensor is None else
                                self.context_lens_tensor[:self.num_prefills])
+        num_orig_input_tokens_tensor = (
+            None if self.num_orig_input_tokens_tensor is None else
+            self.num_orig_input_tokens_tensor[:self.num_prefills])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[:self.num_prefills])
 
@@ -217,6 +220,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             multi_modal_placeholder_index_maps,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_seq_len=0,
@@ -251,6 +255,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                            self.seq_lens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
+        num_orig_input_tokens_tensor = (
+            None if self.num_orig_input_tokens_tensor is None else
+            self.num_orig_input_tokens_tensor[:self.num_prefills])
 
         # Construct & cache decode-phase attention metadata structure
         self._cached_decode_metadata = XFormersMetadata(
@@ -260,6 +267,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
             seq_lens_tensor=seq_lens_tensor,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             block_tables=block_tables,
