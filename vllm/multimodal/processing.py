@@ -660,7 +660,7 @@ class ProcessingCache:
 
         return hasher.hexdigest()
 
-    def _call_cache_fine(
+    def _cached_call_fine(
         self,
         ctx: InputProcessingContext,
         hf_processor: ProcessorMixin,
@@ -707,7 +707,7 @@ class ProcessingCache:
         processed_data = dict(**processed_text, **processed_mm_items)
         return BatchFeature(processed_data)
 
-    def _call_cache_coarse(
+    def _cached_call_coarse(
         self,
         ctx: InputProcessingContext,
         hf_processor: ProcessorMixin,
@@ -743,7 +743,7 @@ class ProcessingCache:
         # Try to cache each item separately to improve hit rate
         if mm_data and all(isinstance(v, list) for v in mm_data.values()):
             try:
-                return self._call_cache_fine(
+                return self._cached_call_fine(
                     ctx,
                     hf_processor,
                     prompt,
@@ -751,9 +751,9 @@ class ProcessingCache:
                     mm_kwargs,
                 )
             except Exception:
-                pass  # See NOTE in `_call_cache_fine`
+                pass  # See NOTE in `_cached_call_fine`
 
-        return self._call_cache_coarse(
+        return self._cached_call_coarse(
             ctx,
             hf_processor,
             prompt,
