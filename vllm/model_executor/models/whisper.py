@@ -35,7 +35,10 @@ logger = init_logger(__name__)
 
 
 class WhisperPositionalEmbedding(nn.Embedding):
-    def __init__(self, num_positions: int, embedding_dim: int,
+
+    def __init__(self,
+                 num_positions: int,
+                 embedding_dim: int,
                  padding_idx: Optional[int] = None):
         super().__init__(num_positions, embedding_dim)
 
@@ -44,6 +47,7 @@ class WhisperPositionalEmbedding(nn.Embedding):
 
 
 class WhisperAttention(nn.Module):
+
     def __init__(
         self,
         embed_dim: int,
@@ -77,15 +81,14 @@ class WhisperAttention(nn.Module):
         if (self.head_dim * num_heads) != self.embed_dim:
             raise ValueError(
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: "
-                f"{self.embed_dim} and `num_heads`: {num_heads})."
-            )
+                f"{self.embed_dim} and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
         self._init_qkv(embed_dim, bias, quant_config, prefix=prefix)
         self.out_proj = RowParallelLinear(
-            input_size = embed_dim,
-            output_size = embed_dim,
-            bias = bias,
+            input_size=embed_dim,
+            output_size=embed_dim,
+            bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
@@ -99,7 +102,8 @@ class WhisperAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def _init_qkv(self,
+    def _init_qkv(
+        self,
         embed_dim: int,
         bias: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
@@ -124,7 +128,11 @@ class WhisperAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+        attn_output = self.attn(q,
+                                k,
+                                v,
+                                kv_cache,
+                                attn_metadata,
                                 attn_type=self.attn_type)
 
         output, _ = self.out_proj(attn_output)
@@ -133,6 +141,7 @@ class WhisperAttention(nn.Module):
 
 
 class WhisperCrossAttention(WhisperAttention):
+
     def __init__(
         self,
         embed_dim: int,
@@ -151,16 +160,17 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=prefix,
         )
 
-    def _init_qkv(self,
+    def _init_qkv(
+        self,
         embed_dim: int,
         bias: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         self.q_proj = ColumnParallelLinear(
-            input_size = embed_dim,
-            output_size = embed_dim,
-            bias = bias,
+            input_size=embed_dim,
+            output_size=embed_dim,
+            bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.q_proj",
         )
@@ -189,7 +199,11 @@ class WhisperCrossAttention(WhisperAttention):
         else:
             k = v = None
 
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+        attn_output = self.attn(q,
+                                k,
+                                v,
+                                kv_cache,
+                                attn_metadata,
                                 attn_type=AttentionType.ENCODER_DECODER)
 
         output, _ = self.out_proj(attn_output)
@@ -256,7 +270,7 @@ class WhisperEncoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -277,11 +291,11 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         if hidden_states.dtype == torch.float16 and (
-            torch.isinf(hidden_states).any() or
-            torch.isnan(hidden_states).any()
-        ):
+                torch.isinf(hidden_states).any()
+                or torch.isnan(hidden_states).any()):
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states, min=-clamp_value,
+            hidden_states = torch.clamp(hidden_states,
+                                        min=-clamp_value,
                                         max=clamp_value)
 
         return hidden_states
@@ -320,7 +334,7 @@ class WhisperDecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.final_layer_norm = nn.LayerNorm(config.d_model)
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -330,11 +344,9 @@ class WhisperDecoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata
-        )
+        hidden_states = self.self_attn(hidden_states=hidden_states,
+                                       kv_cache=kv_cache,
+                                       attn_metadata=attn_metadata)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -364,12 +376,17 @@ class WhisperEncoder(nn.Module):
         self.num_mel_bins = config.num_mel_bins
         self.padding_idx = config.pad_token_id
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = (
-            math.sqrt(embed_dim) if config.scale_embedding else 1.0)
+        self.embed_scale = (math.sqrt(embed_dim)
+                            if config.scale_embedding else 1.0)
 
-        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3,
+        self.conv1 = nn.Conv1d(self.num_mel_bins,
+                               embed_dim,
+                               kernel_size=3,
                                padding=1)
-        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2,
+        self.conv2 = nn.Conv1d(embed_dim,
+                               embed_dim,
+                               kernel_size=3,
+                               stride=2,
                                padding=1)
         self.embed_positions = nn.Embedding(self.max_source_positions,
                                             embed_dim)
@@ -384,7 +401,7 @@ class WhisperEncoder(nn.Module):
         with torch.no_grad():
             self.embed_positions.weight.copy_(
                 sinusoids(*self.embed_positions.weight.shape))
-    
+
     def forward(
         self,
         input_features: Union[torch.Tensor, List[torch.Tensor]],
@@ -420,8 +437,8 @@ class WhisperDecoder(nn.Module):
         self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_target_positions
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = (
-            math.sqrt(config.d_model) if config.scale_embedding else 1.0)
+        self.embed_scale = (math.sqrt(config.d_model)
+                            if config.scale_embedding else 1.0)
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model,
                                          self.padding_idx)
@@ -434,7 +451,7 @@ class WhisperDecoder(nn.Module):
             prefix=f"{prefix}.layers",
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
-    
+
     def forward(
         self,
         input_ids,
@@ -460,6 +477,7 @@ class WhisperDecoder(nn.Module):
 
 
 class WhisperModel(nn.Module):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.encoder = WhisperEncoder(vllm_config=vllm_config,
@@ -604,8 +622,10 @@ def input_mapper_for_whisper(
 
     audios = [audio for audio, _ in multi_modal_data]
 
-    kwargs = processor(audios, sampling_rate=sampling_rate,
-                       padding=False, return_tensors="pt")
+    kwargs = processor(audios,
+                       sampling_rate=sampling_rate,
+                       padding=False,
+                       return_tensors="pt")
     kwargs["input_features"] = kwargs["input_features"].squeeze(0)
     kwargs["input_features"] = kwargs["input_features"].to(torch.float16)
 
@@ -623,7 +643,6 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.dtype = vllm_config.model_config.dtype
 

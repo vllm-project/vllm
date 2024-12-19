@@ -210,7 +210,9 @@ class InputPreprocessor:
             # appending an EOS token to the prompt which disrupts generation.
             add_special_tokens = False
         return await tokenizer.encode_async(
-            request_id=request_id, prompt=prompt, lora_request=lora_request,
+            request_id=request_id,
+            prompt=prompt,
+            lora_request=lora_request,
             add_special_tokens=add_special_tokens)
 
     def _can_process_multimodal(self) -> bool:

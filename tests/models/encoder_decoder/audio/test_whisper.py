@@ -65,8 +65,8 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ) -> None:
-    prompts = PROMPTS * 10
-    expected = EXPECTED[model] * 10
+    prompt_list = PROMPTS * 10
+    expected_list = EXPECTED[model] * 10
 
     llm = LLM(
         model=model,
@@ -81,17 +81,16 @@ def run_test(
         max_tokens=200,
     )
 
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompt_list, sampling_params)
 
-    for output, expected in zip(outputs, expected):
+    for output, expected in zip(outputs, expected_list):
         print(output.outputs[0].text)
         assert output.outputs[0].text == expected
 
 
 @fork_new_process_for_each_test
-@pytest.mark.parametrize(
-    "model", ["openai/whisper-medium", "openai/whisper-large-v3"]
-)
+@pytest.mark.parametrize("model",
+                         ["openai/whisper-medium", "openai/whisper-large-v3"])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_models(model, enforce_eager) -> None:
     run_test(model, enforce_eager=enforce_eager, tensor_parallel_size=1)
@@ -103,5 +102,7 @@ def test_models(model, enforce_eager) -> None:
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
 def test_models_distributed(model, enforce_eager,
                             distributed_executor_backend) -> None:
-    run_test(model, enforce_eager=enforce_eager, tensor_parallel_size=2,
+    run_test(model,
+             enforce_eager=enforce_eager,
+             tensor_parallel_size=2,
              distributed_executor_backend=distributed_executor_backend)

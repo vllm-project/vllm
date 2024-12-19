@@ -182,7 +182,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         original_actor = actor
         try:
             ret = await actor.encode.remote(
-                request_id=request_id, prompt=prompt,
+                request_id=request_id,
+                prompt=prompt,
                 lora_request=lora_request,
                 add_special_tokens=add_special_tokens)
         except ActorDiedError as e:
@@ -193,7 +194,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             actor = self._init_actor()
             try:
                 ret = await actor.encode.remote(
-                    request_id=request_id, prompt=prompt,
+                    request_id=request_id,
+                    prompt=prompt,
                     lora_request=lora_request,
                     add_special_tokens=add_special_tokens)
             except ActorDiedError as e:
