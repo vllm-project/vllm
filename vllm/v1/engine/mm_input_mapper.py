@@ -161,14 +161,15 @@ class MMHasher:
 
         image_inputs = mm_data['image']
 
-        # This is a workaround for models (e.g, Molmo) that process
-        # multimodal data in the input processor (and the input mapper is
-        # a pass through). `pil_image` with the original PIL image is
-        # expected in this case.
+        # This is a temporary workaround for models (e.g, Molmo) that
+        # process multimodal data in the input processor (therefore
+        # image_inputs is MultiModalKwargs instead of raw input format).
+        # `raw_mm_data` with the original input format is expected
+        # in this case.
         if isinstance(image_inputs, dict):
-            assert "pil_image" in image_inputs and isinstance(
-                image_inputs["pil_image"], PIL.Image.Image)
-            image_inputs = image_inputs.pop("pil_image")
+            assert "raw_mm_data" in image_inputs and isinstance(
+                image_inputs["raw_mm_data"], PIL.Image.Image)
+            image_inputs = image_inputs.pop("raw_mm_data")
 
         return self.hash_images(image_inputs)
 

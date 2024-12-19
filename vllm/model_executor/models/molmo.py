@@ -974,7 +974,7 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     dummy_imgdata = {
         "images": out["images"],
         "image_input_idx": out["image_input_idx"],
-        "pil_image": dummy_image,
+        "raw_mm_data": dummy_image,
     }
     if "image_masks" in out:
         dummy_imgdata["image_masks"] = out["image_masks"]
