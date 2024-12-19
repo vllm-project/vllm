@@ -305,6 +305,13 @@ class NeuronSpeculationCausalLM(nn.Module):
 
         # Fused Spec (Generation)
         accepted_tokens_with_padding = output.fused_outputs[0]
+        next_pos_ids = output.fused_outputs[-1]
+        generated_token_counts = next_pos_ids - positions
+
+        batch_size, steps = accepted_tokens_with_padding.shape
+        mask = torch.arange(steps).expand(batch_size, -1) >= generated_token_counts
+        accepted_tokens_with_padding[mask] = -1
+
         return accepted_tokens_with_padding
 
     def sample(
@@ -316,7 +323,6 @@ class NeuronSpeculationCausalLM(nn.Module):
         seq_ids = [seq_id for sg in sampling_metadata.seq_groups for seq_id in sg.seq_ids]
         # Organize input tensors by step instead of by sequence.
         accepted_token_ids_by_step = logits.transpose(0, 1)
-        accepted_token_ids_by_step[accepted_token_ids_by_step == 0] = -1
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
 
         sampler_output_list = []
