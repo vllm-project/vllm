@@ -28,10 +28,11 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils import is_list_of
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP, SupportsLoRA
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings_from_map)
@@ -300,7 +301,20 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "audio", get_ultravox_max_audio_tokens)
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor)
-class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
+class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    # same as llamaforcasuallm model
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
+        "lm_head"
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -309,6 +323,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = config
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
+
+        #TODO: figure out if these prefixes need tweaking to support LoRA and/or
+        #use LLMWrapper or not like this https://github.com/vllm-project/vllm/pull/7199/files#diff-7b8a4e258637b7c94389c745c449c52137d33cf92957f3e5bcb18a0ee204b21bR807
 
         self.secondary_weights = []
         self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
@@ -344,6 +361,13 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             return self.language_model.sampler
 
         return get_sampler()
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model", tower_model="audio_tower")
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor) -> torch.Tensor:
