@@ -164,7 +164,9 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        audio_len = get_max_qwen2_audio_audio_tokens(self.ctx)
+        feature_extractor = self._get_feature_extractor()
+        sampling_rate = feature_extractor.sampling_rate
+        audio_len = feature_extractor.chunk_length * sampling_rate
 
         audio_count = mm_counts["audio"]
         audio = np.zeros(audio_len)
