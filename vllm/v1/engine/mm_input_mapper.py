@@ -151,17 +151,30 @@ class MMHasher:
     def __init__(self):
         pass
 
-    def hash_mm_data(
+    def hash_dummy_mm_data(
             self,
             mm_data: Optional[MultiModalDataDict]) -> Optional[List[str]]:
+        """Hash user-defined dummy multimodal data used for profiling."""
+
         if mm_data is None:
             return None
 
         image_inputs = mm_data['image']
 
+        # This is a workaround for models (e.g, Molmo) that process
+        # multimodal data in the input processor (and the input mapper is
+        # a pass through). `pil_image` with the original PIL image is
+        # expected in this case.
+        if isinstance(image_inputs, dict):
+            assert "pil_image" in image_inputs and isinstance(
+                image_inputs["pil_image"], PIL.Image.Image)
+            image_inputs = image_inputs.pop("pil_image")
+
         return self.hash_images(image_inputs)
 
-    def hash_prompt(self, prompt: PromptType) -> Optional[List[str]]:
+    def hash_prompt_mm_data(self, prompt: PromptType) -> Optional[List[str]]:
+        """Hash multimodal data in the user input prompt if they exist."""
+
         if "multi_modal_data" not in prompt:
             return None
 
@@ -171,6 +184,7 @@ class MMHasher:
         return self.hash_images(image_inputs)
 
     def hash_images(self, image_inputs) -> Optional[List[str]]:
+        """Hash PIL image objects to strings."""
         if not isinstance(image_inputs, list):
             image_inputs = [image_inputs]
         assert len(image_inputs) > 0
