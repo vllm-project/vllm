@@ -508,11 +508,11 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             num_prefill_tokens = attn_metadata.num_encoder_tokens
             num_decode_tokens = 0
 
-        # if attn_type == AttentionType.DECODER:
-        #     # Only enforce this shape-constraint for decoder
-        #     # self-attention
-        #     assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-        #     assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+        if attn_type == AttentionType.DECODER:
+            # Only enforce this shape-constraint for decoder
+            # self-attention
+            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
         output = torch.empty_like(query)
         if prefill_meta := attn_metadata.prefill_metadata:
