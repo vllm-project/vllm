@@ -1,29 +1,17 @@
 import torch
 import torch.distributed as dist
-from torch.distributed import ProcessGroup
 
-from vllm.platforms import current_platform
+from vllm.distributed.device_communicators.base_communicator import (
+    CommunicatorBase)
 
 
-class XpuCommunicator:
+class XpuCommunicator(CommunicatorBase):
 
-    def __init__(self, group: ProcessGroup):
-        if not current_platform.is_xpu():
-            self.disabled = True
-            return
-        self.disabled = False
-        self.group = group
-        self.world_size = dist.get_world_size(self.group)
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        dist.all_reduce(input_, group=self.group)
+        return input_
 
-    def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        dist.all_reduce(x, group=self.group)
-        return x
-
-    def gather(self,
-               input_: torch.Tensor,
-               rank_in_group: int,
-               dst: int = 0,
-               dim: int = -1):
+    def gather(self, input_: torch.Tensor, dst: int = 0, dim: int = -1):
         # For xpu path, gather doesn't work properly together with ray
         # cluster so we use all_gather instead for now.
         input_size = input_.size()
@@ -35,7 +23,7 @@ class XpuCommunicator:
         torch.distributed.all_gather_into_tensor(output_tensor,
                                                  input_,
                                                  group=self.group)
-        if rank_in_group == dst:
+        if self.rank_in_group == dst:
             # Reshape
             output_tensor = output_tensor.movedim(0, dim)
             output_tensor = output_tensor.reshape(input_size[:dim] +
