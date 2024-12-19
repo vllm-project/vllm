@@ -343,6 +343,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                              Tensor a) -> bool");
   ops.impl("cutlass_sparse_compress_entry", &cutlass_sparse_compress_entry);
 
+  // ExLlamaV2 GEMM kernels
+  ops.def(
+      "make_q_matrix(Tensor q_weight, Tensor q_perm, Tensor q_invperm,"
+      "              Tensor q_scale, Tensor q_scale_max, Tensor q_groups,"
+      "              Tensor q_group_map) -> uintptr_t");
+  ops.impl("make_q_matrix", torch::kCUDA, &make_q_matrix);
+
+  ops.def("exl2_gemm(Tensor a, uintptr_t b) -> Tensor");
+  ops.impl("exl2_gemm(Tensor a, uintptr_t b) -> Tensor", torch::kCUDA,
+           &exl2_gemm);
+
   // Mamba selective scan kernel
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"

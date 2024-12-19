@@ -244,7 +244,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_compressor_entry.cu"
-    "csrc/cutlass_extensions/common.cpp")
+    "csrc/cutlass_extensions/common.cpp"
+    "csrc/quantization/exllamav2/q_matrix.cu"
+    "csrc/quantization/exllamav2/q_gemm.cu")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
