@@ -80,8 +80,8 @@ See [this page](#generative-models) for more information on how to use generativ
   * - Architecture
     - Models
     - Example HF Models
-    - [LoRA](#lora)
-    - [PP](#distributed-serving)
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed-serving>`
   * - :code:`AquilaForCausalLM`
     - Aquila, Aquila2
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
@@ -385,8 +385,8 @@ The following table lists those that are tested in vLLM.
   * - Architecture
     - Models
     - Example HF Models
-    - [LoRA](#lora)
-    - [PP](#distributed-serving)
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed-serving>`
   * - :code:`BertModel`
     - BERT-based
     - :code:`BAAI/bge-base-en-v1.5`, etc.
@@ -447,8 +447,8 @@ despite being described otherwise on its model card.
   * - Architecture
     - Models
     - Example HF Models
-    - [LoRA](#lora)
-    - [PP](#distributed-serving)
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed-serving>`
   * - :code:`LlamaForCausalLM`
     - Llama-based
     - :code:`peiyi9979/math-shepherd-mistral-7b-prm`, etc.
@@ -477,7 +477,7 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
     - Models
     - Example HF Models
     - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
+    - :ref:`PP <distributed-serving>`
   * - :code:`JambaForSequenceClassification`
     - Jamba
     - :code:`ai21labs/Jamba-tiny-reward-dev`, etc.
@@ -500,8 +500,8 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
   * - Architecture
     - Models
     - Example HF Models
-    - [LoRA](#lora)
-    - [PP](#distributed-serving)
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed-serving>`
   * - :code:`BertForSequenceClassification`
     - BERT-based
     - :code:`cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.
@@ -555,8 +555,8 @@ See [this page](#generative-models) for more information on how to use generativ
     - Models
     - Inputs
     - Example HF Models
-    - [LoRA](#lora)
-    - [PP](#distributed-serving)
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed-serving>`
     - V1
   * - :code:`AriaForConditionalGeneration`
     - Aria
@@ -722,14 +722,10 @@ See [this page](#generative-models) for more information on how to use generativ
 ```
 
 ```{eval-rst}
-{sup}`E`
+:sup:`E` Pre-computed embeddings can be inputted for this modality.
 
- Pre-computed embeddings can be inputted for this modality.
-
-{sup}`+`
+:sup:`+` Multiple items can be inputted per text prompt for this modality.
 ```
-
- Multiple items can be inputted per text prompt for this modality.
 
 ````{important}
 To enable multiple multi-modal items per text prompt, you have to set {code}`limit_mm_per_prompt` (offline inference)
@@ -789,8 +785,8 @@ The following table lists those that are tested in vLLM.
     - Models
     - Inputs
     - Example HF Models
-    - [LoRA](#lora)
-    - [PP](#distributed-serving)
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed-serving>`
   * - :code:`LlavaNextForConditionalGeneration`
     - LLaVA-NeXT-based
     - T / I
