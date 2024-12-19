@@ -50,7 +50,7 @@ class MultiModalPlugin(ABC):
     (i.e., the modality of the data).
 
     See also:
-        [adding_multimodal_plugin](#adding-multimodal-plugin)
+        :ref:`adding_multimodal_plugin`
     """
 
     def __init__(self) -> None:
@@ -94,8 +94,8 @@ class MultiModalPlugin(ABC):
         If `None` is provided, then the default input mapper is used instead.
 
         See also:
-            - [input-processing-pipeline](#input-processing-pipeline)
-            - [enabling-multimodal-inputs](#enabling-multimodal-inputs)
+            - :ref:`input_processing_pipeline`
+            - :ref:`enabling_multimodal_inputs`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -130,8 +130,8 @@ class MultiModalPlugin(ABC):
             TypeError: If the data type is not supported.
 
         See also:
-            - [input-processing-pipeline](#input-processing-pipeline)
-            - [enabling-multimodal-inputs](#enabling-multimodal-inputs)
+            - :ref:`input_processing_pipeline`
+            - :ref:`enabling_multimodal_inputs`
         """
 
         # Avoid circular import
@@ -190,7 +190,7 @@ class MultiModalPlugin(ABC):
         If `None` is provided, then the default calculation is used instead.
 
         See also:
-            [enabling-multimodal-inputs](#enabling-multimodal-inputs)
+            :ref:`enabling_multimodal_inputs`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -222,7 +222,7 @@ class MultiModalPlugin(ABC):
         The model is identified by ``model_config``.
 
         See also:
-            [enabling-multimodal-inputs](#enabling-multimodal-inputs)
+            :ref:`enabling_multimodal_inputs`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
