@@ -356,7 +356,7 @@ class FlashInferMetadata(AttentionMetadata):
                 self.block_table_bound = self.block_table_bound.to(self.device)
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
                 self.paged_kv_indices = self.paged_kv_indices.to(self.device)
-                self.prefill_wrapper.plan(
+                self.prefill_wrapper.begin_forward(
                     self.query_start_loc,
                     self.paged_kv_indptr[:self.num_prefills + 1],
                     self.paged_kv_indices,
@@ -383,7 +383,7 @@ class FlashInferMetadata(AttentionMetadata):
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
 
             assert self.decode_wrapper is not None
-            self.decode_wrapper.plan(
+            self.decode_wrapper.begin_forward(
                 self.paged_kv_indptr[self.num_prefills:],
                 self.paged_kv_indices,
                 self.paged_kv_last_page_len[self.num_prefills:],
@@ -866,7 +866,7 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert prefill_meta is not None
                 assert prefill_meta.prefill_wrapper is not None
-                prefill_output = prefill_meta.prefill_wrapper.run(
+                prefill_output = prefill_meta.prefill_wrapper.forward(
                     query,
                     kv_cache,
                     logits_soft_cap=logits_soft_cap,
@@ -877,7 +877,7 @@ class FlashInferImpl(AttentionImpl):
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
             assert decode_meta.decode_wrapper is not None
-            decode_output = decode_meta.decode_wrapper.run(
+            decode_output = decode_meta.decode_wrapper.forward(
                 decode_query,
                 kv_cache,
                 sm_scale=softmax_scale,
