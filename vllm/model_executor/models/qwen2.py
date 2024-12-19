@@ -520,50 +520,34 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_producer':
                 layer_by_layer_start = 0
                 layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk) 
-                tasks = []
-
-                with profile(
-                    activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                    ],
-                    schedule=torch.profiler.schedule(
-                    wait=0,
-                    warmup=0,
-                    active=2
-                ),
-                with_stack=True,
-                on_trace_ready=trace_handler
-                ) as p:
-                    for i in range(layer_by_layer_trunk):
-                        p.step()
-                        for _ in range(layer_by_layer_start, layer_by_layer_interval):
-                            if layer_by_layer_start == 0:
-                                if inputs_embeds is not None:
-                                    hidden_states = inputs_embeds
-                                else:
-                                    hidden_states = self.model.get_input_embeddings(input_ids)
-                                residual = None
-                                
-                            hidden_states, residual = self.model.layers[i](
-                                positions,
-                                hidden_states,
-                                kv_caches[i - self.model.start_layer],
-                                attn_metadata,
-                                residual,
-                            )
-                        # get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
-                        #     self,
-                        #     model_input,
-                        #     kv_caches,
-                        #     hidden_or_intermediate_states=hidden_states,
-                        #     layer_by_layer_start=layer_by_layer_start,
-                        #     layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
-                        # )
-                        
-                        self.send_data(model_input,kv_caches,hidden_states,layer_by_layer_start,layer_by_layer_interval)
-                        layer_by_layer_start += layer_by_layer_interval
-                    hidden_states, _ = self.model.norm(hidden_states, residual)
+                for i in range(layer_by_layer_trunk):
+                    for _ in range(layer_by_layer_start, layer_by_layer_interval):
+                        if layer_by_layer_start == 0:
+                            if inputs_embeds is not None:
+                                hidden_states = inputs_embeds
+                            else:
+                                hidden_states = self.model.get_input_embeddings(input_ids)
+                            residual = None
+                            
+                        hidden_states, residual = self.model.layers[i](
+                            positions,
+                            hidden_states,
+                            kv_caches[i - self.model.start_layer],
+                            attn_metadata,
+                            residual,
+                        )
+                    # get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
+                    #     self,
+                    #     model_input,
+                    #     kv_caches,
+                    #     hidden_or_intermediate_states=hidden_states,
+                    #     layer_by_layer_start=layer_by_layer_start,
+                    #     layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+                    # )
+                    
+                    self.send_data(model_input,kv_caches,hidden_states,layer_by_layer_start,layer_by_layer_interval)
+                    layer_by_layer_start += layer_by_layer_interval
+                hidden_states, _ = self.model.norm(hidden_states, residual)
 
             elif get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_consumer':
                 print("DEBUGG get_kv_transfer_group().config={}".format(
