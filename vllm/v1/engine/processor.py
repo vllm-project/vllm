@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Mapping, Optional, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
@@ -12,7 +12,6 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
@@ -34,8 +33,8 @@ class Processor:
         self.lora_config = lora_config
         self.tokenizer = tokenizer
 
-        self.generation_config_fields = _load_generation_config_dict(
-            model_config)
+        self.generation_config_fields = model_config.try_get_generation_config(
+        )
         self.input_preprocessor = InputPreprocessor(model_config,
                                                     self.tokenizer,
                                                     mm_registry)
@@ -181,16 +180,3 @@ class Processor:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
-
-
-def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
-    config = try_get_generation_config(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=model_config.revision,
-    )
-
-    if config is None:
-        return {}
-
-    return config.to_diff_dict()
