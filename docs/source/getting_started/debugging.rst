@@ -136,6 +136,62 @@ If the test script hangs or crashes, usually it means the hardware/drivers are b
 
     Adjust ``--nproc-per-node``, ``--nnodes``, and ``--node-rank`` according to your setup, being sure to execute different commands (with different ``--node-rank``) on different nodes.
 
+Python multiprocessing
+----------------------
+
+`RuntimeError` Exception
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+If you have seen a warning in your logs like this:
+
+.. code-block:: console
+
+    WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
+        initialized. We must use the `spawn` multiprocessing start method. Setting
+        VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
+        https://docs.vllm.ai/en/latest/getting_started/debugging.html#python-multiprocessing
+        for more information.
+
+or an error from Python that looks like this:
+
+.. code-block:: console
+
+    RuntimeError:
+            An attempt has been made to start a new process before the
+            current process has finished its bootstrapping phase.
+
+            This probably means that you are not using fork to start your
+            child processes and you have forgotten to use the proper idiom
+            in the main module:
+
+                if __name__ == '__main__':
+                    freeze_support()
+                    ...
+
+            The "freeze_support()" line can be omitted if the program
+            is not going to be frozen to produce an executable.
+
+            To fix this issue, refer to the "Safe importing of main module"
+            section in https://docs.python.org/3/library/multiprocessing.html
+
+then you must update your Python code to guard usage of ``vllm`` behind a ``if
+__name__ == '__main__':`` block. For example, instead of this:
+
+.. code-block:: python
+
+    import vllm
+
+    llm = vllm.LLM(...)
+
+try this instead:
+
+.. code-block:: python
+
+    if __name__ == '__main__':
+        import vllm
+
+        llm = vllm.LLM(...)
+
 Known Issues
 ----------------------------------------
 - In ``v0.5.2``, ``v0.5.3``, and ``v0.5.3.post1``, there is a bug caused by `zmq <https://github.com/zeromq/pyzmq/issues/2000>`_ , which can occasionally cause vLLM to hang depending on the machine configuration. The solution is to upgrade to the latest version of ``vllm`` to include the `fix <https://github.com/vllm-project/vllm/pull/6759>`_.

@@ -1,14 +1,25 @@
 import enum
+import platform
 import random
+from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+logger = init_logger(__name__)
+
+
+def in_wsl() -> bool:
+    # Reference: https://github.com/microsoft/WSL/issues/4071
+    return "microsoft" in " ".join(uname()).lower()
 
 
 class _Backend(enum.Enum):
@@ -35,6 +46,14 @@ class PlatformEnum(enum.Enum):
     NEURON = enum.auto()
     OPENVINO = enum.auto()
     UNSPECIFIED = enum.auto()
+
+
+class CpuArchEnum(enum.Enum):
+    X86 = enum.auto()
+    ARM = enum.auto()
+    POWERPC = enum.auto()
+    OTHER = enum.auto()
+    UNKNOWN = enum.auto()
 
 
 class DeviceCapability(NamedTuple):
@@ -139,6 +158,13 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        """
+        Check if the current platform supports async output.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def inference_mode(cls):
         """A device-specific wrapper of `torch.inference_mode`.
 
@@ -183,6 +209,34 @@ class Platform:
             raise ValueError(
                 f"{quant} quantization is currently not supported in "
                 f"{cls.device_name}.")
+
+    @classmethod
+    def get_cpu_architecture(cls) -> CpuArchEnum:
+        """
+        Determine the CPU architecture of the current system.
+        Returns CpuArchEnum indicating the architecture type.
+        """
+        machine = platform.machine().lower()
+
+        if machine in ("x86_64", "amd64", "i386", "i686"):
+            return CpuArchEnum.X86
+        elif machine.startswith("arm") or machine.startswith("aarch"):
+            return CpuArchEnum.ARM
+        elif machine.startswith("ppc"):
+            return CpuArchEnum.POWERPC
+
+        return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        """Checks whether pin memory is available on the current platform."""
+        if in_wsl():
+            # Pinning memory in WSL is not supported.
+            # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+            logger.warning("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
+            return False
+        return True
 
 
 class UnspecifiedPlatform(Platform):

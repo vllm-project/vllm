@@ -1,12 +1,15 @@
 .. _spec_decode:
 
-Speculative decoding in vLLM
-============================
+Speculative decoding
+====================
 
 .. warning::
     Please note that speculative decoding in vLLM is not yet optimized and does
     not usually yield inter-token latency reductions for all prompt datasets or sampling parameters. The work
     to optimize it is ongoing and can be followed in `this issue. <https://github.com/vllm-project/vllm/issues/4630>`_
+
+.. warning::
+    Currently, speculative decoding in vLLM is not compatible with pipeline parallelism.
 
 This document shows how to use `Speculative Decoding <https://x.com/karpathy/status/1697318534555336961>`_ with vLLM.
 Speculative decoding is a technique which improves inter-token latency in memory-bound LLM inference.
@@ -182,7 +185,7 @@ speculative decoding, breaking down the guarantees into three key areas:
 3. **vLLM Logprob Stability**
    - vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the 
    same request across runs. For more details, see the FAQ section 
-   titled *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq>`_.
+   titled *Can the output of a prompt vary across runs in vLLM?* in the :ref:`FAQs <faq>`.
 
 
 **Conclusion**
@@ -197,7 +200,7 @@ can occur due to following factors:
 
 **Mitigation Strategies**
 
-For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq>`_.
+For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the :ref:`FAQs <faq>`.
 
 Resources for vLLM contributors
 -------------------------------
