@@ -59,7 +59,8 @@ class TokenizerGroup(BaseTokenizerGroup):
                add_special_tokens: Optional[bool] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
         ret = tokenizer.encode(  # type: ignore[call-arg]
-            prompt, add_special_tokens=add_special_tokens)
+            prompt,
+            add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
 
@@ -71,7 +72,8 @@ class TokenizerGroup(BaseTokenizerGroup):
             add_special_tokens: Optional[bool] = None) -> List[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
         ret = tokenizer.encode(  # type: ignore[call-arg]
-            prompt, add_special_tokens=add_special_tokens)
+            prompt,
+            add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
 
