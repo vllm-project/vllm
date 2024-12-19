@@ -2144,14 +2144,18 @@ def _get_and_verify_dtype(
                     torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
-    
-            if (current_platform.is_cpu() and  
-                current_platform.get_cpu_architecture() == interface.CpuArchEnum.POWERPC):
-                if config_dtype == torch.float16 or config_dtype == torch.float32:
-                    logger.info(
-                        "For POWERPC, we cast models to bfloat16 instead of"
-                        "using float16 by default. Float16 is not currently supported for POWERPC.")
-                    torch_dtype = torch.bfloat16
+
+            if (current_platform.is_cpu()
+                    and current_platform.get_cpu_architecture()
+                    == interface.CpuArchEnum.POWERPC
+                    and (config_dtype == torch.float16
+                         or config_dtype == torch.float32)):
+                logger.info(
+                    "For POWERPC, we cast models to bfloat16 instead of "
+                    "using float16 by default. Float16 is not currently "
+                    "supported for POWERPC.")
+                torch_dtype = torch.bfloat16
+
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
                     "For HPU, we cast models to bfloat16 instead of"
