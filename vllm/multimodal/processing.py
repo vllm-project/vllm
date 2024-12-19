@@ -610,8 +610,8 @@ class ProcessingCache:
 
         cache_stats = cache.stat()
         if cache_stats.total % steps == 0:
-            logger.debug("ProcessingCache: %s.hit_ratio = %.2f",
-                         name, cache_stats.hit_ratio)
+            logger.debug("ProcessingCache: %s.hit_ratio = %.2f", name,
+                         cache_stats.hit_ratio)
 
     def _iter_bytes_to_hash(self, key: str, obj: object) -> Iterable[bytes]:
         # Recursive cases
@@ -717,7 +717,7 @@ class ProcessingCache:
     ) -> BatchFeature:
         self.maybe_log_cache_stats(self._coarse_cache, "coarse_cache")
 
-        return self._coarse_cache.get_or_put(
+        processed_data = self._coarse_cache.get_or_put(
             self._hash_kwargs(text=prompt, **mm_data, **mm_kwargs),
             default_factory=partial(
                 ctx.call_hf_processor,
@@ -726,6 +726,10 @@ class ProcessingCache:
                 mm_kwargs,
             ),
         )
+
+        # Shallow copy to avoid footgun when downstream methods
+        # mutate the returned dictionary (since the result is cached)
+        return BatchFeature(processed_data)  # type: ignore
 
     def call_hf_processor(
         self,
