@@ -83,6 +83,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        if current_platform.is_cpu():
+            import intel_extension_for_pytorch as ipex
+            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(layer.w13_weight,
+                                                             layer.w2_weight,
+                                                             use_prepack=True)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -142,9 +151,28 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                              topk_ids=topk_ids,
                              inplace=True)
 
-    def forward_cpu(self, *args, **kwargs):
-        raise NotImplementedError(
-            "The CPU backend currently does not support MoE.")
+    def forward_cpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        **kwargs,
+    ):
+        return layer.ipex_fusion(
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
+        )
 
     def forward_tpu(
         self,
