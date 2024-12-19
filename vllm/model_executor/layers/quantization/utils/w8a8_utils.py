@@ -11,7 +11,6 @@ TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
 
 
 def sparse_cutlass_supported() -> bool:
-    # sparse cutlass is not supported on Rocm
     if not current_platform.is_cuda():
         return False
 
@@ -22,7 +21,6 @@ def sparse_cutlass_supported() -> bool:
 
 
 def cutlass_fp8_supported() -> bool:
-    # cutlass is not supported on Rocm
     if not current_platform.is_cuda():
         return False
 
