@@ -220,15 +220,18 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
         multi_data = MultiModalDataItems()
 
         for k, v in data.items():
+            # TODO: Make a separate modality for embedding inputs
+            # to avoid confusion
             # yapf: disable
             if k == "video":
                 # Special case since even a single item can be a list
                 multi_data[k] = (  # type: ignore[index]
-                    v if is_list_of(v, (list, torch.Tensor)) else [v]
+                    v if (isinstance(v, (dict, torch.Tensor))  # type: ignore[assignment]
+                          or is_list_of(v, list)) else [v]
                 )
             elif k in ("image", "audio"):
                 multi_data[k] = (  # type: ignore[index]
-                    v if isinstance(v, (list, torch.Tensor)) else [v]
+                    v if isinstance(v, (dict, torch.Tensor, list)) else [v]
                 )
             else:
                 multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
@@ -251,6 +254,16 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
     @property
     def audios(self) -> Sequence[AudioItem]:
         return self.get("audio", [])
+
+    def get_item_counts(self) -> Mapping[str, int]:
+        # For now, embedding inputs can be a dictionary so
+        # we need to handle that case
+        # TODO: Make a separate modality for embedding inputs
+        # to avoid confusion
+        return {
+            m: (1 if isinstance(items, dict) else len(items))
+            for m, items in self.items()
+        }
 
     def get_image_size(self, item_idx: int) -> ImageSize:
         image = self.images[item_idx]
@@ -650,7 +663,11 @@ class BaseMultiModalProcessor(ABC):
             # TODO: Make a separate modality for embedding inputs
             # to avoid confusion
             if k in ("image", "video", "audio"):
-                if isinstance(v, torch.Tensor) and v.ndim == 3:
+                if isinstance(v, dict):
+                    # Pass through embedding inputs (dict)
+                    # This special form is used for Qwen2-VL and MiniCPM-V
+                    passthrough_data.update(v)
+                elif isinstance(v, torch.Tensor) and v.ndim == 3:
                     # Pass through embedding inputs (single)
                     passthrough_data[f"{k}_embeds"] = [v]
                 elif (is_list_of(v, torch.Tensor) and len(v) > 0
@@ -791,7 +808,7 @@ class BaseMultiModalProcessor(ABC):
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        mm_item_counts = {m: len(items) for m, items in mm_items.items()}
+        mm_item_counts = mm_items.get_item_counts()
         all_placeholders = self._find_placeholders(all_prompt_repls,
                                                    prompt_ids, mm_item_counts)
 

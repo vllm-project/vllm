@@ -30,11 +30,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from PIL import Image
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature
+from transformers.models.qwen2_vl import (Qwen2VLImageProcessor,
+                                          Qwen2VLProcessor)
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLConfig, Qwen2VLVisionConfig)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -155,7 +156,7 @@ class Qwen2VisionMLP(nn.Module):
     def __init__(
         self,
         in_features: int,
-        hidden_features: int = None,
+        hidden_features: int,
         act_layer: Type[nn.Module] = QuickGELU,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -712,17 +713,20 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
-    ) -> ProcessorMixin:
-        hf_processor = self.ctx.get_hf_processor()
+    ) -> Qwen2VLProcessor:
+        hf_processor = self.ctx.get_hf_processor(Qwen2VLProcessor)
+        image_processor: Qwen2VLImageProcessor = hf_processor.image_processor
+
         if min_pixels:
-            hf_processor.image_processor.min_pixels = min_pixels
+            image_processor.min_pixels = min_pixels
         if max_pixels:
-            hf_processor.image_processor.max_pixels = max_pixels
+            image_processor.max_pixels = max_pixels
         if max_pixels or min_pixels:
-            hf_processor.image_processor.size = {
-                "min_pixels": hf_processor.image_processor.min_pixels,
-                "max_pixels": hf_processor.image_processor.max_pixels,
+            image_processor.size = {
+                "min_pixels": image_processor.min_pixels,
+                "max_pixels": image_processor.max_pixels,
             }
+
         return hf_processor
 
     def _get_prompt_replacements(
@@ -731,14 +735,16 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         hf_inputs: BatchFeature,
         mm_processor_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
-        hf_processor: Qwen2VLProcessor = self._get_hf_processor()
+        hf_processor = self._get_hf_processor()
+        image_processor: Qwen2VLImageProcessor = hf_processor.image_processor
+
         # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
         # image_token and video_token registered
         placeholder = {
             "image": hf_processor.image_token,
             "video": hf_processor.video_token,
         }
-        merge_length = hf_processor.image_processor.merge_size**2
+        merge_length = image_processor.merge_size**2
 
         def get_replacement_qwen2vl(item_idx: int, modality: str):
             grid_thw = hf_inputs[f"{modality}_grid_thw"][item_idx]
@@ -761,7 +767,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         num_images = mm_counts["image"]
         hf_processor = self._get_hf_processor()
         image_token: str = hf_processor.image_token
-        image_processor = hf_processor.image_processor
+        image_processor: Qwen2VLImageProcessor = hf_processor.image_processor
 
         data = {}
         resized_height, resized_width = smart_resize(
