@@ -689,12 +689,16 @@ def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
                                max_pixels: Optional[int] = None) -> int:
     hf_config = ctx.get_hf_config(Qwen2VLConfig)
     vision_config = hf_config.vision_config
+
+    hf_processor = ctx.get_hf_processor(Qwen2VLProcessor)
+    image_processor: Qwen2VLImageProcessor = hf_processor.image_processor
+
     _, _, max_llm_image_tokens = _get_vision_info(
         vision_config,
         height=9999999,
         width=9999999,
-        min_pixels=min_pixels or 4 * 28 * 28,
-        max_pixels=max_pixels or 1280 * 28 * 28,
+        min_pixels=min_pixels or image_processor.min_pixels,
+        max_pixels=max_pixels or image_processor.max_pixels,
         data_type_key=data_type_key,
     )
     return max_llm_image_tokens
