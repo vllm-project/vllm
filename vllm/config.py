@@ -3094,7 +3094,7 @@ class VllmConfig:
             quant_config = get_quant_config(model_config, load_config)
             capability_tuple = current_platform.get_device_capability()
 
-            if capability_tuple is not None:
+            if capability_tuple is not None and not current_platform.is_xpu():
                 capability = capability_tuple.to_int()
                 if capability < quant_config.get_min_capability():
                     raise ValueError(
