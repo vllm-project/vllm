@@ -37,9 +37,10 @@
           exp_sums_ptr, max_logits_ptr, tmp_out_ptr, query_ptr, key_cache_ptr, \
           value_cache_ptr, num_kv_heads, scale, block_tables_ptr,              \
           seq_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr,              \
-          attn_bias_ptr, q_stride, kv_block_stride, kv_head_stride, k_scale,   \
-          v_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride, \
-          blocksparse_block_size, blocksparse_head_sliding_step);              \
+          attn_bias_ptr, padded_max_seq_len, q_stride, kv_block_stride,        \
+          kv_head_stride, k_scale, v_scale, tp_rank, blocksparse_local_blocks, \
+          blocksparse_vert_stride, blocksparse_block_size,                     \
+          blocksparse_head_sliding_step);                                      \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,            \
                                          PARTITION_SIZE>                       \
       <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                \
@@ -78,7 +79,13 @@ void paged_attention_v2_launcher(
   const float* attn_bias_ptr =
       attn_bias ? reinterpret_cast<const float*>(attn_bias.value().data_ptr())
                 : nullptr;
-
+  if (attn_bias_ptr) {
+    const torch::Tensor& abias = attn_bias.value();
+    TORCH_CHECK(abias.dtype() == torch::kFloat32,
+                "Unsupported bias dtype: ", abias.dtype());
+    TORCH_CHECK(abias.size(abias.dim() - 1) == max_seq_len,
+                "Unexpected attn_bias shape: ", abias.sizes());
+  }
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
   float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
@@ -91,6 +98,8 @@ void paged_attention_v2_launcher(
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
+  int padded_max_seq_len =
+      DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
   int logits_size = PARTITION_SIZE * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
 

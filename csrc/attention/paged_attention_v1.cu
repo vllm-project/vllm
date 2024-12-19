@@ -29,21 +29,21 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
-#define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                   \
-  VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                        \
-      ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE,           \
-                                              BLOCK_SIZE, NUM_THREADS,         \
-                                              KV_DTYPE, IS_BLOCK_SPARSE>),     \
-      shared_mem_size);                                                        \
-  vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE, BLOCK_SIZE,           \
-                                  NUM_THREADS, KV_DTYPE, IS_BLOCK_SPARSE>      \
-      <<<grid, block, shared_mem_size, stream>>>(                              \
-          out_ptr, query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads,    \
-          scale, block_tables_ptr, seq_lens_ptr, max_num_blocks_per_seq,       \
-          alibi_slopes_ptr, attn_bias_ptr, q_stride, kv_block_stride,          \
-          kv_head_stride, k_scale, v_scale, tp_rank, blocksparse_local_blocks, \
-          blocksparse_vert_stride, blocksparse_block_size,                     \
-          blocksparse_head_sliding_step);
+#define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
+  VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
+      ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE,        \
+                                              BLOCK_SIZE, NUM_THREADS,      \
+                                              KV_DTYPE, IS_BLOCK_SPARSE>),  \
+      shared_mem_size);                                                     \
+  vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE, BLOCK_SIZE,        \
+                                  NUM_THREADS, KV_DTYPE, IS_BLOCK_SPARSE>   \
+      <<<grid, block, shared_mem_size, stream>>>(                           \
+          out_ptr, query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, \
+          scale, block_tables_ptr, seq_lens_ptr, max_num_blocks_per_seq,    \
+          alibi_slopes_ptr, attn_bias_ptr, padded_max_seq_len, q_stride,    \
+          kv_block_stride, kv_head_stride, k_scale, v_scale, tp_rank,       \
+          blocksparse_local_blocks, blocksparse_vert_stride,                \
+          blocksparse_block_size, blocksparse_head_sliding_step);
 
 // TODO(woosuk): Tune NUM_THREADS.
 template <typename T, typename CACHE_T, int BLOCK_SIZE,
@@ -77,8 +77,12 @@ void paged_attention_v1_launcher(
   const float* attn_bias_ptr =
       attn_bias ? reinterpret_cast<const float*>(attn_bias.value().data_ptr())
                 : nullptr;
-  if (attn_bias_ptr){
-    TORCH_CHECK(attn_bias.value().dtype() == torch::kFloat32, "Unsupported bias dtype: ", attn_bias.value().dtype());
+  if (attn_bias_ptr) {
+    const torch::Tensor& abias = attn_bias.value();
+    TORCH_CHECK(abias.dtype() == torch::kFloat32,
+                "Unsupported bias dtype: ", abias.dtype());
+    TORCH_CHECK(abias.size(abias.dim() - 1) == max_seq_len,
+                "Unexpected attn_bias shape: ", abias.sizes());
   }
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
