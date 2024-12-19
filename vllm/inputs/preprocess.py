@@ -214,7 +214,7 @@ class InputPreprocessor:
         # updated to use the new multi-modal processor
         can_process_multimodal = self.mm_registry.has_processor(model_config)
         if not can_process_multimodal:
-            logger.info_once(
+            logger.print_info_once(
                 "Your model uses the legacy input pipeline instead of the new "
                 "multi-modal processor. Please note that the legacy pipeline "
                 "will be removed in a future release. For more details, see: "
