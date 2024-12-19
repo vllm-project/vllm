@@ -27,7 +27,8 @@ from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
-    get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
+    get_sentence_transformer_tokenizer_config, is_encoder_decoder,
+    try_get_generation_config, uses_mrope)
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, print_warning_once, random_uuid,
@@ -149,9 +150,8 @@ class ModelConfig:
             HuggingFace config.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
-        mm_cache_preprocessor: If true, then enables caching of the multi-modal 
-            preprocessor/mapper. Otherwise, the mapper executes each time, and 
-            for better performance consider enabling frontend process.
+        disable_mm_preprocessor_cache: If true, then disables caching of the
+            multi-modal preprocessor/mapper. (not recommended)
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
@@ -162,6 +162,7 @@ class ModelConfig:
             logits processor qualified names that can be passed with the
             `logits_processors` extra completion argument. Defaults to None, 
             which allows no processors.
+        generation_config: Configuration parameter file for generation.
     """
 
     def compute_hash(self) -> str:
@@ -217,10 +218,11 @@ class ModelConfig:
                  config_format: ConfigFormat = ConfigFormat.AUTO,
                  hf_overrides: Optional[HfOverrides] = None,
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-                 mm_cache_preprocessor: bool = False,
+                 disable_mm_preprocessor_cache: bool = False,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  override_pooler_config: Optional["PoolerConfig"] = None,
-                 logits_processor_pattern: Optional[str] = None) -> None:
+                 logits_processor_pattern: Optional[str] = None,
+                 generation_config: Optional[str] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -289,7 +291,7 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
-        self.mm_cache_preprocessor = mm_cache_preprocessor
+        self.disable_mm_preprocessor_cache = disable_mm_preprocessor_cache
 
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:
@@ -351,6 +353,8 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config(override_pooler_config)
         self.logits_processor_pattern = logits_processor_pattern
+
+        self.generation_config = generation_config
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -840,6 +844,56 @@ class ModelConfig:
 
         return self.multimodal_config
 
+    def try_get_generation_config(self) -> Dict[str, Any]:
+        if self.generation_config is None or self.generation_config == "auto":
+            config = try_get_generation_config(
+                self.model,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.revision,
+            )
+        else:
+            config = try_get_generation_config(
+                self.generation_config,
+                trust_remote_code=self.trust_remote_code,
+            )
+
+        if config is None:
+            return {}
+
+        return config.to_diff_dict()
+
+    def get_diff_sampling_param(self) -> Dict[str, Any]:
+        """
+        This method returns a dictionary containing the parameters 
+        that differ from the default sampling parameters, but only 
+        if `generation_config` is set. If `generation_config` is not 
+        set, an empty dictionary is returned.
+
+        Returns:
+            Dict[str, Any]: A dictionary with the differing sampling 
+            parameters if `generation_config` is set, otherwise an 
+            empty dictionary.
+        """
+        if self.generation_config is None:
+            # When generation_config is not set
+            return {}
+        config = self.try_get_generation_config()
+        available_params = [
+            "repetition_penalty",
+            "temperature",
+            "top_k",
+            "top_p",
+            "min_p",
+        ]
+        if any(p in config for p in available_params):
+            diff_sampling_param = {
+                p: config.get(p)
+                for p in available_params if config.get(p) is not None
+            }
+        else:
+            diff_sampling_param = {}
+        return diff_sampling_param
+
     @property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
@@ -943,6 +997,10 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+        if (current_platform.is_cuda() and self.block_size is not None
+                and self.block_size > 32):
+            raise ValueError("CUDA Paged Attention kernel only supports "
+                             f"block sizes up to 32. Got {self.block_size}.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
@@ -3178,7 +3236,7 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
-            f"mm_cache_preprocessor={self.model_config.mm_cache_preprocessor!r}, "  # noqa
+            f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r}, "  # noqa
             f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")

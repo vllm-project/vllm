@@ -34,7 +34,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataDict,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
@@ -302,11 +301,18 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
 
-def get_max_phi3v_image_tokens(ctx: InputContext) -> int:
-    processor = ctx.get_hf_processor()
-    image_processor = processor.image_processor  # type: ignore
+def get_max_phi3v_image_tokens(
+    ctx: InputContext,
+    *,
+    num_crops: Optional[int] = None,
+) -> int:
+    mm_processor_kwargs = {}
+    if num_crops:
+        mm_processor_kwargs["num_crops"] = num_crops
 
-    return image_processor.calc_num_image_tokens_from_image_size(
+    processor = ctx.get_hf_processor(**mm_processor_kwargs)
+
+    return processor.calc_num_image_tokens_from_image_size(
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
@@ -323,20 +329,27 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
             return self.ctx.get_hf_processor(num_crops=num_crops)
         return self.ctx.get_hf_processor()
 
-    def _apply_hf_processor(
+    def _call_hf_processor(
         self,
+        hf_processor: ProcessorMixin,
         prompt: str,
-        mm_data: MultiModalDataDict,
+        processor_data: Mapping[str, object],
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        processed_outputs = super()._apply_hf_processor(
-            prompt, mm_data, mm_processor_kwargs)
+        processed_outputs = super()._call_hf_processor(
+            hf_processor,
+            prompt=prompt,
+            processor_data=processor_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+
         # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
         # which will cause OverflowError when decoding the prompt_ids.
         # Therefore, we need to do an early replacement here
         token_ids = processed_outputs['input_ids']
         token_ids[token_ids < 0] = _IMAGE_TOKEN_ID
         processed_outputs['input_ids'] = token_ids
+
         return processed_outputs
 
     def _get_prompt_replacements(
