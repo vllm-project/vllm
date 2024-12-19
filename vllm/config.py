@@ -1960,8 +1960,9 @@ def _get_and_verify_max_len(
         "seq_length",
         # Command-R
         "model_max_length",
+        # Whisper
+        "max_target_positions",
         # Others
-        "max_length",
         "max_sequence_length",
         "max_seq_length",
         "seq_len",
