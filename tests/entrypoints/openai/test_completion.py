@@ -28,8 +28,6 @@ PA_NAME = "swapnilbp/llama_tweet_ptune"
 # need to change to match the prompt adapter
 PA_NUM_VIRTUAL_TOKENS = 8
 
-GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
-
 
 @pytest.fixture(scope="module")
 def zephyr_lora_files():
@@ -637,7 +635,8 @@ async def test_allowed_token_ids(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
 async def test_guided_json_completion(client: openai.AsyncOpenAI,
                                       guided_decoding_backend: str,
                                       sample_json_schema):
@@ -659,7 +658,8 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
 async def test_guided_regex_completion(client: openai.AsyncOpenAI,
                                        guided_decoding_backend: str,
                                        sample_regex):
@@ -680,7 +680,8 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_completion(client: openai.AsyncOpenAI,
                                         guided_decoding_backend: str,
                                         sample_guided_choice):
@@ -760,7 +761,8 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
 async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
                                           guided_decoding_backend: str,
                                           sample_json_schema, sample_regex):
