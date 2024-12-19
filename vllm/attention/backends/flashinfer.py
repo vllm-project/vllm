@@ -356,7 +356,6 @@ class FlashInferMetadata(AttentionMetadata):
                 self.block_table_bound = self.block_table_bound.to(self.device)
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
                 self.paged_kv_indices = self.paged_kv_indices.to(self.device)
-                self.prefill_wrapper.end_forward()
                 self.prefill_wrapper.begin_forward(
                     self.query_start_loc,
                     self.paged_kv_indptr[:self.num_prefills + 1],
@@ -379,7 +378,6 @@ class FlashInferMetadata(AttentionMetadata):
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
 
             assert self.decode_wrapper is not None
-            self.decode_wrapper.end_forward()
             self.decode_wrapper.begin_forward(
                 self.paged_kv_indptr[self.num_prefills:],
                 self.paged_kv_indices,
