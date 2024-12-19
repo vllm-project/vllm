@@ -18,8 +18,7 @@ if not current_platform.is_rocm():
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
-# MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-MAX_SEQ_LEN = 16
+MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
@@ -30,7 +29,6 @@ DTYPES = [
 ] if not current_platform.is_rocm() else [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-# TODO fix different num of heads
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # FlashAttention forward only supports head dimension at most 128
@@ -109,9 +107,7 @@ def ref_single_query_cached_kv_attention(
                 1, 1, -1)
             bias = alibi_bias
         if attn_bias is not None:
-            # TODO test alibi + bias
             bias = attn_bias[i] if bias is None else bias + attn_bias[i]
-        # print(f"ATTN BIAS {i}: {attn_bias[i]}")
         out = ref_masked_attention(q, keys, values, scale, bias)
         out = out.view(num_query_heads, head_size)
         output[i].copy_(out, non_blocking=True)
@@ -144,10 +140,6 @@ def test_paged_attention(
     seed: int,
     device: str,
 ) -> None:
-    # num_heads = (2, 2)
-    # num_seqs = 2
-    # head_size = 32
-    
     if ((kv_cache_dtype == "fp8" and head_size % 16)
             or (version == "rocm" and head_size not in (64, 128))):
         pytest.skip()
@@ -173,16 +165,20 @@ def test_paged_attention(
     if use_custom_attn_bias:
         # NOTE (NickLucche) each sequence can have a different bias,
         # depending on its len, but it *must* be float (f32)!
-        attn_bias_list = [torch.randn(num_query_heads,
-                        1,
-                        seq_len,
-                        dtype=torch.float) for seq_len in seq_lens]
-        attn_bias = torch.empty(num_seqs, num_query_heads, 1, max_seq_len, device=device, dtype=torch.float)
+        attn_bias_list = [
+            torch.randn(num_query_heads, 1, seq_len, dtype=torch.float)
+            for seq_len in seq_lens
+        ]
+        attn_bias = torch.empty(num_seqs,
+                                num_query_heads,
+                                1,
+                                max_seq_len,
+                                device=device,
+                                dtype=torch.float)
 
         for i, (seq_len, bias) in enumerate(zip(seq_lens, attn_bias_list)):
-            # first seq_len entries of the bias for each head/seq
+            # first `seq_len` entries of the bias matrix for each head/seq
             attn_bias[i, :, :, :seq_len] = bias
-        # print("bias shape", attn_bias.shape)
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
@@ -208,7 +204,6 @@ def test_paged_attention(
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    # print("BIAS", attn_bias)
     if version == "v1":
         ops.paged_attention_v1(
             output,
@@ -227,18 +222,15 @@ def test_paged_attention(
             k_scale,
             v_scale,
         )
-        # print("\nOUT", output)
 
         opcheck(torch.ops._C.paged_attention_v1,
                 (output, query, key_cache, value_cache, num_kv_heads, scale,
                  block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
-                 attn_bias,
-                 kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
+                 attn_bias, kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
                 cond=(head_size == HEAD_SIZES[0]
                       and block_size == BLOCK_SIZES[0]))
 
     elif version in ("v2", "rocm"):
-        assert False
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
@@ -273,14 +265,14 @@ def test_paged_attention(
                 v_scale,
             )
 
-            opcheck(torch.ops._C.paged_attention_v2,
-                    (output, exp_sums, max_logits, tmp_output, query,
-                     key_cache, value_cache, num_kv_heads, scale, block_tables,
-                     seq_lens, block_size, max_seq_len, alibi_slopes,
-                     attn_bias,
-                     kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
-                    cond=(head_size == HEAD_SIZES[0]
-                          and block_size == BLOCK_SIZES[0]))
+            opcheck(
+                torch.ops._C.paged_attention_v2,
+                (output, exp_sums, max_logits, tmp_output, query, key_cache,
+                 value_cache, num_kv_heads, scale, block_tables, seq_lens,
+                 block_size, max_seq_len, alibi_slopes, attn_bias,
+                 kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
+                cond=(head_size == HEAD_SIZES[0]
+                      and block_size == BLOCK_SIZES[0]))
 
         else:
             ops.paged_attention_rocm(
@@ -338,7 +330,6 @@ def test_paged_attention(
                                          key_cache, value_cache, block_tables,
                                          seq_lens, scale, alibi_slopes,
                                          attn_bias_list)
-    # print("\nREF OUT", ref_output)
 
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
