@@ -5,7 +5,7 @@ from .punica_base import PunicaWrapperBase
 
 
 def get_punica_wrapper(*args, **kwargs) -> PunicaWrapperBase:
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         # Lazy import to avoid ImportError
         from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
         print_info_once("Using PunicaWrapperGPU.")
