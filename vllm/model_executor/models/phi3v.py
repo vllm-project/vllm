@@ -1,3 +1,4 @@
+
 # Copyright 2024 The vLLM team.
 # Copyright 2024 Microsoft and the HuggingFace Inc. team. All rights reserved.
 #
@@ -349,7 +350,6 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         token_ids = processed_outputs['input_ids']
         token_ids[token_ids < 0] = _IMAGE_TOKEN_ID
         processed_outputs['input_ids'] = token_ids
-
         return processed_outputs
 
     def _get_prompt_replacements(
