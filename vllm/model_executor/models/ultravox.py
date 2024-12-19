@@ -11,7 +11,7 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
@@ -71,6 +71,13 @@ def get_ultravox_max_audio_tokens(ctx: InputContext):
 
 
 class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
+
+    def _get_hf_processor(
+        self,
+        *,
+        sampling_rate: Optional[int] = None,  # Ignored in initialization
+    ) -> ProcessorMixin:
+        return self.ctx.get_hf_processor()
 
     def _get_feature_extractor(self) -> WhisperFeatureExtractor:
         hf_processor = self._get_hf_processor()

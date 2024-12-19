@@ -88,7 +88,11 @@ def get_max_qwen2_audio_audio_tokens(ctx: InputContext) -> int:
 
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
 
-    def _get_hf_processor(self) -> Qwen2AudioProcessor:
+    def _get_hf_processor(
+        self,
+        *,
+        sampling_rate: Optional[int] = None,  # Ignored in initialization
+    ) -> Qwen2AudioProcessor:
         return self.ctx.get_hf_processor(Qwen2AudioProcessor)
 
     def _get_feature_extractor(self) -> WhisperFeatureExtractor:
