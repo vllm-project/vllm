@@ -143,6 +143,11 @@ class Metrics:
                 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
                 1.0, 2.5
             ])
+        self.histogram_iteration_tokens = self._histogram_cls(
+            name="vllm:iteration_tokens_total",
+            documentation="Histogram of number of tokens per engine_step.",
+            labelnames=labelnames,
+            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096])
 
         # Request stats
         #   Latency
@@ -597,6 +602,9 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.time_to_first_tokens_iter)
         self._log_histogram(self.metrics.histogram_time_per_output_token,
                             stats.time_per_output_tokens_iter)
+        self._log_histogram(self.metrics.histogram_iteration_tokens,
+                            [stats.num_generation_tokens_iter \
+                                + stats.num_prompt_tokens_iter])
 
         # Request level data
         # Latency
