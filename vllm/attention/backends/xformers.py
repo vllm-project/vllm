@@ -612,6 +612,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                # TODO (NickLucche) cross_attn_bias not needed for T5-like
+                # models, abstract bias selection if needed.
                 decode_meta.attn_bias,
                 layer._k_scale,
                 layer._v_scale,
