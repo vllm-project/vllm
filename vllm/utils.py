@@ -775,7 +775,7 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 # `collections` helpers
 def is_list_of(
     value: object,
-    typ: Type[T],
+    typ: Union[type[T], tuple[type[T], ...]],
     *,
     check: Literal["first", "all"] = "first",
 ) -> TypeIs[List[T]]:

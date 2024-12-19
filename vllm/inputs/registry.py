@@ -5,7 +5,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Mapping, NamedTuple,
                     Optional, Protocol, Union)
 
 from torch import nn
-from transformers import PretrainedConfig, ProcessorMixin
+from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
@@ -41,7 +41,7 @@ class InputContext:
 
     def get_hf_config(
         self,
-        hf_config_type: Union[type[C], tuple[type[C], ...]] = PretrainedConfig,
+        typ: Union[type[C], tuple[type[C], ...]] = PretrainedConfig,
         /,
     ) -> C:
         """
@@ -53,9 +53,9 @@ class InputContext:
             TypeError: If the configuration is not of the specified type.
         """
         hf_config = self.model_config.hf_config
-        if not isinstance(hf_config, hf_config_type):
+        if not isinstance(hf_config, typ):
             raise TypeError("Invalid type of HuggingFace config. "
-                            f"Expected type: {hf_config_type}, but "
+                            f"Expected type: {typ}, but "
                             f"found type: {type(hf_config)}")
 
         return hf_config
@@ -81,8 +81,7 @@ class InputContext:
 
     def get_hf_processor(
         self,
-        hf_processor_type: Union[type[P], tuple[type[P],
-                                                ...]] = ProcessorMixin,
+        typ: Union[type[P], tuple[type[P], ...]] = ProcessorMixin,
         /,
         **kwargs: object,
     ) -> P:
@@ -105,9 +104,9 @@ class InputContext:
             trust_remote_code=self.model_config.trust_remote_code,
             **merged_kwargs,
         )
-        if not isinstance(hf_processor, hf_processor_type):
+        if not isinstance(hf_processor, typ):
             raise TypeError("Invalid type of HuggingFace processor. "
-                            f"Expected type: {hf_processor_type}, but "
+                            f"Expected type: {typ}, but "
                             f"found type: {type(hf_processor)}")
 
         return hf_processor
@@ -120,35 +119,50 @@ class InputProcessingContext(InputContext):
 
     def get_hf_processor(
         self,
-        hf_processor_type: Union[type[P], tuple[type[P],
-                                                ...]] = ProcessorMixin,
+        typ: Union[type[P], tuple[type[P], ...]] = ProcessorMixin,
         /,
         **kwargs: object,
     ) -> P:
         return super().get_hf_processor(
-            hf_processor_type,
+            typ,
             tokenizer=self.tokenizer,
             **kwargs,
         )
 
-    def resolve_hf_processor_call_kwargs(
+    def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
+        prompt: str,
+        processor_data: Mapping[str, object],
         inference_kwargs: Mapping[str, object],
-    ) -> Mapping[str, object]:
+    ) -> BatchFeature:
         assert callable(hf_processor)
 
         base_kwargs = self.model_config.mm_processor_kwargs
         if base_kwargs is None:
             base_kwargs = {}
 
-        return resolve_mm_processor_kwargs(
+        merged_kwargs = resolve_mm_processor_kwargs(
             base_kwargs,
             inference_kwargs,
             hf_processor,
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
+
+        try:
+            return hf_processor(
+                text=prompt,
+                **processor_data,
+                **merged_kwargs,
+                return_tensors="pt",
+            )
+        except Exception as exc:
+            data = dict(text=prompt, **processor_data)
+            msg = (f"Failed to apply {type(hf_processor).__name__} "
+                   f"on data={data} with kwargs={merged_kwargs}")
+
+            raise RuntimeError(msg) from exc
 
 
 N = TypeVar("N", bound=type[nn.Module])

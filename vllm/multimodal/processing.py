@@ -31,7 +31,7 @@ _PromptSeq = Union[str, list[int]]
 @dataclass
 class PromptReplacement:
     modality: str
-    """The modality for which the replacement is made"""
+    """The modality for which the replacement is made."""
 
     target: _PromptSeq
     """The text or token sequence to find and replace."""
@@ -223,9 +223,13 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
             # yapf: disable
             if k == "video":
                 # Special case since even a single item can be a list
-                multi_data[k] = v if is_list_of(v, list) else [v]  # type: ignore[index]
+                multi_data[k] = (  # type: ignore[index]
+                    v if is_list_of(v, (list, torch.Tensor)) else [v]
+                )
             elif k in ("image", "audio"):
-                multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
+                multi_data[k] = (  # type: ignore[index]
+                    v if isinstance(v, (list, torch.Tensor)) else [v]
+                )
             else:
                 multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
             # yapf: enable
@@ -668,25 +672,12 @@ class BaseMultiModalProcessor(ABC):
         processor_data: Mapping[str, object],
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        assert callable(hf_processor)
-        mm_processor_kwargs = self.ctx.resolve_hf_processor_call_kwargs(
+        return self.ctx.call_hf_processor(
             hf_processor,
+            prompt,
+            processor_data,
             mm_processor_kwargs,
         )
-
-        try:
-            return hf_processor(
-                text=prompt,
-                **processor_data,
-                **mm_processor_kwargs,
-                return_tensors="pt",
-            )
-        except Exception as exc:
-            data = dict(text=prompt, **processor_data)
-            msg = (f"Failed to apply {type(hf_processor).__name__} "
-                   f"on data={data} with kwargs={mm_processor_kwargs}")
-
-            raise RuntimeError(msg) from exc
 
     def _apply_hf_processor(
         self,
