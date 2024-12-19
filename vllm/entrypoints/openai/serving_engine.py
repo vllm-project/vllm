@@ -41,6 +41,7 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.lora.resolver import LoRAResolver
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -101,6 +102,7 @@ class OpenAIServing:
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
+        lora_resolver: Optional[LoRAResolver] = None,
         return_tokens_as_token_ids: bool = False,
     ):
         super().__init__()
@@ -113,6 +115,7 @@ class OpenAIServing:
 
         self.lora_id_counter = AtomicCounter(0)
         self.lora_requests = []
+        self.lora_resolver = lora_resolver
         if lora_modules is not None:
             self.lora_requests = [
                 LoRARequest(lora_name=lora.name,
@@ -206,6 +209,13 @@ class OpenAIServing:
         if self._is_model_supported(request.model):
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
+            return None
+        if (self.lora_resolver
+                and (lora_request := await self.lora_resolver.resolve_lora(
+                    request.model)) and lora_request.lora_int_id
+                not in {lora.lora_int_id
+                        for lora in self.lora_requests}):
+            self.lora_requests.append(lora_request)
             return None
         if request.model in [
                 prompt_adapter.prompt_adapter_name
