@@ -328,8 +328,8 @@ class AsyncLLM(EngineClient):
 
         try:
             while True:
-                logger.info(f"EPOCH: {epoch}")
-                epoch += 1
+                # logger.info(f"EPOCH: {epoch}")
+                # epoch += 1
 
                 # 1) Pull outputs from the Detokenizer.
                 detokenizer_outputs = (

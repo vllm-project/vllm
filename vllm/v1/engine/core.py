@@ -248,8 +248,8 @@ class EngineCoreProc(EngineCore):
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
-            logger.info(f"EPOCH: {epoch}")
-            epoch += 1
+            # logger.info(f"EPOCH: {epoch}")
+            # epoch += 1
 
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
