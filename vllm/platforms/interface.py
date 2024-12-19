@@ -81,6 +81,9 @@ class Platform:
     # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
+    # The backend for torch.compile. The default value is "inductor" to keep
+    # the same behavior as PyTorch.
+    simple_compile_backend: str = "inductor"
     supported_quantization: list[str] = []
 
     def is_cuda(self) -> bool:
