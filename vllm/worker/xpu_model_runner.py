@@ -98,7 +98,7 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
-        
+
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"
             assert not supports_multimodal(
@@ -256,14 +256,15 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             seq_group_metadata_list, finished_requests_ids)
         # Sampling metadata is only required for the final pp group
         generators = self.get_generators(finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list,
-            model_input.seq_lens,
-            model_input.query_lens,
-            self.device,
-            pin_memory=False,
-            generators=generators,
-            cache=self.sampling_metadata_cache)
+        if get_pp_group().is_last_rank:
+            # Sampling metadata is only required for the final pp group
+            generators = self.get_generators(finished_requests_ids)
+            sampling_metadata = SamplingMetadata.prepare(
+                seq_group_metadata_list, model_input.seq_lens,
+                model_input.query_lens, self.device, self.pin_memory,
+                generators, self.sampling_metadata_cache)
+        else:
+            sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
              if seq_group_metadata_list else None)
         return dataclasses.replace(model_input,
