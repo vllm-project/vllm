@@ -185,6 +185,7 @@ Documentation
    contributing/overview
    contributing/profiling/profiling_index
    contributing/dockerfile/dockerfile
+   contributing/vulnerability_management.md
 
 Indices and tables
 ==================
