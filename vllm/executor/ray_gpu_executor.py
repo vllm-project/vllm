@@ -203,7 +203,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 # driver_dummy_worker can be None when using ray spmd worker.
                 continue
             worker_node_and_gpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote()) \
+                ray.get(worker.get_node_and_accelerator_ids.remote()) \
             ) # type: ignore
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
