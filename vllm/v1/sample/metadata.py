@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
@@ -18,4 +18,13 @@ class SamplingMetadata:
 
     generators: Dict[int, torch.Generator]
 
-    max_num_logprobs: int
+    # Max number of sample or prompt logprobs
+    # (respectiely) at the batch level
+    max_num_batch_sample_logprobs: int
+    max_num_batch_prompt_logprobs: int
+
+    # Attributes which support logprob computation
+    query_start_loc: Optional[torch.Tensor]
+    num_query_tokens: Optional[torch.Tensor]
+    num_input_tokens: int
+    partial_req_index: int  # >0 if there is a partial request, -1 o/w
