@@ -23,6 +23,16 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
+
+from torch.distributed.tensor import (
+    DeviceMesh,
+    distribute_module,
+    distribute_tensor,
+    DTensor,
+    Replicate,
+    Shard,
+)
+
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod", "AWQMarlinLinearMethod",
     "AWQLinearMethod", "GPTQMarlinLinearMethod", "Fp8LinearMethod",
@@ -274,8 +284,9 @@ class ColumnParallelLinear(LinearBase):
     """
 
     def __init__(self,
-                 input_size: int,
-                 output_size: int,
+                 *,
+                 input_size: int = None,
+                 output_size: int=None,
                  bias: bool = True,
                  gather_output: bool = False,
                  skip_bias_add: bool = False,
@@ -283,6 +294,10 @@ class ColumnParallelLinear(LinearBase):
                  quant_config: Optional[QuantizationConfig] = None,
                  output_sizes: Optional[List[int]] = None,
                  prefix: str = ""):
+        
+        self.input_size = (input_size or Replicate(),)
+        self.output_size = (output_size or Shard(-1),)
+    
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
 
@@ -987,6 +1002,7 @@ class RowParallelLinear(LinearBase):
     """
 
     def __init__(self,
+                 *,
                  input_size: int,
                  output_size: int,
                  bias: bool = True,
@@ -996,6 +1012,10 @@ class RowParallelLinear(LinearBase):
                  reduce_results: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
+        
+        self.input_size = (input_size or Replicate(),)
+        self.output_size = (output_size or Shard(-1),)
+
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
 

@@ -46,6 +46,16 @@ def create_dummy_prompt(
     return prompt, seq_group
 
 
+def create_dummy_lora_sequence(request_id: int, token_ids: List[int],
+                               block_size: int, lora_int_id: int) -> Sequence:
+    return Sequence(seq_id=request_id,
+                    inputs=token_inputs(token_ids),
+                    block_size=block_size,
+                    lora_request=LoRARequest(lora_name="dummy",
+                                             lora_path="/dummy",
+                                             lora_int_id=lora_int_id))
+
+
 def create_dummy_sequence(request_id: int, token_ids: List[int],
                           block_size: int) -> Sequence:
     return Sequence(

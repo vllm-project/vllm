@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -16,8 +16,10 @@ logger = init_logger(__name__)
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
+    device_name: str = "tpu"
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
+    supported_quantization: list[str] = ["tpu_int8"]
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -34,12 +36,21 @@ class TpuPlatform(Platform):
         raise NotImplementedError
 
     @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return True
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.config import CompilationLevel
+
+        cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
         compilation_config = vllm_config.compilation_config
         if compilation_config.level == CompilationLevel.NO_COMPILATION:
             # TPU does not support NO_COMPILATION

@@ -53,6 +53,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
                                          trust_remote_code=True),
+    "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
+                                         trust_remote_code=True),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
     "DeciLMForCausalLM": _HfExamplesInfo("Deci/DeciLM-7B-instruct",
                                          trust_remote_code=True),
@@ -63,6 +65,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-2b"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
+    "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "GPT2LMHeadModel": _HfExamplesInfo("gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo("bigcode/starcoder"),
     "GPTJForCausalLM": _HfExamplesInfo("EleutherAI/gpt-j-6b"),
@@ -134,6 +137,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
+    "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
@@ -175,6 +179,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-v1.6-mistral-7b-hf"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo("llava-hf/LLaVA-NeXT-Video-7B-hf"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
+    "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3"),  # noqa: E501
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",

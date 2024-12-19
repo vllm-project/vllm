@@ -96,7 +96,8 @@ class PlaceholderRange(TypedDict):
     """The length of the placeholder."""
 
 
-NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
+NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor,
+                      Tuple[torch.Tensor, ...]]
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
@@ -213,6 +214,9 @@ class MultiModalInputsV2(TypedDict):
 
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
+
+    mm_hashes: NotRequired[List[str]]
+    """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict
     """
