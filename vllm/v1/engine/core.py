@@ -1,23 +1,26 @@
-import multiprocessing
 import pickle
 import queue
 import signal
 import threading
 import time
+from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
-from typing import List, Tuple, Type, Union
+from typing import List, Tuple, Type
 
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType)
+                            EngineCoreRequestType, EngineCoreRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -62,7 +65,8 @@ class EngineCore:
 
         self._last_logging_time = time.time()
 
-        self.mm_input_mapper_server = MMInputMapperServer()
+        self.mm_input_mapper_server = MMInputMapperServer(
+            vllm_config.model_config)
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -94,6 +98,7 @@ class EngineCore:
             # Note that the cache here is mirrored with the client side of the
             # MM mapper, so anything that has a hash must have a HIT cache
             # entry here as well.
+            assert request.mm_inputs is not None
             request.mm_inputs = self.mm_input_mapper_server.process_inputs(
                 request.mm_inputs, request.mm_hashes)
 
@@ -125,8 +130,16 @@ class EngineCore:
     def shutdown(self):
         self.model_executor.shutdown()
 
-    def profile(self, is_start=True):
+    def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
+
+
+@dataclass
+class EngineCoreProcHandle:
+    proc: BaseProcess
+    ready_path: str
+    input_path: str
+    output_path: str
 
 
 class EngineCoreProc(EngineCore):
@@ -150,8 +163,8 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue = queue.Queue()
-        self.output_queue = queue.Queue()
+        self.input_queue: queue.Queue[EngineCoreRequestUnion] = queue.Queue()
+        self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
                          daemon=True).start()
@@ -200,12 +213,8 @@ class EngineCoreProc(EngineCore):
         input_path: str,
         output_path: str,
         ready_path: str,
-    ) -> BaseProcess:
-        # The current process might have CUDA context,
-        # so we need to spawn a new process.
-        # NOTE(rob): this is a problem for using EngineCoreProc w/
-        # LLM, since we need a if __name__ == "__main__" guard.
-        context = multiprocessing.get_context("spawn")
+    ) -> EngineCoreProcHandle:
+        context = get_mp_context()
 
         process_kwargs = {
             "input_path": input_path,
@@ -222,7 +231,10 @@ class EngineCoreProc(EngineCore):
 
         # Wait for startup
         EngineCoreProc.wait_for_startup(proc, ready_path)
-        return proc
+        return EngineCoreProcHandle(proc=proc,
+                                    ready_path=ready_path,
+                                    input_path=input_path,
+                                    output_path=output_path)
 
     @staticmethod
     def run_engine_core(*args, **kwargs):
@@ -232,6 +244,9 @@ class EngineCoreProc(EngineCore):
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
         shutdown_requested = False
+
+        # Ensure we can serialize transformer config after spawning
+        maybe_register_config_serialize_by_value()
 
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
@@ -305,15 +320,13 @@ class EngineCoreProc(EngineCore):
 
             self._last_logging_time = now
 
-    def _handle_client_request(
-        self, request: Union[EngineCoreRequest, EngineCoreProfile,
-                             List[str]]) -> None:
+    def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""
 
         if isinstance(request, EngineCoreRequest):
             self.add_request(request)
         elif isinstance(request, EngineCoreProfile):
-            self.model_executor.worker.profile(request.is_start)
+            self.model_executor.profile(request.is_start)
         else:
             # TODO: make an EngineCoreAbort wrapper
             assert isinstance(request, list)

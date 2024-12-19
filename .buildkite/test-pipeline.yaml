@@ -181,14 +181,14 @@ steps:
   commands:
     - VLLM_USE_V1=1 pytest -v -s v1
 
-- label: Examples Test # 15min
+- label: Examples Test # 25min
   working_dir: "/vllm-workspace/examples"
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/entrypoints
   - examples/
   commands:
-    - pip install awscli tensorizer # for llava example and tensorizer test
+    - pip install tensorizer # for tensorizer test
     - python3 offline_inference.py
     - python3 cpu_offload.py
     - python3 offline_inference_chat.py
@@ -198,7 +198,10 @@ steps:
     - python3 offline_inference_vision_language_multi_image.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
-    - python3 offline_profile.py --model facebook/opt-125m
+    - python3 offline_inference_classification.py
+    - python3 offline_inference_embedding.py
+    - python3 offline_inference_scoring.py
+    - python3 offline_profile.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
   mirror_hardwares: [amd]
@@ -221,8 +224,12 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/model_executor/layers
+  - vllm/model_executor/guided_decoding
   - tests/test_logits_processor
-  command: pytest -v -s test_logits_processor.py
+  - tests/model_executor/test_guided_processors
+  commands: 
+    - pytest -v -s test_logits_processor.py
+    - pytest -v -s model_executor/test_guided_processors.py
 
 - label: Speculative decoding tests # 30min
   source_file_dependencies:
@@ -432,11 +439,11 @@ steps:
   - tests/distributed/
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
 
 - label: Distributed Tests (2 GPUs) # 40min
   #mirror_hardwares: [amd]
@@ -455,7 +462,7 @@ steps:
   commands:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
-  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
+  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'

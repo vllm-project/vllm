@@ -55,6 +55,11 @@ class OpenAIServingCompletion(OpenAIServing):
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
+        diff_sampling_param = self.model_config.get_diff_sampling_param()
+        if diff_sampling_param:
+            logger.info(
+                "Overwriting default completion sampling param with: %s",
+                diff_sampling_param)
 
     async def create_completion(
         self,
@@ -85,7 +90,6 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "suffix is not currently supported")
 
-        model_name = self.base_model_paths[0].name
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
@@ -119,12 +123,17 @@ class OpenAIServingCompletion(OpenAIServing):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
+                # Build default sampling params
+                default_sampling_params = (
+                    self.model_config.get_diff_sampling_param())
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens)
+                        default_max_tokens, default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens)
+                        default_max_tokens,
+                        self.model_config.logits_processor_pattern,
+                        default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
 
@@ -159,9 +168,9 @@ class OpenAIServingCompletion(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        result_generator = merge_async_iterators(
-            *generators, is_cancelled=raw_request.is_disconnected)
+        result_generator = merge_async_iterators(*generators)
 
+        model_name = self._get_model_name(lora_request)
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the

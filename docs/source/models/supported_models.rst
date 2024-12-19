@@ -118,9 +118,9 @@ Text Generation (``--task generate``)
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
     - ✅︎
     - ✅︎
-  * - :code:`CohereForCausalLM`
+  * - :code:`CohereForCausalLM`,:code:`Cohere2ForCausalLM`
     - Command-R
-    - :code:`CohereForAI/c4ai-command-r-v01`, etc.
+    - :code:`CohereForAI/c4ai-command-r-v01`, :code:`CohereForAI/c4ai-command-r7b-12-2024`, etc.
     - ✅︎
     - ✅︎
   * - :code:`DbrxForCausalLM`
@@ -194,13 +194,18 @@ Text Generation (``--task generate``)
     -
     - ✅︎
   * - :code:`GraniteForCausalLM`
-    - Granite 3.0, PowerLM
-    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.0-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
+    - Granite 3.0, Granite 3.1, PowerLM
+    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.1-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`GraniteMoeForCausalLM`
     - Granite 3.0 MoE, PowerMoE
     - :code:`ibm-granite/granite-3.0-1b-a400m-base`, :code:`ibm-granite/granite-3.0-3b-a800m-instruct`, :code:`ibm/PowerMoE-3b`, etc.
+    - ✅︎
+    - ✅︎
+  * - :code:`GritLM`
+    - GritLM
+    - :code:`parasail-ai/GritLM-7B-vllm`.
     - ✅︎
     - ✅︎
   * - :code:`InternLMForCausalLM`
@@ -395,6 +400,11 @@ The following table lists those that are tested in vLLM.
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
     - 
     - ✅︎
+  * - :code:`GritLM`
+    - GritLM
+    - :code:`parasail-ai/GritLM-7B-vllm`.
+    - ✅︎
+    - ✅︎
   * - :code:`LlamaModel`, :code:`LlamaForCausalLM`, :code:`MistralModel`, etc.
     - Llama-based
     - :code:`intfloat/e5-mistral-7b-instruct`, etc.
@@ -466,6 +476,11 @@ Classification (``--task classify``)
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`JambaForSequenceClassification`
+    - Jamba
+    - :code:`ai21labs/Jamba-tiny-reward-dev`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`Qwen2ForSequenceClassification`
     - Qwen2-based
     - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.
@@ -654,9 +669,9 @@ Text Generation (``--task generate``)
     - ✅︎
     - ✅︎
   * - :code:`PaliGemmaForConditionalGeneration`
-    - PaliGemma
+    - PaliGemma, PaliGemma 2
     - T + I\ :sup:`E`
-    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
+    - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, :code:`google/paligemma2-3b-ft-docci-448`, etc.
     - 
     - ✅︎
     - 

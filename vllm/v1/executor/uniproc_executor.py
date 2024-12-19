@@ -4,13 +4,14 @@ from typing import Optional, Tuple
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
 
-class UniprocExecutor:
+class UniprocExecutor(Executor):
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -25,7 +26,7 @@ class UniprocExecutor:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
-        self.worker = self._create_worker()
+        self.worker: Worker = self._create_worker()
         self.worker.initialize()
         self.worker.load_model()
 
@@ -75,7 +76,7 @@ class UniprocExecutor:
         self.worker.profile(is_start)
 
     def shutdown(self):
-        self.worker = None
+        pass
 
     def check_health(self) -> None:
         # UniprocExecutor will always be healthy as long as

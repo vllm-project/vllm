@@ -60,9 +60,13 @@ class AsyncLLM(EngineClient):
         self.client_aborted_requests: List[str] = []
 
         # Processor (converts Inputs --> EngineCoreRequests).
-        self.processor = Processor(vllm_config.model_config,
-                                   vllm_config.lora_config, self.tokenizer,
-                                   input_registry)
+        self.processor = Processor(
+            model_config=vllm_config.model_config,
+            cache_config=vllm_config.cache_config,
+            lora_config=vllm_config.lora_config,
+            tokenizer=self.tokenizer,
+            input_registry=input_registry,
+        )
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
         self.detokenizer = Detokenizer(
@@ -81,7 +85,7 @@ class AsyncLLM(EngineClient):
             asyncio_mode=True,
         )
 
-        self.output_handler = None
+        self.output_handler: Optional[asyncio.Task] = None
 
     def __del__(self):
         self.shutdown()
@@ -126,7 +130,8 @@ class AsyncLLM(EngineClient):
             handler.cancel()
 
     @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig):
+    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
+        executor_class: Type[Executor]
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
         if distributed_executor_backend == "mp":
@@ -361,10 +366,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        await self.engine_core.profile(True)
+        await self.engine_core.profile_async(True)
 
     async def stop_profile(self) -> None:
-        await self.engine_core.profile(False)
+        await self.engine_core.profile_async(False)
 
     @property
     def is_running(self) -> bool:
@@ -380,7 +385,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def dead_error(self) -> BaseException:
-        return Exception
+        return Exception()  # TODO: implement
 
 
 # Retain V0 name for backwards compatibility.
