@@ -4,7 +4,11 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.utils import set_weight_attrs
 
 
 @CustomOp.register("rms_norm")
@@ -141,6 +145,82 @@ class RMSNorm(CustomOp):
             self.weight.data,
             self.variance_epsilon,
         )
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.weight.data.size(0)}"
+        s += f", eps={self.variance_epsilon}"
+        return s
+
+
+@CustomOp.register("parallel_rms_norm")
+class ParallelRMSNorm(CustomOp):
+    """Root mean square normalization.
+
+    Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
+    Refer to https://arxiv.org/abs/1910.07467
+
+    This operation supports tensor parallelism along the hidden dimension
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        var_hidden_size: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+
+        # TODO: For tp size == 1, I think this should instantiate an RMSNorm
+        # and use its forward method
+
+        self.hidden_size = hidden_size
+        self.variance_epsilon = eps
+        self.variance_size_override = (None if var_hidden_size == hidden_size
+                                       else var_hidden_size)
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+        assert (hidden_size % self.tp_size == 0)
+        hidden_size = hidden_size // self.tp_size
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        set_weight_attrs(self.weight,
+                         {"weight_loader": self._parallel_weight_loader})
+
+    # TODO: can this use a built-in util now that it's it's only 1D TP?
+    def _parallel_weight_loader(self, param: torch.Tensor,
+                                loaded_weight: torch.Tensor):
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = param.data.shape[0]
+        start_idx = tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
+        param.data.copy_(loaded_weight)
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """PyTorch-native implementation equivalent to forward()."""
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        if residual is not None:
+            assert (residual.shape == x.shape)
+            x = x + residual.to(torch.float32)
+            residual = x.to(orig_dtype)
+
+        # Compute local sum and then reduce to obtain global sum
+        local_sums = x.pow(2).sum(dim=-1, keepdim=False)
+        global_sums = tensor_model_parallel_all_reduce(local_sums)
+
+        # Calculate the variance
+        count = self.tp_size * x.shape[-1]
+        variance = (global_sums / count)
+
+        x = x * torch.rsqrt(variance.unsqueeze(-1) + self.variance_epsilon)
+        x = x.to(orig_dtype) * self.weight
+        if residual is None:
+            return x
+        else:
+            return x, residual
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
