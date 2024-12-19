@@ -1125,7 +1125,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                         remapped_kv_scale_name = name.replace(
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
-                            logger.warning_once(
+                            logger.print_warning_once(
                                 "Found kv scale in the checkpoint (e.g. "
                                 f"{name}), but not found the expected name in "
                                 f"the model (e.g. {remapped_kv_scale_name}). "

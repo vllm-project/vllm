@@ -999,14 +999,14 @@ def apply_mistral_chat_template(
     **kwargs: Any,
 ) -> List[int]:
     if chat_template is not None:
-        logger.warning_once(
+        logger.print_warning_once(
             "'chat_template' cannot be overridden for mistral tokenizer.")
     if "add_generation_prompt" in kwargs:
-        logger.warning_once(
+        logger.print_warning_once(
             "'add_generation_prompt' is not supported for mistral tokenizer, "
             "so it will be ignored.")
     if "continue_final_message" in kwargs:
-        logger.warning_once(
+        logger.print_warning_once(
             "'continue_final_message' is not supported for mistral tokenizer, "
             "so it will be ignored.")
 

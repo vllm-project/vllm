@@ -63,14 +63,17 @@ def _print_warning_once(logger: Logger, msg: str) -> None:
 
 class VllmLogger(Logger):
 
-    def info_once(self, msg: str) -> None:
+    # NOTE: We can't use info_once and warning_once because they
+    # are overwritten by transformers:
+    # https://github.com/huggingface/transformers/blob/2c47618c1a282f925446506d53108dc6e82d9ef0/src/transformers/utils/logging.py#L331
+    def print_info_once(self, msg: str) -> None:
         """
         As :meth:`info`, but subsequent calls with the same message
         are silently dropped.
         """
         _print_info_once(self, msg)
 
-    def warning_once(self, msg: str) -> None:
+    def print_warning_once(self, msg: str) -> None:
         """
         As :meth:`warning`, but subsequent calls with the same message
         are silently dropped.

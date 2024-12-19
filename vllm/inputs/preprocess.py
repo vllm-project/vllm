@@ -67,13 +67,13 @@ class InputPreprocessor:
         '''
 
         if not self.model_config.is_encoder_decoder:
-            logger.warning_once(
+            logger.print_warning_once(
                 "Using None for decoder start token id because "
                 "this is not an encoder/decoder model.")
             return None
 
         if (self.model_config is None or self.model_config.hf_config is None):
-            logger.warning_once(
+            logger.print_warning_once(
                 "Using None for decoder start token id because "
                 "model config is not available.")
             return None
@@ -81,7 +81,7 @@ class InputPreprocessor:
         dec_start_token_id = getattr(self.model_config.hf_config,
                                      'decoder_start_token_id', None)
         if dec_start_token_id is None:
-            logger.warning_once(
+            logger.print_warning_once(
                 "Falling back on <BOS> for decoder start token "
                 "id because decoder start token id is not "
                 "available.")

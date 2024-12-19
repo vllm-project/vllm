@@ -301,7 +301,7 @@ class ModelConfig:
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
-                logger.warning_once(
+                logger.print_warning_once(
                     f"{self.hf_text_config.model_type} has interleaved "
                     "attention, which is currently not supported by the "
                     "XFORMERS backend. Disabling sliding window and capping "
@@ -2638,7 +2638,7 @@ class CompilationConfig(BaseModel):
 
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_reshape and self.enable_fusion:
-                logger.warning_once(
+                logger.print_warning_once(
                     "Fusion enabled but reshape elimination disabled."
                     "RMSNorm + quant (fp8) fusion might not work")
 
@@ -3017,7 +3017,7 @@ class VllmConfig:
             self.scheduler_config.chunked_prefill_enabled and \
             self.model_config.dtype == torch.float32 and \
             current_platform.get_device_capability() == (7, 5):
-            logger.warning_once(
+            logger.print_warning_once(
                 "Turing devices tensor cores do not support float32 matmul. "
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
