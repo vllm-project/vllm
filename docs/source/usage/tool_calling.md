@@ -170,6 +170,12 @@ Recommended flags: `--tool-call-parser granite --chat-template examples/tool_cha
 
 `examples/tool_chat_template_granite.jinja`: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
 
+* `ibm-granite/granite-3.1-8b-instruct`
+
+Recommended flags: `--tool-call-parser granite`
+
+The chat template from Huggingface can be used directly. Parallel function calls are supported.
+
 * `ibm-granite/granite-20b-functioncalling`
 
 Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
@@ -284,4 +290,3 @@ Then you can use this plugin in the command line like this.
     --tool-call-parser example \
     --chat-template <your chat template> \
 ```
-

@@ -194,8 +194,8 @@ Text Generation (``--task generate``)
     -
     - ✅︎
   * - :code:`GraniteForCausalLM`
-    - Granite 3.0, PowerLM
-    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.0-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
+    - Granite 3.0, Granite 3.1, PowerLM
+    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.1-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`GraniteMoeForCausalLM`
