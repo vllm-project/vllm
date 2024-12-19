@@ -11,7 +11,6 @@ from vllm.assets.audio import AudioAsset
 
 from ....utils import fork_new_process_for_each_test, multi_gpu_test
 
-
 PROMPTS = [
     {
         "prompt":

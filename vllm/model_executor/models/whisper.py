@@ -29,7 +29,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sequence import SequenceData
 
 from .interfaces import SupportsMultiModal
-from .utils import AutoWeightsLoader, make_layers, WeightsMapper
+from .utils import AutoWeightsLoader, WeightsMapper, make_layers
 
 logger = init_logger(__name__)
 
