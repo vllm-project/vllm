@@ -724,7 +724,7 @@ class Qwen2VLMultiModalDataItems(MultiModalDataItems):
         """
         Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`.
         """
-        multi_data = MultiModalDataItems()
+        multi_data = Qwen2VLMultiModalDataItems()
 
         for k, v in data.items():
             # TODO: Make a separate modality for embedding inputs
