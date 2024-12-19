@@ -1281,7 +1281,7 @@ class SchedulerConfig:
 
     # calculate context length that determines which sequences are
     # considered "long"
-    long_prefill_token_threshold = int(max_model_len * long_prefill_threshold)
+    long_prefill_token_threshold: int = 0
 
     # The number of slots to allocate per sequence per
     # step, beyond the known token ids. This is used in speculative
@@ -1385,6 +1385,8 @@ class SchedulerConfig:
                 self.max_num_batched_tokens)
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
+        self.long_prefill_token_threshold = int(self.max_model_len *
+                                                self.long_prefill_threshold)
         self._verify_args()
 
     def _verify_args(self) -> None:
