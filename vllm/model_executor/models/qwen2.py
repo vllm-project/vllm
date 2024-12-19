@@ -62,9 +62,15 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from torch.profiler import profile
+import time
 logger = init_logger(__name__)
 
+def trace_handler(prof):
+    print(prof.key_averages().table(
+        sort_by="self_cuda_time_total", row_limit=-1))
+    prof.export_chrome_trace(f"models/test_trace_{time.time()}.json")
 
 class Qwen2MLP(nn.Module):
 
@@ -473,8 +479,25 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
+    
 
-    async def forward(
+
+    def send_data(self, model_input, kv_caches, hidden_states,layer_by_layer_start,layer_by_layer_interval):
+        with ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer,
+                self,
+                model_input,
+                kv_caches,
+                hidden_or_intermediate_states=hidden_states,
+                layer_by_layer_start=layer_by_layer_start,
+                layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+            )
+            try:
+                future.result()
+            except Exception as e:
+                print(f"发送数据任务出现异常: {e}")
+    def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -485,29 +508,35 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         layer_by_layer_trunk: Optional[int] = None,
         model_input: Optional[ModelInputForGPUWithSamplingMetadata] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        # logger.info(f"layer_by_layer_trunk {layer_by_layer_trunk}")
         if (kv_caches[0].numel() == 0):
+            logger.info(kv_caches[0])
             return self.model(input_ids, positions, kv_caches, attn_metadata,
                           intermediate_tensors)
-        
-        with torch.profiler.profile(
+        if layer_by_layer_trunk is not None:
+            logger.info("DEBUGG get_kv_transfer_group().config.kv_transfer_config={}".format(
+                get_kv_transfer_group().config.kv_transfer_config))
+            
+            if get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_producer':
+                layer_by_layer_start = 0
+                layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk) 
+                tasks = []
+
+                with profile(
                     activities=[
-                        torch.profiler.ProfilerActivity.CPU,
-                        torch.profiler.ProfilerActivity.CUDA,
-                    ], with_stack=True,
-                    on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                        '/root/profile@{}@{}'.format(
-                            get_kv_transfer_group().config.kv_transfer_config.kv_role,
-                            get_kv_transfer_group().is_first_decode
-                        ))) as p:
-            if layer_by_layer_trunk is not None:
-                print("DEBUGG get_kv_transfer_group().config.kv_transfer_config={}".format(
-                    get_kv_transfer_group().config.kv_transfer_config))
-                    
-                if get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_producer':
-                    layer_by_layer_start = 0
-                    layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk) 
-                    tasks = []
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                    ],
+                    schedule=torch.profiler.schedule(
+                    wait=0,
+                    warmup=0,
+                    active=2
+                ),
+                with_stack=True,
+                on_trace_ready=trace_handler
+                ) as p:
                     for i in range(layer_by_layer_trunk):
+                        p.step()
                         for _ in range(layer_by_layer_start, layer_by_layer_interval):
                             if layer_by_layer_start == 0:
                                 if inputs_embeds is not None:
@@ -523,80 +552,67 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 attn_metadata,
                                 residual,
                             )
+                        # get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
+                        #     self,
+                        #     model_input,
+                        #     kv_caches,
+                        #     hidden_or_intermediate_states=hidden_states,
+                        #     layer_by_layer_start=layer_by_layer_start,
+                        #     layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+                        # )
                         
-                        get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
-                            self,
-                            model_input,
-                            kv_caches,
-                            hidden_or_intermediate_states=hidden_states,
-                            layer_by_layer_start=layer_by_layer_start,
-                            layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
-                        )
-                        
+                        self.send_data(model_input,kv_caches,hidden_states,layer_by_layer_start,layer_by_layer_interval)
                         layer_by_layer_start += layer_by_layer_interval
-                        # import asyncio
-                        # task = asyncio.create_task(
-                        #     get_kv_transfer_group().send_kv_caches_and_hidden_states_by_layer(
-                        #         self,
-                        #         model_input,
-                        #         kv_caches,
-                        #         hidden_or_intermediate_states=hidden_states,
-                        #         layer_by_layer_start=layer_by_layer_start,
-                        #         layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
-                        #     ))
-                        # tasks.append(task)
-                        # layer_by_layer_start += layer_by_layer_interval
+                    hidden_states, _ = self.model.norm(hidden_states, residual)
 
+            elif get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_consumer':
+                print("DEBUGG get_kv_transfer_group().config={}".format(
+                    get_kv_transfer_group().config.__dict__
+                ))
+                layer_by_layer_start = 0
+                layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk)
 
-                    # await asyncio.gather(*tasks)
+                hidden_or_intermediate_states = None
+                logger.info("DEBUGG is_first_decode={}".format(get_kv_transfer_group().is_first_decode))
+                if get_kv_transfer_group().is_first_decode:
+                    for i in range(layer_by_layer_trunk):
+                        hidden_or_intermediate_states, bypass_model_exec, _ = \
+                            get_kv_transfer_group().recv_kv_caches_and_hidden_states_by_layer(
+                                self,
+                                model_input,
+                                kv_caches,
+                                layer_by_layer_start=layer_by_layer_start,
+                                layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
+                            )
+                        layer_by_layer_start += layer_by_layer_interval
+                
+                    get_kv_transfer_group().is_first_decode = False
+                    return hidden_or_intermediate_states
+                logger.info("DEBUGG kv is received.")
+                logger.info("DEBUGG is_first_decode={}".format(get_kv_transfer_group().is_first_decode))
+                logger.info("DEBUGG self.model.start_layer={}, self.model.end_layer={}".format(self.model.start_layer, self.model.end_layer))
+                for i in range(self.model.start_layer, self.model.end_layer):
+                    if i == 0:
+                        if inputs_embeds is not None:
+                            hidden_states = inputs_embeds
+                        else:
+                            hidden_states = self.model.get_input_embeddings(input_ids)
+                        residual = None
+                        
+                    hidden_states, residual = self.model.layers[i](
+                        positions,
+                        hidden_states,
+                        kv_caches[i - self.model.start_layer],
+                        attn_metadata,
+                        residual,
+                    )
+                hidden_states, _ = self.model.norm(hidden_states, residual)
+            else:
+                raise ValueError("GG!")
 
-                elif get_kv_transfer_group().config.kv_transfer_config.kv_role == 'kv_consumer':
-                    print("DEBUGG get_kv_transfer_group().config={}".format(
-                        get_kv_transfer_group().config.__dict__
-                    ))
-                    layer_by_layer_start = 0
-                    layer_by_layer_interval = int(len(self.model.layers) // layer_by_layer_trunk)
-
-                    hidden_or_intermediate_states = None
-                    logger.info("DEBUGG is_first_decode={}".format(get_kv_transfer_group().is_first_decode))
-                    if get_kv_transfer_group().is_first_decode:
-                        for i in range(layer_by_layer_trunk):
-                            hidden_or_intermediate_states, bypass_model_exec, _ = \
-                                get_kv_transfer_group().recv_kv_caches_and_hidden_states_by_layer(
-                                    self,
-                                    model_input,
-                                    kv_caches,
-                                    layer_by_layer_start=layer_by_layer_start,
-                                    layer_by_layer_end=(layer_by_layer_start + layer_by_layer_interval)
-                                )
-                            layer_by_layer_start += layer_by_layer_interval
-                    
-                        get_kv_transfer_group().is_first_decode = False
-                        return hidden_or_intermediate_states
-                    logger.info("DEBUGG kv is received.")
-                    logger.info("DEBUGG is_first_decode={}".format(get_kv_transfer_group().is_first_decode))
-                    logger.info("DEBUGG self.model.start_layer={}, self.model.end_layer={}".format(self.model.start_layer, self.model.end_layer))
-                    for i in range(self.model.start_layer, self.model.end_layer):
-                        if i == 0:
-                            if inputs_embeds is not None:
-                                hidden_states = inputs_embeds
-                            else:
-                                hidden_states = self.model.get_input_embeddings(input_ids)
-                            residual = None
-                            
-                        hidden_states, residual = self.model.layers[i](
-                            positions,
-                            hidden_states,
-                            kv_caches[i - self.model.start_layer],
-                            attn_metadata,
-                            residual,
-                        )
-                else:
-                    raise ValueError("GG!")
-
-        # hidden_states = self.model(input_ids, positions, kv_caches,
-        #                           attn_metadata, intermediate_tensors,
-        #                           inputs_embeds)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                    attn_metadata, intermediate_tensors,
+                                    inputs_embeds)
         return hidden_states
 
     def compute_logits(

@@ -65,7 +65,7 @@ class KVTransferAgent:
         temp_end_layer = model_executable.model.end_layer
         model_executable.model.start_layer = layer_by_layer_start
         model_executable.model.end_layer = layer_by_layer_end
-        self.send_kv_caches_and_hidden_states(model_executable, model_input, kv_caches, hidden_or_intermediate_states)
+        self.connector.send_kv_caches_and_hidden_states(model_executable, model_input, kv_caches, hidden_or_intermediate_states)
         model_executable.model.start_layer = temp_start_layer
         model_executable.model.end_layer = temp_end_layer
 
@@ -87,7 +87,7 @@ class KVTransferAgent:
         temp_end_layer = model_executable.model.end_layer
         model_executable.model.start_layer = layer_by_layer_start
         model_executable.model.end_layer = layer_by_layer_end
-        ret = self.recv_kv_caches_and_hidden_states(model_executable, model_input, kv_caches)
+        ret = self.connector.recv_kv_caches_and_hidden_states(model_executable, model_input, kv_caches)
         model_executable.model.start_layer = temp_start_layer
         model_executable.model.end_layer = temp_end_layer
 
