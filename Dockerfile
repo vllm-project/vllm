@@ -45,16 +45,25 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-# for arm64, we need to install torch and torchvision from the nightly builds first, so that it won't be overwritten by the requirements
+# for arm64, we need to install torch and torchvision from the nightly builds first, so that it won't be overwritten
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip list | grep torch || true
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" \
-        && python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torchvision==0.22.0.dev20241215";  \
+        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
     fi
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip list | grep torch || true
+
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip list | grep torch || true
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -120,6 +129,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip list | grep torch || true
+
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # Default max size of the wheel is 250MB
@@ -152,8 +164,6 @@ WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
 
-COPY requirements-cuda-arm64.txt requirements-cuda-arm64.txt
-
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
@@ -178,10 +188,22 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
+# for arm64, we need to install torch and torchvision from the nightly builds first, so that it won't be overwritten
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip list | grep torch || true
+
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip list | grep torch || true
 
 RUN --mount=type=cache,target=/root/.cache/pip \
 . /etc/environment && \
@@ -226,6 +248,9 @@ RUN mv vllm test_docs/
 # openai api server alternative
 FROM vllm-base AS vllm-openai
 
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip list | grep torch || true
+
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
@@ -233,6 +258,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     else \
         pip install accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.0' 'timm==0.9.10'; \
     fi
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip list | grep torch || true
+
 ENV VLLM_USAGE_SOURCE production-docker-image
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
