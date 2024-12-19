@@ -50,6 +50,8 @@ class RayExecutor(Executor):
         worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
+                # Skip bundles that don't have GPUs,
+                # as each worker needs one GPU.
                 continue
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
@@ -84,7 +86,8 @@ class RayExecutor(Executor):
             2. Then, if the worker is on a node with fewer workers, it should
                 be placed first.
             3. Finally, if the work is on a node with smaller IP address, it
-                should be placed first.
+                should be placed first. This is simply a tiebreaker to make
+                sure the workers are sorted in a deterministic way.
             """
             ip = worker_to_ip[worker]
             return (ip != driver_ip, ip_counts[ip], ip)
@@ -239,7 +242,9 @@ class RayExecutor(Executor):
         # number of blocks across all workers to make sure all the memory
         # operators can be applied to all workers.
         num_gpu_blocks = min(b[0] for b in num_blocks)
-        return num_gpu_blocks, 0
+        num_cpu_blocks = min(b[1] for b in num_blocks)
+
+        return num_gpu_blocks, num_cpu_blocks
 
     def initialize(self, num_gpu_blocks: int) -> None:
         """
