@@ -43,7 +43,7 @@ class MMInputMapperClient:
         self.mm_registry.init_mm_limits_per_prompt(model_config)
 
         # Init cache
-        self.use_cache = model_config.mm_cache_preprocessor
+        self.use_cache = not model_config.disable_mm_preprocessor_cache
         self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
@@ -119,7 +119,7 @@ class MMInputMapperClient:
 class MMInputMapperServer:
 
     def __init__(self, model_config):
-        self.use_cache = model_config.mm_cache_preprocessor
+        self.use_cache = not model_config.disable_mm_preprocessor_cache
         self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
     def process_inputs(
@@ -151,12 +151,26 @@ class MMHasher:
     def __init__(self):
         pass
 
-    def hash(self, prompt: PromptType) -> Optional[List[str]]:
+    def hash_mm_data(
+            self,
+            mm_data: Optional[MultiModalDataDict]) -> Optional[List[str]]:
+        if mm_data is None:
+            return None
+
+        image_inputs = mm_data['image']
+
+        return self.hash_images(image_inputs)
+
+    def hash_prompt(self, prompt: PromptType) -> Optional[List[str]]:
         if "multi_modal_data" not in prompt:
             return None
 
         mm_data = prompt["multi_modal_data"]
         image_inputs = mm_data["image"]
+
+        return self.hash_images(image_inputs)
+
+    def hash_images(self, image_inputs) -> Optional[List[str]]:
         if not isinstance(image_inputs, list):
             image_inputs = [image_inputs]
         assert len(image_inputs) > 0
