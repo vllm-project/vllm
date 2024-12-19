@@ -687,7 +687,7 @@ class ProcessingCache:
             )
 
             for k, v in processed_mm_item.items():
-                processed_mm_items[k].append(v)
+                processed_mm_items[k].append(v[0])
 
         # NOTE: Some processors do not accept mm-only input, in which case
         # we have to fallback to processing `prompt` and `mm_data` together
