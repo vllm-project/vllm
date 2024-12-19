@@ -197,6 +197,8 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
+    generation_config: Optional[str] = None
+
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
@@ -942,6 +944,16 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
 
+        parser.add_argument(
+            "--generation-config",
+            type=nullable_str,
+            default=None,
+            help="The folder path to the generation config. "
+            "Defaults to None, will use the default generation config in vLLM. "
+            "If set to 'auto', the generation config will be automatically "
+            "loaded from model. If set to a folder path, the generation config "
+            "will be loaded from the specified folder path.")
+
         return parser
 
     @classmethod
@@ -985,7 +997,8 @@ class EngineArgs:
             disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
-            logits_processor_pattern=self.logits_processor_pattern)
+            logits_processor_pattern=self.logits_processor_pattern,
+            generation_config=self.generation_config)
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(

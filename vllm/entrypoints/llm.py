@@ -258,6 +258,13 @@ class LLM:
         else:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
+    def get_default_sampling_params(self) -> SamplingParams:
+        diff_sampling_param = (
+            self.llm_engine.model_config.get_diff_sampling_param())
+        if diff_sampling_param:
+            return SamplingParams.from_optional(**diff_sampling_param)
+        return SamplingParams()
+
     @overload
     def generate(
         self,
@@ -441,7 +448,7 @@ class LLM:
 
         if sampling_params is None:
             # Use default sampling params.
-            sampling_params = SamplingParams()
+            sampling_params = self.get_default_sampling_params()
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
