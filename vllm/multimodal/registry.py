@@ -1,10 +1,9 @@
 import functools
 from collections import UserDict
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
+from typing import (TYPE_CHECKING, Any, Dict, Mapping, Optional, Protocol,
                     Sequence, Type, TypeVar)
 
 import torch.nn as nn
-from typing_extensions import TypeAlias
 
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
@@ -15,7 +14,7 @@ from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import BaseMultiModalProcessor
+from .processing import BaseMultiModalProcessor, ProcessingCache
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -25,13 +24,17 @@ logger = init_logger(__name__)
 
 N = TypeVar("N", bound=Type[nn.Module])
 
-MultiModalProcessorFactory: TypeAlias = Callable[[InputProcessingContext],
-                                                 BaseMultiModalProcessor]
-"""
-Constructs a :class:`MultiModalProcessor` instance from the context.
 
-The processing metadata should be derived from the context.
-"""
+class MultiModalProcessorFactory(Protocol):
+    """Constructs a :class:`MultiModalProcessor` instance from the context."""
+
+    def __call__(
+        self,
+        ctx: InputProcessingContext,
+        *,
+        cache: ProcessingCache,
+    ) -> BaseMultiModalProcessor:
+        ...
 
 
 class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
@@ -70,6 +73,8 @@ class MultiModalRegistry:
         self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
 
         self._limits_by_model = _MultiModalLimits()
+
+        self._processing_cache = ProcessingCache(256)  # MM_CACHE_SIZE
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
@@ -354,4 +359,4 @@ class MultiModalRegistry:
         processor_factory = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)
-        return processor_factory(ctx)
+        return processor_factory(ctx, cache=self._processing_cache)

@@ -784,7 +784,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
         return hf_processor
 
-    def _get_processor_data(
+    def _get_hf_mm_data(
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -817,7 +817,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_items: MultiModalDataItems,
         hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
         image_processor = _get_image_processor(hf_processor)
@@ -869,7 +869,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text=image_token * num_images,
             mm_data=data,
-            mm_processor_kwargs={},
+            hf_mm_kwargs={},
         )
 
 

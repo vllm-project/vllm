@@ -72,11 +72,19 @@ def get_ultravox_max_audio_tokens(ctx: InputContext):
 
 class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
 
+    def _get_hf_processor(
+        self,
+        *,
+        # Ignored in initialization
+        sampling_rate: Optional[int] = None,
+    ) -> ProcessorMixin:
+        return self.ctx.get_hf_processor()
+
     def _get_feature_extractor(self) -> WhisperFeatureExtractor:
         hf_processor = self._get_hf_processor()
         return hf_processor.audio_processor.feature_extractor  # type: ignore
 
-    def _get_processor_data(
+    def _get_hf_mm_data(
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -84,33 +92,31 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         feature_extractor = self._get_feature_extractor()
         mm_items.resample_audios(feature_extractor.sampling_rate)
 
-        return super()._get_processor_data(mm_items)
+        return super()._get_hf_mm_data(mm_items)
 
     def _call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
         prompt: str,
-        processor_data: Mapping[str, object],
-        mm_processor_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        processor_data = dict(processor_data)
-        audios = processor_data.pop("audios", [])
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
 
         if not audios:
             return super()._call_hf_processor(
-                hf_processor,
                 prompt=prompt,
-                processor_data=processor_data,
-                mm_processor_kwargs=mm_processor_kwargs,
+                mm_data=mm_data,
+                mm_kwargs=mm_kwargs,
             )
 
         feature_extractor = self._get_feature_extractor()
-        mm_processor_kwargs = dict(
-            **mm_processor_kwargs,
+        mm_kwargs = dict(
+            **mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
 
-        # Already resampled by _get_processor_data
+        # Already resampled by _get_hf_mm_data
         assert is_list_of(audios, np.ndarray)
 
         # Ultravox processor doesn't support multiple inputs,
@@ -119,13 +125,12 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         shared_outputs = {}
         for audio in audios:
             # NOTE: Ultravox processor accepts "audio" instead of "audios"
-            item_processor_data = dict(**processor_data, audio=audio)
+            item_processor_data = dict(**mm_data, audio=audio)
 
             item_outputs = super()._call_hf_processor(
-                hf_processor,
                 prompt=prompt,
-                processor_data=item_processor_data,
-                mm_processor_kwargs=mm_processor_kwargs,
+                mm_data=item_processor_data,
+                mm_kwargs=mm_kwargs,
             )
 
             audio_features.append(item_outputs.pop("audio_values")[0])
@@ -143,7 +148,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_items: MultiModalDataItems,
         hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
         placeholder = hf_processor.audio_token_replacement  # type: ignore
@@ -175,7 +180,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text="<|audio|>" * audio_count,
             mm_data=data,
-            mm_processor_kwargs={},
+            hf_mm_kwargs={},
         )
 
 

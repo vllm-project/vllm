@@ -306,11 +306,11 @@ def get_max_phi3v_image_tokens(
     *,
     num_crops: Optional[int] = None,
 ) -> int:
-    mm_processor_kwargs = {}
+    hf_mm_kwargs = {}
     if num_crops:
-        mm_processor_kwargs["num_crops"] = num_crops
+        hf_mm_kwargs["num_crops"] = num_crops
 
-    processor = ctx.get_hf_processor(**mm_processor_kwargs)
+    processor = ctx.get_hf_processor(**hf_mm_kwargs)
 
     return processor.calc_num_image_tokens_from_image_size(
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
@@ -331,16 +331,14 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
 
     def _call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
         prompt: str,
-        processor_data: Mapping[str, object],
-        mm_processor_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
-            hf_processor,
             prompt=prompt,
-            processor_data=processor_data,
-            mm_processor_kwargs=mm_processor_kwargs,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
         )
 
         # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
@@ -356,7 +354,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_items: MultiModalDataItems,
         hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
@@ -401,7 +399,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text="".join(image_tokens[:num_images]),
             mm_data=data,
-            mm_processor_kwargs={},
+            hf_mm_kwargs={},
         )
 
 
