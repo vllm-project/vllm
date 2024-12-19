@@ -231,7 +231,7 @@ class IncrementalDetokenizer:
             return self.output_text[last_offset:length]
         return ""
 
-
+import time
 class Detokenizer:
 
     def __init__(self,
@@ -456,6 +456,8 @@ class DetokenizerProc(Detokenizer):
             with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as engine_core_outputs_socket, 
                   zmq_socket_ctx(self.input_path, zmq.PULL) as input_socket,
                   zmq_socket_ctx(self.output_path, zmq.PUSH) as output_socket):
+                
+                epoch = 0
 
                 # TODO: avoid poll by having both EngineCore
                 # and AsyncLLM send to the same socket (unclear why this 
@@ -466,6 +468,9 @@ class DetokenizerProc(Detokenizer):
 
                 # idx = 0
                 while True:
+                    logger.info(f"EPOCH: {epoch}")
+                    epoch += 1
+
                     socks = dict(poller.poll())
 
                     # Handle NewRequest.
@@ -480,13 +485,12 @@ class DetokenizerProc(Detokenizer):
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
                         detokenizer_outputs, _ = self.step(engine_core_outputs)
                         msg = encoder.encode(detokenizer_outputs)
-                        output_socket.send_multipart((msg, ), copy=False)                        
+                        # output_socket.send_multipart((msg, ), copy=False)
+                        output_socket.send(msg)
         
         except Exception as e:
             logger.error(e)
             raise e
-
-import time
 
 class DetokenizerClient:
     
@@ -498,7 +502,7 @@ class DetokenizerClient:
         self.decoder = msgspec.msgpack.Decoder(DetokenizerOutputs)
         
         # ZMQ setup.
-        self.ctx = zmq.asyncio.Context(io_threads=2)
+        self.ctx = zmq.asyncio.Context(4)
 
         # Get input (DetokenizerRequest) to Detokenizer.
         input_path = get_open_zmq_ipc_path()
@@ -542,5 +546,7 @@ class DetokenizerClient:
     async def get_output_async(self) -> DetokenizerOutputs:
         """Get RequestOutputs, RequestsToAbort from Detokenizer."""
 
-        (frame, ) = await self.output_socket.recv_multipart(copy=False)
-        return self.decoder.decode(frame.buffer)
+        # (frame, ) = await self.output_socket.recv_multipart(copy=False)
+        # return self.decoder.decode(frame.buffer)
+        msg = await self.output_socket.recv()
+        return self.decoder.decode(msg)

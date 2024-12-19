@@ -188,9 +188,6 @@ class AsyncLLM(EngineClient):
     ) -> RequestState:
         """Add new request to the AsyncLLM."""
 
-        
-        
-
         # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
         _, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
@@ -275,15 +272,16 @@ class AsyncLLM(EngineClient):
                 # a delta text. This way we do "dynamic chunked streaming", such
                 # that the API client does not fall behind the EngineCor,
                 # which happens at high QPS otherwise.
-                out = state.out_list[-1]
-                if len(state.out_list) > 2 and not self.warned:
-                    logger.info(f"{len(state.out_list)=}")
-                    self.warned = True
 
             except asyncio.TimeoutError:
                 # TODO(rob): do request cancellation checking here.
                 logger.debug("Timeout waiting for %s", request_id)
                 continue
+                
+            out = state.out_list[-1]
+            if len(state.out_list) > 2:
+                logger.info(f"{len(state.out_list)=}")
+                self.warned = True
 
             state.out_list = []
             if out.finished:
@@ -326,9 +324,13 @@ class AsyncLLM(EngineClient):
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
+        epoch = 0
 
         try:
             while True:
+                logger.info(f"EPOCH: {epoch}")
+                epoch += 1
+
                 # 1) Pull outputs from the Detokenizer.
                 detokenizer_outputs = (
                     await self.detokenizer.get_output_async()).outputs

@@ -232,7 +232,7 @@ class AsyncMPClient(MPClient):
                           request: EngineCoreRequestUnion) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
-        await self.input_socket.send_multipart(msg, copy=False, flag=zmq.NOBLOCK)
+        await self.input_socket.send_multipart(msg, copy=False)
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         await self._send_input(EngineCoreRequestType.ADD, request)
