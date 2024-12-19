@@ -621,7 +621,7 @@ class ProcessingCache:
             return
         if isinstance(obj, dict):
             for k, v in obj.items():
-                yield from self._iter_bytes_to_hash(f"{key}_{k}", v)
+                yield from self._iter_bytes_to_hash(f"{key}.{k}", v)
             return
 
         # Simple cases
