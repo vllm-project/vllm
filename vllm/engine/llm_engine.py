@@ -1997,7 +1997,7 @@ class LLMEngine:
         if sampling_params.guided_decoding is not None:
             # Defensively copy sampling params since guided decoding logits
             # processors can have different state for each request
-            sampling_params = copy.deepcopy(sampling_params)
+            sampling_params = copy.copy(sampling_params)
             guided_decoding = sampling_params.guided_decoding
 
             logger.debug(
