@@ -15,6 +15,7 @@ from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.spec_decode.spec_decode_params import SpecDecodeParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import collect_from_async_generator, random_uuid
 
@@ -51,6 +52,7 @@ class EngineClient(ABC):
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -206,6 +208,7 @@ class EngineClient(ABC):
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:

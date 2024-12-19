@@ -39,6 +39,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.spec_decode.spec_decode_params import SpecDecodeParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import deprecate_kwargs
 
@@ -421,6 +422,7 @@ class MQLLMEngineClient(EngineClient):
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -436,6 +438,7 @@ class MQLLMEngineClient(EngineClient):
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -452,6 +455,7 @@ class MQLLMEngineClient(EngineClient):
         sampling_params: Optional[SamplingParams] = None,
         request_id: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -470,6 +474,7 @@ class MQLLMEngineClient(EngineClient):
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
+            spec_decode_params: The speculative decoding parameters, if any.
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
@@ -483,8 +488,9 @@ class MQLLMEngineClient(EngineClient):
                 and request_id is not None)
 
         return self._process_request(prompt, sampling_params, request_id,
-                                     lora_request, trace_headers,
-                                     prompt_adapter_request, priority)
+                                     lora_request, spec_decode_params,
+                                     trace_headers, prompt_adapter_request,
+                                     priority)
 
     @overload
     def encode(
@@ -493,6 +499,7 @@ class MQLLMEngineClient(EngineClient):
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
@@ -507,6 +514,7 @@ class MQLLMEngineClient(EngineClient):
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
@@ -522,6 +530,7 @@ class MQLLMEngineClient(EngineClient):
         pooling_params: Optional[PoolingParams] = None,
         request_id: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         *,
@@ -539,6 +548,7 @@ class MQLLMEngineClient(EngineClient):
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
+            spec_decode_params: The speculative decoding parameters, if any.
             trace_headers: OpenTelemetry trace headers.
 
         Yields:
@@ -556,6 +566,7 @@ class MQLLMEngineClient(EngineClient):
                                   pooling_params,
                                   request_id,
                                   lora_request,
+                                  spec_decode_params,
                                   trace_headers,
                                   priority=priority))
 
@@ -565,6 +576,7 @@ class MQLLMEngineClient(EngineClient):
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -618,6 +630,7 @@ class MQLLMEngineClient(EngineClient):
                     params=params,
                     request_id=request_id,
                     lora_request=lora_request,
+                    spec_decode_params=spec_decode_params,
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
