@@ -552,6 +552,11 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     return out
 
 
+def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_sparse_scaled_mm_supported(
+        cuda_device_capability)
+
+
 def cutlass_sparse_compress(a: torch.Tensor) \
     -> Tuple[torch.Tensor, torch.Tensor]:
     """

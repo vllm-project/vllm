@@ -10,6 +10,17 @@ from vllm.platforms import current_platform
 TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
 
 
+def sparse_cutlass_supported() -> bool:
+    # sparse cutlass is not supported on Rocm
+    if current_platform.is_rocm():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_sparse_scaled_mm_supported(capability)
+
+
 def cutlass_fp8_supported() -> bool:
     # cutlass is not supported on Rocm
     if current_platform.is_rocm():

@@ -273,15 +273,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
-  #
-  # The cutlass_scaled_mm cutlass_scaled_sparse_mm, and cutlass_compressor kernels
-  # For Hopper (c3x, i.e. CUTLASS 3.x) require
+  # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
   # CUDA 12.0 or later (and only work on Hopper, 9.0/9.0a for now).
   cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0;9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
-             "csrc/sparse/cutlass/sparse_compressor_c3x.cu"
-             "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
+    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
@@ -290,12 +286,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-      message(STATUS "Not building cutlass_c3x kernels as CUDA Compiler version is "
+      message(STATUS "Not building scaled_mm_c3x as CUDA Compiler version is "
                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running FP8 sparse or quantized models on "
+                     "later if you intend on running FP8 quantized models on "
                      "Hopper.")
     else()
-      message(STATUS "Not building cutlass_c3x as no compatible archs found "
+      message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
                      "in CUDA target architectures")
     endif()
 
@@ -326,6 +322,31 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     else()
       message(STATUS "Not building scaled_mm_c2x as no compatible archs found "
                     "in CUDA target architectures")
+    endif()
+  endif()
+
+  #
+  # 2:4 Sparse Kernels
+
+  # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
+  # require CUDA 12.2 or later (and only work on Hopper, 9.0/9.0a for now).
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
+    set(SRCS "csrc/sparse/cutlass/sparse_compressor_c3x.cu"
+             "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1")
+    message(STATUS "Building sparse_scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
+      message(STATUS "Not building sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
+                     "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
+                     "if you intend on running FP8 sparse quantized models on Hopper.")
+    else()
+      message(STATUS "Not building sparse_scaled_mm_c3x as no compatible archs found "
+                     "in CUDA target architectures")
     endif()
   endif()
 
