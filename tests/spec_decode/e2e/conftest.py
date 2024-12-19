@@ -2,6 +2,7 @@ from itertools import cycle
 from typing import List, Optional, Sequence, Tuple, Union
 
 import pytest
+import torch
 
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -154,6 +155,8 @@ def _check_logprobs_when_output_disabled(
          spec_pos_logprob) = next(iter(spec_pos_logprobs.items()))
         assert spec_pos_logprob.rank == -1
         assert spec_pos_logprob.logprob == 0.0
+        if isinstance(spec_pos_logprob_token_id, torch.Tensor):
+            spec_pos_logprob_token_id = spec_pos_logprob_token_id.item()
         assert spec_pos_logprob_token_id in baseline_pos_logprobs
 
 
