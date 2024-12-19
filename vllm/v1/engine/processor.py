@@ -79,7 +79,7 @@ class Processor:
         # Compute MM hashes (if enabled)
         mm_hashes = None
         if self.use_hash:
-            mm_hashes = self.mm_hasher.hash_prompt(prompt)
+            mm_hashes = self.mm_hasher.hash_prompt_mm_data(prompt)
 
         # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(
