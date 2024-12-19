@@ -29,11 +29,12 @@ __global__ void act_and_mul_quant_kernel(
     FP8_TYPE* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const float* scale, const int d) {
-  const int64_t token_idx = blockIdx.x;
   const int32_t blocks_per_token = gridDim.y;
 
   const int32_t elems_per_128bit_load = (128 / 8) / sizeof(scalar_t);
 
+  // We don't expect the hidden dimension to exceed 32 bits so int32 should
+  // be safe here.
   const int32_t tgt_elems_per_block = div_ceil(d, blocks_per_token);
   const int32_t elems_per_block =
       round_to_next_multiple_of(tgt_elems_per_block, elems_per_128bit_load);
@@ -41,6 +42,9 @@ __global__ void act_and_mul_quant_kernel(
   int32_t block_end = block_start + elems_per_block;
   block_end = block_end > d ? d : block_end;
 
+  // token_idx is 64 bit to prevent 32 bit overflow when the number of tokens
+  // is very large
+  const int64_t token_idx = blockIdx.x;
   const scalar_t* __restrict__ x_ptr = input + token_idx * 2 * d;
   const scalar_t* __restrict__ y_ptr = input + token_idx * 2 * d + d;
   FP8_TYPE* __restrict__ out_ptr = out + token_idx * d;
@@ -105,12 +109,12 @@ __global__ void act_and_mul_quant_kernel(
                                          scale.data_ptr<float>(), d);   \
       });
 
-void silu_and_mul_quant(torch::Tensor& out,  // [..., d]
-                        torch::Tensor& input,
-                        torch::Tensor& scale)  // [..., 2 * d]
-{
+void silu_and_mul_quant(torch::Tensor& out,    // [..., d]
+                        torch::Tensor& input,  // [..., 2 * d]
+                        torch::Tensor& scale) {
   TORCH_CHECK(out.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(input.dtype() == torch::kFloat16 ||
               input.dtype() == torch::kBFloat16);
+  TORCH_CHECK(input.size(-1) % 2 == 0);
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
 }

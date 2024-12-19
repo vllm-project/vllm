@@ -8,7 +8,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 DTYPES = [torch.bfloat16, torch.float16]
 QUANT_DTYPES = [torch.float8_e4m3fn]
 NUM_TOKENS = [1, 17, 86, 1234, 3045]  # Arbitrary values for testing
-HIDDEN_SIZES = [32, 64, 128, 2048, 4096]  # Arbitrary values for testing
+HIDDEN_SIZES = [16, 48, 128, 1562, 4096]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)

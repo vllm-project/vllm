@@ -49,8 +49,6 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
 
     config = CompilationConfig.PassConfig(enable_fusion=do_fusion,
                                           enable_reshape=True)
-    # compilation_config = CompilationConfig(level=3,
-    #                                        custom_ops=["+silu_and_mul"])
     reshape_pass = RedundantReshapesPass(config)
     fusion_pass = FusionPass.instance(config)
     act_quant_fusion_pass = ActivationQuantFusionPass.instance(config)
@@ -85,9 +83,6 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
 
     gen_no_func = llm.generate(prompts, sampling_params)
 
-    # print(
-    #     backend_func.graph_pre_pass.python_code(root_module="self",
-    #                                             verbose=True).src)
     for output_func, output_no_func in zip(gen_func, gen_no_func):
         assert output_func.outputs[0].text == output_no_func.outputs[0].text
 
