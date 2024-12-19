@@ -1044,6 +1044,7 @@ class LoadFormat(str, enum.Enum):
     GGUF = "gguf"
     BITSANDBYTES = "bitsandbytes"
     MISTRAL = "mistral"
+    RUNAI_STREAMER = "runai_streamer"
 
 
 @dataclass
