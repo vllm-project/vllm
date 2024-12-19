@@ -9,6 +9,7 @@ setuptools-scm>=8
 setuptools>=75.8.0
 wheel
 jinja2
+datasets
 
 torch @ https://intel-optimized-pytorch.s3.cn-north-1.amazonaws.com.cn/ipex_dev/xpu/torch-2.5.0a0%2Bgite84e33f-cp310-cp310-linux_x86_64.whl
 intel-extension-for-pytorch @ https://intel-optimized-pytorch.s3.cn-north-1.amazonaws.com.cn/ipex_dev/xpu/intel_extension_for_pytorch-2.5.10%2Bgit9d489a8-cp310-cp310-linux_x86_64.whl
