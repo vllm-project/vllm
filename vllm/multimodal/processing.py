@@ -1,13 +1,14 @@
 import re
 from abc import ABC, abstractmethod
-from collections import UserDict
+from collections import UserDict, defaultdict
 from collections.abc import Callable, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
-from typing import Any, NamedTuple, Optional, Protocol, TypeVar, Union
+from functools import lru_cache, partial
+from typing import Any, NamedTuple, Optional, Protocol, TypeVar, Union, cast
 
 import numpy as np
 import torch
+from blake3 import blake3
 from PIL.Image import Image
 from transformers import BatchFeature, ProcessorMixin
 from typing_extensions import assert_never
@@ -15,7 +16,7 @@ from typing_extensions import assert_never
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import flatten_2d_lists, full_groupby, is_list_of
+from vllm.utils import LRUCache, flatten_2d_lists, full_groupby, is_list_of
 
 from .audio import resample_audio
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
@@ -587,7 +588,194 @@ class ProcessorInputs(NamedTuple):
     """Keyword arguments to :meth:`BaseMultiModalProcessor`"""
     prompt_text: str
     mm_data: MultiModalDataDict
-    mm_processor_kwargs: Mapping[str, object]
+    hf_mm_kwargs: Mapping[str, object]
+
+
+class ProcessingCache:
+
+    def __init__(self, capacity: int) -> None:
+        super().__init__()
+
+        # DEBUG: Set to None to disable
+        self.debug_cache_hit_ratio_steps: Optional[int] = None
+
+        self._text_cache = LRUCache[str, BatchFeature](capacity)
+        self._mm_cache = LRUCache[str, BatchFeature](capacity)
+        self._coarse_cache = LRUCache[str, BatchFeature](capacity)
+
+    def maybe_log_text_cache_stats(self) -> None:
+        steps = self.debug_cache_hit_ratio_steps
+        if not steps:
+            return
+
+        text_cache_stats = self._text_cache.stat()
+        if text_cache_stats.total % steps == 0:
+            logger.debug("ProcessingCache: text_cache.hit_ratio = %.2f",
+                         text_cache_stats.hit_ratio)
+
+    def maybe_log_mm_cache_stats(self) -> None:
+        steps = self.debug_cache_hit_ratio_steps
+        if not steps:
+            return
+
+        mm_cache_stats = self._mm_cache.stat()
+        if mm_cache_stats.total % steps == 0:
+            logger.debug("ProcessingCache: mm_cache.hit_ratio = %.2f",
+                         mm_cache_stats.hit_ratio)
+
+    def maybe_log_coarse_cache_stats(self) -> None:
+        steps = self.debug_cache_hit_ratio_steps
+        if not steps:
+            return
+
+        coarse_cache_stats = self._mm_cache.stat()
+        if coarse_cache_stats.total % steps == 0:
+            logger.debug("ProcessingCache: coarse_cache.hit_ratio = %.2f",
+                         coarse_cache_stats.hit_ratio)
+
+    def _iter_bytes_to_hash(self, key: str, obj: object) -> Iterable[bytes]:
+        # Recursive cases
+        if isinstance(obj, (list, tuple)):
+            for elem in obj:
+                yield from self._iter_bytes_to_hash(key, elem)
+            return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                yield from self._iter_bytes_to_hash(f"{key}_{k}", v)
+            return
+
+        # Simple cases
+        if isinstance(obj, str):
+            yield key.encode("utf-8")
+            yield obj.encode("utf-8")
+            return
+        if isinstance(obj, bytes):
+            yield key.encode("utf-8")
+            yield obj
+            return
+        if isinstance(obj, Image):
+            yield key.encode("utf-8")
+            yield obj.tobytes()
+            return
+
+        # Convertible to NumPy arrays
+        if isinstance(obj, torch.Tensor):
+            obj = obj.numpy()
+        if isinstance(obj, (int, float)):
+            obj = np.array(obj)
+        if isinstance(obj, np.ndarray):
+            yield key.encode("utf-8")
+            yield obj.tobytes()
+            return
+
+        msg = f"Unable to hash object of type {type(obj)}"
+        raise NotImplementedError(msg)
+
+    def _hash_kwargs(self, **kwargs: object) -> str:
+        hasher = blake3()
+
+        for k, v in kwargs.items():
+            for item_bytes in self._iter_bytes_to_hash(k, v):
+                hasher.update(item_bytes)
+
+        return hasher.hexdigest()
+
+    def _call_cache_fine(
+        self,
+        ctx: InputProcessingContext,
+        hf_processor: ProcessorMixin,
+        prompt: str,
+        mm_data: Mapping[str, list[object]],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_mm_items = defaultdict[str, list[torch.Tensor]]()
+
+        num_items = len(next(iter(mm_data.values())))
+        for idx in range(num_items):
+            mm_item = {k: [v[idx]] for k, v in mm_data.items()}
+
+            self.maybe_log_mm_cache_stats()
+
+            processed_mm_item = self._mm_cache.get_or_put(
+                self._hash_kwargs(**mm_item, **mm_kwargs),
+                default_factory=partial(
+                    ctx.call_hf_processor,
+                    hf_processor,
+                    mm_item,
+                    mm_kwargs,
+                ),
+            )
+
+            for k, v in processed_mm_item.items():
+                processed_mm_items[k].append(v)
+
+        # NOTE: Some processors do not accept mm-only input, in which case
+        # we have to fallback to processing `prompt` and `mm_data` together
+        # Therefore, we place the text processing last to avoid redundant
+        # computation
+        self.maybe_log_text_cache_stats()
+
+        processed_text = self._text_cache.get_or_put(
+            prompt,
+            default_factory=partial(
+                ctx.call_hf_processor,
+                hf_processor,
+                dict(text=prompt),
+            ),
+        )
+
+        processed_data = dict(**processed_text, **processed_mm_items)
+        return BatchFeature(processed_data)
+
+    def _call_cache_coarse(
+        self,
+        ctx: InputProcessingContext,
+        hf_processor: ProcessorMixin,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        self.maybe_log_coarse_cache_stats()
+
+        return self._coarse_cache.get_or_put(
+            self._hash_kwargs(text=prompt, **mm_data, **mm_kwargs),
+            default_factory=partial(
+                ctx.call_hf_processor,
+                hf_processor,
+                dict(text=prompt, **mm_data),
+                mm_kwargs,
+            ),
+        )
+
+    def call_hf_processor(
+        self,
+        ctx: InputProcessingContext,
+        # Assumes that hf_processor has been initialized according to kwargs
+        hf_processor: ProcessorMixin,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Try to cache each item separately to improve hit rate
+        if mm_data and all(isinstance(v, list) for v in mm_data.values()):
+            try:
+                return self._call_cache_fine(
+                    ctx,
+                    hf_processor,
+                    prompt,
+                    cast(Mapping[str, list[object]], mm_data),
+                    mm_kwargs,
+                )
+            except Exception:
+                pass
+
+        return self._call_cache_coarse(
+            ctx,
+            hf_processor,
+            prompt,
+            mm_data,
+            mm_kwargs,
+        )
 
 
 class BaseMultiModalProcessor(ABC):
@@ -595,18 +783,24 @@ class BaseMultiModalProcessor(ABC):
     Abstract base class to process multi-modal inputs to be used in vLLM.
     """
 
-    def __init__(self, ctx: InputProcessingContext) -> None:
+    def __init__(
+        self,
+        ctx: InputProcessingContext,
+        *,
+        cache: ProcessingCache,
+    ) -> None:
         super().__init__()
 
         self.ctx = ctx
+        self.cache = cache
 
     def __call__(
         self,
         prompt: str,
         mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
-        return self.apply(prompt, mm_data, mm_processor_kwargs)
+        return self.apply(prompt, mm_data, hf_mm_kwargs)
 
     def _get_hf_processor(self) -> ProcessorMixin:
         """
@@ -629,7 +823,7 @@ class BaseMultiModalProcessor(ABC):
         self,
         mm_items: MultiModalDataItems,
         hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         """
         Given the original multi-modal items for this modality
@@ -651,7 +845,7 @@ class BaseMultiModalProcessor(ABC):
         return list(
             iter_placeholders(all_prompt_repls, new_token_ids, mm_item_counts))
 
-    def _get_processor_data(
+    def _get_hf_mm_data(
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -679,39 +873,36 @@ class BaseMultiModalProcessor(ABC):
 
     def _call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
         prompt: str,
-        processor_data: Mapping[str, object],
-        mm_processor_kwargs: Mapping[str, object],
+        # Not to be confused with `mm_data` in `self.apply`.
+        # This refers to the data to be passed to HF processor.
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        return self.ctx.call_hf_processor(
-            hf_processor,
+        return self.cache.call_hf_processor(
+            self.ctx,
+            self._get_hf_processor(**mm_kwargs),
             prompt,
-            processor_data,
-            mm_processor_kwargs,
+            mm_data,
+            mm_kwargs,
         )
 
     def _apply_hf_processor(
         self,
         prompt: str,
         mm_items: MultiModalDataItems,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # some mm_processor_kwargs may be used in processor initialization
-        # instead of processor call
-        hf_processor = self._get_hf_processor(**mm_processor_kwargs)
+        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
-        processor_data, passthrough_data = self._get_processor_data(mm_items)
-
-        hf_inputs = self._call_hf_processor(
-            hf_processor,
+        processed_data = self._call_hf_processor(
             prompt=prompt,
-            processor_data=processor_data,
-            mm_processor_kwargs=mm_processor_kwargs,
+            mm_data=processor_data,
+            mm_kwargs=hf_mm_kwargs,
         )
-        hf_inputs.update(passthrough_data)
+        processed_data.update(passthrough_data)
 
-        return hf_inputs
+        return processed_data
 
     def _bind_prompt_replacements(
         self,
@@ -775,7 +966,7 @@ class BaseMultiModalProcessor(ABC):
         self,
         prompt_text: str,
         mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -793,12 +984,12 @@ class BaseMultiModalProcessor(ABC):
         mm_items = self._get_mm_items(mm_data)
 
         hf_inputs = self._apply_hf_processor(prompt_text, mm_items,
-                                             mm_processor_kwargs)
+                                             hf_mm_kwargs)
         prompt_ids, = hf_inputs.pop("input_ids").tolist()
         mm_kwargs = MultiModalKwargs(hf_inputs)
 
         prompt_repls = self._get_prompt_replacements(mm_items, hf_inputs,
-                                                     mm_processor_kwargs)
+                                                     hf_mm_kwargs)
         all_prompt_repls = self._bind_prompt_replacements(prompt_repls)
 
         # If HF processor already inserts placeholder tokens,

@@ -145,7 +145,7 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_items: MultiModalDataItems,
         hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         hf_config = self.ctx.get_hf_config(LlavaConfig)
         image_token_id = hf_config.image_token_index
@@ -218,7 +218,7 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text=image_token * num_images,
             mm_data=data,
-            mm_processor_kwargs={},
+            hf_mm_kwargs={},
         )
 
 

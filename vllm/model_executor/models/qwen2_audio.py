@@ -26,7 +26,7 @@ from typing import (Any, Iterable, List, Mapping, Optional, Set, Tuple,
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature
 from transformers.models.qwen2_audio import (Qwen2AudioConfig,
                                              Qwen2AudioEncoder,
                                              Qwen2AudioProcessor)
@@ -94,7 +94,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
     def _get_feature_extractor(self) -> WhisperFeatureExtractor:
         return self._get_hf_processor().feature_extractor  # type: ignore
 
-    def _get_processor_data(
+    def _get_hf_mm_data(
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -102,24 +102,23 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         feature_extractor = self._get_feature_extractor()
         mm_items.resample_audios(feature_extractor.sampling_rate)
 
-        return super()._get_processor_data(mm_items)
+        return super()._get_hf_mm_data(mm_items)
 
     def _call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
         prompt: str,
-        processor_data: Mapping[str, object],
-        mm_processor_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        processor_data = dict(processor_data)
-        audios = processor_data.pop("audios", [])
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
 
         if audios:
-            processor_data["audios"] = audios
+            mm_data["audios"] = audios
 
             feature_extractor = self._get_feature_extractor()
-            mm_processor_kwargs = dict(
-                **mm_processor_kwargs,
+            mm_kwargs = dict(
+                **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
         else:
@@ -127,17 +126,16 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
             pass
 
         return super()._call_hf_processor(
-            hf_processor,
             prompt=prompt,
-            processor_data=processor_data,
-            mm_processor_kwargs=mm_processor_kwargs,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
         )
 
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
         hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_mm_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         hf_config = self.ctx.get_hf_config(Qwen2AudioConfig)
         placeholder = hf_config.audio_token_index
@@ -175,7 +173,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text="<|AUDIO|>" * audio_count,
             mm_data=data,
-            mm_processor_kwargs={},
+            hf_mm_kwargs={},
         )
 
 

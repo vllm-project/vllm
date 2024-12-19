@@ -132,10 +132,12 @@ class InputProcessingContext(InputContext):
     def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
-        prompt: str,
-        processor_data: Mapping[str, object],
-        inference_kwargs: Mapping[str, object],
+        data: Mapping[str, object],
+        kwargs: Optional[Mapping[str, object]] = None,
     ) -> BatchFeature:
+        if kwargs is None:
+            kwargs = {}
+
         assert callable(hf_processor)
 
         base_kwargs = self.model_config.mm_processor_kwargs
@@ -144,21 +146,15 @@ class InputProcessingContext(InputContext):
 
         merged_kwargs = resolve_mm_processor_kwargs(
             base_kwargs,
-            inference_kwargs,
+            kwargs,
             hf_processor,
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
 
         try:
-            return hf_processor(
-                text=prompt,
-                **processor_data,
-                **merged_kwargs,
-                return_tensors="pt",
-            )
+            return hf_processor(**data, **merged_kwargs, return_tensors="pt")
         except Exception as exc:
-            data = dict(text=prompt, **processor_data)
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
 
