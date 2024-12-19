@@ -609,10 +609,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 hidden_states, _ = self.model.norm(hidden_states, residual)
             else:
                 raise ValueError("GG!")
-
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                    attn_metadata, intermediate_tensors,
-                                    inputs_embeds)
+        else:
+            hidden_states = self.model(input_ids, positions, kv_caches,
+                                        attn_metadata, intermediate_tensors,
+                                        inputs_embeds)
         return hidden_states
 
     def compute_logits(
