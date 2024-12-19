@@ -6,6 +6,7 @@
 
 # Do not set -e, as the mixtral 8x22B model tends to crash occasionally
 # and we still want to see other benchmarking results even when mixtral crashes.
+set -x
 set -o pipefail
 
 check_gpus() {
@@ -17,7 +18,7 @@ check_gpus() {
     echo "Need at least 1 GPU to run benchmarking."
     exit 1
   fi
-  declare -g gpu_type=$(echo $(nvidia-smi --query-gpu=name --format=csv,noheader) | awk '{print $2}')
+  declare -g gpu_type=$(nvidia-smi --query-gpu=name --format=csv,noheader | awk '{print $2}')
   echo "GPU type is $gpu_type"
 }
 
@@ -85,15 +86,11 @@ kill_gpu_processes() {
 
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
-  pkill -f pt_main_thread
-  # this line doesn't work now
-  # ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
-  pkill -f python3
-  pkill -f /usr/bin/python3
+  pgrep python3 | xargs -r kill -9
 
 
   # wait until GPU memory usage smaller than 1GB
-  while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 1000 ]; do
+  while [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)" -ge 1000 ]; do
     sleep 1
   done
 
@@ -117,7 +114,7 @@ upload_to_buildkite() {
   fi
 
   # Use the determined command to annotate and upload artifacts
-  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "$BUILDKITE_LABEL-benchmark-results" <$RESULTS_FOLDER/benchmark_results.md
+  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "$BUILDKITE_LABEL-benchmark-results" < "$RESULTS_FOLDER/benchmark_results.md"
   $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
 }
 
@@ -150,7 +147,7 @@ run_latency_tests() {
     # check if there is enough GPU to run the test
     tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
     if [[ $gpu_count -lt $tp ]]; then
-      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
+      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
 
@@ -206,9 +203,9 @@ run_throughput_tests() {
     throughput_args=$(json2args "$throughput_params")
 
     # check if there is enough GPU to run the test
-    tp=$(echo $throughput_params | jq -r '.tensor_parallel_size')
+    tp=$(echo "$throughput_params" | jq -r '.tensor_parallel_size')
     if [[ $gpu_count -lt $tp ]]; then
-      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
+      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
 
@@ -270,7 +267,7 @@ run_serving_tests() {
     # check if there is enough GPU to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
     if [[ $gpu_count -lt $tp ]]; then
-      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
+      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
 
@@ -278,7 +275,7 @@ run_serving_tests() {
     server_model=$(echo "$server_params" | jq -r '.model')
     client_model=$(echo "$client_params" | jq -r '.model')
     if [[ $server_model != "$client_model" ]]; then
-      echo "Server model and client model must be the same. Skip testcase $testname."
+      echo "Server model and client model must be the same. Skip testcase $test_name."
       continue
     fi
 
@@ -289,12 +286,11 @@ run_serving_tests() {
     # run the server
     echo "Running test case $test_name"
     echo "Server command: $server_command"
-    eval "$server_command" &
+    bash -c "$server_command" &
     server_pid=$!
 
     # wait until the server is alive
-    wait_for_server
-    if [ $? -eq 0 ]; then
+    if wait_for_server; then
       echo ""
       echo "vllm server is up and running."
     else
@@ -323,7 +319,7 @@ run_serving_tests() {
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
 
-      eval "$client_command"
+      bash -c "$client_command"
 
       # record the benchmarking commands
       jq_output=$(jq -n \

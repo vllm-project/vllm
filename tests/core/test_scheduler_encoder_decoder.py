@@ -36,7 +36,12 @@ def test_scheduler_schedule_simple_encoder_decoder():
     block_size = 4
     num_seq_group = 4
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, num_seq_group, max_model_len)
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=64,
+        max_num_seqs=num_seq_group,
+        max_model_len=max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16  # enc and dec prompts per seq_group
     cache_config.num_gpu_blocks = 16  # enc and dec prompts per seq_group

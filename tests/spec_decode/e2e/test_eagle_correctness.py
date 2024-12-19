@@ -21,7 +21,7 @@ correctess for the target model outputs.
 
 import pytest
 
-from .conftest import run_greedy_equality_correctness_test
+from .conftest import run_equality_correctness_test
 
 # main model
 MAIN_MODEL = "JackFram/llama-68m"
@@ -43,9 +43,6 @@ PRECISION = "float32"
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Print spec metrics.
         "disable_log_stats": False,
 
@@ -53,7 +50,7 @@ PRECISION = "float32"
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -68,15 +65,71 @@ PRECISION = "float32"
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_e2e_greedy_correctness(baseline_llm_generator,
-                                      test_llm_generator, batch_size: int,
-                                      output_len: int):
-    """Verify greedy equality with different batch size."""
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+def test_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
+                                      per_test_common_llm_kwargs,
+                                      baseline_llm_kwargs, test_llm_kwargs,
+                                      batch_size: int, output_len: int,
+                                      seed: int):
+
+    run_equality_correctness_test(vllm_runner, common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs, test_llm_kwargs,
+                                  batch_size, output_len, seed)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model_name": MAIN_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": SPEC_MODEL,
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "disable_logprobs_during_spec_decoding": False,
+    },
+    {
+        "speculative_model": SPEC_MODEL,
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "disable_logprobs_during_spec_decoding": True,
+    },
+])
+@pytest.mark.parametrize("output_len", [
+    128,
+])
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("logprobs", [1, 6])
+def test_eagle_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
+                                   per_test_common_llm_kwargs,
+                                   baseline_llm_kwargs, test_llm_kwargs,
+                                   batch_size: int, output_len: int, seed: int,
+                                   logprobs: int):
+
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  output_len,
+                                  seed,
+                                  logprobs=logprobs,
+                                  prompt_logprobs=logprobs,
+                                  disable_logprobs=test_llm_kwargs[
+                                      'disable_logprobs_during_spec_decoding'])
 
 
 @pytest.mark.parametrize(
@@ -84,9 +137,6 @@ def test_eagle_e2e_greedy_correctness(baseline_llm_generator,
     [{
         "enforce_eager": False,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Print spec metrics.
         "disable_log_stats": False,
 
@@ -94,7 +144,7 @@ def test_eagle_e2e_greedy_correctness(baseline_llm_generator,
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -109,17 +159,16 @@ def test_eagle_e2e_greedy_correctness(baseline_llm_generator,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_e2e_greedy_correctness_cuda_graph(baseline_llm_generator,
-                                                 test_llm_generator,
-                                                 batch_size: int,
-                                                 output_len: int):
-    """Verify greedy equality with cuda graph enabled and different 
+def test_eagle_e2e_greedy_correctness_cuda_graph(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int):
+    """Verify greedy equality with cuda graph enabled and different
     batch sizes."""
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner, common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs, test_llm_kwargs,
+                                  batch_size, output_len, seed)
 
 
 @pytest.mark.parametrize(
@@ -133,14 +182,11 @@ def test_eagle_e2e_greedy_correctness_cuda_graph(baseline_llm_generator,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Precision
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -158,18 +204,17 @@ def test_eagle_e2e_greedy_correctness_cuda_graph(baseline_llm_generator,
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
-                                                      test_llm_generator,
-                                                      batch_size: int,
-                                                      output_len: int):
+def test_eagle_e2e_greedy_correctness_with_preemption(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner, common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs, test_llm_kwargs,
+                                  batch_size, output_len, seed)
 
 
 @pytest.mark.parametrize(
@@ -178,14 +223,11 @@ def test_eagle_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Precision
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -207,16 +249,17 @@ def test_eagle_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_different_k(baseline_llm_generator, test_llm_generator,
-                           batch_size: int, output_len: int):
+def test_eagle_different_k(vllm_runner, common_llm_kwargs,
+                           per_test_common_llm_kwargs, baseline_llm_kwargs,
+                           test_llm_kwargs, batch_size: int, output_len: int,
+                           seed: int):
     """Verify that eagle speculative decoding produces exact equality
     to without spec decode with different values of num_speculative_tokens.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner, common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs, test_llm_kwargs,
+                                  batch_size, output_len, seed)
 
 
 @pytest.mark.parametrize(
@@ -225,14 +268,11 @@ def test_eagle_different_k(baseline_llm_generator, test_llm_generator,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Precision
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -250,17 +290,18 @@ def test_eagle_different_k(baseline_llm_generator, test_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_disable_queue(baseline_llm_generator, test_llm_generator,
-                             batch_size: int, output_len: int):
+def test_eagle_disable_queue(vllm_runner, common_llm_kwargs,
+                             per_test_common_llm_kwargs, baseline_llm_kwargs,
+                             test_llm_kwargs, batch_size: int, output_len: int,
+                             seed: int):
     """Verify that eagle speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner, common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs, test_llm_kwargs,
+                                  batch_size, output_len, seed)
 
 
 if __name__ == "__main__":

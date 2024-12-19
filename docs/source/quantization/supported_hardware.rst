@@ -27,8 +27,8 @@ The table below shows the compatibility of various quantization implementations 
      - ✅︎
      - ✅︎
      - ✗
-     - ✗
-     - ✗
+     - ✅︎
+     - ✅︎
      - ✗
      - ✗
    * - GPTQ
@@ -38,8 +38,8 @@ The table below shows the compatibility of various quantization implementations 
      - ✅︎
      - ✅︎
      - ✗
-     - ✗
-     - ✗
+     - ✅︎
+     - ✅︎
      - ✗
      - ✗
    * - Marlin (GPTQ/AWQ/FP8)
@@ -61,7 +61,7 @@ The table below shows the compatibility of various quantization implementations 
      - ✅︎
      - ✗
      - ✗
-     - ✗
+     - ✅︎
      - ✗
      - ✗
    * - FP8 (W8A8)

@@ -1,6 +1,8 @@
-from time import time
-
 from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
+
+# NOTE: This is just a running example. For benchmarking purpose,
+# please see benchmarks/benchmark_prefix_caching.py
 
 # Common prefix.
 prefix = (
@@ -27,19 +29,14 @@ generating_prompts = [prefix + prompt for prompt in prompts]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.0)
 
-# Create an LLM.
+# Create an LLM without prefix caching as a baseline.
 regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.4)
 
-prefix_cached_llm = LLM(model="facebook/opt-125m",
-                        enable_prefix_caching=True,
-                        gpu_memory_utilization=0.4)
 print("Results without `enable_prefix_caching`")
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
-start_time_regular = time()
 outputs = regular_llm.generate(generating_prompts, sampling_params)
-duration_regular = time() - start_time_regular
 
 regular_generated_texts = []
 # Print the outputs.
@@ -51,13 +48,20 @@ for output in outputs:
 
 print("-" * 80)
 
+# Destroy the LLM object and free up the GPU memory.
+del regular_llm
+cleanup_dist_env_and_memory()
+
+# Create an LLM with prefix caching enabled.
+prefix_cached_llm = LLM(model="facebook/opt-125m",
+                        enable_prefix_caching=True,
+                        gpu_memory_utilization=0.4)
+
 # Warmup so that the shared prompt's KV cache is computed.
 prefix_cached_llm.generate(generating_prompts[0], sampling_params)
 
 # Generate with prefix caching.
-start_time_cached = time()
 outputs = prefix_cached_llm.generate(generating_prompts, sampling_params)
-duration_cached = time() - start_time_cached
 
 print("Results with `enable_prefix_caching`")
 
@@ -77,6 +81,3 @@ generated_same = all([
     for i in range(len(prompts))
 ])
 print(f"Generated answers are the same: {generated_same}")
-
-speedup = round(duration_regular / duration_cached, 2)
-print(f"Speed up of cached generation compared to the regular is: {speedup}")

@@ -13,7 +13,7 @@ import pytest
 
 from vllm.logger import (_DATE_FORMAT, _FORMAT, _configure_vllm_root_logger,
                          enable_trace_function_call, init_logger)
-from vllm.logging import NewLineFormatter
+from vllm.logging_utils import NewLineFormatter
 
 
 def f1(x):
@@ -29,7 +29,7 @@ def test_trace_function_call():
     cur_dir = os.path.dirname(__file__)
     enable_trace_function_call(path, cur_dir)
     f1(1)
-    with open(path, 'r') as f:
+    with open(path) as f:
         content = f.read()
 
     assert "f1" in content
@@ -111,7 +111,7 @@ def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist():
     configuration occurs."""
     with pytest.raises(RuntimeError) as ex_info:
         _configure_vllm_root_logger()
-    assert ex_info.type == RuntimeError
+    assert ex_info.type == RuntimeError  # noqa: E721
     assert "File does not exist" in str(ex_info)
 
 
@@ -152,7 +152,7 @@ def test_an_error_is_raised_when_custom_logging_config_is_unexpected_json(
                    logging_config_file.name):
             with pytest.raises(ValueError) as ex_info:
                 _configure_vllm_root_logger()
-            assert ex_info.type == ValueError
+            assert ex_info.type == ValueError  # noqa: E721
             assert "Invalid logging config. Expected Dict, got" in str(ex_info)
 
 

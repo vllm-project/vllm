@@ -21,32 +21,32 @@ from .conftest import get_token_ids_from_llm_generator
         "num_gpu_blocks_override": 5 * (64 + 1),
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "use_v2_block_manager": False
-}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
-    "use_v2_block_manager": True,
     "preemption_mode": "swap"
 }, {
-    "use_v2_block_manager": True,
     "preemption_mode": "recompute"
 }])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
-def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
-                                               test_llm_generator, batch_size):
-    """Verify block manager v2 produces same outputs as block manager v1, even
-    when there is preemption.
+def test_block_manager_with_preemption(baseline_llm_generator,
+                                       test_llm_generator, batch_size):
+    """Verify block manager produces same outputs even when there is preemption.
 
     This constructs two LLM, each with limited number of GPU blocks. The limit
     is decided such that as the sequences in the batch grow, sequences must be
     preempted and removed from cache.
 
     If the output token ids are equivalent, then we have confidence that the KV
-    cache is not corrupted in the v2 block manager.
+    cache is not corrupted.
 
     NOTE: We want a significant number of generated tokens so that any incorrect
     KV mapping has time to build up error.
+
+    NOTE(Kuntai): Though we have removed block manager v1, this test is still
+    useful as it asserts the behavior of block manager v2 (now it is called 
+    SelfAttnBlockSpaceManager) is the same when swapping / preemption, so we  
+    keep this test.
     """
     output_len = 1024
     temperature = 0.0
@@ -70,78 +70,9 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
         temperature=temperature,
     )
 
-    print('Getting token ids from block manager v1')
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids from block manager v2')
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
-
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
-                                                    test_token_ids):
-        assert expected_token_ids == actual_token_ids
-
-    assert baseline_token_ids == test_token_ids
-
-
-@pytest.mark.parametrize(
-    "common_llm_kwargs",
-    [{
-        # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
-
-        # skip cuda graph creation for fast test.
-        "enforce_eager": True,
-
-        # Use a large block size to trigger more copy-on-writes.
-        "block_size": 32,
-    }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "use_v2_block_manager": False
-}])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "use_v2_block_manager": True,
-    "preemption_mode": "swap"
-}, {
-    "use_v2_block_manager": True,
-    "preemption_mode": "recompute"
-}])
-@pytest.mark.parametrize("batch_size", [10])
-@pytest.mark.parametrize("seed", [1])
-def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
-                                        test_llm_generator, batch_size):
-    """Verify beam search equality with block manager v1 and v2.
-
-    This requires copy-on-writes; if the v1 and v2 output is the same, then
-    we have some confidence cow is working.
-    """
-    output_len = 128
-    temperature = 0.0
-
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
-
-    sampling_params = SamplingParams(
-        max_tokens=output_len,
-        ignore_eos=True,
-        temperature=temperature,
-        use_beam_search=True,
-        best_of=2,
-    )
-
-    print('Getting token ids from block manager v1')
-    baseline_token_ids = get_token_ids_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
-
-    print('Getting token ids from block manager v2')
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
@@ -164,9 +95,6 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
 
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
-
-        # Lookahead scheduling only supported in v2 block manager.
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -278,26 +206,22 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
                              "max_num_seqs": 10,
                          }])
 @pytest.mark.parametrize("baseline_llm_kwargs", [
-    {
-        "use_v2_block_manager": False,
-    },
+    {},
 ])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "use_v2_block_manager": True,
         "num_lookahead_slots": 0,
     },
     {
-        "use_v2_block_manager": True,
         "num_lookahead_slots": 5,
     },
 ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
-                                          test_llm_generator, batch_size):
-    """Verify that chunked prefill works with BlockManagerV2, with and without
-    lookahead scheduling.
+def test_chunked_prefill_block_manager(baseline_llm_generator,
+                                       test_llm_generator, batch_size):
+    """Verify that chunked prefill works with SelfAttnBlockSpaceManager, 
+    with and without lookahead scheduling.
     """
     output_len = 32
     temperature = 0.0
@@ -318,11 +242,11 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
         temperature=temperature,
     )
 
-    print('Getting token ids with BlockManagerV1')
+    print('Getting token ids with BlockManager')
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids with BlockManagerV2')
+    print('Getting token ids with BlockManager, with lookahead slots.')
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
@@ -350,32 +274,32 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
         "enable_prefix_caching": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "use_v2_block_manager": False
-}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
-    "use_v2_block_manager": True,
     "preemption_mode": "swap"
 }, {
-    "use_v2_block_manager": True,
     "preemption_mode": "recompute"
 }])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
-def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
+def test_block_manager_prefix_caching_enabled_with_preemption(
         baseline_llm_generator, test_llm_generator, batch_size):
-    """Verify block manager v2 produces same outputs as block manager v1, even
-    when there is preemption.
+    """Verify block manager produces same outputs even when there is preemption.
 
     This constructs two LLM, each with limited number of GPU blocks. The limit
     is decided such that as the sequences in the batch grow, sequences must be
     preempted and removed from cache.
 
     If the output token ids are equivalent, then we have confidence that the KV
-    cache is not corrupted in the v2 block manager.
+    cache is not corrupted.
 
     NOTE: We want a significant number of generated tokens so that any incorrect
     KV mapping has time to build up error.
+
+    NOTE(Kuntai): Though we have removed block manager v1, this test is still
+    useful as it asserts the behavior of block manager v2 (now it is called 
+    SelfAttnBlockSpaceManager) is the same when swapping / preemption, so we  
+    keep this test.
     """
     output_len = 1024
     temperature = 0.0
@@ -399,11 +323,11 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
         temperature=temperature,
     )
 
-    print('Getting token ids from block manager v1')
+    print('Getting token ids from block manager')
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids from block manager v2')
+    print('Getting token ids from block manager, with preemption')
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
@@ -426,9 +350,6 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
         # Allow only 5 sequences of ~1024 tokens in worst case.
         "block_size": 16,
         "num_gpu_blocks_override": 5 * (64 + 1),
-
-        # Test APC in v2 block
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
@@ -504,9 +425,6 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
         "max_model_len": 48,
         "block_size": 16,
         "num_gpu_blocks_override": 3,
-
-        # Test APC in v2 block
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{

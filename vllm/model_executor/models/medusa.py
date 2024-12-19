@@ -1,24 +1,27 @@
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.transformers_utils.configs.medusa import MedusaConfig
 
 
 class ResidualBlock(nn.Module):
 
-    def __init__(self, hidden_size: int, num_layers: int) -> None:
+    def __init__(self, config: VllmConfig, hidden_size: int,
+                 num_layers: int) -> None:
         super().__init__()
 
         self.layers = nn.ModuleList([
-            nn.Linear(hidden_size, hidden_size, bias=False)
+            nn.Linear(hidden_size,
+                      hidden_size,
+                      bias=getattr(config, "medusa_fc_bias", False))
             for _ in range(num_layers)
         ])
         self.act = nn.SiLU()
@@ -44,11 +47,13 @@ class Medusa(nn.Module):
        in the draft checkpoint (using key token_map). Also, the draft config
        needs to have truncated_vocab_size (=k) as an attribute."""
 
-    def __init__(self, config: MedusaConfig, **_) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        config = vllm_config.model_config.hf_config
         super().__init__()
         self.config = config
         self.blocks = nn.ModuleList([
-            ResidualBlock(hidden_size=self.config.hidden_size,
+            ResidualBlock(config=config,
+                          hidden_size=self.config.hidden_size,
                           num_layers=self.config.num_hidden_layers)
             for _ in range(self.config.num_heads)
         ])
@@ -56,14 +61,25 @@ class Medusa(nn.Module):
         self.truncated_vocab_size = config.truncated_vocab_size
         self.unpadded_vocab_size = self.truncated_vocab_size
 
-        self.lm_heads = nn.ModuleList([
-            ParallelLMHead(
+        if getattr(config, "original_lm_head", False):
+            self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=self.truncated_vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-            ) for _ in range(self.config.num_heads)
-        ])
+            )
+            self.lm_heads = [
+                self.lm_head for _ in range(self.config.num_heads)
+            ]
+        else:
+            self.lm_heads = nn.ModuleList([
+                ParallelLMHead(
+                    self.unpadded_vocab_size,
+                    config.hidden_size,
+                    org_num_embeddings=self.truncated_vocab_size,
+                    padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                ) for _ in range(self.config.num_heads)
+            ])
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
@@ -151,8 +167,10 @@ class Medusa(nn.Module):
             sampling_metadata=sampling_metadata,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
 
         weights_map = {}
 
@@ -165,6 +183,9 @@ class Medusa(nn.Module):
                                                   requires_grad=False)
             elif name in params_dict:
                 weights_map[name] = loaded_weight
+            elif (getattr(self.config, "original_lm_head", False)
+                  and name == "lm_heads.0.weight"):
+                weights_map["lm_head.weight"] = loaded_weight
 
         for name, loaded_weight in weights_map.items():
             if "lm_head" in name and self.token_map is not None and\
@@ -176,9 +197,12 @@ class Medusa(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
 
         if self.token_map is not None:
             self.token_map.to(device=self.lm_heads[0].weight.device)
 
         assert (self.truncated_vocab_size
                 == self.orig_vocab_size) or (self.token_map is not None)
+
+        return loaded_params
