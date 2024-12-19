@@ -20,7 +20,7 @@ import time
 import uuid
 import warnings
 import weakref
-from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
+from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -370,72 +370,23 @@ def _next_task(iterator: AsyncGenerator[T, None],
     return loop.create_task(iterator.__anext__())  # type: ignore[arg-type]
 
 
-async def iterate_with_cancellation(
-    iterator: AsyncGenerator[T, None],
-    is_cancelled: Callable[[], Awaitable[bool]],
-) -> AsyncGenerator[T, None]:
-    """Convert async iterator into one that polls the provided function
-    at least once per second to check for client cancellation.
-    """
-
-    loop = asyncio.get_running_loop()
-
-    awaits: List[Future[T]] = [_next_task(iterator, loop)]
-    next_cancel_check: float = 0
-    while True:
-        done, pending = await asyncio.wait(awaits, timeout=1.5)
-
-        # Check for cancellation at most once per second
-        time_now = time.time()
-        if time_now >= next_cancel_check:
-            if await is_cancelled():
-                with contextlib.suppress(BaseException):
-                    awaits[0].cancel()
-                    await iterator.aclose()
-                raise asyncio.CancelledError("client cancelled")
-            next_cancel_check = time_now + 1
-
-        if done:
-            try:
-                item = await awaits[0]
-                awaits[0] = _next_task(iterator, loop)
-                yield item
-            except StopAsyncIteration:
-                # we are done
-                return
-
-
 async def merge_async_iterators(
-    *iterators: AsyncGenerator[T, None],
-    is_cancelled: Optional[Callable[[], Awaitable[bool]]] = None,
-) -> AsyncGenerator[Tuple[int, T], None]:
+    *iterators: AsyncGenerator[T,
+                               None], ) -> AsyncGenerator[Tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
-
-    It also optionally polls a provided function at least once per second
-    to check for client cancellation.
     """
 
     loop = asyncio.get_running_loop()
 
     awaits = {_next_task(pair[1], loop): pair for pair in enumerate(iterators)}
-    timeout = None if is_cancelled is None else 1.5
-    next_cancel_check: float = 0
     try:
         while awaits:
-            done, pending = await asyncio.wait(awaits.keys(),
-                                               return_when=FIRST_COMPLETED,
-                                               timeout=timeout)
-            if is_cancelled is not None:
-                # Check for cancellation at most once per second
-                time_now = time.time()
-                if time_now >= next_cancel_check:
-                    if await is_cancelled():
-                        raise asyncio.CancelledError("client cancelled")
-                    next_cancel_check = time_now + 1
+            done, _ = await asyncio.wait(awaits.keys(),
+                                         return_when=FIRST_COMPLETED)
             for d in done:
                 pair = awaits.pop(d)
                 try:
@@ -824,7 +775,7 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 # `collections` helpers
 def is_list_of(
     value: object,
-    typ: Type[T],
+    typ: Union[type[T], tuple[type[T], ...]],
     *,
     check: Literal["first", "all"] = "first",
 ) -> TypeIs[List[T]]:
@@ -1331,6 +1282,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,
+    *,
     requires_kw_only: bool = False,
     allow_var_kwargs: bool = True,
 ) -> bool:
@@ -1375,6 +1327,8 @@ def resolve_mm_processor_kwargs(
     init_kwargs: Optional[Mapping[str, object]],
     inference_kwargs: Optional[Mapping[str, object]],
     callable: Callable[..., object],
+    *,
+    requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
 ) -> Dict[str, Any]:
     """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
@@ -1393,11 +1347,17 @@ def resolve_mm_processor_kwargs(
     runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
         callable,
         overrides=inference_kwargs,
-        allow_var_kwargs=allow_var_kwargs)
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
 
     # Filter init time multimodal processor kwargs provided
     init_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable, overrides=init_kwargs, allow_var_kwargs=allow_var_kwargs)
+        callable,
+        overrides=init_kwargs,
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
 
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
@@ -1408,6 +1368,8 @@ def resolve_mm_processor_kwargs(
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
     overrides: Optional[Mapping[str, object]],
+    *,
+    requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -1439,16 +1401,21 @@ def get_allowed_kwarg_only_overrides(
         for kwarg_name, val in overrides.items()
         if supports_kw(callable,
                        kwarg_name,
-                       requires_kw_only=True,
+                       requires_kw_only=requires_kw_only,
                        allow_var_kwargs=allow_var_kwargs)
     }
 
     # If anything is dropped, log a warning
     dropped_keys = overrides.keys() - filtered_overrides.keys()
     if dropped_keys:
-        logger.warning(
-            "The following intended overrides are not keyword-only args "
-            "and and will be dropped: %s", dropped_keys)
+        if requires_kw_only:
+            logger.warning(
+                "The following intended overrides are not keyword-only args "
+                "and and will be dropped: %s", dropped_keys)
+        else:
+            logger.warning(
+                "The following intended overrides are not keyword args "
+                "and and will be dropped: %s", dropped_keys)
 
     return filtered_overrides
 
