@@ -476,6 +476,11 @@ Classification (``--task classify``)
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`JambaForSequenceClassification`
+    - Jamba
+    - :code:`ai21labs/Jamba-tiny-reward-dev`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`Qwen2ForSequenceClassification`
     - Qwen2-based
     - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.
