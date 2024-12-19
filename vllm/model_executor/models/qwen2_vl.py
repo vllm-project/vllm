@@ -682,6 +682,12 @@ def _get_vision_info(
     return resized_height, resized_width, llm_num_vision_tokens
 
 
+def _get_image_processor(hf_processor: Qwen2VLProcessor):
+    image_processor = hf_processor.image_processor  # type: ignore
+    assert isinstance(image_processor, Qwen2VLImageProcessor)
+    return image_processor
+
+
 def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
                                data_type_key: str,
                                *,
@@ -691,7 +697,7 @@ def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
     vision_config = hf_config.vision_config
 
     hf_processor = ctx.get_hf_processor(Qwen2VLProcessor)
-    image_processor: Qwen2VLImageProcessor = hf_processor.image_processor
+    image_processor = _get_image_processor(hf_processor)
 
     _, _, max_llm_image_tokens = _get_vision_info(
         vision_config,
@@ -719,7 +725,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         max_pixels: Optional[int] = None,
     ) -> Qwen2VLProcessor:
         hf_processor = self.ctx.get_hf_processor(Qwen2VLProcessor)
-        image_processor: Qwen2VLImageProcessor = hf_processor.image_processor
+        image_processor = _get_image_processor(hf_processor)
 
         if min_pixels:
             image_processor.min_pixels = min_pixels
@@ -740,7 +746,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         mm_processor_kwargs: Mapping[str, object],
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
-        image_processor: Qwen2VLImageProcessor = hf_processor.image_processor
+        image_processor = _get_image_processor(hf_processor)
 
         # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
         # image_token and video_token registered
@@ -771,7 +777,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         num_images = mm_counts["image"]
         hf_processor = self._get_hf_processor()
         image_token: str = hf_processor.image_token
-        image_processor: Qwen2VLImageProcessor = hf_processor.image_processor
+        image_processor = _get_image_processor(hf_processor)
 
         data = {}
         resized_height, resized_width = smart_resize(
