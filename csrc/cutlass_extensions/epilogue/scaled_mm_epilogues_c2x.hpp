@@ -1,3 +1,5 @@
+#pragma once
+
 #include "cutlass_extensions/epilogue/broadcast_load_epilogue_c2x.hpp"
 
 /*
