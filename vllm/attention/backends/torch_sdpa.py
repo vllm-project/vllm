@@ -281,7 +281,8 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
         self.input_data = input_builder.input_data
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int) -> TorchSDPAMetadata:
+              num_orig_input_tokens_list: List[int], cuda_graph_pad_size: int,
+              batch_size: int) -> TorchSDPAMetadata:
         input_data = self.input_data
         prefill_seq_lens = seq_lens[0:input_data.num_prefills]
         prefill_query_lens = query_lens[0:input_data.num_prefills]
@@ -347,6 +348,9 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
                 device="cpu",
             )
 
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
+                                                    dtype=torch.long,
+                                                    device="cpu")
         # For multi-modal models
         placeholder_index_maps = None
         if len(input_data.multi_modal_inputs_list) != 0:
@@ -360,6 +364,7 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
             chunked_prefill=self.chunked_prefill,
             seq_lens=prefill_seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_query_len=max_query_len,
             max_kv_len=max_kv_len,
             query_start_loc=query_start_loc,
