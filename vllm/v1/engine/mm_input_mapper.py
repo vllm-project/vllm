@@ -8,7 +8,7 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalKwargs, MultiModalRegistry)
-from vllm.v1.utils import LRUDictCache
+from vllm.utils import LRUCache
 
 logger = init_logger(__name__)
 
@@ -44,7 +44,7 @@ class MMInputMapperClient:
 
         # Init cache
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
         self.mm_debug_cache_hit_ratio_steps = None
@@ -120,7 +120,7 @@ class MMInputMapperServer:
 
     def __init__(self, model_config):
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
     def process_inputs(
         self,
