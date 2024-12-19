@@ -75,7 +75,8 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
     def _get_hf_processor(
         self,
         *,
-        sampling_rate: Optional[int] = None,  # Ignored in initialization
+        # Ignored in initialization
+        sampling_rate: Optional[int] = None,
     ) -> ProcessorMixin:
         return self.ctx.get_hf_processor()
 
