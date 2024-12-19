@@ -638,7 +638,7 @@ class GPUModelRunner:
             # Compute MM hashes (if enabled)
             mm_hashes = None
             if self.use_hash:
-                mm_hashes = self.mm_hasher.hash_mm_data(dummy_mm_data)
+                mm_hashes = self.mm_hasher.hash_dummy_mm_data(dummy_mm_data)
 
             dummy_mm_kwargs = self.mm_input_mapper_client.process_inputs(
                 mm_data=dummy_mm_data,
