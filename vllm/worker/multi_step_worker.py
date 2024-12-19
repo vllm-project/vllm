@@ -118,11 +118,26 @@ class MultiStepWorker(Worker):
             # otherwise we need to get the cached sampled token ids from the
             # execute_model_req
             assert execute_model_req.last_sampled_token_ids is not None
-            model_input.last_sampled_token_ids = (
-                execute_model_req.last_sampled_token_ids.cuda())
-            model_input.add_sampler_output(
-                SamplerOutput(outputs=[], sampled_token_ids=None),
-                model_input.last_sampled_token_ids)
+            if get_pp_group().is_first_rank:
+                # required for the first rank to copy the tensor to the GPU
+                model_input.last_sampled_token_ids = (
+                    execute_model_req.last_sampled_token_ids.cuda())
+                model_input.add_sampler_output(
+                    SamplerOutput(outputs=[], sampled_token_ids=None),
+                    model_input.last_sampled_token_ids)
+            else:
+                # if it's not the first rank, we can avoid serializing the
+                # tensor.
+                model_input.last_sampled_token_ids = None
+                # we use input_tokens as a placeholder for the last sampled
+                # token, resulting in a no-op in the advance_step.
+                num_queries = model_input.num_queries
+                assert model_input.frozen_model_input is not None
+                input_tokens = model_input.frozen_model_input.input_tokens
+                assert input_tokens is not None
+                model_input.add_sampler_output(
+                    SamplerOutput(outputs=[], sampled_token_ids=None),
+                    input_tokens.unsqueeze(1)[:num_queries])
 
             # free sampled token ids from the previous step.
             # TODO(will) we could reuse the sampled token ids tensor from
@@ -182,12 +197,15 @@ class MultiStepWorker(Worker):
                 # for the next step (sampled_token_ids from the previous step)
 
                 assert isinstance(model_input, StatefulModelInput)
-                # we need to update the last sampled token ids in the model
-                # input for the workers so that they can run inplace
-                # advance_step
+                # we use input_tokens as a placeholder for the last sampled
+                # token, resulting in a no-op in the advance_step.
+                num_queries = model_input.num_queries
+                assert model_input.frozen_model_input is not None
+                input_tokens = model_input.frozen_model_input.input_tokens
+                assert input_tokens is not None
                 model_input.add_sampler_output(
                     SamplerOutput(outputs=[], sampled_token_ids=None),
-                    model_input.last_sampled_token_ids)
+                    input_tokens.unsqueeze(1)[:num_queries])
 
         assert model_input is not None
         assert worker_input is not None
