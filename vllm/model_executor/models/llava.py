@@ -133,8 +133,8 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor.__is_patched__ = True  # type: ignore
 
     def _get_hf_processor(self) -> Union[LlavaProcessor, PixtralProcessor]:
-        hf_processor = self.ctx.get_hf_processor()
-        assert isinstance(hf_processor, (LlavaProcessor, PixtralProcessor))
+        hf_processor = self.ctx.get_hf_processor(
+            (LlavaProcessor, PixtralProcessor))
 
         if isinstance(hf_processor, PixtralProcessor):
             self._patch_pixtral_processor(hf_processor)
