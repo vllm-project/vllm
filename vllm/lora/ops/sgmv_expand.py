@@ -53,12 +53,20 @@ def _sgmv_expand_kernel(
     """
     pid = tl.program_id(axis=0)
     cur_batch = tl.program_id(axis=1)
-
     slice_id = tl.program_id(axis=2)
-    cta_n_num = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // cta_n_num
-    pid_n = pid % cta_n_num
+
     M = tl.load(seq_lens + cur_batch)
+
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    GROUP_SIZE_M: tl.constexpr = 1
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
     if pid_m * BLOCK_M > M:
         return
     lora_index = tl.load(lora_indices + cur_batch)
