@@ -518,8 +518,8 @@ class ModelConfig:
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
-            "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8"
+            "gptq_bitblas", "bitblas", "awq_marlin", "fbgemm_fp8",
+            "compressed_tensors", "compressed-tensors", "experts_int8"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -682,10 +682,27 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    def find_flash_attn_supported_head_dims(self, head_dim: int) -> int:
+        """
+        Find the closest head dimension to the given head dimension that 
+        is supported by Flash Attention.
+        """
+        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+
+        FLASHATTN_SUPPORTED_HEAD_DIMS = (
+            FlashAttentionBackend.get_supported_head_sizes())
+
+        for supported_head_dim in FLASHATTN_SUPPORTED_HEAD_DIMS:
+            if head_dim <= supported_head_dim:
+                return supported_head_dim
+        raise ValueError(
+            f"Head dimension {head_dim} is not supported by Flash Attention."
+            f"Supported head dimensions are {FLASHATTN_SUPPORTED_HEAD_DIMS}.")
+
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config, "model_type"
-                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+        if (hasattr(self.hf_text_config, "model_type")
+                and self.hf_text_config.model_type == "deepseek_v2"):
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
             return 256
@@ -721,8 +738,11 @@ class ModelConfig:
                 return self.hf_config.attn_config["kv_n_heads"]
             return self.hf_config.num_attention_heads
         if self.hf_config.model_type == "dbrx":
-            return getattr(self.hf_config.attn_config, "kv_n_heads",
-                           self.hf_config.num_attention_heads)
+            return getattr(
+                self.hf_config.attn_config,
+                "kv_n_heads",
+                self.hf_config.num_attention_heads,
+            )
 
         if self.is_attention_free:
             return 0
@@ -1027,6 +1047,7 @@ class TokenizerPoolConfig:
             The way the config will be used depends on the
             pool type.
     """
+
     pool_size: int
     pool_type: Union[str, Type["BaseTokenizerGroup"]]
     extra_config: dict
@@ -1080,9 +1101,11 @@ class TokenizerPoolConfig:
             else:
                 tokenizer_pool_extra_config_parsed = (
                     tokenizer_pool_extra_config or {})
-            tokenizer_pool_config = cls(tokenizer_pool_size,
-                                        tokenizer_pool_type,
-                                        tokenizer_pool_extra_config_parsed)
+            tokenizer_pool_config = cls(
+                tokenizer_pool_size,
+                tokenizer_pool_type,
+                tokenizer_pool_extra_config_parsed,
+            )
         else:
             tokenizer_pool_config = None
         return tokenizer_pool_config
@@ -1251,6 +1274,7 @@ class ParallelConfig:
             # current node and we aren't in a ray placement group.
 
             from vllm.executor import ray_utils
+
             backend = "mp"
             ray_found = ray_utils.ray_is_available()
             if (current_platform.is_cuda()
@@ -1266,8 +1290,10 @@ class ParallelConfig:
                     backend = "ray"
                 else:
                     from ray import is_initialized as ray_is_initialized
+
                     if ray_is_initialized():
                         from ray.util import get_current_placement_group
+
                         if get_current_placement_group():
                             backend = "ray"
             self.distributed_executor_backend = backend
@@ -1672,8 +1698,8 @@ class SpeculativeConfig:
 
             draft_hf_config = draft_model_config.hf_config
 
-            if (num_speculative_tokens is not None
-                    and hasattr(draft_hf_config, "num_lookahead_tokens")):
+            if num_speculative_tokens is not None and hasattr(
+                    draft_hf_config, "num_lookahead_tokens"):
                 draft_hf_config.num_lookahead_tokens = num_speculative_tokens
 
             n_predict = getattr(draft_hf_config, "n_predict", None)
@@ -2014,7 +2040,8 @@ class LoRAConfig:
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
         if model_config.quantization and model_config.quantization not in [
-                "awq", "gptq"
+                "awq",
+                "gptq",
         ]:
             # TODO support marlin
             logger.warning("%s quantization is not tested with LoRA yet.",
@@ -2262,8 +2289,8 @@ def _get_and_verify_max_len(
     for key in possible_keys:
         max_len = getattr(hf_config, key, None)
         if max_len is not None:
-            max_len_key = key if max_len < derived_max_model_len \
-                else max_len_key
+            max_len_key = (key
+                           if max_len < derived_max_model_len else max_len_key)
             derived_max_model_len = min(derived_max_model_len, max_len)
 
     # If sliding window is manually disabled, max_length should be less
@@ -2292,8 +2319,10 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%s. Assuming the model's maximum length is %d.", possible_keys,
-            default_max_len)
+            "%s. Assuming the model's maximum length is %d.",
+            possible_keys,
+            default_max_len,
+        )
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
@@ -2419,6 +2448,7 @@ class DecodingConfig:
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability."""
+
     otlp_traces_endpoint: Optional[str] = None
 
     # Collecting detailed timing information for each request can be expensive.

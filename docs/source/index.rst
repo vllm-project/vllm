@@ -122,6 +122,7 @@ Documentation
 
    quantization/supported_hardware
    quantization/auto_awq
+   quantization/bitblas
    quantization/bnb
    quantization/gguf
    quantization/int8
