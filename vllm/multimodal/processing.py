@@ -226,12 +226,12 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
             if k == "video":
                 # Special case since even a single item can be a list
                 multi_data[k] = (  # type: ignore[index]
-                    v if (isinstance(v, (dict, torch.Tensor))  # type: ignore[assignment]
+                    v if (isinstance(v, torch.Tensor)
                           or is_list_of(v, list)) else [v]
                 )
             elif k in ("image", "audio"):
                 multi_data[k] = (  # type: ignore[index]
-                    v if isinstance(v, (dict, torch.Tensor, list)) else [v]
+                    v if isinstance(v, (torch.Tensor, list)) else [v]
                 )
             else:
                 multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
@@ -256,14 +256,7 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
         return self.get("audio", [])
 
     def get_item_counts(self) -> Mapping[str, int]:
-        # For now, embedding inputs can be a dictionary so
-        # we need to handle that case
-        # TODO: Make a separate modality for embedding inputs
-        # to avoid confusion
-        return {
-            m: (1 if isinstance(items, dict) else len(items))
-            for m, items in self.items()
-        }
+        return {m: len(items) for m, items in self.items()}
 
     def get_image_size(self, item_idx: int) -> ImageSize:
         image = self.images[item_idx]
@@ -625,6 +618,12 @@ class BaseMultiModalProcessor(ABC):
     def _get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
+    def _get_mm_items(
+        self,
+        mm_data: MultiModalDataDict,
+    ) -> MultiModalDataItems:
+        return MultiModalDataItems.from_dict(mm_data)
+
     @abstractmethod
     def _get_prompt_replacements(
         self,
@@ -663,11 +662,7 @@ class BaseMultiModalProcessor(ABC):
             # TODO: Make a separate modality for embedding inputs
             # to avoid confusion
             if k in ("image", "video", "audio"):
-                if isinstance(v, dict):
-                    # Pass through embedding inputs (dict)
-                    # This special form is used for Qwen2-VL and MiniCPM-V
-                    passthrough_data.update(v)
-                elif isinstance(v, torch.Tensor) and v.ndim == 3:
+                if isinstance(v, torch.Tensor) and v.ndim == 3:
                     # Pass through embedding inputs (single)
                     passthrough_data[f"{k}_embeds"] = [v]
                 elif (is_list_of(v, torch.Tensor) and len(v) > 0
@@ -795,7 +790,7 @@ class BaseMultiModalProcessor(ABC):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        mm_items = MultiModalDataItems.from_dict(mm_data)
+        mm_items = self._get_mm_items(mm_data)
 
         hf_inputs = self._apply_hf_processor(prompt_text, mm_items,
                                              mm_processor_kwargs)

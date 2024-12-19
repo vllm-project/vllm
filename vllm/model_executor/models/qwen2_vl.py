@@ -22,8 +22,8 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import cached_property, partial
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    Type, TypedDict, Union)
+from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
+                    Tuple, Type, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -54,13 +54,14 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import MultiModalDataDict, NestedTensors
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
+from vllm.utils import is_list_of
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
@@ -716,7 +717,51 @@ get_max_qwen2_vl_video_tokens = partial(get_max_qwen2_vl_mm_tokens,
                                         data_type_key="video")
 
 
+class Qwen2VLMultiModalDataItems(MultiModalDataItems):
+
+    @staticmethod
+    def from_dict(data: MultiModalDataDict) -> "MultiModalDataItems":
+        """
+        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`.
+        """
+        multi_data = MultiModalDataItems()
+
+        for k, v in data.items():
+            # TODO: Make a separate modality for embedding inputs
+            # to avoid confusion
+            # yapf: disable
+            if k == "video":
+                # Special case since even a single item can be a list
+                multi_data[k] = (  # type: ignore[index]
+                    v if (isinstance(v, (dict, torch.Tensor))  # type: ignore[assignment]
+                          or is_list_of(v, list)) else [v]
+                )
+            elif k in ("image", "audio"):
+                multi_data[k] = (  # type: ignore[index]
+                    v if isinstance(v, (dict, torch.Tensor, list)) else [v]
+                )
+            else:
+                multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
+            # yapf: enable
+
+        return multi_data
+
+    def get_item_counts(self) -> Mapping[str, int]:
+        return {
+            m: (
+                len(items[f"{m}_grid_thw"])  # type: ignore
+                if isinstance(items, dict) else len(items))
+            for m, items in self.items()
+        }
+
+
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
+
+    def _get_mm_items(
+        self,
+        mm_data: MultiModalDataDict,
+    ) -> MultiModalDataItems:
+        return Qwen2VLMultiModalDataItems.from_dict(mm_data)
 
     def _get_hf_processor(
         self,
@@ -738,6 +783,35 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
             }
 
         return hf_processor
+
+    def _get_processor_data(
+        self,
+        mm_items: MultiModalDataItems,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        processor_data = dict[str, Any]()
+        passthrough_data = dict[str, Any]()
+
+        for k, v in mm_items.items():
+            # TODO: Make a separate modality for embedding inputs
+            # to avoid confusion
+            if k in ("image", "video", "audio"):
+                if isinstance(v, dict):
+                    # Pass through embedding inputs (dict)
+                    passthrough_data.update(v)
+                elif isinstance(v, torch.Tensor) and v.ndim == 3:
+                    # Pass through embedding inputs (single)
+                    passthrough_data[f"{k}_embeds"] = [v]
+                elif (is_list_of(v, torch.Tensor) and len(v) > 0
+                      and v[0].ndim == 2):
+                    # Pass through embedding inputs (multi)
+                    passthrough_data[f"{k}_embeds"] = v
+                else:
+                    # Map keys to plural form, e.g.: image -> images
+                    processor_data[f"{k}s"] = v
+            else:
+                processor_data[k] = v
+
+        return processor_data, passthrough_data
 
     def _get_prompt_replacements(
         self,
