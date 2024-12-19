@@ -20,7 +20,7 @@ __device__ __forceinline__ FP8_TYPE
 scaled_fp8_conversion(float const val, float const inverted_scale) {
   float x = val * inverted_scale;
   float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
-  return static_cast<c10::Float8_e4m3fn>(r);
+  return static_cast<FP8_TYPE>(r);
 }
 
 // Activation and gating kernel template.
