@@ -118,9 +118,9 @@ Text Generation (``--task generate``)
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
     - ✅︎
     - ✅︎
-  * - :code:`CohereForCausalLM`
+  * - :code:`CohereForCausalLM`,:code:`Cohere2ForCausalLM`
     - Command-R
-    - :code:`CohereForAI/c4ai-command-r-v01`, etc.
+    - :code:`CohereForAI/c4ai-command-r-v01`, :code:`CohereForAI/c4ai-command-r7b-12-2024`, etc.
     - ✅︎
     - ✅︎
   * - :code:`DbrxForCausalLM`
@@ -194,8 +194,8 @@ Text Generation (``--task generate``)
     -
     - ✅︎
   * - :code:`GraniteForCausalLM`
-    - Granite 3.0, PowerLM
-    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.0-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
+    - Granite 3.0, Granite 3.1, PowerLM
+    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.1-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`GraniteMoeForCausalLM`

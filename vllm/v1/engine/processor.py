@@ -1,7 +1,7 @@
 import time
 from typing import Mapping, Optional, Tuple, Union
 
-from vllm.config import LoRAConfig, ModelConfig
+from vllm.config import CacheConfig, LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs
@@ -22,6 +22,7 @@ class Processor:
     def __init__(
         self,
         model_config: ModelConfig,
+        cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         tokenizer: BaseTokenizerGroup,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -44,8 +45,9 @@ class Processor:
         self.mm_input_mapper_client = MMInputMapperClient(model_config)
 
         # Multi-modal hasher (for images)
-        self.mm_hasher = MMHasher(
-        ) if model_config.mm_cache_preprocessor else None
+        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
+            cache_config.enable_prefix_caching
+        self.mm_hasher = MMHasher()
 
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
     # This ideally should releases the GIL, so we should not block the
@@ -76,8 +78,8 @@ class Processor:
 
         # Compute MM hashes (if enabled)
         mm_hashes = None
-        if self.mm_hasher is not None:
-            mm_hashes = self.mm_hasher.hash(prompt)
+        if self.use_hash:
+            mm_hashes = self.mm_hasher.hash_prompt(prompt)
 
         # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(
@@ -117,7 +119,7 @@ class Processor:
         # Apply MM mapper
         mm_inputs = None
         if len(decoder_inputs.multi_modal_data) > 0:
-            mm_inputs, mm_hashes = self.mm_input_mapper_client.process_inputs(
+            mm_inputs = self.mm_input_mapper_client.process_inputs(
                 decoder_inputs.multi_modal_data, mm_hashes,
                 decoder_inputs.mm_processor_kwargs, precomputed_mm_inputs)
 
