@@ -1582,7 +1582,7 @@ def direct_register_custom_op(
 
     if not supports_custom_op():
         assert not current_platform.is_cuda_alike(), (
-            "cuda platform should support custom op by default,"
+            "cuda platform needs torch>=2.4 to support custom op, "
             "chances are you are using an old version of pytorch "
             "or a custom build of pytorch. It is recommended to "
             "use vLLM in a fresh new environment and let it install "
