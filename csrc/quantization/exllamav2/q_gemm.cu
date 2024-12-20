@@ -119,9 +119,13 @@ void gemm_half_q_half_cuda(cublasHandle_t cublas_handle, const half* a,
 }  // namespace exl2
 }  // namespace vllm
 
-torch::Tensor exl2_gemm(torch::Tensor a, uintptr_t b) {
+torch::Tensor exl2_gemm(torch::Tensor a, int64_t b) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
-  vllm::exl2::QMatrix* qm = reinterpret_cast<vllm::exl2::QMatrix*>(b);
+  if (b < 0) {
+    throw std::runtime_error("Invalid pointer value passed as int64_t");
+  }
+  vllm::exl2::QMatrix* qm =
+      reinterpret_cast<vllm::exl2::QMatrix*>(static_cast<uintptr_t>(b));
 
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   at::Tensor c = torch::empty({a.size(0), qm->width}, options);
@@ -140,10 +144,10 @@ torch::Tensor exl2_gemm(torch::Tensor a, uintptr_t b) {
   return c;
 }
 
-uintptr_t make_q_matrix(torch::Tensor q_weight, torch::Tensor q_perm,
-                        torch::Tensor q_invperm, torch::Tensor q_scale,
-                        torch::Tensor q_scale_max, torch::Tensor q_groups,
-                        torch::Tensor q_group_map) {
+int64_t make_q_matrix(torch::Tensor q_weight, torch::Tensor q_perm,
+                      torch::Tensor q_invperm, torch::Tensor q_scale,
+                      torch::Tensor q_scale_max, torch::Tensor q_groups,
+                      torch::Tensor q_group_map) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(q_weight));
   int device = q_weight.device().index();
   int width = q_weight.size(1);
@@ -155,5 +159,11 @@ uintptr_t make_q_matrix(torch::Tensor q_weight, torch::Tensor q_perm,
       (uint16_t*)q_perm.data_ptr(), (uint16_t*)q_invperm.data_ptr(),
       (uint32_t*)q_scale.data_ptr(), (half*)q_scale_max.data_ptr(),
       (uint16_t*)q_groups.data_ptr(), (uint16_t*)q_group_map.data_ptr());
-  return reinterpret_cast<uintptr_t>(m);
+
+  uintptr_t ptr_val = reinterpret_cast<uintptr_t>(m);
+  if (ptr_val > static_cast<uintptr_t>(std::numeric_limits<int64_t>::max())) {
+    delete m;
+    throw std::runtime_error("Pointer value too large for int64_t");
+  }
+  return static_cast<int64_t>(ptr_val);
 }
