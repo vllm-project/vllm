@@ -62,7 +62,8 @@ def _cached_encode(
     *,
     add_special_tokens: bool = False,
 ) -> list[int]:
-    return encode_tokens(tokenizer, text,
+    return encode_tokens(tokenizer,
+                         text,
                          add_special_tokens=add_special_tokens)
 
 
@@ -746,7 +747,8 @@ class BaseMultiModalProcessor(ABC):
                 mm_item_counts,
             )
 
-            token_ids = encode_tokens(tokenizer, text,
+            token_ids = encode_tokens(tokenizer,
+                                      text,
                                       add_special_tokens=False)
             matched_repls = [match.prompt_repl for match in text_matches]
 

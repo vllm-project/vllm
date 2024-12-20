@@ -2,8 +2,7 @@ from typing import List, Optional
 
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               encode_tokens,
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, encode_tokens,
                                                get_lora_tokenizer,
                                                get_lora_tokenizer_async,
                                                get_tokenizer)
@@ -59,7 +58,8 @@ class TokenizerGroup(BaseTokenizerGroup):
                lora_request: Optional[LoRARequest] = None,
                add_special_tokens: Optional[bool] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
-        ret = encode_tokens(tokenizer, prompt,
+        ret = encode_tokens(tokenizer,
+                            prompt,
                             add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
@@ -71,7 +71,8 @@ class TokenizerGroup(BaseTokenizerGroup):
             lora_request: Optional[LoRARequest] = None,
             add_special_tokens: Optional[bool] = None) -> List[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
-        ret = encode_tokens(tokenizer, prompt,
+        ret = encode_tokens(tokenizer,
+                            prompt,
                             add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret

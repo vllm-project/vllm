@@ -1,6 +1,6 @@
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import numpy as np
 import torch
@@ -589,7 +589,6 @@ def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
 
 
 def input_processor_for_whisper(ctx: InputContext, inputs):
-    
     multi_modal_data = inputs["encoder"]["multi_modal_data"]
     if isinstance(multi_modal_data["audio"], list):
         assert len(multi_modal_data["audio"]) == 1
@@ -710,7 +709,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         if input_features is not None:
             if not isinstance(input_features, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of audio features. "
-                                f"Got type: {type(input_features)}")
+                                 f"Got type: {type(input_features)}")
             input_features = [feat.to(self.dtype) for feat in input_features]
 
         return WhisperAudioInputs(input_features=input_features)
