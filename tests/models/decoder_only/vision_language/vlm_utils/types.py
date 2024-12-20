@@ -7,9 +7,11 @@ from typing import (Any, Callable, Dict, Iterable, List, NamedTuple, Optional,
 import torch
 from PIL.Image import Image
 from pytest import MarkDecorator
-from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
+from transformers import (AutoModelForCausalLM, BatchEncoding,
+                          PreTrainedTokenizerBase)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
+from vllm.config import TaskOption
 from vllm.sequence import SampleLogprobs
 from vllm.utils import identity
 
@@ -66,7 +68,7 @@ class ImageSizeWrapper(NamedTuple):
 class VLMTestInfo(NamedTuple):
     """Holds the configuration for 1+ tests for one model architecture."""
 
-    models: Union[List[str]]
+    models: List[str]
     test_type: Union[VLMTestType, Iterable[VLMTestType]]
 
     # Should be None only if this is a CUSTOM_INPUTS test
@@ -92,15 +94,20 @@ class VLMTestInfo(NamedTuple):
     enforce_eager: bool = True
     max_model_len: int = 1024
     max_num_seqs: int = 256
-    task: str = "auto"
+    task: TaskOption = "auto"
     tensor_parallel_size: int = 1
+    vllm_runner_kwargs: Optional[Dict[str, Any]] = None
 
     # Optional callable which gets a list of token IDs from the model tokenizer
-    get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]] = None
+    get_stop_token_ids: Optional[Callable[[PreTrainedTokenizerBase],
+                                          List[int]]] = None
+    # Optional list of strings to stop generation, useful when stop tokens are
+    # not special tokens in the tokenizer
+    stop_str: Optional[List[str]] = None
 
     # Exposed options for HF runner
-    model_kwargs: Optional[Dict[str, Any]] = None
-    # Indicates we should explicitly pass the EOS from the tokeniezr
+    hf_model_kwargs: Optional[Dict[str, Any]] = None
+    # Indicates we should explicitly pass the EOS from the tokenizer
     use_tokenizer_eos: bool = False
     auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM
     # Callable to pass to the HF runner to run on inputs; for now, we also pass
@@ -148,6 +155,8 @@ class VLMTestInfo(NamedTuple):
 
     marks: Optional[List[MarkDecorator]] = None
 
+    tokenizer_mode: str = "auto"
+
     def get_non_parametrized_runner_kwargs(self):
         """Returns a dictionary of expandable kwargs for items that are used
         in all test types, which are NOT used when creating the parametrized
@@ -159,6 +168,7 @@ class VLMTestInfo(NamedTuple):
             "max_num_seqs": self.max_num_seqs,
             "task": self.task,
             "tensor_parallel_size": self.tensor_parallel_size,
+            "vllm_runner_kwargs": self.vllm_runner_kwargs,
             "hf_output_post_proc": self.hf_output_post_proc,
             "vllm_output_post_proc": self.vllm_output_post_proc,
             "auto_cls": self.auto_cls,
@@ -166,8 +176,10 @@ class VLMTestInfo(NamedTuple):
             "postprocess_inputs": self.postprocess_inputs,
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
-            "model_kwargs": self.model_kwargs,
+            "hf_model_kwargs": self.hf_model_kwargs,
+            "stop_str": self.stop_str,
             "patch_hf_runner": self.patch_hf_runner,
+            "tokenizer_mode": self.tokenizer_mode
         }
 
 

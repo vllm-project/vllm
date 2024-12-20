@@ -1,245 +1,281 @@
+import ast
 import copy
 import dataclasses
-import operator
+import os
+import pprint
+import time
+from collections import defaultdict
 from contextlib import ExitStack
-from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
-                    Union)
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
 import torch
 import torch.fx as fx
 
 import vllm.envs as envs
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import combine_fx_passes, weak_ref_tensors
+from vllm.utils import weak_ref_tensors
 
-from .config import CompilationConfig
 from .counter import compilation_counter
-from .fusion import FusionPass
-from .levels import CompilationLevel
-from .reshapes import RedundantReshapesPass
+from .inductor_pass import InductorPass
+from .monitor import end_monitoring_torch_compile
+from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
 
-def fix_functionalization(graph: fx.Graph):
+class InductorHashCache:
     """
-    Rewrite the graph module to replace the pattern involving
-    torch._higher_order_ops.auto_functionalize.auto_functionalized
-    with a direct call to the inplace custom op.
+    Disk format: a Python list of tuples, each tuple is
+    (runtime_shape, graph_index, hash_str)
+    We use list of tuple for readability.
 
-    # TODO: check if PyTorch nightly has fixed this issue
+    In-memory format: a defaultdict of dict, where the key is
+    runtime_shape, and the value is a dict of graph_index to hash_str.
+
+    The data is essentially `Dict[Optional[int], Dict[int, str]]`,
+    we don't use json here because json doesn't support int as key.
+
+    TODO: better off-the-shelf solution to serialize the data?
     """
 
-    # debug code, if we want to see the graph before the transformation
-    # with open("before.py", "w") as f:
-    #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
+    def __init__(self, cache_dir: str, disabled: bool = False):
+        self.cache: defaultdict = defaultdict(dict)
+        self.disabled = disabled
+        self.cache_dir = cache_dir
+        self.cache_file_path = os.path.join(cache_dir,
+                                            "inductor_hash_cache.py")
+        if disabled:
+            return
+        # set flags so that Inductor and Triton store their cache
+        # in the cache_dir, then users only need to copy the cache_dir
+        # to another machine to reuse the cache.
+        inductor_cache = os.path.join(cache_dir, "inductor_cache")
+        os.makedirs(inductor_cache, exist_ok=True)
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+        triton_cache = os.path.join(cache_dir, "triton_cache")
+        os.makedirs(triton_cache, exist_ok=True)
+        os.environ["TRITON_CACHE_DIR"] = triton_cache
+        if os.path.exists(self.cache_file_path):
+            with open(self.cache_file_path) as f:
+                self.deserialize(f.read())
 
-    nodes_to_remove = []
+    def deserialize(self, data: str):
+        # we use ast.literal_eval to parse the data
+        # because it is a safe way to parse Python literals.
+        # do not use eval(), it is unsafe.
+        list_data = ast.literal_eval(data)
+        for runtime_shape, graph_index, hash_str in list_data:
+            self.cache[runtime_shape][graph_index] = hash_str
 
-    for node in graph.nodes:
-        # Identify the auto_functionalized node
-        if node.op == 'call_function' and node.target == torch._higher_order_ops.auto_functionalize.auto_functionalized:  # noqa
-            if node.args[0] == torch.ops._C.rotary_embedding.default:
-                # manual replace for rotary_embedding
+    def serialize(self) -> str:
+        data = []
+        for runtime_shape, graph_index_to_hash_str in self.cache.items():
+            for graph_index, hash_str in graph_index_to_hash_str.items():
+                data.append((runtime_shape, graph_index, hash_str))
+        printer = pprint.PrettyPrinter(indent=4)
+        return printer.pformat(data)
 
-                # Now, collect the arguments
-                kwargs = node.kwargs
+    def save_to_file(self):
+        if self.disabled:
+            return
+        with open(self.cache_file_path, "w") as f:
+            f.write(self.serialize())
 
-                query = kwargs['query']
-                mm_node = query.args[0].args[0]
+    def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
+        if self.disabled:
+            return False
+        runtime_shape, graph_index = key
+        return runtime_shape in self.cache and graph_index in self.cache[
+            runtime_shape]
 
-                # Create a new call to torch.ops._C.rotary_embedding.default
-                with graph.inserting_before(node):
-                    # just insert the call to the custom op
-                    # NOTE: don't run dead code elimination,
-                    # otherwise this op will be removed
-                    graph.call_function(torch.ops._C.rotary_embedding.default,
-                                        kwargs=kwargs)
+    def __getitem__(self, key: Tuple[Optional[int], int]) -> str:
+        if self.disabled:
+            raise KeyError("cannot read from disabled cache")
+        runtime_shape, graph_index = key
+        return self.cache[runtime_shape][graph_index]
 
-                # Remove the auto_functionalized node
-                # Since the node may have outputs, we need to handle its users
-                # Replace uses of the outputs (getitem nodes) with mm_node
-                for user in list(node.users):
-                    if user.op == 'call_function' and user.target == operator.getitem:  # noqa
-                        # Remove the getitem node
-                        for getitem_user in list(user.users):
-                            if (getitem_user.op == 'call_function'
-                                    and getitem_user.target
-                                    == torch.ops.aten.slice_scatter.default):
-                                # Replace the uses of slice_scatter node
-                                # with mm_node
-                                getitem_user.replace_all_uses_with(mm_node)
-                                nodes_to_remove.append(getitem_user)
-                        nodes_to_remove.append(user)
-                nodes_to_remove.append(node)
+    def __setitem__(self, key: Tuple[Optional[int], int], value: str):
+        # setitem for disabled cache is fine, because we
+        # don't actually write to the disk
+        runtime_shape, graph_index = key
+        self.cache[runtime_shape][graph_index] = value
 
-            elif node.args[0] == torch.ops._C.fused_add_rms_norm.default:
-                # manual replace for fused_add_rms_norm
-                # this is the most effective optimization for llama
-                # failing to do this will result in many unnecessary copies
 
-                kwargs = node.kwargs
+class AlwaysHitShapeEnv:
+    """
+    Why do we need this class:
 
-                input = kwargs['input']
-                residual = kwargs['residual']
+    For normal `torch.compile` usage, every compilation will have
+    one Dynamo bytecode compilation and one Inductor compilation.
+    The Inductor compilation happens under the context of the
+    Dynamo bytecode compilation, and that context is used to
+    determine the dynamic shape information, etc.
 
-                # Create a new call to torch.ops._C.rotary_embedding.default
-                with graph.inserting_before(node):
-                    # just insert the call to the custom op
-                    # NOTE: don't run dead code elimination,
-                    # otherwise this op will be removed
-                    graph.call_function(
-                        torch.ops._C.fused_add_rms_norm.default, kwargs=kwargs)
+    For our use case, we only run Dynamo bytecode compilation once,
+    and run Inductor compilation multiple times with different shapes
+    plus a general shape. The compilation for specific shapes happens
+    outside of the context of the Dynamo bytecode compilation. At that
+    time, we don't have shape environment to provide to Inductor, and
+    it will fail the Inductor code cache lookup.
 
-                for user in list(node.users):
-                    if user.op == 'call_function' and user.target == operator.getitem:  # noqa
-                        # Remove the getitem node
-                        if user.args[1] == 1:
-                            replace_node = input
-                        elif user.args[1] == 2:
-                            replace_node = residual
-                        user.replace_all_uses_with(replace_node)
-                        nodes_to_remove.append(user)
-                nodes_to_remove.append(node)
-            elif (node.args[0] ==
-                  torch.ops._C.fused_add_rms_norm_static_fp8_quant.default):
-                # manual replace for fused_add_rms_norm_static_fp8_quant
-                # this is the most effective optimization for llama
-                # failing to do this will result in many unnecessary copies
+    By providing a dummy shape environment that always hits, we can
+    make the Inductor code cache lookup always hit, and we can
+    compile the graph for different shapes as needed.
 
-                kwargs = node.kwargs
+    The following dummy methods are obtained by trial-and-error
+    until it works.
+    """
 
-                result = kwargs['result']
-                residual = kwargs['residual']
+    def __init__(self) -> None:
+        self.guards: List[Any] = []
 
-                # Create a new call to
-                # torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
-                with graph.inserting_before(node):
-                    # just insert the call to the custom op
-                    # NOTE: don't run dead code elimination,
-                    # otherwise this op will be removed
-                    graph.call_function(
-                        torch.ops._C.fused_add_rms_norm_static_fp8_quant.
-                        default,
-                        kwargs=kwargs)
+    def evaluate_guards_expression(self, *args, **kwargs):
+        return True
 
-                for user in list(node.users):
-                    if user.op == 'call_function' and user.target == operator.getitem:  # noqa
-                        # Remove the getitem node
-                        if user.args[1] == 1:
-                            replace_node = result
-                        elif user.args[1] == 2:
-                            replace_node = residual
-                        user.replace_all_uses_with(replace_node)
-                        nodes_to_remove.append(user)
-                nodes_to_remove.append(node)
+    def get_pruned_guards(self, *args, **kwargs):
+        return []
 
-            elif node.args[0] == torch.ops._C.rms_norm.default:
-                # manual replace for rms_norm
-
-                kwargs = node.kwargs
-
-                replace_node = kwargs['result']
-                # Create a new call to torch.ops._C.rms_norm.default
-                with graph.inserting_before(node):
-                    # just insert the call to the custom op
-                    # NOTE: don't run dead code elimination,
-                    # otherwise this op will be removed
-                    graph.call_function(torch.ops._C.rms_norm.default,
-                                        kwargs=kwargs)
-
-                for user in list(node.users):
-                    if user.op == 'call_function' and user.target == operator.getitem:  # noqa
-                        user.replace_all_uses_with(replace_node)
-                        nodes_to_remove.append(user)
-                nodes_to_remove.append(node)
-
-            elif node.args[
-                    0] == torch.ops._C.rms_norm_static_fp8_quant.default:  # noqa
-                # manual replace for rms_norm_static_fp8_quant
-
-                kwargs = node.kwargs
-
-                replace_node = kwargs['result']
-                # Create a new call to torch.ops._C.rms_norm_static_fp8_quant.default  # noqa
-                with graph.inserting_before(node):
-                    # just insert the call to the custom op
-                    # NOTE: don't run dead code elimination,
-                    # otherwise this op will be removed
-                    graph.call_function(
-                        torch.ops._C.rms_norm_static_fp8_quant.default,
-                        kwargs=kwargs)
-
-                for user in list(node.users):
-                    if user.op == 'call_function' and user.target == operator.getitem:  # noqa
-                        user.replace_all_uses_with(replace_node)
-                        nodes_to_remove.append(user)
-                nodes_to_remove.append(node)
-
-            elif node.args[0] == torch.ops._C.silu_and_mul.default:
-                # manual replace for silu_and_mul
-
-                kwargs = node.kwargs
-
-                input = kwargs['input']
-                out = kwargs['out']
-
-                # Create a new call to torch.ops._C.silu_and_mul.default
-                # cannot use kwargs, because we have an `out`, see https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351 # noqa
-                with graph.inserting_before(node):
-                    # just insert the call to the custom op
-                    # NOTE: don't run dead code elimination,
-                    # otherwise this op will be removed
-                    graph.call_function(
-                        torch.ops._C.silu_and_mul.default,
-                        args=(out, input),
-                    )
-                replace_node = out
-
-                for user in list(node.users):
-                    if user.op == 'call_function' and user.target == operator.getitem:  # noqa
-                        user.replace_all_uses_with(replace_node)
-                        nodes_to_remove.append(user)
-                nodes_to_remove.append(node)
-
-    # Remove the nodes all at once
-    for node in nodes_to_remove:
-        graph.erase_node(node)
-
-    # debug code, if we want to see the graph after the transformation
-    # with open("after.py", "w") as f:
-    #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
+    def produce_guards_expression(self, *args, **kwargs):
+        return ""
 
 
 def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config,
-                  do_logging=False,
+                  compilation_config: CompilationConfig,
+                  graph_index: int = 0,
+                  num_graphs: int = 1,
                   runtime_shape: Optional[int] = None,
                   use_inductor: bool = True):
+    if graph_index == 0:
+        # before compiling the first graph, record the start time
+        global compilation_start_time
+        compilation_start_time = time.time()
+
     if not use_inductor:
         return graph
 
     compilation_counter.num_inductor_compilations += 1
 
-    if do_logging:
-        if runtime_shape is None:
-            logger.info("Compiling a graph for general shape")
-        else:
-            logger.info("Compiling a graph for shape %s", runtime_shape)
-
     from torch._inductor import config
-    current_config = config.shallow_copy_dict()
+    current_config = config.get_config_copy()
     from torch._inductor.compile_fx import compile_fx
 
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
 
+    if isinstance(runtime_shape, int):
+        # for a specific batchsize, tuning triton kernel parameters
+        # can be beneficial
+        current_config["max_autotune"] = True
+        current_config["coordinate_descent_tuning"] = True
+
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
-    return compile_fx(graph, example_inputs, config_patches=current_config)
+
+    cache_data = compilation_config.inductor_hash_cache
+    if (runtime_shape, graph_index) in cache_data:
+        # we compiled this graph before
+        # so we can directly lookup the compiled graph via hash
+        hash_str = cache_data[(runtime_shape, graph_index)]
+        if graph_index == 0:
+            # adds some info logging for the first graph
+            logger.info(
+                "Directly lookup the graph for shape %s from the cache",
+                str(runtime_shape))  # noqa
+        logger.debug(
+            "directly lookup the %s-th graph for shape %s via hash %s",
+            graph_index, str(runtime_shape), hash_str)
+        from torch._inductor.codecache import FxGraphCache
+        with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
+                   lambda *args, **kwargs: AlwaysHitShapeEnv()):
+            inductor_compiled_graph = FxGraphCache._lookup_graph(
+                hash_str, example_inputs, True, False)
+            assert inductor_compiled_graph is not None, (
+                "Inductor cache lookup failed. Please remove"
+                f"the cache file {compilation_config.inductor_hash_cache.cache_file_path} and try again."  # noqa
+            )
+
+        # Inductor calling convention (function signature):
+        # f(list) -> tuple
+        # Dynamo calling convention (function signature):
+        # f(*args) -> Any
+
+        # need to know if the graph returns a tuple
+        from torch._inductor.compile_fx import graph_returns_tuple
+        returns_tuple = graph_returns_tuple(graph)
+
+        # this is the graph we return to Dynamo to run
+        def compiled_graph(*args):
+            # convert args to list
+            list_args = list(args)
+            graph_output = inductor_compiled_graph(list_args)
+            # unpack the tuple if needed
+            if returns_tuple:
+                return graph_output
+            else:
+                return graph_output[0]
+    else:
+        # it's the first time we compile this graph
+        # the assumption is that we don't have nested Inductor compilation.
+        # compiled_fx_graph_hash will only be called once, and we can hook
+        # it to get the hash of the compiled graph directly.
+        from torch._inductor.codecache import compiled_fx_graph_hash
+
+        def hijack_compiled_fx_graph_hash(*args, **kwargs):
+            out = compiled_fx_graph_hash(*args, **kwargs)
+            # store the hash in the cache
+            nonlocal cache_data
+            cache_data[(runtime_shape, graph_index)] = out[0]
+            if graph_index == 0:
+                # adds some info logging for the first graph
+                logger.info("Cache the graph of shape %s for later use",
+                            str(runtime_shape))
+            logger.debug("store the %s-th graph for shape %s via hash %s",
+                         graph_index, str(runtime_shape), out[0])
+            return out
+
+        def _check_can_cache(*args, **kwargs):
+            # no error means it can be cached.
+            # Inductor refuses to cache the graph outside of Dynamo
+            # tracing context, and also disables caching for graphs
+            # with high-order ops.
+            # For vLLM, in either case, we want to cache the graph.
+            # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221 # noqa
+            return
+
+        def _get_shape_env():
+            return AlwaysHitShapeEnv()
+
+        with patch(# for hijacking the hash of the compiled graph
+                "torch._inductor.codecache.compiled_fx_graph_hash",
+                hijack_compiled_fx_graph_hash), \
+            patch(# for providing a dummy shape environment
+                "torch._inductor.codecache.FxGraphCache._get_shape_env",
+                 _get_shape_env), \
+            patch(# for forcing the graph to be cached
+                "torch._inductor.codecache.FxGraphCache._check_can_cache",
+                _check_can_cache):
+            compiled_graph = compile_fx(graph,
+                                        example_inputs,
+                                        config_patches=current_config)
+
+    # after compiling the last graph, record the end time
+    if graph_index == num_graphs - 1:
+        now = time.time()
+        elapsed = now - compilation_start_time
+        compilation_config.compilation_time += elapsed
+        if runtime_shape is None:
+            logger.info("Compiling a graph for general shape takes %.2f s",
+                        elapsed)
+        else:
+            logger.info("Compiling a graph for shape %s takes %.2f s",
+                        runtime_shape, elapsed)
+
+    return compiled_graph
 
 
 @dataclasses.dataclass
@@ -301,6 +337,8 @@ def split_graph(graph: fx.GraphModule,
 # we share the global graph pool among all the backends
 global_graph_pool = None
 
+compilation_start_time = 0.0
+
 
 class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
@@ -315,14 +353,15 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """
 
     def __init__(self, module: torch.fx.GraphModule,
-                 compile_submod_names: List[str],
-                 compilation_configs: CompilationConfig, graph_pool):
+                 compile_submod_names: List[str], vllm_config: VllmConfig,
+                 graph_pool):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
-        self.compilation_configs = compilation_configs
+        self.compilation_config = vllm_config.compilation_config
         self.graph_pool = graph_pool
+        self.vllm_config = vllm_config
 
     def run(self, *args):
         fake_args = [
@@ -344,16 +383,19 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
+            global compilation_start_time
             compiled_graph_for_general_shape = wrap_inductor(
                 submod,
                 args,
-                self.compilation_configs.inductor_compile_config,
+                self.compilation_config.inductor_compile_config,
+                self.compilation_config,
+                graph_index=index,
+                num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
-                do_logging=index == 0,
-                use_inductor=self.compilation_configs.use_inductor)
+                use_inductor=self.compilation_config.use_inductor)
 
             self.module.__dict__[target] = PiecewiseBackend(
-                submod, self.compilation_configs, self.graph_pool, index,
+                submod, self.vllm_config, self.graph_pool, index,
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_general_shape)
 
@@ -370,15 +412,12 @@ class VllmBackend:
     The major work of this backend is to split the graph into
     piecewise graphs, and pass them to the piecewise backend.
 
-    This backend also handles custom passes and adds them to Inductor config.
-    The order of the post-grad post-passes is:
-    1. post_grad_passes (constructor parameter)
-    2. config["post_grad_custom_post_pass"]
-    3. fix_functionalization
-    This way, all passes operate on a functionalized graph.
+    This backend also adds the PostGradPassManager to Inductor config,
+    which handles the post-grad passes.
     """
 
-    compilation_configs: CompilationConfig
+    vllm_config: VllmConfig
+    compilation_config: CompilationConfig
     graph_pool: Any
     _called: bool = False
     # the graph we compiled
@@ -392,7 +431,10 @@ class VllmBackend:
     sym_tensor_indices: List[int]
     input_buffers: List[torch.Tensor]
 
-    def __init__(self, post_grad_passes: Sequence[Callable] = ()):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ):
         global global_graph_pool
         if global_graph_pool is None:
             global_graph_pool = torch.cuda.graph_pool_handle()
@@ -401,55 +443,59 @@ class VllmBackend:
         # streams, it might not be safe to share a global pool.
         # only investigate this when we use multiple streams
         self.graph_pool = global_graph_pool
-        self.post_grad_passes = post_grad_passes
+
+        # Passes to run on the graph post-grad.
+        self.post_grad_pass_manager = PostGradPassManager()
 
         self.sym_tensor_indices = []
         self.input_buffers = []
 
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
+
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
-    def add_passes_to_config(self):
-        config = self.compilation_configs
-        passes = list(self.post_grad_passes)
+    def configure_post_pass(self):
+        config = self.compilation_config
+        self.post_grad_pass_manager.configure(config.pass_config)
 
-        passes = passes + [RedundantReshapesPass(config)]
-
-        if config.enable_fusion:
-            passes = passes + [FusionPass.instance(config)]
-
+        # Post-grad custom passes are run using the post_grad_custom_post_pass
+        # hook. If a pass for that hook exists, add it to the pass manager.
         inductor_config = config.inductor_compile_config
-        if "post_grad_custom_post_pass" in inductor_config:
-            passes = passes + [inductor_config["post_grad_custom_post_pass"]]
-
-        # add the fix_functionalization pass last, so that all other
-        # passes operate on a functionalized graph
-        passes = passes + [fix_functionalization]
-        combined_pass = combine_fx_passes(passes)
-        inductor_config["post_grad_custom_post_pass"] = combined_pass
+        PASS_KEY = "post_grad_custom_post_pass"
+        if PASS_KEY in inductor_config:
+            # Config should automatically wrap all inductor passes
+            assert isinstance(inductor_config[PASS_KEY], InductorPass)
+            self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
+        inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
+        # when dynamo calls the backend, it means the bytecode
+        # transform and analysis are done
         compilation_counter.num_graphs_seen += 1
+        from .monitor import torch_compile_start_time
+        dynamo_time = time.time() - torch_compile_start_time
+        logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
         # called once
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
-        # config is read now, because only here can
-        # we get the sizes to capture for cudagraph
-        # from compilation context
-        self.compilation_configs = CompilationConfig.select_and_init_config()
-        self.add_passes_to_config()
+        self.configure_post_pass()
 
         self.split_gm, self.piecewise_graphs = split_graph(
-            graph, self.compilation_configs.non_cudagraph_ops)
+            graph, self.compilation_config.splitting_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
-        logger.debug("%s", lazy_format_graph_code("before split", self.graph))
-        logger.debug("%s", lazy_format_graph_code("after split",
-                                                  self.split_gm))
+
+        # depyf will hook lazy_format_graph_code and dump the graph
+        # for debugging, no need to print the graph here
+        lazy_format_graph_code("before split", self.graph)
+        lazy_format_graph_code("after split", self.split_gm)
 
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)
@@ -461,13 +507,13 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-                                    self.compilation_configs,
+                                    self.vllm_config,
                                     self.graph_pool).run(*example_inputs)
 
         self._called = True
 
-        if not self.compilation_configs.use_cudagraph or \
-            not self.compilation_configs.cudagraph_copy_inputs:
+        if not self.compilation_config.use_cudagraph or \
+            not self.compilation_config.cudagraph_copy_inputs:
             return self.split_gm
 
         # if we need to copy input buffers for cudagraph
@@ -527,10 +573,9 @@ class ConcreteSizeEntry:
 
 class PiecewiseBackend:
 
-    def __init__(self, graph: fx.GraphModule,
-                 compilation_configs: CompilationConfig, graph_pool: Any,
-                 piecewise_compile_index: int, total_piecewise_compiles: int,
-                 sym_shape_indices: List[int],
+    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
+                 graph_pool: Any, piecewise_compile_index: int,
+                 total_piecewise_compiles: int, sym_shape_indices: List[int],
                  compiled_graph_for_general_shape: Callable):
         """
         The backend for piecewise compilation.
@@ -538,7 +583,7 @@ class PiecewiseBackend:
 
         We will compile `self.graph` once for the general shape,
         and then compile for different shapes specified in
-        `compilation_configs.compile_sizes`.
+        `compilation_config.compile_sizes`.
 
         Independently, we will capture cudagraph for different shapes.
 
@@ -546,7 +591,8 @@ class PiecewiseBackend:
         compile it first, and then capture cudagraph.
         """
         self.graph = graph
-        self.compilation_configs = compilation_configs
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
         self.graph_pool = graph_pool
         self.piecewise_compile_index = piecewise_compile_index
         self.total_piecewise_compiles = total_piecewise_compiles
@@ -556,10 +602,10 @@ class PiecewiseBackend:
             piecewise_compile_index == total_piecewise_compiles - 1)
 
         self.compile_sizes: Set[int] = set(
-            self.compilation_configs.compile_sizes)
+            self.compilation_config.compile_sizes)
         self.capture_sizes: Set[int] = set(
-            self.compilation_configs.capture_sizes
-        ) if self.compilation_configs.use_cudagraph else set()
+            self.compilation_config.capture_sizes
+        ) if self.compilation_config.use_cudagraph else set()
 
         self.first_run_finished = False
 
@@ -572,6 +618,8 @@ class PiecewiseBackend:
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
         self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
+        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.union(
+            self.capture_sizes)
         for shape in self.compile_sizes.union(self.capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
@@ -582,6 +630,9 @@ class PiecewiseBackend:
     def __call__(self, *args) -> Any:
         if not self.first_run_finished:
             self.first_run_finished = True
+            # no specific sizes to compile
+            if self.is_last_graph and not self.to_be_compiled_sizes:
+                end_monitoring_torch_compile(self.vllm_config)
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
@@ -596,26 +647,36 @@ class PiecewiseBackend:
 
         if entry.need_to_compile and not entry.compiled:
             entry.compiled = True
+            self.to_be_compiled_sizes.remove(runtime_shape)
             # args are real arguments
             entry.runnable = wrap_inductor(
                 self.graph,
                 args,
-                self.compilation_configs.inductor_compile_config,
+                self.compilation_config.inductor_compile_config,
+                self.compilation_config,
+                graph_index=self.piecewise_compile_index,
+                num_graphs=self.total_piecewise_compiles,
                 runtime_shape=runtime_shape,
-                do_logging=self.is_first_graph,
-                use_inductor=self.compilation_configs.use_inductor)
+                use_inductor=self.compilation_config.use_inductor)
+
+            # finished compilations for all required shapes
+            if self.is_last_graph and not self.to_be_compiled_sizes:
+
+                # save the hash of the inductor graph for the next run
+                self.compilation_config.inductor_hash_cache.save_to_file()
+                end_monitoring_torch_compile(self.vllm_config)
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
-            if entry.num_finished_warmup < self.compilation_configs.cudagraph_num_of_warmups:  # noqa
+            if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
                 entry.num_finished_warmup += 1
                 if self.is_first_graph:
                     logger.debug(
                         "Warming up %s/%s for shape %s",
                         entry.num_finished_warmup,
-                        self.compilation_configs.cudagraph_num_of_warmups,
+                        self.compilation_config.cudagraph_num_of_warmups,
                         runtime_shape)
                 return entry.runnable(*args)
 
@@ -680,12 +741,3 @@ class PiecewiseBackend:
 
         entry.cudagraph.replay()
         return entry.output
-
-
-def select_default_backend(level: int) -> Union[str, Callable]:
-    if level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
-        backend_str = "eager"
-        return backend_str
-    assert level == CompilationLevel.PIECEWISE
-
-    return VllmBackend()

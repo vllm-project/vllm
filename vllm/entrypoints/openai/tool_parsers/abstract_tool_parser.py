@@ -1,5 +1,3 @@
-import importlib
-import importlib.util
 import os
 from functools import cached_property
 from typing import Callable, Dict, List, Optional, Sequence, Type, Union
@@ -9,7 +7,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ExtractedToolCallInformation)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import is_list_of
+from vllm.utils import import_from_path, is_list_of
 
 logger = init_logger(__name__)
 
@@ -149,13 +147,14 @@ class ToolParserManager:
     @classmethod
     def import_tool_parser(cls, plugin_path: str) -> None:
         """
-        Import a user defined tool parser by the path of the tool parser define
+        Import a user-defined tool parser by the path of the tool parser define
         file.
         """
         module_name = os.path.splitext(os.path.basename(plugin_path))[0]
-        spec = importlib.util.spec_from_file_location(module_name, plugin_path)
-        if spec is None or spec.loader is None:
-            logger.error("load %s from %s failed.", module_name, plugin_path)
+
+        try:
+            import_from_path(module_name, plugin_path)
+        except Exception:
+            logger.exception("Failed to load module '%s' from %s.",
+                             module_name, plugin_path)
             return
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)

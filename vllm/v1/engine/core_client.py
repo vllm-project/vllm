@@ -1,16 +1,18 @@
-import multiprocessing
-import time
-from typing import List, Union
+import os
+import weakref
+from typing import List, Optional
 
 import msgspec
 import zmq
 import zmq.asyncio
 
 from vllm.logger import init_logger
-from vllm.utils import get_open_zmq_ipc_path
+from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreRequest, EngineCoreRequestType)
-from vllm.v1.engine.core import EngineCore, EngineCoreProc
+                            EngineCoreProfile, EngineCoreRequest,
+                            EngineCoreRequestType, EngineCoreRequestUnion)
+from vllm.v1.engine.core import (EngineCore, EngineCoreProc,
+                                 EngineCoreProcHandle)
 from vllm.v1.serial_utils import PickleEncoder
 
 logger = init_logger(__name__)
@@ -58,6 +60,9 @@ class EngineCoreClient:
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
+    def profile(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -65,6 +70,9 @@ class EngineCoreClient:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        raise NotImplementedError
+
+    async def profile_async(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -95,6 +103,15 @@ class InprocClient(EngineCoreClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self.engine_core.abort_requests(request_ids)
 
+    def shutdown(self):
+        self.engine_core.shutdown()
+
+    def __del__(self):
+        self.shutdown()
+
+    def profile(self, is_start: bool = True) -> None:
+        self.engine_core.profile(is_start)
+
 
 class MPClient(EngineCoreClient):
     """
@@ -120,7 +137,10 @@ class MPClient(EngineCoreClient):
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.
-        self.ctx = (zmq.asyncio.Context() if asyncio_mode else zmq.Context())
+        if asyncio_mode:
+            self.ctx = zmq.asyncio.Context()
+        else:
+            self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
         # Path for IPC.
         ready_path = get_open_zmq_ipc_path()
@@ -136,33 +156,40 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
-        self.should_shutdown = multiprocessing.Value('b', False, lock=False)
-        self.proc = EngineCoreProc.make_engine_core_process(
+        self.proc_handle: Optional[EngineCoreProcHandle]
+        self.proc_handle = EngineCoreProc.make_engine_core_process(
             *args,
-            input_path=input_path,
-            output_path=output_path,
-            ready_path=ready_path,
-            should_shutdown=self.should_shutdown,
+            input_path=
+            input_path,  # type: ignore[misc]  # MyPy incorrectly flags duplicate keywords
+            output_path=output_path,  # type: ignore[misc]
+            ready_path=ready_path,  # type: ignore[misc]
             **kwargs,
         )
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
     def shutdown(self):
-        # Send shutdown signal to background process.
-        self.should_shutdown = True
-
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
 
-        # Shutdown the process if needed.
-        if hasattr(self, "proc") and self.proc.is_alive():
-            self.proc.terminate()
+        if hasattr(self, "proc_handle") and self.proc_handle:
+            # Shutdown the process if needed.
+            if self.proc_handle.proc.is_alive():
+                self.proc_handle.proc.terminate()
+                self.proc_handle.proc.join(5)
 
-            time.sleep(5)
-            if self.proc.is_alive():
-                self.proc.kill()
+                if self.proc_handle.proc.is_alive():
+                    kill_process_tree(self.proc_handle.proc.pid)
 
-    def __del__(self):
-        self.shutdown()
+            # Remove zmq ipc socket files
+            ipc_sockets = [
+                self.proc_handle.ready_path, self.proc_handle.output_path,
+                self.proc_handle.input_path
+            ]
+            for ipc_socket in ipc_sockets:
+                socket_file = ipc_socket.replace("ipc://", "")
+                if os and os.path.exists(socket_file):
+                    os.remove(socket_file)
+            self.proc_handle = None
 
 
 class SyncMPClient(MPClient):
@@ -178,7 +205,7 @@ class SyncMPClient(MPClient):
         return engine_core_outputs
 
     def _send_input(self, request_type: EngineCoreRequestType,
-                    request: Union[EngineCoreRequest, List[str]]) -> None:
+                    request: EngineCoreRequestUnion) -> None:
 
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
@@ -189,6 +216,10 @@ class SyncMPClient(MPClient):
 
     def abort_requests(self, request_ids: List[str]) -> None:
         self._send_input(EngineCoreRequestType.ABORT, request_ids)
+
+    def profile(self, is_start: bool = True) -> None:
+        self._send_input(EngineCoreRequestType.PROFILE,
+                         EngineCoreProfile(is_start))
 
 
 class AsyncMPClient(MPClient):
@@ -204,9 +235,8 @@ class AsyncMPClient(MPClient):
 
         return engine_core_outputs
 
-    async def _send_input(
-            self, request_type: EngineCoreRequestType,
-            request: Union[EngineCoreRequest, List[str]]) -> None:
+    async def _send_input(self, request_type: EngineCoreRequestType,
+                          request: EngineCoreRequestUnion) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
@@ -217,3 +247,7 @@ class AsyncMPClient(MPClient):
     async def abort_requests_async(self, request_ids: List[str]) -> None:
         if len(request_ids) > 0:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+
+    async def profile_async(self, is_start: bool = True) -> None:
+        await self._send_input(EngineCoreRequestType.PROFILE,
+                               EngineCoreProfile(is_start))

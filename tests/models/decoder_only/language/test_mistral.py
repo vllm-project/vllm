@@ -2,14 +2,21 @@
 
 Run `pytest tests/models/test_mistral.py`.
 """
+import copy
+import json
+
+import jsonschema
+import jsonschema.exceptions
 import pytest
 
-from vllm import SamplingParams
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (  # noqa
+    MistralToolParser)
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 from ...utils import check_logprobs_close
 
 MODELS = [
-    "mistralai/Mistral-7B-Instruct-v0.1",
+    "mistralai/Mistral-7B-Instruct-v0.3",
 ]
 
 MISTRAL_FORMAT_MODELS = [
@@ -58,17 +65,108 @@ TOOLS = [{
             },
             "required": ["city", "state", "unit"]
         }
+    },
+}, {
+    "type": "function",
+    "function": {
+        "name": "rewrite",
+        "description": "Rewrites text",
+        "parameters": {
+            "type": "object",
+            "required": [],
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The input text to rewrite."
+                }
+            }
+        }
     }
 }]
-MSGS = [{
-    "role":
-    "user",
-    "content": ("Can you tell me what the temperate"
-                " will be in Dallas, in fahrenheit?")
-}]
-EXPECTED_FUNC_CALL = (
-    '[{"name": "get_current_weather", "arguments": '
-    '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]')
+MSGS = [
+    {
+        "role": "system",
+        "content": "You are an assistant."
+    },
+    {
+        "role":
+        "user",
+        "content":
+        "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make errors."  # noqa
+    },
+    {
+        "role":
+        "assistant",
+        "content":
+        "",
+        "tool_calls": [{
+            "id": "bbc5b7ede",
+            "type": "function",
+            "function": {
+                "name":
+                "rewrite",
+                "arguments":
+                '{\"text\":\"My English needs improvving, maybe I make errors.\"}'  # noqa
+            }
+        }]
+    },
+    {
+        "role": "tool",
+        "content":
+        "{\"action\":\"rewrite\",\"outcome\":\"My English needs improving, maybe I make errors.\"}",  # noqa
+        "tool_call_id": "bbc5b7ede",
+        "name": "rewrite"
+    },
+    {
+        "role": "assistant",
+        "content": "---\n\nMy English needs improving, maybe I make errors"
+    },
+    {
+        "role":
+        "user",
+        "content": ("Can you tell me what the temperate"
+                    " will be in Dallas, in fahrenheit?")
+    }
+]
+
+SAMPLE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string"
+        },
+        "age": {
+            "type": "integer"
+        },
+        "skills": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "maxLength": 10
+            },
+            "minItems": 3
+        },
+        "work_history": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string"
+                    },
+                    "duration": {
+                        "type": "number"
+                    },
+                    "position": {
+                        "type": "string"
+                    }
+                },
+                "required": ["company", "position"]
+            }
+        }
+    },
+    "required": ["name", "age", "skills", "work_history"]
+}
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -175,8 +273,63 @@ def test_mistral_function_calling(
                      tokenizer_mode="mistral",
                      config_format="mistral",
                      load_format="mistral") as vllm_model:
-        outputs = vllm_model.model.chat(MSGS,
+
+        msgs = copy.deepcopy(MSGS)
+        outputs = vllm_model.model.chat(msgs,
                                         tools=TOOLS,
                                         sampling_params=SAMPLING_PARAMS)
 
-        assert outputs[0].outputs[0].text.strip() == EXPECTED_FUNC_CALL
+        tokenizer = vllm_model.model.get_tokenizer()
+        tool_parser = MistralToolParser(tokenizer)
+
+        model_output = outputs[0].outputs[0].text.strip()
+        assert model_output.startswith(tool_parser.bot_token), model_output
+        parsed_message = tool_parser.extract_tool_calls(model_output, None)
+
+        assert parsed_message.tools_called
+        assert parsed_message.tool_calls[0].id == "0UAqFzWsD"
+        assert parsed_message.tool_calls[
+            0].function.name == "get_current_weather"
+        assert parsed_message.tool_calls[
+            0].function.arguments == '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}'  # noqa
+        assert parsed_message.content is None
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("guided_backend",
+                         ["outlines", "lm-format-enforcer", "xgrammar"])
+def test_mistral_guided_decoding(
+    vllm_runner,
+    model: str,
+    guided_backend: str,
+) -> None:
+    with vllm_runner(model, dtype='bfloat16',
+                     tokenizer_mode="mistral") as vllm_model:
+
+        guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA,
+                                               backend=guided_backend)
+        params = SamplingParams(max_tokens=512,
+                                temperature=0.7,
+                                guided_decoding=guided_decoding)
+
+        messages = [{
+            "role": "system",
+            "content": "you are a helpful assistant"
+        }, {
+            "role":
+            "user",
+            "content":
+            f"Give an example JSON for an employee profile that "
+            f"fits this schema: {SAMPLE_JSON_SCHEMA}"
+        }]
+        outputs = vllm_model.model.chat(messages, sampling_params=params)
+
+        generated_text = outputs[0].outputs[0].text
+        json_response = json.loads(generated_text)
+        assert outputs is not None
+
+        try:
+            jsonschema.validate(instance=json_response,
+                                schema=SAMPLE_JSON_SCHEMA)
+        except jsonschema.exceptions.ValidationError:
+            pytest.fail("Generated response is not valid with JSON schema")

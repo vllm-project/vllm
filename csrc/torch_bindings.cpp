@@ -128,6 +128,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
            &fused_add_rms_norm_static_fp8_quant);
 
+  // Fused Layernorm + Quant kernels
+  ops.def(
+      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual) -> ()");
+  ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
+           &rms_norm_dynamic_per_token_quant);
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -203,13 +211,36 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   //  conditionally compiled so impl in source file
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
-  ops.def("machete_supported_schedules(int btype) -> str[]");
   ops.def(
-      "machete_gemm(Tensor A, Tensor B, int btype, "
-      "             Tensor? scales, Tensor? zeros, int? group_size, "
-      "             Tensor? C, float? alpha, float? beta, str? schedule)"
-      "-> Tensor");
-  ops.def("machete_prepack_B(Tensor B, int btype) -> Tensor");
+      "machete_supported_schedules("
+      "   ScalarType a_type,"
+      "   int b_type,"
+      "   ScalarType? maybe_group_scales_type,"
+      "   ScalarType? maybe_group_zeros_type,"
+      "   ScalarType? maybe_channel_scales_type,"
+      "   ScalarType? maybe_token_scales_type,"
+      "   ScalarType? maybe_out_type"
+      ") -> str[]");
+  ops.def(
+      "machete_mm("
+      "   Tensor A,"
+      "   Tensor B,"
+      "   int b_type,"
+      "   ScalarType? out_type,"
+      "   Tensor? group_scales,"
+      "   Tensor? group_zeros,"
+      "   int?    group_size,"
+      "   Tensor? channel_scales,"
+      "   Tensor? token_scales,"
+      "   str?    schedule"
+      ") -> Tensor");
+  ops.def(
+      "machete_prepack_B("
+      "   Tensor B,"
+      "   ScalarType a_type,"
+      "   int b_type,"
+      "   ScalarType? group_scales_type"
+      ") -> Tensor");
   // conditionally compiled so impl registration is in source file
 
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
@@ -221,7 +252,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor workspace, "
       "int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
-      "bool has_zp, bool use_fp32_reduce) -> Tensor");
+      "bool has_zp, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
   // gptq_marlin repack from GPTQ.
@@ -235,6 +266,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
       "SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
+#endif
 
   // Dequantization for GGML.
   ops.def("ggml_dequantize(Tensor W, int type, SymInt m, SymInt n) -> Tensor");
@@ -251,6 +283,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
 
+#ifndef USE_ROCM
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def(
       "fp8_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
@@ -287,6 +320,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // capability
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
+
+  // Check if cutlass sparse scaled_mm is supported for CUDA devices of the
+  // given capability
+  ops.def(
+      "cutlass_sparse_scaled_mm_supported(int cuda_device_capability) -> bool");
+  ops.impl("cutlass_sparse_scaled_mm_supported",
+           &cutlass_sparse_scaled_mm_supported);
+
+  // CUTLASS sparse GEMM, supporting symmetric per-tensor or per-row/column
+  // quantization, as well as bias
+  ops.def(
+      "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
+      "                         Tensor bt_nzs,"
+      "                         Tensor bt_meta, Tensor a_scales,"
+      "                         Tensor b_scales, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
+
+  // CUTLASS sparse matrix compressor
+  ops.def(
+      "cutlass_sparse_compress_entry(Tensor! a_nzs, Tensor! a_meta,"
+      "                              Tensor a) -> bool");
+  ops.impl("cutlass_sparse_compress_entry", &cutlass_sparse_compress_entry);
 
   // Mamba selective scan kernel
   ops.def(
