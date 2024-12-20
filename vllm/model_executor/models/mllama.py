@@ -29,7 +29,7 @@ from transformers.modeling_outputs import (BaseModelOutput,
 from transformers.models.mllama.image_processing_mllama import (
     get_optimal_tiled_canvas)
 from transformers.models.mllama.processing_mllama import (
-    build_string_from_input, get_cross_attention_token_mask, MllamaProcessor)
+    get_cross_attention_token_mask, MllamaProcessor)
 
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
@@ -240,17 +240,13 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
         processor_data: Mapping[str, object],
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        images = processor_data["image"]
         image_processor  = hf_processor.image_processor
-        image_features = image_processor(images)
-
-        bos_token = hf_processor.bos_token
-        image_token = hf_processor.image_token
+        image_features = image_processor(**processor_data)
 
         tokenizer = self._get_tokenizer()
-        text = build_string_from_input(prompt, bos_token, image_token)
-        encoding = tokenizer(text)
+        encoding = tokenizer(prompt, return_tensors="pt")
         data = dict(**encoding, **image_features)
+
         return BatchFeature(data=data, tensor_type="pt")
 
     def _get_prompt_replacements(
@@ -274,7 +270,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token_id,
+                target=[image_token_id],
                 replacement=get_replacement_mllama,
             )
         ]
