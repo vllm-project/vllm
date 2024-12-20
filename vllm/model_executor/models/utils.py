@@ -629,6 +629,8 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
         elif current_platform.is_cpu() or current_platform.is_rocm():
             # ROCM doesn't support xformers
             selected_backend = _Backend.TORCH_SDPA
+        elif current_platform.is_npu():
+            selected_backend = _Backend.ASCEND
         else:
             selected_backend = _Backend.XFORMERS
     return selected_backend
