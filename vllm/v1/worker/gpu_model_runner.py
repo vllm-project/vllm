@@ -635,17 +635,6 @@ class GPUModelRunner:
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
 
-            # Compute MM hashes (if enabled)
-            mm_hashes = None
-            if self.use_hash:
-                mm_hashes = self.mm_hasher.hash_dummy_mm_data(dummy_mm_data)
-
-            dummy_mm_kwargs = self.mm_input_mapper_client.process_inputs(
-                mm_data=dummy_mm_data,
-                mm_hashes=mm_hashes,
-                mm_processor_kwargs=None,
-                precomputed_mm_inputs=None)
-
             # NOTE: Currently model is profiled with a single non-text
             # modality even when it supports multiple.
             max_tokens_per_mm_item = max(
@@ -660,8 +649,39 @@ class GPUModelRunner:
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
             # they are scheduled to be processed separately.
+
+            # Case when models have a merged processor, their dummy data is
+            # already batched `MultiModalKwargs`, therefore we need to "unbatch"
+            # and take the first item in each batched tensor.
+            # TODO (ywang96): This is somewhat hacky. Refactor this to be
+            # consistent with the other case.
+            if isinstance(dummy_mm_data, MultiModalKwargs):
+                dummy_mm_kwargs = {
+                    k: v[0].unsqueeze(0)
+                    for k, v in dummy_mm_data.items()
+                }
+
+            # Case when models have dummy data explicitly defined as
+            # `MultiModalDataDict`, so they need to be processed through input
+            # mapper.
+            else:
+                # Compute MM hashes (if enabled)
+                mm_hashes = None
+                if self.use_hash:
+                    mm_hashes = self.mm_hasher.hash_dummy_mm_data(
+                        dummy_mm_data)
+
+                mm_kwargs_list = self.mm_input_mapper_client.process_inputs(
+                    mm_data=dummy_mm_data,
+                    mm_hashes=mm_hashes,
+                    mm_processor_kwargs=None,
+                    precomputed_mm_inputs=None)
+
+                # Take the first `MultiModalKwargs`
+                dummy_mm_kwargs = mm_kwargs_list[0]
+
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
-                [dummy_mm_kwargs[0]] * max_num_mm_items)
+                [dummy_mm_kwargs] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
                 batched_dummy_mm_inputs, device=self.device)
 
