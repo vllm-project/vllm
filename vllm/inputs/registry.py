@@ -1,7 +1,7 @@
 import functools
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Mapping, NamedTuple,
+from typing import (TYPE_CHECKING, Any, Callable, Literal, Mapping, NamedTuple,
                     Optional, Protocol, Union)
 
 from torch import nn
@@ -111,6 +111,39 @@ class InputContext:
 
         return hf_processor
 
+    def get_modality_processor(
+        self,
+        hf_processor: ProcessorMixin,
+        modality_data_key: Literal["text", "images", "videos", "audios"],
+    ) -> Callable[..., BatchFeature]:
+        """
+        Get the HuggingFace modality-specific processor which is
+        a child of a :class:`transformers.ProcessorMixin`, identified by
+        the corresponding keyword argument in its `__call__` method.
+        """
+        if modality_data_key == "text":
+            attributes = ["tokenizer"]
+        elif modality_data_key == "images":
+            attributes = ["image_processor"]
+        elif modality_data_key == "videos":
+            attributes = ["video_processor"]
+        elif modality_data_key == "audios":
+            attributes = ["audio_processor", "feature_extractor"]
+        else:
+            assert_never(modality_data_key)
+
+        modality_processor = next(
+            (getattr(hf_processor, attr)
+             for attr in attributes if hasattr(hf_processor, attr)),
+            None,
+        )
+        if modality_processor is None:
+            raise AttributeError(
+                f"Cannot found HuggingFace processor for "
+                f"{modality_data_key} inside {type(hf_processor)}")
+
+        return modality_processor
+
 
 @dataclass(frozen=True)
 class InputProcessingContext(InputContext):
@@ -131,14 +164,14 @@ class InputProcessingContext(InputContext):
 
     def call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
+        hf_processor: Union[ProcessorMixin, Callable[..., BatchFeature]],
         data: Mapping[str, object],
         kwargs: Optional[Mapping[str, object]] = None,
     ) -> BatchFeature:
+        assert callable(hf_processor)
+
         if kwargs is None:
             kwargs = {}
-
-        assert callable(hf_processor)
 
         base_kwargs = self.model_config.mm_processor_kwargs
         if base_kwargs is None:
