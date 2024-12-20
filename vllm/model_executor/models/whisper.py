@@ -687,6 +687,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> Optional[NestedTensors]:
+        # TODO: This method does not obey the interface for SupportsMultiModal.
+        # Refactor this once encoder/decoder support is implemented in V1.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         return self.model.get_encoder_outputs(
             audio_input["input_features"],
@@ -700,6 +702,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         multimodal_embeddings: Optional[NestedTensors] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
+        # TODO: This method just returns the decoder sequence embeddings since
+        # Whisper does not have encoder text tokens. Refactor this once
+        # encoder/decoder support is implemented in V1.
         return self.model.decoder.get_input_embeddings(input_ids)
 
     def _parse_and_validate_audio_input(
