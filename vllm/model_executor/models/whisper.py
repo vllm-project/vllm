@@ -602,9 +602,8 @@ def input_processor_for_whisper(ctx: InputContext, inputs):
         # Truncate audio to 30 seconds
         audio = audio[:30 * target_sr]
     multi_modal_data["audio"] = (audio, target_sr)
-    # Calculate number of tokens after convolutions
-    num_tokens = (audio.size // 80 - 1) // 2 + 1
-    num_tokens = (num_tokens - 2) // 2 + 1
+    # Calculate number of tokens after feature extraction and convolutions
+    num_tokens = (audio.size // 160 - 1) // 2 + 1
     # Pre-allocate placeholder tokens in encoder sequence
     inputs["encoder"]["prompt_token_ids"] = [0] * num_tokens
     return inputs
