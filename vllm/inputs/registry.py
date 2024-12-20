@@ -182,7 +182,8 @@ class InputProcessingContext(InputContext):
             kwargs,
             hf_processor,
             requires_kw_only=False,
-            allow_var_kwargs=True,
+            # Modality-specific processors should state each kwarg individually
+            allow_var_kwargs=isinstance(hf_processor, ProcessorMixin),
         )
 
         try:
