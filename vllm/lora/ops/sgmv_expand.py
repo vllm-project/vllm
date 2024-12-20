@@ -80,7 +80,6 @@ def _sgmv_expand_kernel(
     offset_k = tl.arange(0, BLOCK_K)
     ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
-    rak = tl.max_contiguous(tl.multiple_of(offset_k % K, BLOCK_K), BLOCK_K)
 
     if SAME_STRIDE:
         cur_lora_d0_stride = ls_d0_ptr
@@ -101,9 +100,9 @@ def _sgmv_expand_kernel(
 
     a_ptr = (cur_input_ptr + cur_seq_start * input_d1_stride +
              ram[:, None] * input_d1_stride +
-             rak[None, :] * input_d2_stride, )
+             offset_k[None, :] * input_d2_stride, )
     b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
-             rak[:, None] * cur_lora_d2_stride +
+             offset_k[:, None] * cur_lora_d2_stride +
              rbn[None, :] * cur_lora_d1_stride)
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(tl.cdiv(K, BLOCK_K)):
@@ -112,10 +111,10 @@ def _sgmv_expand_kernel(
             tiled_b = tl.load(b_ptr)
         else:
             tiled_a = tl.load(a_ptr,
-                              mask=rak[None, :] < K - k * BLOCK_K,
+                              mask=offset_k[None, :] < K - k * BLOCK_K,
                               other=0)
             tiled_b = tl.load(b_ptr,
-                              mask=rak[:, None] < K - k * BLOCK_K,
+                              mask=offset_k[:, None] < K - k * BLOCK_K,
                               other=0)
         if CAST_TYPE:
             tiled_a = tiled_a.to(cur_lora_ptr.dtype.element_ty)
