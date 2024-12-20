@@ -32,7 +32,7 @@ class MultiModalProcessorFactory(Protocol):
         self,
         ctx: InputProcessingContext,
         *,
-        cache: ProcessingCache,
+        cache: Optional[ProcessingCache] = None,
     ) -> BaseMultiModalProcessor:
         ...
 
@@ -359,4 +359,7 @@ class MultiModalRegistry:
         processor_factory = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)
-        return processor_factory(ctx, cache=self._processing_cache)
+        cache = (None if model_config.disable_mm_preprocessor_cache else
+                 self._processing_cache)
+
+        return processor_factory(ctx, cache=cache)

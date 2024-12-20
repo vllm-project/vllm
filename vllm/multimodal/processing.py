@@ -777,7 +777,7 @@ class BaseMultiModalProcessor(ABC):
         self,
         ctx: InputProcessingContext,
         *,
-        cache: ProcessingCache,
+        cache: Optional[ProcessingCache] = None,
     ) -> None:
         super().__init__()
 
@@ -869,6 +869,13 @@ class BaseMultiModalProcessor(ABC):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        if self.cache is None:
+            return self.ctx.call_hf_processor(
+                self._get_hf_processor(**mm_kwargs),
+                dict(text=prompt, **mm_data),
+                mm_kwargs,
+            )
+
         return self.cache.call_hf_processor(
             self.ctx,
             self._get_hf_processor(**mm_kwargs),
