@@ -892,3 +892,84 @@ class BaseMultiModalProcessor(ABC):
             multi_modal_data=mm_inputs["mm_kwargs"],
             multi_modal_placeholders=placeholders_by_modality,
         )
+
+
+class EncDecMultiModalProcessor(BaseMultiModalProcessor):
+
+    def get_dummy_encoder_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_max_tokens: Mapping[str, int],
+    ) -> DummyData:
+        # Avoid circular import
+        from vllm.sequence import SequenceData
+
+        processor_inputs = self._get_dummy_mm_inputs(mm_counts)
+
+        mm_inputs = self.apply(*processor_inputs)
+
+        prompt_token_ids = mm_inputs["prompt_token_ids"]
+        placeholders_by_modality = mm_inputs["mm_placeholders"]
+
+        total_placeholders_by_modality = dict[str, int]()
+        for modality, placeholders in placeholders_by_modality.items():
+            num_placeholders = sum(item["length"] for item in placeholders)
+            max_tokens = mm_max_tokens[modality]
+
+            if num_placeholders != max_tokens:
+                logger.warning(
+                    "The processed dummy data has a total of %d placeholder "
+                    "tokens for the '%s' modality, which is not the expected "
+                    "%d tokens.", num_placeholders, modality, max_tokens)
+
+            total_placeholders_by_modality[modality] = num_placeholders
+
+        total_len = len(prompt_token_ids)
+        if total_len > seq_len:
+            logger.warning(
+                "The context length (%d) of the model is too short "
+                "to hold the multi-modal embeddings in the worst case "
+                "(%d tokens in total, out of which %s are reserved for "
+                "multi-modal embeddings). This may cause certain multi-modal "
+                "inputs to fail during inference, even when the input text is "
+                "short. To avoid this, you should increase `max_model_len`, "
+                "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
+                total_len, total_placeholders_by_modality)
+
+        return DummyData(
+            seq_data=SequenceData.from_seqs(prompt_token_ids),
+            multi_modal_data=mm_inputs["mm_kwargs"],
+            multi_modal_placeholders=placeholders_by_modality,
+        )
+
+    def get_dummy_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_max_tokens: Mapping[str, int],
+    ) -> DummyData:
+        # Avoid circular import
+        from vllm.sequence import SequenceData
+
+        processor_inputs = self._get_dummy_mm_inputs(mm_counts)
+        tokenizer = self._get_tokenizer()
+        prompt_token_ids = tokenizer.encode(processor_inputs.prompt_text)
+
+        total_len = len(prompt_token_ids)
+        if total_len > seq_len:
+            logger.warning(
+                "The context length (%d) of the model is too short "
+                "to hold the multi-modal embeddings in the worst case "
+                "(%d tokens in total, out of which %s are reserved for "
+                "multi-modal embeddings). This may cause certain multi-modal "
+                "inputs to fail during inference, even when the input text is "
+                "short. To avoid this, you should increase `max_model_len`, "
+                "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
+                total_len)
+
+        prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
+
+        return DummyData(
+            seq_data=SequenceData.from_seqs(prompt_token_ids),
+        )
