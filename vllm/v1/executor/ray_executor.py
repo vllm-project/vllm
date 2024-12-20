@@ -47,7 +47,7 @@ class RayExecutor(Executor):
 
         # Create the workers.
         driver_ip = get_ip()
-        worker_wrapper_kwargs = self._get_worker_wrapper_args()
+        # worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 # Skip bundles that don't have GPUs,
@@ -64,7 +64,7 @@ class RayExecutor(Executor):
                 num_gpus=1,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
             self.workers.append(worker)
 
         logger.debug("workers: %s", self.workers)
@@ -191,11 +191,6 @@ class RayExecutor(Executor):
     def _get_env_vars_to_be_updated(self):
         return self._env_vars_for_all_workers
 
-    def _get_worker_module_and_class(self) -> Tuple[str, str]:
-        worker_module_name = "vllm.v1.worker.gpu_worker"
-        worker_class_name = "Worker"
-        return worker_module_name, worker_class_name
-
     def _get_worker_kwargs(
             self,
             local_rank: int = 0,
@@ -212,16 +207,6 @@ class RayExecutor(Executor):
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-        )
-
-    def _get_worker_wrapper_args(self) -> Dict[str, Any]:
-        worker_module_name, worker_class_name = (
-            self._get_worker_module_and_class())
-
-        return dict(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-            trust_remote_code=self.model_config.trust_remote_code,
         )
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
