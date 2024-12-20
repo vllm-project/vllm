@@ -126,6 +126,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
+        self.block_hash_map: List[Dict[int, int]] = []
         self.curr_seq_lens: List[int] = []
         self.multimodal_placeholder_maps: Dict[
             str,
@@ -185,6 +186,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                     block_table = block_tables[seq_id][
                         -curr_sliding_window_block:]
             self.block_tables.append(block_table)
+            if seq_id in inter_data.block_hash_map:
+                self.block_hash_map.append(inter_data.block_hash_map[seq_id])
 
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
@@ -275,6 +278,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             seq_start_loc=seq_start_loc_tensor,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            block_hash_map=self.block_hash_map,
             use_cuda_graph=use_captured_graph,
         )
 
@@ -326,6 +330,7 @@ class CommonAttentionState(AttentionState):
             seq_start_loc=None,
             context_lens_tensor=None,
             block_tables=self._graph_block_tables[:batch_size],
+            block_hash_map={},
             use_cuda_graph=True,
         )
         if is_encoder_decoder_model:

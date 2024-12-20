@@ -128,6 +128,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
     block_tables: Optional[torch.Tensor]
+    block_hash_map: Optional[List[Dict[int, int]]]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -234,6 +235,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            block_hash_map=self.block_hash_map,
             use_cuda_graph=False,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -284,6 +286,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
             block_tables=block_tables,
+            block_hash_map=self.block_hash_map,
             use_cuda_graph=self.use_cuda_graph,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -376,6 +379,7 @@ class FlashAttentionMetadataBuilder(
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
+        self.block_hash_map: List[Dict[int, int]] = []
         self.curr_seq_lens: List[int] = []
         self.multimodal_placeholder_maps: Dict[
             str,
@@ -440,6 +444,8 @@ class FlashAttentionMetadataBuilder(
                     block_table = block_tables[seq_id][
                         -curr_sliding_window_block:]
             self.block_tables.append(block_table)
+            if seq_id in inter_data.block_hash_map:
+                self.block_hash_map.append(inter_data.block_hash_map[seq_id])            
 
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
@@ -559,6 +565,7 @@ class FlashAttentionMetadataBuilder(
             seq_start_loc=seq_start_loc_tensor,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            block_hash_map=self.block_hash_map,
             use_cuda_graph=use_captured_graph,
         )
 

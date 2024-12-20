@@ -14,6 +14,8 @@ from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
 from vllm.sequence import Sequence
 
+from vllm.global_cache import global_cache_instance
+
 PrefixHash = int
 
 # By default, we init our block access time as _DEFAULT_LAST_ACCESSED_TIME
@@ -179,6 +181,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No cached block => Allocate a new block
         block = self.allocate_mutable_block(prev_block, extra_hash=extra_hash)
         block.append_token_ids(token_ids)
+
+        if global_cache_instance.checkExist(block.content_hash):
+            block.global_computed = True
+
         return block
 
     def allocate_immutable_blocks(
@@ -703,6 +709,7 @@ class PrefixCachingBlock(Block):
         block_id: Optional[int] = None,
         computed: bool = False,
         extra_hash: Optional[int] = None,
+        global_computed: bool = False,
     ):
         assert isinstance(allocator, PrefixCachingBlockAllocator), (
             "Currently this class is only tested with "
@@ -717,6 +724,8 @@ class PrefixCachingBlock(Block):
         self._last_accessed: float = _DEFAULT_LAST_ACCESSED_TIME
         self._computed = computed
         self._extra_hash = extra_hash
+
+        self._global_computed = global_computed
 
         # On the first time, we create the block object, and next we only
         # reinitialize it
@@ -758,6 +767,14 @@ class PrefixCachingBlock(Block):
     @computed.setter
     def computed(self, value) -> None:
         self._computed = value
+
+    @property
+    def global_computed(self) -> bool:
+        return self._global_computed
+
+    @global_computed.setter
+    def global_computed(self, value) -> None:
+        self._global_computed = value
 
     @property
     def last_accessed(self) -> float:
