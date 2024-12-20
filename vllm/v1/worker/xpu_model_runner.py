@@ -13,9 +13,8 @@ class XPUModelRunner(GPUModelRunner):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        input_registry: InputRegistry = INPUT_REGISTRY,
     ):
-        super().__init__(vllm_config, device, input_registry)
+        super().__init__(vllm_config, device)
         self.use_cuda_graph = False
 
     @torch.inference_mode()
