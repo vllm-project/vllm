@@ -729,7 +729,7 @@ class ProcessingCache:
 
         # Shallow copy to avoid footgun when downstream methods
         # mutate the returned dictionary (since the result is cached)
-        return BatchFeature(processed_data)  # type: ignore
+        return BatchFeature(processed_data)  # type: ignore[arg-type]
 
     def call_hf_processor(
         self,
