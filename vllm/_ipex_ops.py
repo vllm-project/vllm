@@ -268,7 +268,9 @@ class ipex_ops:
         lora_indices_tensor: torch.Tensor,
         batches: int,
         max_seq_length: int,
+        token_nums: int,
         scaling: float = 1.0) -> None:
+        assert inputs.size(0) == token_nums
         ipex.llm.functional.sgmv_shrink(inputs, lora_a_weights, output_tensor,
                                         b_seq_start_loc, seq_len_tensor, lora_indices_tensor,
                                         batches, max_seq_length, scaling)
@@ -283,7 +285,9 @@ class ipex_ops:
         lora_indices_tensor: torch.Tensor,
         batches: int,
         max_seq_length: int,
+        token_nums: int,
         add_inputs: bool = False) -> None:
+        assert inputs.size(0) == token_nums
         ipex.llm.functional.sgmv_expand(inputs, lora_b_weights, output_tensor,
                                         b_seq_start_loc, seq_len_tensor, lora_indices_tensor,
                                         batches, max_seq_length, add_inputs)
@@ -298,9 +302,11 @@ class ipex_ops:
         lora_indices_tensor: torch.Tensor,
         batches: int,
         max_seq_length: int,
+        token_nums: int,
         slice_offset: int,
         slice_size: int,
         add_inputs: bool = False) -> None:
+        assert inputs.size(0) == token_nums
         ipex.llm.functional.sgmv_expand_slice(inputs, lora_b_weights, output_tensor,
                                               b_seq_start_loc, seq_len_tensor, lora_indices_tensor,
                                               batches, max_seq_length, slice_offset, slice_size, add_inputs)
