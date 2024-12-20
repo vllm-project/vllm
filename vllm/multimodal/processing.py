@@ -1,3 +1,4 @@
+import pickle
 import re
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
@@ -614,7 +615,11 @@ class ProcessingCache:
             logger.debug("ProcessingCache: %s.hit_ratio = %.2f", name,
                          cache_stats.hit_ratio)
 
-    def _iter_bytes_to_hash(self, key: str, obj: object) -> Iterable[bytes]:
+    def _iter_bytes_to_hash(
+        self,
+        key: str,
+        obj: object,
+    ) -> Iterable[tuple[bytes, bytes]]:
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
@@ -625,18 +630,17 @@ class ProcessingCache:
                 yield from self._iter_bytes_to_hash(f"{key}.{k}", v)
             return
 
+        key_bytes = key.encode("utf-8")
+
         # Simple cases
         if isinstance(obj, str):
-            yield key.encode("utf-8")
-            yield obj.encode("utf-8")
+            yield key_bytes, obj.encode("utf-8")
             return
         if isinstance(obj, bytes):
-            yield key.encode("utf-8")
-            yield obj
+            yield key_bytes, obj
             return
         if isinstance(obj, Image):
-            yield key.encode("utf-8")
-            yield obj.tobytes()
+            yield key_bytes, obj.tobytes()
             return
 
         # Convertible to NumPy arrays
@@ -645,19 +649,22 @@ class ProcessingCache:
         if isinstance(obj, (int, float)):
             obj = np.array(obj)
         if isinstance(obj, np.ndarray):
-            yield key.encode("utf-8")
-            yield obj.tobytes()
+            yield key_bytes, obj.tobytes()
             return
 
-        msg = f"Unable to hash object of type {type(obj)}"
-        raise NotImplementedError(msg)
+        logger.warning(
+            "No serialization method found for %s. "
+            "Falling back to pickle.", type(obj))
+
+        yield key_bytes, pickle.dumps(obj)
 
     def _hash_kwargs(self, **kwargs: object) -> str:
         hasher = blake3()
 
         for k, v in kwargs.items():
-            for item_bytes in self._iter_bytes_to_hash(k, v):
-                hasher.update(item_bytes)
+            for k_bytes, v_bytes in self._iter_bytes_to_hash(k, v):
+                hasher.update(k_bytes)
+                hasher.update(v_bytes)
 
         return hasher.hexdigest()
 
