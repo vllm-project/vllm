@@ -19,6 +19,7 @@
 
 # This file is based on the LLama model definition file in transformers
 """PyTorch Cohere model."""
+import copy
 from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
