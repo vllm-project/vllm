@@ -153,10 +153,37 @@ def run_multi_image() -> None:
 
 # Audio input inference
 def run_audio() -> None:
-    # Any format supported by librosa is supported
     audio_url = AudioAsset("winning_call").url
+    audio_base64 = encode_base64_content_from_url(audio_url)
 
-    # Use audio url in the payload
+    # OpenAI-compatible schema (`input_audio`)
+    chat_completion_from_base64 = client.chat.completions.create(
+        messages=[{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What's in this audio?"
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        # Any format supported by librosa is supported
+                        "data": audio_base64,
+                        "format": "wav"
+                    },
+                },
+            ],
+        }],
+        model=model,
+        max_completion_tokens=64,
+    )
+
+    result = chat_completion_from_base64.choices[0].message.content
+    print("Chat completion output from input audio:", result)
+
+    # HTTP URL
     chat_completion_from_url = client.chat.completions.create(
         messages=[{
             "role":
@@ -169,6 +196,7 @@ def run_audio() -> None:
                 {
                     "type": "audio_url",
                     "audio_url": {
+                        # Any format supported by librosa is supported
                         "url": audio_url
                     },
                 },
@@ -181,7 +209,7 @@ def run_audio() -> None:
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output from audio url:", result)
 
-    audio_base64 = encode_base64_content_from_url(audio_url)
+    # base64 URL
     chat_completion_from_base64 = client.chat.completions.create(
         messages=[{
             "role":

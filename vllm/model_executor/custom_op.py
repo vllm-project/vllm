@@ -2,9 +2,9 @@ from typing import Dict, Type
 
 import torch.nn as nn
 
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.plugins import get_current_vllm_config
 from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
