@@ -682,13 +682,20 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    @property
+    def _is_deepseek_v2(self) -> bool:
+        return hasattr(
+            self.hf_text_config,
+            "model_type") and self.hf_text_config.model_type == 'deepseek_v2'
+
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config, "model_type"
-                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+        if self._is_deepseek_v2:
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
-            return 256
+            # return 256
+            # TODO(simon): feature flag MLA
+            return self.hf_text_config.kv_lora_rank  # + self.hf_text_config.qk_rope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -747,6 +754,10 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
+        if self._is_deepseek_v2:
+            # TODO(simon): feature flag MLA
+            return 1
+
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
