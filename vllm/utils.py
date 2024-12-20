@@ -1577,8 +1577,18 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if is_in_doc_build() or not supports_custom_op():
+    if is_in_doc_build():
         return
+
+    if not supports_custom_op():
+        assert not current_platform.is_cuda_alike(), (
+            "cuda platform needs torch>=2.4 to support custom op, "
+            "chances are you are using an old version of pytorch "
+            "or a custom build of pytorch. It is recommended to "
+            "use vLLM in a fresh new environment and let it install "
+            "the required dependencies.")
+        return
+
     import torch.library
     if hasattr(torch.library, "infer_schema"):
         schema_str = torch.library.infer_schema(op_func,
