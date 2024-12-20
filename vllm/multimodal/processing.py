@@ -918,6 +918,10 @@ class BaseMultiModalProcessor(ABC):
         tokenizer = self._get_tokenizer()
 
         token_matches = find_token_matches(token_ids, prompt_repls)
+        mm_match_counts = {
+            modality: len(matches)
+            for modality, matches in full_groupby_modality(token_matches)
+        }
 
         # If the search text does not represent a special token,
         # it may have different token IDs in the prompt, because
@@ -930,8 +934,8 @@ class BaseMultiModalProcessor(ABC):
         # of the search text in the prompt, we instead perform string
         # replacement on the decoded token IDs, then encode them back.
         if all(
-            len(matches) >= mm_item_counts[modality]
-            for modality, matches in full_groupby_modality(token_matches)
+            mm_match_counts.get(modality, 0) >= item_count
+            for modality, item_count in mm_item_counts.items()
         ):  # yapf: disable
             token_ids = replace_token_matches(
                 token_ids,
