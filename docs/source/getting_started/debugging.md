@@ -83,6 +83,11 @@ if world_size <= 1:
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 pynccl = PyNcclCommunicator(group=gloo_group, device=local_rank)
+# pynccl is enabled by default for 0.6.5+,
+# but for 0.6.4 and below, we need to enable it manually.
+# keep the code for backward compatibility when because people
+# prefer to read the latest documentation.
+pynccl.disabled = False
 
 s = torch.cuda.Stream()
 with torch.cuda.stream(s):
