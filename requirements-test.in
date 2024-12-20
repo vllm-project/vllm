@@ -30,5 +30,6 @@ bitsandbytes>=0.45.0
 buildkite-test-collector==0.1.9
 
 genai_perf==0.0.8
+tritonclient==2.51.0
 
 numpy < 2.0.0
