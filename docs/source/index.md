@@ -85,6 +85,7 @@ serving/distributed_serving
 serving/metrics
 serving/integrations
 serving/tensorizer
+serving/runai_model_streamer
 ```
 
 ```{toctree}
