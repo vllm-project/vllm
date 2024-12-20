@@ -144,7 +144,7 @@ class EngineArgs:
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
-    mm_cache_preprocessor: bool = False
+    disable_mm_preprocessor_cache: bool = False
     enable_lora: bool = False
     enable_lora_bias: bool = False
     max_loras: int = 1
@@ -199,6 +199,8 @@ class EngineArgs:
     worker_cls: str = "auto"
 
     kv_transfer_config: Optional[KVTransferConfig] = None
+
+    generation_config: Optional[str] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -317,6 +319,8 @@ class EngineArgs:
             '* "tensorizer" will load the weights using tensorizer from '
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
+            '* "runai_streamer" will load the Safetensors weights using Run:ai'
+            'Model Streamer \n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
         parser.add_argument(
@@ -634,11 +638,10 @@ class EngineArgs:
             help=('Overrides for the multimodal input mapping/processing, '
                   'e.g., image processor. For example: {"num_crops": 4}.'))
         parser.add_argument(
-            '--mm-cache-preprocessor',
+            '--disable-mm-preprocessor-cache',
             action='store_true',
-            help='If true, then enables caching of the multi-modal '
-            'preprocessor/mapper. Otherwise, the mapper executes each time'
-            ', and for better performance consider enabling frontend process.')
+            help='If true, then disables caching of the multi-modal '
+            'preprocessor/mapper. (not recommended)')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
@@ -971,6 +974,16 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
 
+        parser.add_argument(
+            "--generation-config",
+            type=nullable_str,
+            default=None,
+            help="The folder path to the generation config. "
+            "Defaults to None, will use the default generation config in vLLM. "
+            "If set to 'auto', the generation config will be automatically "
+            "loaded from model. If set to a folder path, the generation config "
+            "will be loaded from the specified folder path.")
+
         return parser
 
     @classmethod
@@ -1011,10 +1024,11 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            mm_cache_preprocessor=self.mm_cache_preprocessor,
+            disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
-            logits_processor_pattern=self.logits_processor_pattern)
+            logits_processor_pattern=self.logits_processor_pattern,
+            generation_config=self.generation_config)
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(

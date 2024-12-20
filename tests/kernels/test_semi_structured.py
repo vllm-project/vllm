@@ -8,6 +8,8 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    sparse_cutlass_supported)
 from vllm.platforms import current_platform
 
 CUDA_DEVICES = [
@@ -102,10 +104,11 @@ def baseline_scaled_mm(a: torch.Tensor,
     return output
 
 
-@pytest.mark.skipif(not current_platform.has_device_capability(90),
+@pytest.mark.skipif(not sparse_cutlass_supported(),
                     reason="Sparse FP8 is not yet supported on this GPU type.")
 # Test working with a subset of A and B for sparse matmul
 def test_cutlass_sparse_subset():
+
     big_m = 1024
     m, n, k = 512, 512, 512
 
