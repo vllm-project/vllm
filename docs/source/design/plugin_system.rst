@@ -8,7 +8,7 @@ The community frequently requests the ability to extend vLLM with custom feature
 How Plugins Work in vLLM
 ------------------------
 
-Plugins are user-registered code that vLLM executes. Given vLLM's architecture (see :ref:`class_hierarchy`), multiple processes may be involved, especially when using distributed inference with various parallelism techniques. To enable plugins successfully, every process created by vLLM needs to load the plugin. This is done by the `load_general_plugins <https://github.com/vllm-project/vllm/blob/c76ac49d266e27aa3fea84ef2df1f813d24c91c7/vllm/plugins/__init__.py#L16>`__ function in the ``vllm.plugins`` module. This function is called for every process created by vLLM before it starts any work.
+Plugins are user-registered code that vLLM executes. Given vLLM's architecture (see :ref:`arch_overview`), multiple processes may be involved, especially when using distributed inference with various parallelism techniques. To enable plugins successfully, every process created by vLLM needs to load the plugin. This is done by the `load_general_plugins <https://github.com/vllm-project/vllm/blob/c76ac49d266e27aa3fea84ef2df1f813d24c91c7/vllm/plugins/__init__.py#L16>`__ function in the ``vllm.plugins`` module. This function is called for every process created by vLLM before it starts any work.
 
 How vLLM Discovers Plugins
 --------------------------

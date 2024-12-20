@@ -173,7 +173,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         quant_group: Optional[int],
         k_scales: torch.Tensor,
         v_scales: torch.Tensor,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
 

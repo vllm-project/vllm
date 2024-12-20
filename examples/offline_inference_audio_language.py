@@ -18,6 +18,10 @@ question_per_audio_count = {
     2: "What sport and what nursery rhyme are referenced?"
 }
 
+# NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
+# lower-end GPUs.
+# Unless specified, these settings have been tested to work on a single L4.
+
 
 # Ultravox 0.3
 def run_ultravox(question: str, audio_count: int):
@@ -25,16 +29,18 @@ def run_ultravox(question: str, audio_count: int):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{
-        'role':
-        'user',
-        'content':
-        "<|reserved_special_token_0|>\n" * audio_count + question
+        'role': 'user',
+        'content': "<|audio|>\n" * audio_count + question
     }]
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
 
-    llm = LLM(model=model_name, limit_mm_per_prompt={"audio": audio_count})
+    llm = LLM(model=model_name,
+              max_model_len=4096,
+              max_num_seqs=5,
+              trust_remote_code=True,
+              limit_mm_per_prompt={"audio": audio_count})
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 

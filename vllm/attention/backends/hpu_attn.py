@@ -23,6 +23,10 @@ logger = init_logger(__name__)
 class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "HPU_ATTN"
+
+    @staticmethod
     def get_impl_cls() -> Type["HPUAttentionImpl"]:
         return HPUAttentionImpl
 
@@ -107,8 +111,16 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.matmul_qk = Matmul()
         self.softmax = Softmax()
         self.matmul_av = Matmul()
+        self.batch2block_matmul = Matmul()
+        self.block2batch_matmul = Matmul()
+        # NOTE(kzawora): Contiguous PA is off until model runner supports it
         self.k_cache = VLLMKVCache()
+        self.k_cache.use_contiguous_pa = False
         self.v_cache = VLLMKVCache()
+        self.v_cache.use_contiguous_pa = False
+        # NOTE(kzawora): Pipelined PA is off until model runner supports it
+        ops.pa_impl = ops.pa
+
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
         self.alibi_slopes = alibi_slopes
@@ -140,7 +152,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_metadata: HPUAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -223,9 +236,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_mapping=attn_metadata.block_mapping,
                 block_bias=attn_metadata.attn_bias,
                 block_scales=attn_metadata.block_scales,
+                block_groups=None,
                 scale=self.scale,
                 matmul_qk_op=self.matmul_qk,
                 matmul_av_op=self.matmul_av,
+                batch2block_matmul_op=self.batch2block_matmul,
+                block2batch_matmul_op=self.block2batch_matmul,
                 keys_fetch_func=self.k_cache.fetch_from_cache,
                 values_fetch_func=self.v_cache.fetch_from_cache)
         # Reshape the output tensor.

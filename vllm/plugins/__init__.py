@@ -1,16 +1,15 @@
 import logging
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Callable, Optional, Union
+import os
+
+import torch
 
 import vllm.envs as envs
-
-if TYPE_CHECKING:
-    from vllm.config import CompilationConfig, VllmConfig
-else:
-    CompilationConfig = None
-    VllmConfig = None
+from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
+
+# make sure one process only loads plugins once
+plugins_loaded = False
 
 
 def load_general_plugins():
@@ -18,6 +17,36 @@ def load_general_plugins():
     processes. They should be designed in a way that they can be loaded
     multiple times without causing issues.
     """
+
+    # all processes created by vllm will load plugins,
+    # and here we can inject some common environment variables
+    # for all processes.
+
+    # see https://github.com/vllm-project/vllm/issues/10480
+    os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
+    # see https://github.com/vllm-project/vllm/issues/10619
+    torch._inductor.config.compile_threads = 1
+    if current_platform.is_xpu():
+        # see https://github.com/pytorch/pytorch/blob/8cada5cbe5450e17c26fb8b358116785324537b2/torch/_dynamo/config.py#L158  # noqa
+        os.environ['TORCH_COMPILE_DISABLE'] = 'True'
+    if current_platform.is_hpu():
+        # NOTE(kzawora): PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
+        # does not support torch.compile
+        # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
+        # torch.compile support
+        is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '1') == '1'
+        if is_lazy:
+            # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
+            torch._dynamo.config.disable = True
+            # NOTE(kzawora) multi-HPU inference with HPUGraphs (lazy-only)
+            # requires enabling lazy collectives
+            # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html # noqa: E501
+            os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
+
+    global plugins_loaded
+    if plugins_loaded:
+        return
+    plugins_loaded = True
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
@@ -28,7 +57,7 @@ def load_general_plugins():
 
     discovered_plugins = entry_points(group='vllm.general_plugins')
     if len(discovered_plugins) == 0:
-        logger.info("No plugins found.")
+        logger.debug("No plugins found.")
         return
     logger.info("Available plugins:")
     for plugin in discovered_plugins:
@@ -48,53 +77,3 @@ def load_general_plugins():
                 logger.info("plugin %s loaded.", plugin.name)
             except Exception:
                 logger.exception("Failed to load plugin %s", plugin.name)
-
-
-_torch_compile_backend: Optional[Union[Callable, str]] = None
-
-
-def set_torch_compile_backend(backend: Union[Callable, str]):
-    global _torch_compile_backend
-    _torch_compile_backend = backend
-
-
-def get_torch_compile_backend() -> Optional[Union[Callable, str]]:
-    return _torch_compile_backend
-
-
-_compilation_config: Optional[CompilationConfig] = None
-
-
-def set_compilation_config(config: Optional[CompilationConfig]):
-    global _compilation_config
-    _compilation_config = config
-
-
-def get_compilation_config() -> Optional[CompilationConfig]:
-    return _compilation_config
-
-
-_current_vllm_config: Optional[VllmConfig] = None
-
-
-@contextmanager
-def set_current_vllm_config(vllm_config: VllmConfig):
-    """
-    Temporarily set the current VLLM config.
-    Used during model initialization.
-    We save the current VLLM config in a global variable,
-    so that all modules can access it, e.g. custom ops
-    can access the VLLM config to determine how to dispatch.
-    """
-    global _current_vllm_config
-    old_vllm_config = _current_vllm_config
-    try:
-        _current_vllm_config = vllm_config
-        yield
-    finally:
-        _current_vllm_config = old_vllm_config
-
-
-def get_current_vllm_config() -> VllmConfig:
-    assert _current_vllm_config is not None, "Current VLLM config is not set."
-    return _current_vllm_config

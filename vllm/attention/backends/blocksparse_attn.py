@@ -88,6 +88,11 @@ class BlocksparseParams:
 class BlocksparseFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        # For attention layer compatibility
+        return "FLASH_ATTN"
+
+    @staticmethod
     def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
         return BlocksparseFlashAttentionImpl
 
@@ -355,7 +360,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         quant_group: Optional[int],
         k_scales: torch.Tensor,
         v_scales: torch.Tensor,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -436,8 +442,9 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                k_scale,
-                v_scale,
+                quant_group,
+                k_scales,
+                v_scales,
                 tp_rank=self.tp_rank,
                 blocksparse_local_blocks=self.local_blocks,
                 blocksparse_vert_stride=self.vert_stride,
@@ -445,5 +452,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 blocksparse_head_sliding_step=self.head_sliding_step,
             )
 
+        assert output is not None
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

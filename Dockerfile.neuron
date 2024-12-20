@@ -1,5 +1,6 @@
 # default base image
-ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.1.2-neuronx-py310-sdk2.20.0-ubuntu20.04"
+# https://gallery.ecr.aws/neuron/pytorch-inference-neuronx
+ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.1.2-neuronx-py310-sdk2.20.2-ubuntu20.04"
 
 FROM $BASE_IMAGE
 
@@ -37,5 +38,8 @@ RUN python3 -m pip install -U \
 ENV VLLM_TARGET_DEVICE neuron
 RUN --mount=type=bind,source=.git,target=.git \
     pip install --no-build-isolation -v -e .
+
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
 
 CMD ["/bin/bash"]
