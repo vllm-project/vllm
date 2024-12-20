@@ -14,14 +14,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
-if current_platform.is_cuda_alike():
-    from .fused_moe import fused_experts
-else:
-    fused_experts = None  # type: ignore
-if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
-else:
-    fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
 
 
@@ -135,6 +127,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
+        if current_platform.is_cuda_alike():
+            from .fused_moe import fused_experts
+        else:
+            fused_experts = None  # type: ignore
+
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w2=layer.w2_weight,
@@ -170,6 +167,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if e_score_correction_bias is not None:
             raise NotImplementedError(
                 "Expert score correction bias is not supported for TPU.")
+
+        if current_platform.is_tpu():
+            from .moe_pallas import fused_moe as fused_moe_pallas
+        else:
+            fused_moe_pallas = None  # type: ignore
+
         return fused_moe_pallas(hidden_states=x,
                                 w1=layer.w13_weight,
                                 w2=layer.w2_weight,

@@ -12,27 +12,42 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-if not current_platform.is_tpu() and not current_platform.is_hpu():
-    try:
-        import vllm._C
-    except ImportError as e:
-        logger.warning("Failed to import from vllm._C with %r", e)
+try:
+    import vllm._C
+except ImportError as e:
+    logger.warning("Failed to import from vllm._C with %r", e)
 
 supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
     supports_moe_ops = True
 
+register_fake_func = None
 # neuron has torch version that doesn't even have impl_abstract
-if TYPE_CHECKING or current_platform.is_neuron():
+if TYPE_CHECKING:
 
     def register_fake(fn):
         return lambda name: fn
+
+    register_fake_func = register_fake
 else:
     try:
         from torch.library import register_fake
+
+        register_fake_func = register_fake
     except ImportError:
-        from torch.library import impl_abstract as register_fake
+        try:
+            from torch.library import impl_abstract as register_fake
+
+            register_fake_func = register_fake
+        except ImportError:
+            # For the platform which torch version that doesn't even have
+            # impl_abstract, set a dummy register_fake_func. For example, the
+            # neuron platform.
+            def register_fake(fn):
+                return lambda name: fn
+
+            register_fake_func = register_fake
 
 
 # activation ops
@@ -273,7 +288,7 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 if hasattr(torch.ops._C, "gptq_gemm"):
 
-    @register_fake("_C::gptq_gemm")
+    @register_fake_func("_C::gptq_gemm")
     def _gptq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_gptq_qzeros: torch.Tensor,
                         b_gptq_scales: torch.Tensor, b_g_idx: torch.Tensor,
@@ -308,7 +323,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
-    @register_fake("_C::gptq_marlin_24_gemm")
+    @register_fake_func("_C::gptq_marlin_24_gemm")
     def _gptq_marlin_24_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                                   b_meta: torch.Tensor, b_scales: torch.Tensor,
                                   workspace: torch.Tensor,
@@ -317,7 +332,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                   size_k: torch.SymInt) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
-    @register_fake("_C::gptq_marlin_gemm")
+    @register_fake_func("_C::gptq_marlin_gemm")
     def _gptq_marlin_gemm_fake(a: torch.Tensor,
                                b_q_weight: torch.Tensor,
                                b_scales: torch.Tensor,
@@ -335,7 +350,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                is_zp_float: bool = False) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
-    @register_fake("_C::marlin_qqq_gemm")
+    @register_fake_func("_C::marlin_qqq_gemm")
     def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                               s_tok: torch.Tensor, s_ch: torch.Tensor,
                               s_group: torch.Tensor, workspace: torch.Tensor,
@@ -345,7 +360,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                            dtype=torch.float16,
                            device=a.device)
 
-    @register_fake("_C::marlin_gemm")
+    @register_fake_func("_C::marlin_gemm")
     def _marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                           b_scales: torch.Tensor, workspace: torch.Tensor,
                           size_m: torch.SymInt, size_n: torch.SymInt,
@@ -354,7 +369,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                            dtype=torch.float16,
                            device=a.device)
 
-    @register_fake("_C::awq_dequantize")
+    @register_fake_func("_C::awq_dequantize")
     def _awq_dequantize_fake(qweight: torch.Tensor, scales: torch.Tensor,
                              zeros: torch.Tensor, split_k_iters: torch.SymInt,
                              thx: int, thy: int) -> torch.Tensor:
@@ -365,7 +380,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                            dtype=scales.dtype,
                            device=scales.device)
 
-    @register_fake("_C::awq_gemm")
+    @register_fake_func("_C::awq_gemm")
     def _awq_gemm_fake(input: torch.Tensor, qweight: torch.Tensor,
                        qzeros: torch.Tensor, scales: torch.Tensor,
                        split_k_iters: torch.SymInt) -> torch.Tensor:
@@ -374,7 +389,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                            dtype=input.dtype,
                            device=input.device).sum(0)
 
-    @register_fake("_C::aqlm_gemm")
+    @register_fake_func("_C::aqlm_gemm")
     def _aqlm_gemm_fake(input: torch.Tensor, codes: torch.Tensor,
                         codebooks: torch.Tensor, scales: torch.Tensor,
                         codebook_partition_sizes: List[int],
@@ -390,7 +405,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         output_sizes.append(-1)
         return flat_output.reshape(tuple(output_sizes))
 
-    @register_fake("_C::aqlm_dequant")
+    @register_fake_func("_C::aqlm_dequant")
     def _aqlm_dequant_fake(
             codes: torch.Tensor, codebooks: torch.Tensor,
             codebook_partition_sizes: List[int]) -> torch.Tensor:
@@ -400,7 +415,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                            dtype=codebooks.dtype,
                            device=codebooks.device)
 
-    @register_fake("_C::fp8_marlin_gemm")
+    @register_fake_func("_C::fp8_marlin_gemm")
     def _fp8_marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                               b_scales: torch.Tensor, workspace: torch.Tensor,
                               num_bits: int, size_m: torch.SymInt,
@@ -408,7 +423,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                               size_k: torch.SymInt) -> torch.Tensor:
         return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
 
-    @register_fake("_C::machete_mm")
+    @register_fake_func("_C::machete_mm")
     def machete_mm_fake(
         a: torch.Tensor,
         # b_q Should be the tensor returned by machete_prepack_B
@@ -426,7 +441,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         n = b_q.size(1)
         return torch.empty((m, n), device=a.device, dtype=a.dtype)
 
-    @register_fake("_C::machete_prepack_B")
+    @register_fake_func("_C::machete_prepack_B")
     def machete_prepack_B_fake(
             b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
             group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
@@ -436,13 +451,13 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
 if hasattr(torch.ops._C, "ggml_dequantize"):
 
-    @register_fake("_C::ggml_dequantize")
+    @register_fake_func("_C::ggml_dequantize")
     def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
                               m: torch.SymInt,
                               n: torch.SymInt) -> torch.Tensor:
         return torch.empty((m, n), dtype=torch.float16, device=W.device)
 
-    @register_fake("_C::ggml_mul_mat_vec_a8")
+    @register_fake_func("_C::ggml_mul_mat_vec_a8")
     def _ggml_mul_mat_vec_a8_fake(
         W: torch.Tensor,
         X: torch.Tensor,
@@ -451,7 +466,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
     ) -> torch.Tensor:
         return torch.empty((1, row), dtype=torch.float16, device=W.device)
 
-    @register_fake("_C::ggml_mul_mat_a8")
+    @register_fake_func("_C::ggml_mul_mat_a8")
     def _ggml_mul_mat_a8_fake(
         W: torch.Tensor,
         X: torch.Tensor,
@@ -758,7 +773,7 @@ def machete_prepack_B(
 
 if hasattr(torch.ops._C, "permute_cols"):
 
-    @register_fake("_C::permute_cols")
+    @register_fake_func("_C::permute_cols")
     def _permute_cols_fake(a: torch.Tensor,
                            perm: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(a)
@@ -964,7 +979,7 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
 
-    @register_fake("_moe_C::marlin_gemm_moe")
+    @register_fake_func("_moe_C::marlin_gemm_moe")
     def marlin_gemm_moe_fake(a: torch.Tensor, b_q_weights: torch.Tensor,
                              sorted_ids: torch.Tensor,
                              topk_weights: torch.Tensor,

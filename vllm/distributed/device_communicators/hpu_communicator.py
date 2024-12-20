@@ -1,10 +1,12 @@
+import contextlib
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.platforms import current_platform
 
-if current_platform.is_hpu():
+with contextlib.suppress(ImportError):
     import habana_frameworks.torch as htorch  # noqa: F401
 
 
