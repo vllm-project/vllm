@@ -4,6 +4,9 @@
 # It serves a sanity check for compilation and basic model usage.
 set -ex
 
+# Skip the new torch installation during build since we are using the specified version for arm64 in the Dockerfile
+python3 use_existing_torch.py
+
 # Try building the docker image
 DOCKER_BUILDKIT=1 docker build . \
   --target vllm-openai \
