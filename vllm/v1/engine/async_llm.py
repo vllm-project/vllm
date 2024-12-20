@@ -288,9 +288,8 @@ class AsyncLLM(EngineClient):
                 continue
                 
             out = state.out_list[-1]
-            if len(state.out_list) > 2:
+            if len(state.out_list) > 1:
                 logger.info(f"{len(state.out_list)=}")
-            
 
             state.out_list = []
             if out.finished:
