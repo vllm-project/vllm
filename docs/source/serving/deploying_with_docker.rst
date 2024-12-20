@@ -52,7 +52,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag ``-
 .. note::
 
         Multiple modules must be compiled, so this process can take a while. Recommend using ``--build-arg max_jobs=`` & ``--build-arg nvcc_threads=``
-        flags to speed up build process. However, ensure your 'max_jobs' is substantially larger than 'nvcc_threads' to get the most benefits.
+        flags to speed up build process. However, ensure your ``max_jobs`` is substantially larger than ``nvcc_threads`` to get the most benefits.
         Keep an eye on memory usage with parallel jobs as it can be substantial (see example below).
 
 .. code-block:: console
