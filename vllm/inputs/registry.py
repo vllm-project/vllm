@@ -140,8 +140,8 @@ class InputContext:
         )
         if modality_processor is None:
             raise AttributeError(
-                f"Cannot found HuggingFace processor for "
-                f"{modality_data_key} inside {type(hf_processor)}")
+                f"Cannot find HuggingFace processor for {modality_data_key} "
+                f"inside {type(hf_processor)}")
 
         return modality_processor
 
