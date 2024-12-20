@@ -362,7 +362,9 @@ class FlashInferMetadata(AttentionMetadata):
                     self.paged_kv_indptr[:self.num_prefills + 1],
                     self.paged_kv_indices,
                     self.paged_kv_last_page_len[:self.num_prefills],
-                    self.num_qo_heads, self.num_kv_heads, self.head_dim,
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
                     self.page_size,
                     q_data_type=self.q_data_type,
                     kv_data_type=self.data_type)
