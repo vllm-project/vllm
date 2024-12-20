@@ -7,12 +7,7 @@ import triton.language as tl
 
 from vllm.platforms import current_platform
 
-# Static kernels parameters
-BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
 NUM_WARPS = 8
-
-# To check compatibility
-IS_TURING = current_platform.get_device_capability() == (7, 5)
 
 if triton.__version__ >= "2.1.0":
 
@@ -719,10 +714,16 @@ if triton.__version__ >= "2.1.0":
                               sliding_window=None):
 
         q_dtype_is_f32 = q.dtype is torch.float32
+        # Static kernels parameters
+        BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
+
         # need to reduce num. blocks when using fp32
         # due to increased use of GPU shared memory
         # if q.dtype is torch.float32:
         BLOCK = BASE_BLOCK // 2 if q_dtype_is_f32 else BASE_BLOCK
+
+        # To check compatibility
+        IS_TURING = current_platform.get_device_capability() == (7, 5)
 
         # Turing does have tensor core for float32 multiplication
         # use ieee as fallback for triton kernels work. There is also

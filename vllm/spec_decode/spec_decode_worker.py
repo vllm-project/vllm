@@ -20,10 +20,7 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            HiddenStates, SequenceGroupMetadata,
                            get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-
-if current_platform.is_cuda_alike():
-    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
-
+from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.medusa_worker import MedusaWorker
