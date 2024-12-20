@@ -47,7 +47,6 @@ class RayExecutor(Executor):
 
         # Create the workers.
         driver_ip = get_ip()
-        # worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 # Skip bundles that don't have GPUs,
