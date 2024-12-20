@@ -813,6 +813,26 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
         return processor_data, passthrough_data
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        # Remove the extra dimension
+        if (not self.ctx.model_config.disable_mm_preprocessor_cache
+                and "pixel_values" in processed_outputs):
+            processed_outputs["pixel_values"] = \
+                processed_outputs["pixel_values"].squeeze(0)
+
+        return processed_outputs
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
@@ -945,9 +965,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
         return quant_config
 
-    def _validate_and_reshape_mm_tensor(self,
-                                        mm_input: Union[torch.Tensor,
-                                                        List[torch.Tensor]],
+    def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
             raise ValueError(f"Incorrect type of {name}. "
@@ -957,7 +975,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 return mm_input
             if mm_input.ndim != 3:
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim}")
+                                 f"Got ndim: {mm_input.ndim} "
+                                 f"(shape={mm_input.shape})")
             return torch.concat(list(mm_input))
         else:
             return torch.concat(mm_input)
