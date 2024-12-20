@@ -127,7 +127,7 @@ class InputContext:
         elif modality_data_key == "images":
             attributes = ["image_processor"]
         elif modality_data_key == "videos":
-            attributes = ["video_processor"]
+            attributes = ["video_processor", "image_processor"]
         elif modality_data_key == "audios":
             attributes = ["audio_processor", "feature_extractor"]
         else:
