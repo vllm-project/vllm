@@ -18,7 +18,7 @@ from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available, weak_ref_tensor, print_warning_once
-git
+
 logger = init_logger(__name__)
 
 WeightsMapping = Mapping[str, Optional[str]]
