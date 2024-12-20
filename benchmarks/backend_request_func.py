@@ -1,5 +1,4 @@
 import json
-import os
 import sys
 import time
 import traceback
@@ -27,6 +26,7 @@ class RequestFuncInput:
     extra_body: Optional[dict] = None
     multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
+    api_key: Optional[str] = None
 
 
 @dataclass
@@ -246,9 +246,9 @@ async def async_request_openai_completions(
         }
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
-        }
+        api_key = (request_func_input.api_key if request_func_input.api_key
+                   else os.environ.get('OPENAI_API_KEY'))
+        headers = {"Authorization": f"Bearer {api_key}"}
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
@@ -342,9 +342,11 @@ async def async_request_openai_chat_completions(
         }
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
+        api_key = (request_func_input.api_key if request_func_input.api_key
+                   else os.environ.get('OPENAI_API_KEY'))
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+            "Authorization": f"Bearer {api_key}",
         }
 
         output = RequestFuncOutput()
