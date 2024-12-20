@@ -45,7 +45,11 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-# for arm64, we need to install torch and torchvision from the nightly builds first, so that it won't be overwritten by the requirements
+
+# arm64 (GH200) build follows the practice of "use existing pytorch" build,
+# we need to install torch and torchvision from the nightly builds first,
+# pytorch will not appear as a vLLM dependency in all of the following steps
+# after this step
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
@@ -176,7 +180,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
-# for arm64, we need to install torch and torchvision from the nightly builds first, so that it won't be overwritten during the wheel installation
+# arm64 (GH200) build follows the practice of "use existing pytorch" build,
+# we need to install torch and torchvision from the nightly builds first,
+# pytorch will not appear as a vLLM dependency in all of the following steps
+# after this step
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
