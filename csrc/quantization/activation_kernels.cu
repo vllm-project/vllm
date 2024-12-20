@@ -16,13 +16,6 @@ __device__ __forceinline__ T silu_kernel(const T& x) {
   return (T)(((float)x) / (1.0f + expf((float)-x)));
 }
 
-__device__ __forceinline__ FP8_TYPE
-scaled_fp8_conversion(float const val, float const inverted_scale) {
-  float x = val * inverted_scale;
-  float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
-  return static_cast<FP8_TYPE>(r);
-}
-
 // Activation and gating kernel template.
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
 __global__ void act_and_mul_quant_kernel(
@@ -74,8 +67,8 @@ __global__ void act_and_mul_quant_kernel(
 
 #pragma unroll
     for (int i = 0; i < elems_per_128bit_load; i++) {
-      out_vec[i] =
-          scaled_fp8_conversion(ACT_FN(x_vec[i]) * y_vec[i], inverted_scale);
+      out_vec[i] = scaled_fp8_conversion<true>(ACT_FN(x_vec[i]) * y_vec[i],
+                                               inverted_scale);
     }
 
     out_128bit_ptr[vec_idx] = reinterpret_cast<const int2&>(out_vec);
@@ -87,7 +80,7 @@ __global__ void act_and_mul_quant_kernel(
          idx += blockDim.x) {
       const scalar_t x = VLLM_LDG(&x_ptr[idx]);
       const scalar_t y = VLLM_LDG(&y_ptr[idx]);
-      out_ptr[idx] = scaled_fp8_conversion(ACT_FN(x) * y, inverted_scale);
+      out_ptr[idx] = scaled_fp8_conversion<true>(ACT_FN(x) * y, inverted_scale);
     }
   }
 }
