@@ -502,7 +502,9 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = loaded_weight[0]
+                if loaded_weight.shape:
+                    # scalar shape is torch.Size([1]), not torch.Size([])
+                    loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue

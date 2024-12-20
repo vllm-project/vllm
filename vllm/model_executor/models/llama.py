@@ -197,6 +197,12 @@ class LlamaAttention(nn.Module):
         else:
             sliding_window = None
 
+        # For CUDA devices and Navi4x, attn_fp8 will be set to false.
+        self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
+                        and current_platform.is_rocm() \
+                        and not is_navi() \
+                        and isinstance(quant_config, Fp8Config)
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -207,11 +213,6 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
-        # For CUDA devices and Navi4x, attn_fp8_out will be set to false.
-        self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
-                            and current_platform.is_rocm() \
-                            and not is_navi() \
-                            and isinstance(quant_config, Fp8Config)
 
     def forward(
         self,
@@ -228,8 +229,10 @@ class LlamaAttention(nn.Module):
                                 v,
                                 kv_cache,
                                 attn_metadata,
-                                fp8_out_scale=self.o_proj.input_scale
-                                if self.attn_fp8_out else None)
+                                fp8_comp_scales=(self.attn._q_scale,
+                                                 self.attn._prob_scale,
+                                                 self.o_proj.input_scale if
+                                                 self.attn_fp8_out else None))
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -428,7 +431,9 @@ class LlamaModel(nn.Module):
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = loaded_weight[0]
+                if loaded_weight.shape:
+                    # scalar shape is torch.Size([1]), not torch.Size([])
+                    loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue

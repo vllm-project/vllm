@@ -742,7 +742,7 @@ def attn_fwd(
             mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
             out_ptrs_mask = (mask_m_offsets[:, None] >=
                              out_mask_boundary[None, :])
-            z = 0.0
+            z = tl.zeros((1, ), tl.float32)
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     # write back LSE
     # l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m

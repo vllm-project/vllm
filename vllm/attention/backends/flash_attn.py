@@ -642,7 +642,7 @@ class FlashAttentionImpl(AttentionImpl):
         v_scale: float = 1.0,
         attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
-        fp8_out_scale: Optional[torch.Tensor] = None,
+        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 

@@ -1,5 +1,5 @@
 """Attention layer."""
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -75,6 +75,8 @@ class Attention(nn.Module):
         self.calculate_kv_scales = calculate_kv_scales
         self._k_scale = torch.tensor(1.0, dtype=torch.float32)
         self._v_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None:
@@ -106,11 +108,11 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.backend = backend_name_to_enum(attn_backend.get_name())
 
-        # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
+        # For cuda and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
-        self.use_direct_call = not current_platform.is_cuda_alike(
+        self.use_direct_call = not current_platform.is_cuda(
         ) and not current_platform.is_cpu()
 
         # For some attention backends, we allocate an output tensor before
@@ -124,6 +126,7 @@ class Attention(nn.Module):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
 
+        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
@@ -135,12 +138,11 @@ class Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         attn_type: str = AttentionType.DECODER,
-        fp8_out_scale: Optional[torch.Tensor] = None,
+        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales and \
             attn_metadata.enable_kv_scales_calculation:
-            self.calc_kv_scales(key, value)
-
+            self.calc_kv_scales(query, key, value)
         if self.use_direct_call:
             return self.impl.forward(query,
                                      key,
@@ -150,7 +152,7 @@ class Attention(nn.Module):
                                      self._k_scale,
                                      self._v_scale,
                                      attn_type=attn_type,
-                                     fp8_out_scale=fp8_out_scale)
+                                     fp8_comp_scales=fp8_comp_scales)
         elif self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -172,7 +174,8 @@ class Attention(nn.Module):
                                                     kv_cache, attn_type,
                                                     self.layer_name)
 
-    def calc_kv_scales(self, key, value):
+    def calc_kv_scales(self, query, key, value):
+        self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
         # We only calculate the scales once
