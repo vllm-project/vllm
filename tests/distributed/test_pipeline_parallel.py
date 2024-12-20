@@ -156,24 +156,25 @@ TEXT_GENERATION_MODELS = {
     # "internlm/internlm-chat-7b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(trust_remote_code=True),
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
-    # TODO: Implement PP
-    # "ai21labs/AI21-Jamba-1.5-Mini": PPTestSettings.fast(),
+    "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(trust_remote_code=True),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(trust_remote_code=True),
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
+    "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(tp_base=4),
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
-    "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
+    "shanearora/OLMo-7B-1124-hf": PPTestSettings.fast(),
+    "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
-    "microsoft/phi-2": PPTestSettings.fast(),
-    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True, load_format="dummy", hf_overrides='{"num_hidden_layers": 4, "hidden_size": 512, "intermediate_size": 800, "num_attention_heads": 4, "num_key_value_heads": 1}'),  # noqa: E501
-    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
+    "microsoft/phi-2": PPTestSettings.fast(),
+    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True, load_format="dummy", hf_overrides='{"num_hidden_layers": 4, "hidden_size": 512, "intermediate_size": 800, "num_attention_heads": 4, "num_key_value_heads": 1}'),  # noqa: E501
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "Qwen/Qwen2-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
@@ -213,7 +214,7 @@ MULTIMODAL_MODELS = {
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(trust_remote_code=True),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
-    "fixie-ai/ultravox-v0_3": PPTestSettings.fast(),
+    "fixie-ai/ultravox-v0_3": PPTestSettings.fast(trust_remote_code=True),
     # [Encoder-decoder]
     # TODO: Implement PP
     # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
@@ -233,6 +234,8 @@ TEST_MODELS = [
     "OpenGVLab/InternVL2-1B",
     "microsoft/Phi-3-vision-128k-instruct",
     "fixie-ai/ultravox-v0_3",
+    # [LANGUAGE GENERATION - HYBRID ARCH]
+    "ai21labs/Jamba-tiny-dev",
 ]
 
 
@@ -246,9 +249,19 @@ def _compare_tp(
     *,
     method: Literal["generate", "encode"],
 ):
-    tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
-    multi_node_only, trust_remote_code, tokenizer_mode, \
-        load_format, hf_overrides = test_options
+    (
+        tp_size,
+        pp_size,
+        eager_mode,
+        chunked_prefill,
+    ) = parallel_setup
+    (
+        multi_node_only,
+        trust_remote_code,
+        tokenizer_mode,
+        load_format,
+        hf_overrides,
+    ) = test_options
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")

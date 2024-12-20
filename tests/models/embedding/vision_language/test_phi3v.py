@@ -39,7 +39,7 @@ def _run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model, task="embedding", dtype=dtype,
+    with vllm_runner(model, task="embed", dtype=dtype,
                      enforce_eager=True) as vllm_model:
         vllm_outputs = vllm_model.encode(input_texts, images=input_images)
 
@@ -74,6 +74,7 @@ def _run_test(
     )
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_text(
@@ -98,6 +99,7 @@ def test_models_text(
 
 
 @large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_image(

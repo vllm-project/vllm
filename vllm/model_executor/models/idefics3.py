@@ -15,13 +15,14 @@
 
 import math
 from typing import (Dict, Iterable, List, Literal, Mapping, NamedTuple,
-                    Optional, Tuple, TypedDict, Union)
+                    Optional, Set, Tuple, TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint
 from PIL import Image
 from torch import nn
 # Temporary solution for transformers below 4.46.0.
+from transformers import PretrainedConfig as Idefics3Config
 from transformers import ProcessorMixin as Idefics3ImageProcessor
 
 from vllm.attention import AttentionMetadata
@@ -31,12 +32,14 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.inputs import NestedTensors
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
@@ -57,7 +60,8 @@ class Idefics3ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
     """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
+    Shape: `(batch_size * num_images * num_patches, 
+             num_channels, height, width)`
     """
     pixel_attention_mask: Optional[torch.BoolTensor]
 
@@ -264,54 +268,56 @@ def input_processor_for_idefics3(ctx: InputContext,
     n_images_in_text = []
 
     text = inputs.get("prompt")
-    if text is not None:
-        if isinstance(text, str):
-            text = [text]
-        elif not isinstance(text, list) and not isinstance(text[0], str):
-            raise ValueError("Invalid input text. Please provide a string, "
-                             "or a list of strings")
+    if text is None:
+        prompt_token_ids = inputs.get("prompt_token_ids", [])
+        assert prompt_token_ids
+        text = tokenizer.decode(prompt_token_ids)
 
-        fake_image_token = processor.fake_image_token.content
-        image_token = processor.image_token.content
-        global_img_token = processor.global_image_tag
+    if isinstance(text, str):
+        text = [text]
+    elif not isinstance(text, list) and not isinstance(text[0], str):
+        raise ValueError("Invalid input text. Please provide a string, "
+                         "or a list of strings")
 
-        prompt_strings = []
-        for sample, sample_rows, sample_cols in zip(text, image_rows,
-                                                    image_cols):
-            n_images_in_text.append(sample.count(image_token))
+    fake_image_token = processor.fake_image_token.content
+    image_token = processor.image_token.content
+    global_img_token = processor.global_image_tag
 
-            # Replace the image token with fake tokens around the expanded
-            # image token sequence of length `image_seq_len`
-            image_prompt_strings = []
-            for n_rows, n_cols in zip(sample_rows, sample_cols):
-                image_prompt_string = _get_image_prompt_string(
-                    n_rows,
-                    n_cols,
-                    processor.image_seq_len,
-                    image_token=image_token,
-                    fake_token_around_image=fake_image_token,
-                    global_img_token=global_img_token,
-                )
-                image_prompt_strings.append(image_prompt_string)
+    prompt_strings = []
+    for sample, sample_rows, sample_cols in zip(text, image_rows, image_cols):
+        n_images_in_text.append(sample.count(image_token))
 
-            split_sample = sample.split(image_token)
-            if len(split_sample) == 0:
-                raise ValueError(
-                    "The image token should be present in the text.")
+        # Replace the image token with fake tokens around the expanded
+        # image token sequence of length `image_seq_len`
+        image_prompt_strings = []
+        for n_rows, n_cols in zip(sample_rows, sample_cols):
+            image_prompt_string = _get_image_prompt_string(
+                n_rows,
+                n_cols,
+                processor.image_seq_len,
+                image_token=image_token,
+                fake_token_around_image=fake_image_token,
+                global_img_token=global_img_token,
+            )
+            image_prompt_strings.append(image_prompt_string)
 
-            # Place in the image prompt strings where the image tokens are
-            sample = split_sample[0]
-            for i, image_prompt_string in enumerate(image_prompt_strings):
-                sample += image_prompt_string + split_sample[i + 1]
-            prompt_strings.append(sample)
+        split_sample = sample.split(image_token)
+        if len(split_sample) == 0:
+            raise ValueError("The image token should be present in the text.")
 
-        prompt_token_ids = tokenizer(text=prompt_strings[0]).input_ids
+        # Place in the image prompt strings where the image tokens are
+        sample = split_sample[0]
+        for i, image_prompt_string in enumerate(image_prompt_strings):
+            sample += image_prompt_string + split_sample[i + 1]
+        prompt_strings.append(sample)
 
-        return token_inputs(
-            prompt_token_ids=prompt_token_ids,
-            prompt=prompt_strings[0],
-            multi_modal_data=multi_modal_data,
-        )
+    prompt_token_ids = tokenizer(text=prompt_strings[0]).input_ids
+
+    return token_inputs(
+        prompt_token_ids=prompt_token_ids,
+        prompt=prompt_strings[0],
+        multi_modal_data=multi_modal_data,
+    )
 
 
 def _get_max_num_image_patch(image_processor: Idefics3ImageProcessor) -> int:
@@ -374,12 +380,23 @@ def dummy_data_for_idefics3(
 
 class Idefics3SimpleMLP(nn.Module):
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config: Idefics3Config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         input_size = config.vision_config.hidden_size * (config.scale_factor**
                                                          2)
         output_size = config.text_config.hidden_size
-        self.proj = ReplicatedLinear(input_size, output_size, bias=False)
+        self.proj = ReplicatedLinear(
+            input_size,
+            output_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "proj"),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.proj(x)
@@ -388,10 +405,19 @@ class Idefics3SimpleMLP(nn.Module):
 
 class Idefics3Connector(nn.Module):
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config: Idefics3Config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.scale_factor = config.scale_factor
-        self.modality_projection = Idefics3SimpleMLP(config)
+        self.modality_projection = Idefics3SimpleMLP(
+            config,
+            quant_config,
+            prefix=maybe_prefix(prefix, "modality_projection"),
+        )
 
     def pixel_shuffle(self,
                       x: torch.Tensor,
@@ -431,9 +457,15 @@ class Idefics3Model(nn.Module):
         self.config = config
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
-        self.vision_model = Idefics3VisionTransformer(config.vision_config,
-                                                      quant_config)
-        self.connector = Idefics3Connector(config)
+        self.vision_model = Idefics3VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "vision_model"))
+        self.connector = Idefics3Connector(
+            config,
+            quant_config,
+            prefix=maybe_prefix(prefix, "connector"),
+        )
         self.text_model = LlamaModel(
             vllm_config=vllm_config.with_hf_config(config.text_config),
             prefix=maybe_prefix(prefix, "text_model"),
@@ -489,13 +521,17 @@ class Idefics3Model(nn.Module):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            return Idefics3ImagePixelInputs(type="pixel_values",
-                                            data=self._validate_pixel_values(
-                                                flatten_bn(pixel_values,
-                                                           concat=True)),
-                                            pixel_attention_mask=flatten_bn(
-                                                pixel_attention_mask,
-                                                concat=True))
+            if isinstance(pixel_values, list):
+                pixel_values = torch.cat(pixel_values, dim=1)
+                pixel_attention_mask = torch.cat(pixel_attention_mask, dim=1)
+            else:
+                pixel_values = flatten_bn(pixel_values)
+                pixel_attention_mask = flatten_bn(pixel_attention_mask)
+
+            return Idefics3ImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+                pixel_attention_mask=pixel_attention_mask)
 
         raise AssertionError("This line should be unreachable.")
 
@@ -569,6 +605,12 @@ class Idefics3Model(nn.Module):
         image_features = self._process_image_pixels(image_input)
         return self.connector(image_features)
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.text_model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -576,26 +618,8 @@ class Idefics3Model(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        **kwargs: object,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if intermediate_tensors is not None:
-            input_ids = None
-            inputs_embeds = None
-        else:
-            # always pass the input via `inputs_embeds`
-            # to make sure the computation graph is consistent
-            image_input = self._parse_and_validate_image_input(**kwargs)
-
-            if image_input is not None:
-                vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = self.text_model.get_input_embeddings(input_ids)
-
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
-                    self.image_token_id)
-            else:
-                inputs_embeds = self.text_model.get_input_embeddings(input_ids)
-            input_ids = None
 
         hidden_states = self.text_model(
             input_ids,
@@ -637,6 +661,17 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         "gate_up_proj",
         "down_proj",
     ]
+
+    # BitandBytes specific attributes
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
     embedding_modules = {}
     embedding_padding_modules = []
 
@@ -664,6 +699,25 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
         self.sampler = Sampler()
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self.model._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        vision_embeddings = self.model._process_image_input(image_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.image_token_id)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -671,16 +725,27 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            intermediate_tensors,
-            **kwargs,
-        )
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
+
+        hidden_states = self.model.text_model(input_ids,
+                                              positions,
+                                              kv_caches,
+                                              attn_metadata,
+                                              intermediate_tensors,
+                                              inputs_embeds=inputs_embeds)
+
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -697,9 +762,10 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

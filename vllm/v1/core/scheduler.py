@@ -5,6 +5,8 @@ from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
+from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.base import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -33,21 +35,22 @@ class Scheduler:
         # TODO: Support LoRA.
         assert lora_config is None, "V1 does not support LoRA yet."
 
-        num_gpu_blocks = cache_config.num_gpu_blocks
-        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
-        # Create the block space manager.
-        self.kv_cache_manager = KVCacheManager(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
-        self.block_size = self.cache_config.block_size
-
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
+
+        num_gpu_blocks = cache_config.num_gpu_blocks
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        # Create the KV cache manager.
+        self.kv_cache_manager = KVCacheManager(
+            block_size=self.cache_config.block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            max_model_len=self.max_model_len,
+            sliding_window=self.cache_config.sliding_window,
+            enable_caching=self.cache_config.enable_prefix_caching)
+        self.block_size = self.cache_config.block_size
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
@@ -70,14 +73,13 @@ class Scheduler:
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed). Currently, we assume that the encoder also
         # has the Transformer architecture (e.g., ViT).
-        # FIXME(woosuk): Below are placeholder values. We need to calculate the
-        # actual values from the configurations.
-        self.max_num_encoder_input_tokens = 2048
+        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  #noqa: E501
         # NOTE(woosuk): For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized and used, regardless of
         # the cache size. This is because the memory space for the encoder cache
         # is preallocated in the profiling run.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
+        self.encoder_cache_manager = EncoderCacheManager(
+            cache_size=self.scheduler_config.encoder_cache_size)
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
@@ -149,6 +151,7 @@ class Scheduler:
                     break
             if not can_schedule:
                 break
+            assert new_blocks is not None
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -196,9 +199,13 @@ class Scheduler:
                 if num_new_tokens == 0:
                     # The happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
-                    # the last token.
-                    num_computed_tokens -= 1
-                    num_new_tokens = 1
+                    # the last block. Note that we have to re-compute an entire
+                    # block because allocate_slots() assumes num_computed_tokens
+                    # is always a multiple of the block size. This limitation
+                    # can potentially be removed in the future to slightly
+                    # improve the performance.
+                    num_computed_tokens -= self.block_size
+                    num_new_tokens = self.block_size
                     computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
@@ -382,7 +389,7 @@ class Scheduler:
         model_runner_output: "ModelRunnerOutput",
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
-        sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
+        sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
@@ -509,6 +516,7 @@ class NewRequestData:
     prompt_token_ids: List[int]
     prompt: Optional[str]
     mm_inputs: List["MultiModalKwargs"]
+    mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     block_ids: List[int]
@@ -526,6 +534,7 @@ class NewRequestData:
             prompt_token_ids=request.prompt_token_ids,
             prompt=request.prompt,
             mm_inputs=request.mm_inputs,
+            mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
             block_ids=block_ids,
