@@ -42,15 +42,25 @@ class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
     model_config = ConfigDict(extra="allow")
 
+    # Detect any extra fields present in the json before validation and
+    # processing by Pydantic.
     @model_validator(mode="before")
     @classmethod
-    def __log_extra_fields__(cls, data):
+    def __detect_extra_fields__(cls, data):
         if isinstance(data, dict):
-            extra_fields = data.keys() - cls.model_fields.keys()
-            if extra_fields:
-                logger.warning(
-                    "The following fields were present in the request "
-                    "but ignored: %s", extra_fields)
+            cls.__detected_extra_fields = data.keys() - cls.model_fields.keys(
+            )  # type: ignore
+        return data
+
+    # We only want to log the extra fields if the validation went through and
+    # the json was successfully deserialized.
+    @model_validator(mode="after")
+    @classmethod
+    def __log_extra_fields__(cls, data):
+        if cls.__detected_extra_fields:  # type: ignore
+            logger.warning("The following fields were present in the request "
+                           "but ignored: %s",
+                           cls.__detected_extra_fields)  # type: ignore
         return data
 
 
