@@ -4,17 +4,6 @@
 # It serves a sanity check for compilation and basic model usage.
 set -ex
 
-# Download the python
-PYTHON_VERSION=3.12
-apt-get update -y \
-  && apt-get update -y \
-  && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-  && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-  && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-  && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-  && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
-  && python3 --version && python3 -m pip --version
-
 # Skip the new torch installation during build since we are using the specified version for arm64 in the Dockerfile
 python3 use_existing_torch.py
 
