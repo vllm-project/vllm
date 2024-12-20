@@ -6,6 +6,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Literal, Mapping, NamedTuple,
 
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
@@ -185,6 +186,14 @@ class InputProcessingContext(InputContext):
             # Modality-specific processors should state each kwarg individually
             allow_var_kwargs=isinstance(hf_processor, ProcessorMixin),
         )
+
+        # WhisperFeatureExtractor accepts `raw_speech`
+        # but the parent HF processor accepts `audios`
+        # Making `audios` an alias of `raw_speech` simplifies the calling code
+        if (isinstance(hf_processor, WhisperFeatureExtractor)
+                and "raw_speech" not in data):
+            data = dict(data)
+            data["raw_speech"] = data.pop("audios")
 
         try:
             return hf_processor(**data, **merged_kwargs, return_tensors="pt")

@@ -21,8 +21,8 @@ from vllm.utils import LRUCache, flatten_2d_lists, full_groupby, is_list_of
 
 from .audio import resample_audio
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
-                     MultiModalInputsV2, MultiModalKwargs, PlaceholderRange,
-                     VideoItem)
+                     MultiModalInputsV2, MultiModalKwargs, NestedTensors,
+                     PlaceholderRange, VideoItem)
 
 logger = init_logger(__name__)
 
@@ -682,7 +682,8 @@ class ProcessingCache:
 
         processed_data = dict(**processed_text)
         for data_key, items in mm_data.items():
-            processed_modal_items = defaultdict[str, list[torch.Tensor]](list)
+            processed_modal_items = defaultdict[str, Union[
+                list[torch.Tensor], list[NestedTensors]]](list)
 
             for item in items:
                 self.maybe_log_cache_stats(self._fine_mm_cache,
@@ -703,7 +704,14 @@ class ProcessingCache:
                     # Remove the extra batch dimension
                     processed_modal_items[k].append(v[0])
 
-            processed_data.update(processed_modal_items)
+            for k, vs in processed_modal_items.items():
+                # Try to merge elements into a single tensor
+                if is_list_of(vs, torch.Tensor, check="all") and len(vs) > 0:
+                    first_shape = vs[0].shape
+                    if all(v.shape == first_shape for v in vs):
+                        vs = torch.stack(vs)
+
+                processed_data[k] = vs
 
         return BatchFeature(processed_data)
 

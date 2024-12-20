@@ -93,6 +93,8 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         *,
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
+        return_attention_mask: Optional[bool] = None,
+        padding: Optional[str] = None,
     ) -> Qwen2AudioProcessor:
         return self.ctx.get_hf_processor(Qwen2AudioProcessor)
 
@@ -125,16 +127,28 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs = dict(
                 **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
+                # When fine-grained caching is applied,
+                # the individual processors are called separately.
+                return_attention_mask=True,
+                padding="max_length",
             )
         else:
             # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
             pass
 
-        return super()._call_hf_processor(
+        processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
+
+        # When fine-grained caching is applied,
+        # the individual processors are called separately.
+        if "attention_mask" in processed_outputs:
+            processed_outputs["feature_attention_mask"] = \
+                processed_outputs.pop("attention_mask")
+
+        return processed_outputs
 
     def _get_prompt_replacements(
         self,
