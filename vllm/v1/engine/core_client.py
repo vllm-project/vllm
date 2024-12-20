@@ -140,6 +140,7 @@ class MPClient(EngineCoreClient):
 
         # ZMQ setup.
         if asyncio_mode:
+            print("HERE HERE HERE")
             self.ctx = zmq.asyncio.Context(io_threads=2)
         else:
             self.ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]

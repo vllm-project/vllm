@@ -207,6 +207,9 @@ async def run_vllm_async(
         # async for i, res in all_gens:
         #     pass
 
+        from aiodebug import log_slow_callbacks
+        loop = asyncio.get_event_loop()
+        log_slow_callbacks.enable(0.05)
         await asyncio.gather(*tasks)
 
         end = time.perf_counter()

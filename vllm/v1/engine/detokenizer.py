@@ -468,8 +468,8 @@ class DetokenizerProc(Detokenizer):
 
                 # idx = 0
                 while True:
-                    logger.info(f"EPOCH: {epoch}")
-                    epoch += 1
+                    # logger.info(f"EPOCH: {epoch}")
+                    # epoch += 1
 
                     socks = dict(poller.poll())
 
@@ -484,9 +484,10 @@ class DetokenizerProc(Detokenizer):
                         (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
                         detokenizer_outputs, _ = self.step(engine_core_outputs)
-                        msg = encoder.encode(detokenizer_outputs)
-                        # output_socket.send_multipart((msg, ), copy=False)
-                        output_socket.send(msg)
+                        # msg = encoder.encode(detokenizer_outputs)
+                        # # output_socket.send_multipart((msg, ), copy=False)
+                        # output_socket.send(msg)
+                        output_socket.send_pyobj(detokenizer_outputs)
         
         except Exception as e:
             logger.error(e)
@@ -502,7 +503,7 @@ class DetokenizerClient:
         self.decoder = msgspec.msgpack.Decoder(DetokenizerOutputs)
         
         # ZMQ setup.
-        self.ctx = zmq.asyncio.Context(4)
+        self.ctx = zmq.asyncio.Context(2)
 
         # Get input (DetokenizerRequest) to Detokenizer.
         input_path = get_open_zmq_ipc_path()
@@ -548,5 +549,5 @@ class DetokenizerClient:
 
         # (frame, ) = await self.output_socket.recv_multipart(copy=False)
         # return self.decoder.decode(frame.buffer)
-        msg = await self.output_socket.recv()
-        return self.decoder.decode(msg)
+        return await self.output_socket.recv_pyobj()
+        # return self.decoder.decode(msg)

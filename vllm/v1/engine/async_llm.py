@@ -115,6 +115,7 @@ class AsyncLLM(EngineClient):
 
         # self.output_handler: Optional[asyncio.Task] = None
         self.to_create_loop = True
+        self.epoch = 0
 
     def __del__(self):
         self.shutdown()
@@ -246,9 +247,17 @@ class AsyncLLM(EngineClient):
         # to handle startup failure gracefully in the OpenAI server.
         # if self.output_handler is None:
         if self.to_create_loop:
+            
+            import signal
+            def signal_handler(self, signum=None, frame=None):
+                logger.warning(
+                    f"SIGTERM received. {signum=} {frame=}. Draining requests and shutting down..."
+            )
+
+            self.to_create_loop = False
             loop = asyncio.get_event_loop()
             loop.create_task(self._run_output_handler())
-            self.to_create_loop = False
+            loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
         state = await self.add_request(
             request_id,
@@ -275,13 +284,13 @@ class AsyncLLM(EngineClient):
 
             except asyncio.TimeoutError:
                 # TODO(rob): do request cancellation checking here.
-                logger.debug("Timeout waiting for %s", request_id)
+                # logger.debug("Timeout waiting for %s", request_id)
                 continue
                 
             out = state.out_list[-1]
             if len(state.out_list) > 2:
                 logger.info(f"{len(state.out_list)=}")
-                self.warned = True
+            
 
             state.out_list = []
             if out.finished:
@@ -324,46 +333,44 @@ class AsyncLLM(EngineClient):
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
-        epoch = 0
+        # epoch = 0
 
-        try:
-            while True:
-                # logger.info(f"EPOCH: {epoch}")
-                # epoch += 1
+        while True:
+            # logger.info(f"EPOCH: {epoch}")
+            # self.warned = False
+            # if self.epoch % 10 == 0:
+            #     logger.info(f"\n{self.epoch=}\n")
+            # self.epoch += 1
 
-                # 1) Pull outputs from the Detokenizer.
-                detokenizer_outputs = (
-                    await self.detokenizer.get_output_async()).outputs
+            # 1) Pull outputs from the Detokenizer.
+            detokenizer_outputs = (
+                await self.detokenizer.get_output_async()).outputs
 
-                for detok_out in detokenizer_outputs:
-                    if detok_out.request_id not in self.rid_to_state:
-                        raise RuntimeError(f"{detok_out.request_id} "
-                                            "not in RequestStates")
+            for detok_out in detokenizer_outputs:
+                if detok_out.request_id not in self.rid_to_state:
+                    raise RuntimeError(f"{detok_out.request_id} "
+                                        "not in RequestStates")
 
-                    state = self.rid_to_state[detok_out.request_id]
+                state = self.rid_to_state[detok_out.request_id]
 
-                    out = RequestOutput.from_detok(
-                        state.prompt,
-                        state.prompt_token_ids,
-                        detok_out,
-                    )
+                out = RequestOutput.from_detok(
+                    state.prompt,
+                    state.prompt_token_ids,
+                    detok_out,
+                )
 
-                    # Update the RequestState and alert generate() that there
-                    # is a RequestOutput ready to return to the user.
-                    
-                    state.out_list.append(out)
-                    state.event.set()
+                # Update the RequestState and alert generate() that there
+                # is a RequestOutput ready to return to the user.
+                
+                state.out_list.append(out)
+                state.event.set()
 
-                # 3) Abort any requests that finished due to stop strings.
-                # await self.engine_core.abort_requests_async(reqs_to_abort)
+            # 3) Abort any requests that finished due to stop strings.
+            # await self.engine_core.abort_requests_async(reqs_to_abort)
 
-                # 4) Abort any requests due to client cancellations.
-                # TODO: send back to detokenizer if this fails.
-                # await self._process_cancellations()
-
-        except Exception as e:
-            logger.error(e)
-            raise e
+            # 4) Abort any requests due to client cancellations.
+            # TODO: send back to detokenizer if this fails.
+            # await self._process_cancellations()
 
     async def abort(self, request_id: str) -> None:
         # Note: this is not used outside of testing.
