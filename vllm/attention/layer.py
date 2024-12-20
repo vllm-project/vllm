@@ -143,15 +143,16 @@ class Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
 
-        return self.impl.forward(query,
-                                 key,
-                                 value,
-                                 kv_cache,
-                                 attn_metadata,
-                                 self._quant_group,
-                                 self._k_scales,
-                                 self._v_scales,
-                                 attn_type=attn_type)
+        if self.use_direct_call:
+            return self.impl.forward(query,
+                                    key,
+                                    value,
+                                    kv_cache,
+                                    attn_metadata,
+                                    self._quant_group,
+                                    self._k_scales,
+                                    self._v_scales,
+                                    attn_type=attn_type)
         elif self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
