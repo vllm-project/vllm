@@ -3,6 +3,9 @@
 Deploying with Docker
 ============================
 
+Use vLLM's Official Docker Image
+--------------------------------
+
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
 
@@ -24,12 +27,15 @@ The image can be used to run OpenAI compatible server and is available on Docker
         memory to share data between processes under the hood, particularly for tensor parallel inference.
 
 
+Building vLLM's Docker Image from Source
+----------------------------------------
+
 You can build and run vLLM from source via the provided `Dockerfile <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`_. To build vLLM:
 
 .. code-block:: console
 
-    $ DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
-
+    $ # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
+    $ DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai
 
 .. note::
 
@@ -62,7 +68,10 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
       --build-arg torch_cuda_arch_list="9.0+PTX" \
       --build-arg vllm_fa_cmake_gpu_arches="90-real"
 
-To run vLLM:
+Use the custom-built vLLM Docker image
+--------------------------------------
+
+To run vLLM with the custom-built Docker image:
 
 .. code-block:: console
 
@@ -72,6 +81,8 @@ To run vLLM:
         --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
         vllm/vllm-openai <args...>
 
+The argument ``vllm/vllm-openai`` specifies the image to run, and should be replaced with the name of the custom-built image (the ``-t`` tag from the build command).
+
 .. note::
 
-        **For `v0.4.1` and `v0.4.2` only** - the vLLM docker images under these versions are supposed to be run under the root user since a library under the root user's home directory, i.e. ``/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1`` is required to be loaded during runtime. If you are running the container under a different user, you may need to first change the permissions of the library (and all the parent directories) to allow the user to access it, then run vLLM with environment variable ``VLLM_NCCL_SO_PATH=/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1`` .
+        **For ``v0.4.1``` and ``v0.4.2``` only** - the vLLM docker images under these versions are supposed to be run under the root user since a library under the root user's home directory, i.e. ``/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1`` is required to be loaded during runtime. If you are running the container under a different user, you may need to first change the permissions of the library (and all the parent directories) to allow the user to access it, then run vLLM with environment variable ``VLLM_NCCL_SO_PATH=/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1`` .
