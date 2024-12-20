@@ -1139,6 +1139,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if not seq_group.is_prefill():
+                seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1181,6 +1183,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if not seq_group.is_prefill():
+                seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
