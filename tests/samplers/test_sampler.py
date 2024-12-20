@@ -1,5 +1,6 @@
 import itertools
 import random
+from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock, patch
@@ -12,7 +13,8 @@ import vllm.envs as envs
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
+                           SequenceData, SequenceGroupMetadata)
 from vllm.utils import Counter, is_pin_memory_available
 
 
@@ -754,3 +756,137 @@ def test_sampler_include_gpu_probs_tensor(device: str):
     assert sampler_output.sampled_token_probs is not None
     assert sampler_output.logprobs is not None
     assert sampler_output.sampled_token_ids is not None
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_dry(device: str):
+    vocab_size = 8
+
+    def test_sampling_params(sampling_params: List[SamplingParams]):
+        seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        seq_lens: List[int] = []
+        for i in range(2):
+            seq_group_metadata_list.append(
+                SequenceGroupMetadata(
+                    request_id=f"test_{i}",
+                    is_prompt=True,
+                    seq_data={
+                        0:
+                        SequenceData(
+                            array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3, 1, 2]))
+                    },
+                    sampling_params=sampling_params[i],
+                    block_tables={0: [1]},
+                ))
+            seq_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            seq_lens,
+            query_lens=seq_lens,
+            device=device,
+            pin_memory=is_pin_memory_available())
+
+        fake_logits = torch.full((2, vocab_size),
+                                 1e-2,
+                                 device=device,
+                                 dtype=torch.float16)
+        fake_logits[:, 3] = 1.0
+
+        sampler = MockLogitsSampler(fake_logits)
+        sampler_output = sampler(logits=fake_logits,
+                                 sampling_metadata=sampling_metadata)
+
+        generated_tokens = []
+        for output in sampler_output:
+            generated_tokens.append(output.samples[0].output_token)
+
+        return generated_tokens
+
+    # Test case 1: DRY disabled (multiplier = 0)
+    sampling_params_no_dry = SamplingParams(
+        temperature=0.0,
+        dry_multiplier=0.0,
+    )
+
+    # Test case 2: DRY enabled with full range
+    sampling_params_full_dry = SamplingParams(
+        temperature=0.0,
+        dry_multiplier=1.0,
+        dry_allowed_length=2,
+        dry_base=2.0,
+        dry_range=0,
+    )
+
+    # Test case 3: DRY enabled with limited range
+    sampling_params_limited_dry = SamplingParams(
+        temperature=0.0,
+        dry_multiplier=1.0,
+        dry_allowed_length=2,
+        dry_base=2.0,
+        dry_range=3,
+    )
+
+    tokens1 = test_sampling_params(
+        [sampling_params_no_dry, sampling_params_full_dry])
+
+    assert tokens1[0] == 3, "Without DRY, should choose highest logit token"
+    assert tokens1[
+        1] != 3, "With full-range DRY, should avoid repeating pattern"  # noqa: E501
+
+    tokens2 = test_sampling_params(
+        [sampling_params_full_dry, sampling_params_limited_dry])
+
+    assert tokens2[0] != 3, "Full-range DRY should detect full pattern"
+    assert tokens2[
+        1] == 3, "Limited-range DRY should only consider recent tokens"  # noqa: E501
+
+    tokens3 = test_sampling_params(
+        [sampling_params_full_dry, sampling_params_limited_dry])
+    assert tokens2 == tokens3, "DRY sampling should be deterministic"
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_dry_sequence_breakers(device: str):
+    """Test that DRY respects sequence breakers."""
+    vocab_size = 8
+
+    # 7 is a sequence breaker
+    input_sequence = [1, 2, 7, 1, 2]
+
+    seq_group_metadata = SequenceGroupMetadata(
+        request_id="test_0",
+        is_prompt=True,
+        seq_data={
+            0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, input_sequence))
+        },
+        sampling_params=SamplingParams(
+            temperature=0.0,
+            dry_multiplier=1.0,
+            dry_allowed_length=2,
+            dry_base=2.0,
+            dry_range=0,
+            dry_sequence_breaker_ids=[7],
+        ),
+        block_tables={0: [1]},
+    )
+
+    sampling_metadata = SamplingMetadata.prepare(
+        [seq_group_metadata],
+        seq_lens=[len(input_sequence)],
+        query_lens=[len(input_sequence)],
+        device=device,
+        pin_memory=is_pin_memory_available())
+
+    fake_logits = torch.full((1, vocab_size),
+                             1e-2,
+                             device=device,
+                             dtype=torch.float16)
+    fake_logits[0, 3] = 1.0
+
+    sampler = MockLogitsSampler(fake_logits)
+    sampler_output = sampler(logits=fake_logits,
+                             sampling_metadata=sampling_metadata)
+
+    assert sampler_output[0].samples[0].output_token == 3, \
+        "DRY should not detect patterns across sequence breakers"
