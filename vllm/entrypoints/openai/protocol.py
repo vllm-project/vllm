@@ -46,7 +46,15 @@ class OpenAIBaseModel(BaseModel):
     @classmethod
     def __log_extra_fields__(cls, data):
         if isinstance(data, dict):
-            extra_fields = data.keys() - cls.model_fields.keys()
+            # Get all class field names and their potential aliases
+            field_names = set()
+            for field_name, field in cls.model_fields.items():
+                field_names.add(field_name)
+                if hasattr(field, 'alias') and field.alias:
+                    field_names.add(field.alias)
+
+            # Compare against both field names and aliases
+            extra_fields = data.keys() - field_names
             if extra_fields:
                 logger.warning(
                     "The following fields were present in the request "
