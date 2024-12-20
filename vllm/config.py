@@ -22,12 +22,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform, interface
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
-    get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
+    get_sentence_transformer_tokenizer_config, is_encoder_decoder,
+    try_get_generation_config, uses_mrope)
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, print_warning_once, random_uuid,
                         resolve_obj_by_qualname)
@@ -160,6 +161,7 @@ class ModelConfig:
             logits processor qualified names that can be passed with the
             `logits_processors` extra completion argument. Defaults to None, 
             which allows no processors.
+        generation_config: Configuration parameter file for generation.
     """
 
     def compute_hash(self) -> str:
@@ -218,7 +220,8 @@ class ModelConfig:
                  disable_mm_preprocessor_cache: bool = False,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  override_pooler_config: Optional["PoolerConfig"] = None,
-                 logits_processor_pattern: Optional[str] = None) -> None:
+                 logits_processor_pattern: Optional[str] = None,
+                 generation_config: Optional[str] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -347,6 +350,8 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config(override_pooler_config)
         self.logits_processor_pattern = logits_processor_pattern
+
+        self.generation_config = generation_config
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -812,6 +817,56 @@ class ModelConfig:
             raise ValueError("The model is not multimodal.")
 
         return self.multimodal_config
+
+    def try_get_generation_config(self) -> Dict[str, Any]:
+        if self.generation_config is None or self.generation_config == "auto":
+            config = try_get_generation_config(
+                self.model,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.revision,
+            )
+        else:
+            config = try_get_generation_config(
+                self.generation_config,
+                trust_remote_code=self.trust_remote_code,
+            )
+
+        if config is None:
+            return {}
+
+        return config.to_diff_dict()
+
+    def get_diff_sampling_param(self) -> Dict[str, Any]:
+        """
+        This method returns a dictionary containing the parameters 
+        that differ from the default sampling parameters, but only 
+        if `generation_config` is set. If `generation_config` is not 
+        set, an empty dictionary is returned.
+
+        Returns:
+            Dict[str, Any]: A dictionary with the differing sampling 
+            parameters if `generation_config` is set, otherwise an 
+            empty dictionary.
+        """
+        if self.generation_config is None:
+            # When generation_config is not set
+            return {}
+        config = self.try_get_generation_config()
+        available_params = [
+            "repetition_penalty",
+            "temperature",
+            "top_k",
+            "top_p",
+            "min_p",
+        ]
+        if any(p in config for p in available_params):
+            diff_sampling_param = {
+                p: config.get(p)
+                for p in available_params if config.get(p) is not None
+            }
+        else:
+            diff_sampling_param = {}
+        return diff_sampling_param
 
     @property
     def is_encoder_decoder(self) -> bool:
@@ -2143,6 +2198,17 @@ def _get_and_verify_dtype(
                     torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
+
+            if (current_platform.is_cpu()
+                    and current_platform.get_cpu_architecture()
+                    == interface.CpuArchEnum.POWERPC
+                    and (config_dtype == torch.float16
+                         or config_dtype == torch.float32)):
+                logger.info(
+                    "For POWERPC, we cast models to bfloat16 instead of "
+                    "using float16 by default. Float16 is not currently "
+                    "supported for POWERPC.")
+                torch_dtype = torch.bfloat16
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(

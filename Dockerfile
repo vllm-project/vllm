@@ -45,16 +45,20 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
-COPY requirements-cuda-arm64.txt requirements-cuda-arm64.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-cuda.txt
 
+# arm64 (GH200) build follows the practice of "use existing pytorch" build,
+# we need to install torch and torchvision from the nightly builds first,
+# pytorch will not appear as a vLLM dependency in all of the following steps
+# after this step
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install -r requirements-cuda-arm64.txt; \
+        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
     fi
+
+COPY requirements-common.txt requirements-common.txt
+COPY requirements-cuda.txt requirements-cuda.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r requirements-cuda.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -76,11 +80,6 @@ COPY requirements-build.txt requirements-build.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install -r requirements-cuda-arm64.txt; \
-    fi
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -157,8 +156,6 @@ WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
 
-COPY requirements-cuda-arm64.txt requirements-cuda-arm64.txt
-
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
@@ -183,16 +180,19 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
+# arm64 (GH200) build follows the practice of "use existing pytorch" build,
+# we need to install torch and torchvision from the nightly builds first,
+# pytorch will not appear as a vLLM dependency in all of the following steps
+# after this step
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
+    fi
+
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        pip uninstall -y torch && \
-        python3 -m pip install -r requirements-cuda-arm64.txt; \
-    fi
 
 RUN --mount=type=cache,target=/root/.cache/pip \
 . /etc/environment && \
@@ -244,6 +244,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     else \
         pip install accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.0' 'timm==0.9.10'; \
     fi
+
 ENV VLLM_USAGE_SOURCE production-docker-image
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
