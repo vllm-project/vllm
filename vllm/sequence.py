@@ -779,6 +779,14 @@ class SequenceGroup:
             "if the seq_group is in prefill phase.")
         return self.last_token_latency
 
+    def get_last_token_latency(self) -> float:
+        """Returns the latency of the last token."""
+        if self.is_prefill():
+            raise ValueError(
+                "seq_group.get_last_token_latency() should not be called "
+                "if the seq_group is in prefill phase.")
+        return self.last_token_latency
+    
     def maybe_set_first_token_time(self, time: float) -> None:
         """Sets the first token time for Request level timings."""
         # Note: in a case where a sequence_group is swapped and
