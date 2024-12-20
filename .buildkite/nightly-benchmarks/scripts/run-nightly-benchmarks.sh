@@ -443,13 +443,14 @@ main() {
   # run the test
   run_serving_tests "$BENCHMARK_ROOT/tests/nightly-tests.json"
 
+  # run genai-perf tests
+  run_genai_perf_tests "$BENCHMARK_ROOT/tests/genai-perf-tests.json"
+  mv artifacts/ $RESULTS_FOLDER/
+
   # upload benchmark results to buildkite
   python3 -m pip install tabulate pandas
   python3 "$BENCHMARK_ROOT/scripts/summary-nightly-results.py"
   upload_to_buildkite
-
-  # run genai-perf tests
-  run_genai_perf_tests "$BENCHMARK_ROOT/tests/genai-perf-tests.json"
 
 }
 
