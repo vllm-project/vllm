@@ -183,6 +183,8 @@ class CohereAttention(nn.Module):
 
         self.sliding_window = (sliding_window
                                if layer_has_sliding_window else None)
+        cache_config = copy.deepcopy(cache_config)
+        cache_config.sliding_window = self.sliding_window
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -190,7 +192,6 @@ class CohereAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              per_layer_sliding_window=self.sliding_window,
                               prefix=f"{prefix}.attn")
         if self.use_qk_norm:
             self.q_norm = LayerNorm(param_shape=(self.num_heads,
