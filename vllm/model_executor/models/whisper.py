@@ -1,11 +1,10 @@
 import math
-from functools import lru_cache
-from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
 from torch import nn
-from transformers import WhisperProcessor
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
@@ -24,13 +23,21 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
+                             NestedTensors)
+from vllm.multimodal.audio import resample_audio
 from vllm.sequence import SequenceData
+from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import SupportsMultiModal
 from .utils import AutoWeightsLoader, WeightsMapper, make_layers
 
 logger = init_logger(__name__)
+
+
+class WhisperAudioInputs(TypedDict):
+    input_features: NestedTensors
+    """Shape: `(batch_size, 128, M)`"""
 
 
 class WhisperPositionalEmbedding(nn.Embedding):
@@ -192,6 +199,8 @@ class WhisperCrossAttention(WhisperAttention):
     ):
         q, _ = self.q_proj(hidden_states)
 
+        # Encoder hidden states are only computed once during prefill phase.
+        # Afterwards, the keys and values should be available in the kv-cache.
         if encoder_hidden_states is not None:
             kv, _ = self.kv_proj(encoder_hidden_states)
             k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
@@ -459,7 +468,7 @@ class WhisperDecoder(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.get_input_embeddings(input_ids)
         positions = self.embed_positions(positions)
         hidden_states = inputs_embeds + positions
 
@@ -473,6 +482,12 @@ class WhisperDecoder(nn.Module):
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
 
 class WhisperModel(nn.Module):
@@ -492,16 +507,11 @@ class WhisperModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if input_features is not None:
-            # Prefill encoder kv-caches
-            encoder_outputs = self.encoder(
-                input_features,
-                kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
-            )
-        else:
-            encoder_outputs = None
-
+        encoder_outputs = self.get_encoder_outputs(
+            input_features,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+        )
         decoder_outputs = self.decoder(
             input_ids=input_ids,
             positions=positions,
@@ -510,6 +520,20 @@ class WhisperModel(nn.Module):
             attn_metadata=attn_metadata,
         )
         return decoder_outputs
+
+    def get_encoder_outputs(
+        self,
+        input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]],
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    ) -> Optional[torch.Tensor]:
+        if input_features is None:
+            return None
+        return self.encoder(
+            input_features,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+        )
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -564,33 +588,6 @@ def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
     )
 
 
-@lru_cache
-def get_whisper_processor(
-    processor_name: str,
-    *args,
-    trust_remote_code: bool = False,
-    revision: Optional[str] = None,
-    **kwargs,
-) -> WhisperProcessor:
-    """Gets an whisper processor for the given model name via HuggingFace."""
-    return WhisperProcessor.from_pretrained(
-        processor_name,
-        *args,
-        trust_remote_code=trust_remote_code,
-        revision=revision,
-        **kwargs,
-    )
-
-
-def _resample(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-    try:
-        import librosa
-    except ImportError as exc:
-        raise ImportError(
-            "Please install vllm[audio] for audio support.") from exc
-    return librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
-
-
 def input_processor_for_whisper(ctx: InputContext, inputs):
     
     multi_modal_data = inputs["encoder"]["multi_modal_data"]
@@ -599,9 +596,9 @@ def input_processor_for_whisper(ctx: InputContext, inputs):
         multi_modal_data["audio"] = multi_modal_data["audio"][0]
     # Resample and process audio
     audio, orig_sr = multi_modal_data["audio"]
-    processor = get_whisper_processor(ctx.model_config.model)
+    processor = cached_get_processor(ctx.model_config.model)
     target_sr = processor.feature_extractor.sampling_rate
-    audio = _resample(audio, orig_sr=orig_sr, target_sr=target_sr)
+    audio = resample_audio(audio, orig_sr=orig_sr, target_sr=target_sr)
     if audio.size > 30 * target_sr:
         # Truncate audio to 30 seconds
         audio = audio[:30 * target_sr]
@@ -626,7 +623,7 @@ def input_mapper_for_whisper(
     if len(multi_modal_data) == 0:
         return MultiModalKwargs()
 
-    processor = get_whisper_processor(ctx.model_config.model)
+    processor = cached_get_processor(ctx.model_config.model)
     sampling_rate = processor.feature_extractor.sampling_rate
 
     audios = [audio for audio, _ in multi_modal_data]
@@ -675,18 +672,48 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
-        input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]]
-        input_features = kwargs.get("input_features")
-        if input_features is not None:
-            input_features = [feat.to(self.dtype) for feat in input_features]
+        audio_input = self._parse_and_validate_audio_input(**kwargs)
         decoder_outputs = self.model(
-            input_features=input_features,
+            input_features=audio_input["input_features"],
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )
         return decoder_outputs
+
+    def get_multimodal_embeddings(
+        self,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        **kwargs,
+    ) -> Optional[NestedTensors]:
+        audio_input = self._parse_and_validate_audio_input(**kwargs)
+        return self.model.get_encoder_outputs(
+            audio_input["input_features"],
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+        )
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+    ) -> torch.Tensor:
+        return self.model.decoder.get_input_embeddings(input_ids)
+
+    def _parse_and_validate_audio_input(
+            self, **kwargs: object) -> WhisperAudioInputs:
+        input_features = kwargs.pop("input_features", None)
+
+        if input_features is not None:
+            if not isinstance(input_features, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of audio features. "
+                                f"Got type: {type(input_features)}")
+            input_features = [feat.to(self.dtype) for feat in input_features]
+
+        return WhisperAudioInputs(input_features=input_features)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
