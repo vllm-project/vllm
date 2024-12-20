@@ -1,15 +1,15 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.3-complete
-ARG HIPBLASLT_BRANCH="507a649"
+ARG HIPBLASLT_BRANCH="4d40e36"
 ARG LEGACY_HIPBLASLT_OPTION=
-ARG RCCL_BRANCH="dfe4a3e"
+ARG RCCL_BRANCH="648a58d"
 ARG RCCL_REPO="https://github.com/ROCm/rccl"
-ARG TRITON_BRANCH="e192dba"
+ARG TRITON_BRANCH="e5be006"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
-ARG PYTORCH_BRANCH="8bc4033"
+ARG PYTORCH_BRANCH="8d4926e"
 ARG PYTORCH_VISION_BRANCH="v0.19.1"
 ARG PYTORCH_REPO="https://github.com/pytorch/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
-ARG FA_BRANCH="c555642"
+ARG FA_BRANCH="b7d29fb"
 ARG FA_REPO="https://github.com/ROCm/flash-attention.git"
 
 FROM ${BASE_IMAGE} AS base

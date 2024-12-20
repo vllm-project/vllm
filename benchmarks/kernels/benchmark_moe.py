@@ -155,7 +155,7 @@ def get_rocm_tuning_space(use_fp16):
     # For now we see better perf with num_stages=0 for all gemm configs we care
     # But keep this explicit so that we do not forget we may need to set it to
     # other values in the future
-    num_stage_range = [0]
+    num_stage_range = [2]
     waves_per_eu_range = [0]
     matrix_instr_nonkdim_range = [16, 32] if use_fp16 else []
     kpack_range = [1, 2] if use_fp16 else []
