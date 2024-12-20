@@ -395,7 +395,6 @@ class InputBatch:
         # TODO - Add a method in vllm/utils.py to pad a numpy array similar
         # to make_tensor_with_pad which takes a list and move the logic
         # there.
-        
         padded_prompts = np.full((self.num_reqs, max_prompt_len),
                                  vocab_size,
                                  dtype=np.int64)
