@@ -803,14 +803,14 @@ class BaseMultiModalProcessor(ABC):
 
     def _apply_hf_processor(
         self,
-        prompt: str,
+        prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs]:
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
         processed_data = self._call_hf_processor(
-            prompt=prompt,
+            prompt=prompt_text,
             mm_data=processor_data,
             mm_kwargs=hf_processor_mm_kwargs,
         )
@@ -827,7 +827,7 @@ class BaseMultiModalProcessor(ABC):
 
     def _cached_apply_hf_processor(
         self,
-        prompt: str,
+        prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs]:
@@ -835,7 +835,7 @@ class BaseMultiModalProcessor(ABC):
 
         if cache is None:
             return self._apply_hf_processor(
-                prompt=prompt,
+                prompt_text=prompt_text,
                 mm_items=mm_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             )
@@ -860,15 +860,17 @@ class BaseMultiModalProcessor(ABC):
 
         # Rely on our placeholder replacement logic instead of HF
         # to insert the placeholder tokens
-        prompt_ids = _encode(self._get_tokenizer(),
-                             prompt,
-                             add_special_tokens=True)
+        prompt_ids = self._get_tokenizer().encode(prompt_text)
 
-        _, mm_missing_kwargs = self._apply_hf_processor(
-            prompt=prompt,
-            mm_items=mm_missing_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-        )
+        if mm_missing_items:
+            _, mm_missing_kwargs = self._apply_hf_processor(
+                prompt_text=prompt_text,
+                mm_items=mm_missing_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            )
+        else:
+            # Avoid unnecessary tokenization of the prompt text
+            mm_missing_kwargs = MultiModalKwargs({})
 
         mm_missing_next_idx = {modality: 0 for modality in mm_missing_items}
 
