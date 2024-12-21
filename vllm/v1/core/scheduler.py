@@ -140,7 +140,6 @@ class Scheduler:
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
 
-                    logger.info(f"Preempted: {preempted_req.request_id}")
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -425,12 +424,10 @@ class Scheduler:
                 # Check for stop and update request state.
                 # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
-                
+
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
                     request_id=req_id,
-                    prompt=request.prompt,
-                    prompt_token_ids=request.prompt_token_ids,
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
