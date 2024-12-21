@@ -27,8 +27,7 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
-                                  SamplingParams)
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
@@ -174,7 +173,6 @@ class OpenAIServingCompletion(OpenAIServing):
         stream = (request.stream
                   and (request.best_of is None or request.n == request.best_of)
                   and not request.use_beam_search)
-        assert isinstance(sampling_params, SamplingParams)
 
         # Streaming response
         if stream:
@@ -186,8 +184,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 model_name,
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
-                request_metadata=request_metadata,
-            )
+                request_metadata=request_metadata)
 
         # Non-streaming response
         final_res_batch: List[Optional[RequestOutput]] = [None] * num_prompts
