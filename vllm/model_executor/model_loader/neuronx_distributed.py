@@ -309,6 +309,8 @@ class NeuronSpeculationCausalLM(nn.Module):
         next_pos_ids = output.fused_outputs[-1]
         generated_token_counts = next_pos_ids - positions
 
+        assert torch.any(generated_token_counts == 0).item() is False, "NxDI model generated no output for one or more sequences."
+
         batch_size, steps = accepted_tokens_with_padding.shape
         mask = torch.arange(steps).expand(batch_size, -1) >= generated_token_counts
         accepted_tokens_with_padding[mask] = -1
