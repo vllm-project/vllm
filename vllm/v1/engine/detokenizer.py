@@ -14,10 +14,8 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
-from vllm.v1.engine import (DetokenizerRequest, DetokenizerOutputs,
-                            DetokenizerOutput,
-                            EngineCoreOutput, EngineCoreOutputs, 
-                            BackgroundProcHandle,)
+from vllm.v1.engine import (DetokenizerRequest, EngineCoreOutput,
+                            EngineCoreOutputs, BackgroundProcHandle,)
 from vllm.v1.utils import (make_zmq_socket, zmq_socket_ctx, 
                            wait_for_startup)
 from vllm.v1.serial_utils import PickleEncoder

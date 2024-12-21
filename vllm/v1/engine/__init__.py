@@ -69,7 +69,6 @@ class EngineCoreOutput(
     finished: bool
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
-    
 
 
 class EngineCoreOutputs(

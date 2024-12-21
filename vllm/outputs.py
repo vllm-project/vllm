@@ -12,7 +12,6 @@ from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
-from vllm.v1.engine import DetokenizerOutput
 
 
 @dataclass
@@ -133,29 +132,6 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
 
-    @classmethod
-    def from_detok(
-        cls,
-        prompt: str,
-        prompt_token_ids: List[int],
-        detok_output: DetokenizerOutput,
-    ):
-        completion_output = CompletionOutput(
-            index=0,
-            text=detok_output.text,
-            token_ids=detok_output.token_ids,
-            cumulative_logprob=None,
-            logprobs=None,  # TODO
-        )
-
-        return RequestOutput(
-            request_id=detok_output.request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=None,  # TODO
-            outputs=[completion_output],
-            finished=detok_output.finished,
-        )
 
     @classmethod
     def new(
