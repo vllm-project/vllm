@@ -151,7 +151,6 @@ class InputBatch:
             self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: Set[str] = set()
 
-        self.prompt_tokens_tensor: Optional[torch.Tensor] = None
         self.min_tokens: List[int] = [0] * max_num_reqs
         self.stop_token_ids: List[Set[int]] = [
             set() for _ in range(max_num_reqs)
@@ -244,6 +243,8 @@ class InputBatch:
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
+        self.min_tokens[req_index] = 0
+        self.stop_token_ids[req_index].clear()
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
@@ -259,6 +260,9 @@ class InputBatch:
         self.frequency_penalties_reqs.clear()
         self.presence_penalties_reqs.clear()
         self.repetition_penalties_reqs.clear()
+        self.min_tokens = [0] * self.max_num_reqs
+        for stop_token_ids in self.stop_token_ids:
+            stop_token_ids.clear()
         self.generators.clear()
         self.num_logprobs.clear()
         self.prompt_logprob_reqs.clear()
@@ -323,6 +327,7 @@ class InputBatch:
         req_id_output_token_ids: Dict[str, List[int]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
+        prompt_tokens_tensor: Optional[torch.Tensor] = None
         if not skip_copy:
             self.temperature[:self.num_reqs].copy_(
                 self.temperature_cpu_tensor[:self.num_reqs], non_blocking=True)
@@ -346,9 +351,8 @@ class InputBatch:
                 # The prompt tokens are used only for applying penalties during
                 # the sampling process. Hence copy these tensors only when
                 # there are requests which need penalties to be applied.
-                self.prompt_tokens_tensor = \
-                    self._construct_prompt_tokens_tensor(
-                        self.vocab_size, device=self.device)
+                prompt_tokens_tensor = self._construct_prompt_tokens_tensor(
+                    self.vocab_size, device=self.device)
 
         output_token_ids: List[List[int]] = []
 
@@ -373,8 +377,7 @@ class InputBatch:
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
-            prompt_token_ids=self.prompt_tokens_tensor[:self.num_reqs] \
-                if self.prompt_tokens_tensor is not None else None,
+            prompt_token_ids=prompt_tokens_tensor,
             frequency_penalties=self.frequency_penalties[:self.num_reqs],
             presence_penalties=self.presence_penalties[:self.num_reqs],
             repetition_penalties=self.repetition_penalties[:self.num_reqs],
