@@ -494,7 +494,6 @@ def build_app(args: Namespace) -> FastAPI:
         app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.root_path = args.root_path
-    app.count = 0
 
     mount_metrics(app)
 

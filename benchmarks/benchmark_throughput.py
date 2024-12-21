@@ -6,7 +6,6 @@ import random
 import time
 from typing import List, Optional
 
-import asyncio
 import torch
 import uvloop
 from PIL import Image
@@ -204,7 +203,6 @@ async def run_vllm_async(
         for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
             generators.append(generator)
-        
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
             pass
