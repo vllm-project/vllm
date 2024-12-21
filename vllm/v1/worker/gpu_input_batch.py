@@ -147,7 +147,7 @@ class InputBatch:
             dtype=torch.float,
             device="cpu",
             pin_memory=pin_memory)
-        self.repetition_penalties_cpu =\
+        self.repetition_penalties_cpu = \
             self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: Set[str] = set()
 
@@ -205,7 +205,7 @@ class InputBatch:
         self.top_k_cpu[req_index] = sampling_params.top_k
         if sampling_params.top_k > 0:
             self.top_k_reqs.add(req_id)
-        self.frequency_penalties_cpu[req_index] =\
+        self.frequency_penalties_cpu[req_index] = \
             sampling_params.frequency_penalty
         if sampling_params.frequency_penalty != 0.0:
             self.frequency_penalties_reqs.add(req_id)
@@ -292,7 +292,7 @@ class InputBatch:
             # block_table_cpu.
             self.token_ids_cpu[empty_index] = self.token_ids_cpu[
                 last_req_index]
-            self.num_prompt_token_ids[empty_index] =\
+            self.num_prompt_token_ids[empty_index] = \
                 self.num_prompt_token_ids[last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
@@ -399,7 +399,7 @@ class InputBatch:
                                  vocab_size,
                                  dtype=np.int64)
         for i in range(self.num_reqs):
-            padded_prompts[i, :self.num_prompt_token_ids[i]] =\
+            padded_prompts[i, :self.num_prompt_token_ids[i]] = \
                 self.token_ids_cpu[i, :self.num_prompt_token_ids[i]]
         prompt_tokens_cpu_tensor = torch.from_numpy(padded_prompts).to("cpu")
         if self.pin_memory:
@@ -431,9 +431,9 @@ class InputBatch:
 
     @property
     def no_penalties(self) -> bool:
-        return len(self.presence_penalties_reqs) == 0 and \
-            len(self.frequency_penalties_reqs) == 0 and \
-                len(self.repetition_penalties_reqs) == 0
+        return (len(self.presence_penalties_reqs) == 0
+                and len(self.frequency_penalties_reqs) == 0
+                and len(self.repetition_penalties_reqs) == 0)
 
     @property
     def max_num_logprobs(self) -> int:
