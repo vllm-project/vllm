@@ -35,31 +35,6 @@ class DetokenizerRequest(
     include_stop_str_in_output: bool
 
 
-class DetokenizerOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
-    request_id: str
-    text: str
-    token_ids: List[int]
-    finished: bool
-
-
-class DetokenizerOutputs(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
-    #NOTE(Nick): We could consider ways to make this more compact,
-    # e.g. columnwise layout and using an int enum for finish/stop reason
-
-    # [num_reqs]
-    outputs: List[DetokenizerOutput]
-
-
 @dataclass
 class EngineCoreRequest:
 
