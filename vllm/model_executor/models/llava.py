@@ -1,5 +1,4 @@
 from functools import cached_property
-from types import MethodType
 from typing import (Iterable, List, Literal, Mapping, Optional, Protocol, Set,
                     Tuple, TypedDict, Union)
 
@@ -116,30 +115,29 @@ def get_max_llava_image_tokens(ctx: InputContext):
 
 class LlavaMultiModalProcessor(BaseMultiModalProcessor):
 
-    def _patch_pixtral_processor(self, hf_processor: PixtralProcessor):
-        if getattr(hf_processor, "__is_patched__", False):
-            return  # Already patched
-
-        image_processor = hf_processor.image_processor  # type: ignore
-        orig_preprocess = image_processor.preprocess
-
-        def preprocess(__self, *args, **kwargs):
-            hf_inputs = orig_preprocess(*args, **kwargs)
-            hf_inputs["is_pixtral"] = torch.tensor(True)
-            return hf_inputs
-
-        image_processor.preprocess = MethodType(preprocess, image_processor)
-
-        hf_processor.__is_patched__ = True  # type: ignore
-
     def _get_hf_processor(self) -> Union[LlavaProcessor, PixtralProcessor]:
-        hf_processor = self.ctx.get_hf_processor(
-            (LlavaProcessor, PixtralProcessor))
+        return self.ctx.get_hf_processor((LlavaProcessor, PixtralProcessor))
 
-        if isinstance(hf_processor, PixtralProcessor):
-            self._patch_pixtral_processor(hf_processor)
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
 
-        return hf_processor
+        images = mm_data.get("images", [])
+        assert isinstance(images, list)
+
+        is_pixtral = isinstance(self._get_hf_processor(), PixtralProcessor)
+        processed_outputs["is_pixtral"] = \
+            torch.tensor([is_pixtral] * len(images))
+
+        return processed_outputs
 
     def _get_prompt_replacements(
         self,
@@ -379,8 +377,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        is_pixtral = kwargs.pop("is_pixtral", torch.tensor([False]))
         image_embeds = kwargs.pop("image_embeds", None)
+        is_pixtral = kwargs.pop("is_pixtral", None)
 
         if pixel_values is None and image_embeds is None:
             return None
