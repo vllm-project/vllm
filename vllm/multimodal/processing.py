@@ -12,7 +12,7 @@ from PIL.Image import Image
 from transformers import BatchFeature, ProcessorMixin
 from typing_extensions import assert_never
 
-from vllm.inputs import DummyData, InputProcessingContext, token_inputs
+from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import flatten_2d_lists, full_groupby, is_list_of
@@ -20,7 +20,7 @@ from vllm.utils import flatten_2d_lists, full_groupby, is_list_of
 from .audio import resample_audio
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
                      MultiModalInputsV2, MultiModalKwargs, PlaceholderRange,
-                     VideoItem)
+                     VideoItem, MultiModalEncDecInputs)
 
 logger = init_logger(__name__)
 
@@ -910,7 +910,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
         prompt_text: str,
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
 
@@ -936,12 +936,14 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
         all_prompt_repls = self._bind_prompt_replacements(prompt_repls)
 
         encoder_prompt_text = self._create_encoder_prompt(prompt_text)
-        encoder_prompt_ids = _encode(self._get_tokenizer(), encoder_prompt_text)
+        encoder_prompt_ids = _encode(self._get_tokenizer(),
+                                     encoder_prompt_text)
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
         mm_item_counts = mm_items.get_item_counts()
         all_placeholders = self._find_placeholders(all_prompt_repls,
-                                                   encoder_prompt_ids, mm_item_counts)
+                                                   encoder_prompt_ids,
+                                                   mm_item_counts)
 
         if all_placeholders:
             tokenizer = self._get_tokenizer()
@@ -962,13 +964,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
             for modality, items in full_groupby_modality(all_placeholders)
         }
 
-        encoder_inputs = MultiModalInputsV2(
-            type="multimodal",
-            prompt=encoder_prompt_text,
-            prompt_token_ids=encoder_prompt_ids,
-            mm_kwargs=mm_kwargs,
-            mm_placeholders=mm_placeholders,
-        )
         decoder_inputs = MultiModalInputsV2(
             type="multimodal",
             prompt=prompt_text,
@@ -976,14 +971,16 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs=mm_kwargs,
             mm_placeholders=mm_placeholders,
         )
-        return dict(encoder_inputs=encoder_inputs, decoder_inputs=decoder_inputs)
-
+        return MultiModalEncDecInputs(
+            encoder_prompt=encoder_prompt_text,
+            encoder_prompt_token_ids=encoder_prompt_ids,
+            **decoder_inputs)
 
     def _create_encoder_prompt(
         self,
         prompt: str,
-        mm_kwargs: MultiModalKwargs,
-    ):
+    ) -> str:
+        """Create prompt for the encoder."""
         raise NotImplementedError
 
     def get_dummy_encoder_data(
@@ -997,9 +994,9 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
 
         processor_inputs = self._get_dummy_mm_inputs(mm_counts)
 
-        mm_inputs = self.apply(*processor_inputs)["encoder_inputs"]
+        mm_inputs = self.apply(*processor_inputs)
 
-        prompt_token_ids = mm_inputs["prompt_token_ids"]
+        prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         total_placeholders_by_modality = dict[str, int]()
@@ -1060,6 +1057,4 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
 
         prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
 
-        return DummyData(
-            seq_data=SequenceData.from_seqs(prompt_token_ids),
-        )
+        return DummyData(seq_data=SequenceData.from_seqs(prompt_token_ids), )

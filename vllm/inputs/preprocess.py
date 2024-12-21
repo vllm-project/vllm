@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Mapping, Optional, Union
+from typing import cast, List, Mapping, Optional, Union
 
 from typing_extensions import assert_never
 
@@ -7,7 +7,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.processing import MultiModalDataDict, MultiModalInputsV2
+from vllm.multimodal.processing import MultiModalDataDict, MultiModalInputsV2, MultiModalEncDecInputs
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_info_once, print_warning_once
@@ -516,9 +516,24 @@ class InputPreprocessor:
                 prompt,
                 request_id=request_id,
             )
-            if "encoder_inputs" in inputs and "decoder_inputs" in inputs:
-                encoder_inputs = inputs["encoder_inputs"]
-                decoder_inputs = inputs["decoder_inputs"]
+            if inputs["type"] == "multimodal":
+                assert ("encoder_prompt" in inputs
+                        and "encoder_prompt_token_ids" in inputs)
+                inputs = cast(MultiModalEncDecInputs, inputs)
+                encoder_inputs = MultiModalInputsV2(
+                    type="multimodal",
+                    prompt=inputs["encoder_prompt"],
+                    prompt_token_ids=inputs["encoder_prompt_token_ids"],
+                    mm_kwargs=inputs["mm_kwargs"],
+                    mm_placeholders=inputs["mm_placeholders"],
+                )
+                decoder_inputs = MultiModalInputsV2(
+                    type="multimodal",
+                    prompt=inputs["prompt"],
+                    prompt_token_ids=inputs["prompt_token_ids"],
+                    mm_kwargs=inputs["mm_kwargs"],
+                    mm_placeholders=inputs["mm_placeholders"],
+                )
             else:
                 encoder_inputs = inputs
 

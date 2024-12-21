@@ -224,3 +224,19 @@ class MultiModalInputsV2(TypedDict):
     For each modality, information about the placeholder tokens in
     :code:`prompt_token_ids`.
     """
+
+
+class MultiModalEncDecInputs(MultiModalInputsV2):
+    """
+    Represents the outputs of :class:`vllm.multimodal.EncDecMultiModalProcessor`
+    ready to be passed to vLLM internals.
+    """
+
+    encoder_prompt: str
+    """The processed encoder prompt text."""
+
+    encoder_prompt_token_ids: List[int]
+    """The processed token IDs of the encoder prompt."""
+
+    encoder_token_type_ids: NotRequired[List[int]]
+    """The token type IDs of the encoder prompt."""

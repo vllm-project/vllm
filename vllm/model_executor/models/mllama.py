@@ -230,17 +230,18 @@ def dummy_encoder_data_for_mllama(ctx: InputContext, seq_len: int,
 
 
 class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
+
     def _get_hf_processor(self) -> MllamaProcessor:
         return self.ctx.get_hf_processor(MllamaProcessor)
 
     def _call_hf_processor(
-        self, 
+        self,
         hf_processor: MllamaProcessor,
         prompt: str,
         processor_data: Mapping[str, object],
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        image_processor  = hf_processor.image_processor
+        image_processor = hf_processor.image_processor
         image_features = image_processor(**processor_data)
 
         tokenizer = self._get_tokenizer()
@@ -291,7 +292,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
 
         width = height = 1024
         image = Image.new("RGB", (width, height), color=0)
-        
+
         return ProcessorInputs(
             prompt_text=image_token * num_images,
             mm_data={"image": image},
