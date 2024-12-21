@@ -88,6 +88,7 @@ Documentation
    serving/metrics
    serving/integrations
    serving/tensorizer
+   serving/runai_model_streamer
 
 .. toctree::
    :maxdepth: 1
@@ -114,6 +115,7 @@ Documentation
    usage/engine_args
    usage/env_vars
    usage/usage_stats
+   usage/disagg_prefill
 
 .. toctree::
    :maxdepth: 1

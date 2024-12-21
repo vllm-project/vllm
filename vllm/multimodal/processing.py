@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import flatten_2d_lists, full_groupby, is_list_of
 
+from .audio import resample_audio
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
                      MultiModalInputsV2, MultiModalKwargs, PlaceholderRange,
                      VideoItem)
@@ -30,7 +31,7 @@ _PromptSeq = Union[str, list[int]]
 @dataclass
 class PromptReplacement:
     modality: str
-    """The modality for which the replacement is made"""
+    """The modality for which the replacement is made."""
 
     target: _PromptSeq
     """The text or token sequence to find and replace."""
@@ -211,20 +212,54 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
     corresponds to a list.
     """
 
+    @staticmethod
+    def from_dict(data: MultiModalDataDict) -> "MultiModalDataItems":
+        """
+        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`.
+        """
+        multi_data = MultiModalDataItems()
+
+        for k, v in data.items():
+            # TODO: Make a separate modality for embedding inputs
+            # to avoid confusion
+            # yapf: disable
+            if k == "video":
+                # Special case since even a single item can be a list
+                multi_data[k] = (  # type: ignore[index]
+                    v if (isinstance(v, torch.Tensor)
+                          or is_list_of(v, list)) else [v]
+                )
+            elif k in ("image", "audio"):
+                multi_data[k] = (  # type: ignore[index]
+                    v if isinstance(v, (torch.Tensor, list)) else [v]
+                )
+            else:
+                multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
+            # yapf: enable
+
+        return multi_data
+
+    # NOTE: When a field (e.g. `images`) doesn't exist, directly appending to
+    # `self.images` doesn't update this dictionary, which may be confusing
+    # We annotate the getter methods as `Sequence` to prevent others from
+    # trying to update the list in this way
     @property
-    def image(self) -> list[ImageItem]:
-        return self["image"]
+    def images(self) -> Sequence[ImageItem]:
+        return self.get("image", [])
 
     @property
-    def video(self) -> list[VideoItem]:
-        return self["video"]
+    def videos(self) -> Sequence[VideoItem]:
+        return self.get("video", [])
 
     @property
-    def audio(self) -> list[AudioItem]:
-        return self["audio"]
+    def audios(self) -> Sequence[AudioItem]:
+        return self.get("audio", [])
+
+    def get_item_counts(self) -> Mapping[str, int]:
+        return {m: len(items) for m, items in self.items()}
 
     def get_image_size(self, item_idx: int) -> ImageSize:
-        image = self.image[item_idx]
+        image = self.images[item_idx]
 
         if isinstance(image, Image):
             return ImageSize(*image.size)
@@ -234,25 +269,41 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
 
         assert_never(image)
 
+    def get_audio_with_sr(
+        self,
+        item_idx: int,
+        *,
+        default_sr: float,
+    ) -> tuple[np.ndarray, float]:
+        audio = self.audios[item_idx]
 
-def to_multi_format(data: MultiModalDataDict) -> MultiModalDataItems:
-    """
-    Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`.
-    """
-    multi_data = MultiModalDataItems()
+        if isinstance(audio, tuple):
+            return audio
+        if isinstance(audio, list):
+            return np.array(audio), default_sr
+        if isinstance(audio, np.ndarray):
+            return audio, default_sr
 
-    for k, v in data.items():
-        # yapf: disable
-        if k == "video":
-            # Special case since even a single item can be a list
-            multi_data[k] = v if is_list_of(v, list) else [v]  # type: ignore[index]
-        elif k in ("image", "audio"):
-            multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
-        else:
-            multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
-        # yapf: enable
+        assert_never(audio)
 
-    return multi_data
+    def resample_audios(self, new_sr: float, *, drop_sr: bool = True) -> None:
+        """
+        If :code:`drop_sr=True`, the audio items in this dictionary are updated
+        to be NumPy arrays which implicitly means that their sampling rate is
+        the same as the model's expected sampling rate; otherwise, they remain
+        as :code:`(audio, new_sr)` tuples.
+        """
+        if not self.audios:
+            return
+
+        new_audios = []
+        for item_idx in range(len(self.audios)):
+            audio, sr = self.get_audio_with_sr(item_idx, default_sr=new_sr)
+            audio = resample_audio(audio, orig_sr=sr, target_sr=new_sr)
+
+            new_audios.append(audio if drop_sr else (audio, new_sr))
+
+        self["audio"] = new_audios
 
 
 class _TokenMatch(NamedTuple):
@@ -403,18 +454,17 @@ def _resolve_matches(
 def _replace_matches(
     prompt: _S,
     matches: Sequence[_PromptReplacementMatch],
-    mm_items: MultiModalDataItems,
+    mm_item_counts: Mapping[str, int],
 ) -> list[_S]:
     out_seqs = list[_S]()
     prev_end_idx = 0
-    next_idx_by_modality = {modality: 0 for modality in mm_items}
+    next_idx_by_modality = {modality: 0 for modality in mm_item_counts}
 
     for match in _resolve_matches(prompt, matches):
         modality = match.modality
-        modal_items = mm_items[modality]
 
         item_idx = next_idx_by_modality[modality]
-        if item_idx >= len(modal_items):
+        if item_idx >= mm_item_counts[modality]:
             continue
 
         start_idx = match.start_idx
@@ -441,13 +491,13 @@ def _replace_matches(
 def replace_token_matches(
     prompt: list[int],
     matches: Sequence[_PromptReplacementTokenMatch],
-    mm_items: MultiModalDataItems,
+    mm_item_counts: Mapping[str, int],
 ) -> list[int]:
     """Apply :code:`prompt_repls` to :code:`prompt`."""
     if not matches:
         return prompt
 
-    token_id_seqs = _replace_matches(prompt, matches, mm_items)
+    token_id_seqs = _replace_matches(prompt, matches, mm_item_counts)
 
     return flatten_2d_lists(token_id_seqs)
 
@@ -455,13 +505,13 @@ def replace_token_matches(
 def replace_text_matches(
     prompt: str,
     matches: Sequence[_PromptReplacementTextMatch],
-    mm_items: MultiModalDataItems,
+    mm_item_counts: Mapping[str, int],
 ) -> str:
     """Apply :code:`prompt_repls` to :code:`prompt`."""
     if not matches:
         return prompt
 
-    texts = _replace_matches(prompt, matches, mm_items)
+    texts = _replace_matches(prompt, matches, mm_item_counts)
 
     return "".join(texts)
 
@@ -470,9 +520,9 @@ def _iter_modality_placeholders(
     prompt: list[int],
     modality: str,
     modality_repls: Sequence[_BoundPromptReplacement],
-    modal_items: list[Any],
+    modal_item_count: int,
 ) -> Iterable[_PlaceholderInfo]:
-    if len(modal_items) == 0:
+    if modal_item_count == 0:
         return
 
     prompt_len = len(prompt)
@@ -499,7 +549,7 @@ def _iter_modality_placeholders(
                 )
 
                 item_index += 1
-                if item_index >= len(modal_items):
+                if item_index >= modal_item_count:
                     return
 
                 # Exclude overlapping matches
@@ -514,7 +564,7 @@ def _iter_modality_placeholders(
 def iter_placeholders(
     prompt_repls: Sequence[_BoundPromptReplacement],
     prompt: list[int],
-    mm_items: MultiModalDataItems,
+    mm_item_counts: Mapping[str, int],
 ) -> Iterable[_PlaceholderInfo]:
     """
     Yield each set of placeholder tokens found in :code:`prompt`.
@@ -523,13 +573,13 @@ def iter_placeholders(
     """
     repls_by_modality = dict(full_groupby_modality(prompt_repls))
 
-    for modality, modal_items in mm_items.items():
+    for modality, modal_item_count in mm_item_counts.items():
         if modality in repls_by_modality:
             yield from _iter_modality_placeholders(
                 prompt,
                 modality,
                 repls_by_modality[modality],
-                modal_items,
+                modal_item_count,
             )
 
 
@@ -568,6 +618,12 @@ class BaseMultiModalProcessor(ABC):
     def _get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
+    def _get_mm_items(
+        self,
+        mm_data: MultiModalDataDict,
+    ) -> MultiModalDataItems:
+        return MultiModalDataItems.from_dict(mm_data)
+
     @abstractmethod
     def _get_prompt_replacements(
         self,
@@ -590,29 +646,27 @@ class BaseMultiModalProcessor(ABC):
         self,
         all_prompt_repls: Sequence[_BoundPromptReplacement],
         new_token_ids: list[int],
-        mm_items: MultiModalDataItems,
+        mm_item_counts: Mapping[str, int],
     ) -> list[_PlaceholderInfo]:
         return list(
-            iter_placeholders(all_prompt_repls, new_token_ids, mm_items))
+            iter_placeholders(all_prompt_repls, new_token_ids, mm_item_counts))
 
-    def _apply_hf_processor(
+    def _get_processor_data(
         self,
-        prompt: str,
-        mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        hf_processor = self._get_hf_processor(**mm_processor_kwargs)
-
+        mm_items: MultiModalDataItems,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
-        for k, v in mm_data.items():
+
+        for k, v in mm_items.items():
             # TODO: Make a separate modality for embedding inputs
             # to avoid confusion
             if k in ("image", "video", "audio"):
                 if isinstance(v, torch.Tensor) and v.ndim == 3:
                     # Pass through embedding inputs (single)
                     passthrough_data[f"{k}_embeds"] = [v]
-                elif is_list_of(v, torch.Tensor) and v[0].ndim == 2:
+                elif (is_list_of(v, torch.Tensor) and len(v) > 0
+                      and v[0].ndim == 2):
                     # Pass through embedding inputs (multi)
                     passthrough_data[f"{k}_embeds"] = v
                 else:
@@ -621,26 +675,40 @@ class BaseMultiModalProcessor(ABC):
             else:
                 processor_data[k] = v
 
-        assert callable(hf_processor)
-        mm_processor_kwargs = self.ctx.resolve_hf_processor_call_kwargs(
+        return processor_data, passthrough_data
+
+    def _call_hf_processor(
+        self,
+        hf_processor: ProcessorMixin,
+        prompt: str,
+        processor_data: Mapping[str, object],
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        return self.ctx.call_hf_processor(
             hf_processor,
+            prompt,
+            processor_data,
             mm_processor_kwargs,
         )
 
-        try:
-            hf_inputs = hf_processor(
-                text=prompt,  # type: ignore
-                **processor_data,
-                **mm_processor_kwargs,
-                return_tensors="pt",
-            )
-        except Exception as exc:
-            data = dict(text=prompt, **processor_data)
+    def _apply_hf_processor(
+        self,
+        prompt: str,
+        mm_items: MultiModalDataItems,
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # some mm_processor_kwargs may be used in processor initialization
+        # instead of processor call
+        hf_processor = self._get_hf_processor(**mm_processor_kwargs)
 
-            raise RuntimeError(
-                f"Failed to apply {type(hf_processor).__name__} "
-                f"on data={data} with kwargs={mm_processor_kwargs}") from exc
+        processor_data, passthrough_data = self._get_processor_data(mm_items)
 
+        hf_inputs = self._call_hf_processor(
+            hf_processor,
+            prompt=prompt,
+            processor_data=processor_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
         hf_inputs.update(passthrough_data)
 
         return hf_inputs
@@ -655,10 +723,9 @@ class BaseMultiModalProcessor(ABC):
 
     def _apply_prompt_replacements(
         self,
-        mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
         token_ids: list[int],
         prompt_repls: Sequence[_BoundPromptReplacement],
+        mm_item_counts: Mapping[str, int],
     ) -> tuple[list[int], str, list[_PlaceholderInfo]]:
         tokenizer = self._get_tokenizer()
 
@@ -675,13 +742,13 @@ class BaseMultiModalProcessor(ABC):
         # of the search text in the prompt, we instead perform string
         # replacement on the decoded token IDs, then encode them back.
         if all(
-            len(matches) >= len(mm_items[modality])
+            len(matches) >= mm_item_counts[modality]
             for modality, matches in full_groupby_modality(token_matches)
         ):  # yapf: disable
             token_ids = replace_token_matches(
                 token_ids,
                 token_matches,
-                mm_items,
+                mm_item_counts,
             )
 
             text = _decode(tokenizer, token_ids)
@@ -693,14 +760,14 @@ class BaseMultiModalProcessor(ABC):
             text = replace_text_matches(
                 text,
                 text_matches,
-                mm_items,
+                mm_item_counts,
             )
 
             token_ids = _encode(tokenizer, text)
             matched_repls = [match.prompt_repl for match in text_matches]
 
         placeholders = self._find_placeholders(matched_repls, token_ids,
-                                               mm_items)
+                                               mm_item_counts)
 
         return token_ids, text, placeholders
 
@@ -723,24 +790,25 @@ class BaseMultiModalProcessor(ABC):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        tokenizer = self._get_tokenizer()
+        mm_items = self._get_mm_items(mm_data)
 
-        hf_inputs = self._apply_hf_processor(prompt_text, mm_data,
+        hf_inputs = self._apply_hf_processor(prompt_text, mm_items,
                                              mm_processor_kwargs)
         prompt_ids, = hf_inputs.pop("input_ids").tolist()
         mm_kwargs = MultiModalKwargs(hf_inputs)
 
-        mm_items = to_multi_format(mm_data)
         prompt_repls = self._get_prompt_replacements(mm_items, hf_inputs,
                                                      mm_processor_kwargs)
         all_prompt_repls = self._bind_prompt_replacements(prompt_repls)
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
+        mm_item_counts = mm_items.get_item_counts()
         all_placeholders = self._find_placeholders(all_prompt_repls,
-                                                   prompt_ids, mm_items)
+                                                   prompt_ids, mm_item_counts)
 
         if all_placeholders:
+            tokenizer = self._get_tokenizer()
             prompt_text = _decode(tokenizer, prompt_ids)
         else:
             (
@@ -748,10 +816,9 @@ class BaseMultiModalProcessor(ABC):
                 prompt_text,
                 all_placeholders,
             ) = self._apply_prompt_replacements(
-                mm_items,
-                hf_inputs,
                 prompt_ids,
                 all_prompt_repls,
+                mm_item_counts,
             )
 
         mm_placeholders = {

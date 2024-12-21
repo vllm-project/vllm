@@ -41,6 +41,7 @@ _TEXT_GENERATION_MODELS = {
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
+    "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
@@ -112,6 +113,7 @@ _EMBEDDING_MODELS = {
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
+    "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
         # Multiple models share the same architecture, so we include them all

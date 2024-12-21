@@ -84,6 +84,10 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
