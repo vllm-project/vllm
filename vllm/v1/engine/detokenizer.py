@@ -231,7 +231,6 @@ class IncrementalDetokenizer:
             return self.output_text[last_offset:length]
         return ""
 
-import time
 class Detokenizer:
 
     def __init__(self,
@@ -458,8 +457,8 @@ class DetokenizerProc(Detokenizer):
 
                 epoch = 0
                 while True:
-                    # logger.info(f"EPOCH: {epoch}")
-                    # epoch += 1
+                    logger.info(f"EPOCH: {epoch}")
+                    epoch += 1
 
                     socks = dict(poller.poll())
 

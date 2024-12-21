@@ -198,26 +198,20 @@ async def run_vllm_async(
                     max_tokens=request.expected_output_len,
                 ))
 
+        async def run(generator):
+            async for res in generator:
+                pass
+
         tasks = []
         start = time.perf_counter()
         for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
             tasks.append(run(generator))
-        # all_gens = merge_async_iterators(*generators)
-        # async for i, res in all_gens:
-        #     pass
 
-        from aiodebug import log_slow_callbacks
-        loop = asyncio.get_event_loop()
-        log_slow_callbacks.enable(0.05)
         await asyncio.gather(*tasks)
 
         end = time.perf_counter()
         return end - start
-
-async def run(generator):
-    async for res in generator:
-        pass
 
 def run_hf(
     requests: List[SampleRequest],
@@ -371,7 +365,10 @@ def main(args: argparse.Namespace):
         # TODO(vllm-project/vllm/issues/9778): Count molti-modal token length.
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
-          f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
+          f"{total_output_tokens / elapsed_time:.2f} output tokens/s, "
+          f"{(total_num_tokens - total_output_tokens) / len(requests)} input tokens/req, "
+          f"{(total_output_tokens) / len(requests)} output tokens/req, "
+    )
 
     # Output JSON results if specified
     if args.output_json:

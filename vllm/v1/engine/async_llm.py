@@ -92,7 +92,6 @@ class AsyncLLM(EngineClient):
 
         # self.output_handler: Optional[asyncio.Task] = None
         self.to_create_loop = True
-        self.epoch = 0
 
     def __del__(self):
         self.shutdown()
@@ -244,6 +243,8 @@ class AsyncLLM(EngineClient):
         while True:
             try:
                 out = await asyncio.wait_for(queue.get(), timeout=4)
+
+                logger.info(f"{queue.qsize()=}")
                 if out.finished:
                     del self.rid_to_queue[request_id]
                     yield out
@@ -293,7 +294,10 @@ class AsyncLLM(EngineClient):
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
+        epoch = 0
         while True:
+            logger.info(f"EPOCH: {epoch}")
+            epoch+=1
 
             # 1) Pull outputs from the Detokenizer.
             outputs: List[RequestOutput] = await self.detokenizer.output_socket.recv_pyobj()
