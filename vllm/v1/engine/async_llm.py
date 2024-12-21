@@ -98,7 +98,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-    ) -> "AsyncLLMEngine":
+    ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
         # Create the engine configs.
@@ -386,7 +386,3 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return Exception()  # TODO: implement
-
-
-# Retain V0 name for backwards compatibility.
-AsyncLLMEngine = AsyncLLM

@@ -27,6 +27,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
@@ -65,11 +66,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address)
 from vllm.version import __version__ as VLLM_VERSION
-
-if envs.VLLM_USE_V1:
-    from vllm.v1.engine.async_llm import AsyncLLMEngine  # type: ignore
-else:
-    from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
