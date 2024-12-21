@@ -400,6 +400,7 @@ class LLMEngine:
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
                     get_tokenizer_for_seq,
+                    num_lookahead_slots=self.scheduler_config.num_lookahead_slots if self.device_config.device_type == "neuron" else 0
                 ),
             ))
 
