@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -352,7 +353,7 @@ class MambaMixer2(CustomOp):
         # - also need flags to indicate if there are initial states
         # - currently we really only support the FlashAttention backend
         has_initial_states = None
-        if (isinstance(attn_metadata, FlashAttentionMetadata)
+        if (isinstance(attn_metadata, (FlashAttentionMetadata, XFormersMetadata))
                 and attn_metadata.context_lens_tensor is not None):
             has_initial_states = attn_metadata.context_lens_tensor > 0
 
@@ -427,7 +428,7 @@ class MambaMixer2(CustomOp):
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
                 hidden_states.view(1, seq_len, self.num_heads // self.tp_size,
-                                   self.head_dim),
+                                self.head_dim),
                 dt.unsqueeze(0),
                 self.A,
                 B.view(1, seq_len, self.n_groups // self.tp_size, -1),

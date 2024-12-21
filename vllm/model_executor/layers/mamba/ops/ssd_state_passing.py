@@ -79,12 +79,17 @@ def _state_passing_fwd_kernel(
     out_ptrs = out_ptr + offs_m * stride_out_dim
     final_states_ptrs = final_states_ptr + offs_m * stride_final_states_dim
 
+    # - states will be the past state of the sequence that continues on the current check
     if not HAS_INITSTATES:
         states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
     else:
-        initstates_ptrs = initstates_ptr + offs_m * stride_initstates_dim
+        initstates_ptr += offs_m * stride_initstates_dim
+        initstates_ptrs = initstates_ptr
+        # - for cont batches, for the first chunk mean it will be the first batch's
+        #   init state
         states = tl.load(initstates_ptrs, mask=offs_m < dim,
                          other=0.0).to(tl.float32)
+
     tl.store(out_ptrs, states, mask=offs_m < dim)
     out_ptrs += stride_out_chunk
     seq_idx = 0
@@ -94,25 +99,24 @@ def _state_passing_fwd_kernel(
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
         scale = tl.exp(dA_cs)
         if HAS_SEQ_IDX:
+            # - the seq to pass forward is the one that is flushed to the right
+            #   boundary.
+            # - that is given by seq_idx_new below.
             seq_idx_new = tl.load(seq_idx_ptr +
                                   (min((c + 1) * chunk_size, seqlen) - 1) *
                                   stride_seq_idx_seqlen)
             if HAS_INITSTATES:
                 if IS_CONT_BATCHED and seq_idx != seq_idx_new:
-                    # need to load the initial state for this new sequence
-                    # - override the scanned state
-                    initstates_ptrs += seq_idx_new * stride_initstates_batch
+                    # this means in the current chunk the rightmost flushed seq
+                    # has changed. 
+                    # - so we do not propagate the state from previous chunk
+                    # - but rather we load that sequence's init state
+                    initstates_ptrs = initstates_ptr + seq_idx_new * stride_initstates_batch
 
+                    # - update state with seq_idx_new's init state
                     states = tl.load(initstates_ptrs,
                                      mask=offs_m < dim,
                                      other=0.0).to(tl.float32)
-
-                    # in the previous scan iteration, the wrong state was
-                    # written to the output buffer
-                    # - so we also override it
-                    tl.store(out_ptrs - stride_out_chunk,
-                             states,
-                             mask=offs_m < dim)
             else:
                 scale = tl.where(seq_idx_new == seq_idx, scale, 0.0)
 
