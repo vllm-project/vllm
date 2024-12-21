@@ -374,12 +374,15 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @router.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
+    raw_request.app.count += 1
+    should_profile = raw_request.app.count == 500
     handler = completion(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Completions API")
 
-    generator = await handler.create_completion(request, raw_request)
+    generator = await handler.create_completion(request, raw_request, 
+                                                should_profile=should_profile)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -494,6 +497,7 @@ def build_app(args: Namespace) -> FastAPI:
         app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.root_path = args.root_path
+    app.count = 0
 
     mount_metrics(app)
 

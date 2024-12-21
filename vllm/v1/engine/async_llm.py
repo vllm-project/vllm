@@ -281,16 +281,15 @@ class AsyncLLM(EngineClient):
                 # a delta text. This way we do "dynamic chunked streaming", such
                 # that the API client does not fall behind the EngineCor,
                 # which happens at high QPS otherwise.
+                out = state.out_list[-1]
+                if len(state.out_list) > 1:
+                    logger.info(f"{len(state.out_list)=}")
 
             except asyncio.TimeoutError:
                 # TODO(rob): do request cancellation checking here.
                 # logger.debug("Timeout waiting for %s", request_id)
                 continue
                 
-            out = state.out_list[-1]
-            if len(state.out_list) > 1:
-                logger.info(f"{len(state.out_list)=}")
-
             state.out_list = []
             if out.finished:
                 del self.rid_to_state[request_id]
@@ -332,31 +331,24 @@ class AsyncLLM(EngineClient):
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
-        # epoch = 0
+        epoch = 0
 
         while True:
-            # logger.info(f"EPOCH: {epoch}")
+            logger.info(f"EPOCH: {epoch}")
+            epoch += 1
             # self.warned = False
             # if self.epoch % 10 == 0:
             #     logger.info(f"\n{self.epoch=}\n")
-            # self.epoch += 1
 
             # 1) Pull outputs from the Detokenizer.
-            detokenizer_outputs = (
-                await self.detokenizer.get_output_async()).outputs
+            outputs = await self.detokenizer.output_socket.recv_pyobj()
 
-            for detok_out in detokenizer_outputs:
-                if detok_out.request_id not in self.rid_to_state:
-                    raise RuntimeError(f"{detok_out.request_id} "
+            for out in outputs:
+                if out.request_id not in self.rid_to_state:
+                    raise RuntimeError(f"{out.request_id} "
                                         "not in RequestStates")
 
-                state = self.rid_to_state[detok_out.request_id]
-
-                out = RequestOutput.from_detok(
-                    state.prompt,
-                    state.prompt_token_ids,
-                    detok_out,
-                )
+                state = self.rid_to_state[out.request_id]
 
                 # Update the RequestState and alert generate() that there
                 # is a RequestOutput ready to return to the user.

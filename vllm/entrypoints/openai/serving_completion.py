@@ -61,6 +61,7 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
         raw_request: Request,
+        should_profile: bool=False
     ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
@@ -188,6 +189,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 tokenizer=tokenizer,
                 request_metadata=request_metadata,
                 output_kind=sampling_params.output_kind,
+                should_profile=should_profile,
             )
 
         # Non-streaming response
@@ -247,6 +249,7 @@ class OpenAIServingCompletion(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
         output_kind: RequestOutputKind,
+        should_profile: bool = False,
     ) -> AsyncGenerator[str, None]:
         """
         In V0, we use RequestOutputType.DELTA and each RequestOutput
@@ -268,6 +271,12 @@ class OpenAIServingCompletion(OpenAIServing):
             such that the API server falls behind, we dynamically fall back
             to streaming chunks of tokens.
         """
+        if should_profile:
+            from pyinstrument import Profiler
+            print("STARTING PROFILER")
+            profiler = Profiler(async_mode="disabled")
+            profiler.start()
+
         assert (output_kind == RequestOutputKind.CUMULATIVE
                 or output_kind == RequestOutputKind.DELTA)
 
@@ -292,6 +301,10 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
                 prompt_text = res.prompt
+
+                if res.finished and should_profile:
+                    profiler.stop()
+                    profiler.write_html("task-disabled.html")
 
                 # Prompt details are excluded from later streamed outputs
                 if res.prompt_token_ids is not None:
@@ -418,6 +431,7 @@ class OpenAIServingCompletion(OpenAIServing):
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
+
 
     def request_output_to_completion_response(
         self,

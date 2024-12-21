@@ -293,9 +293,9 @@ class Detokenizer:
     ) -> DetokenizerOutputs:
         """Update state and request the RequestOutputs to the LLMEngine."""
 
-        # request_outputs: List[RequestOutput] = []
+        request_outputs: List[RequestOutput] = []
         # requests_to_abort: List[str] = []
-        detokenizer_outputs = DetokenizerOutputs(outputs=[])
+        # detokenizer_outputs = DetokenizerOutputs(outputs=[])
 
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
@@ -316,16 +316,8 @@ class Detokenizer:
             )
             
             if request_output is not None:
-                detokenizer_outputs.outputs.append(
-                    DetokenizerOutput(
-                        request_id=request_id,
-                        token_ids=request_output.outputs[0].token_ids,
-                        text=request_output.outputs[0].text,
-                        finished=request_output.finished,
-                    )
-                )   
-                # # Add to RequestOutputs list.
-                # request_outputs.append(request_output)
+                # Add to RequestOutputs list.
+                request_outputs.append(request_output)
 
                 # # Free completed requests.
                 # if request_output.finished:
@@ -338,7 +330,7 @@ class Detokenizer:
 
         # Return to EngineClient.
         # return request_outputs, requests_to_abort
-        return detokenizer_outputs, []
+        return request_outputs, []
 
 class DetokenizerProc(Detokenizer):
     """ZMQ-wrapper for running Detokenizer in background process."""
@@ -456,8 +448,6 @@ class DetokenizerProc(Detokenizer):
             with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as engine_core_outputs_socket, 
                   zmq_socket_ctx(self.input_path, zmq.PULL) as input_socket,
                   zmq_socket_ctx(self.output_path, zmq.PUSH) as output_socket):
-                
-                epoch = 0
 
                 # TODO: avoid poll by having both EngineCore
                 # and AsyncLLM send to the same socket (unclear why this 
@@ -466,10 +456,10 @@ class DetokenizerProc(Detokenizer):
                 poller.register(engine_core_outputs_socket, zmq.POLLIN)
                 poller.register(input_socket, zmq.POLLIN)
 
-                # idx = 0
+                epoch = 0
                 while True:
-                    # logger.info(f"EPOCH: {epoch}")
-                    # epoch += 1
+                    logger.info(f"EPOCH: {epoch}")
+                    epoch += 1
 
                     socks = dict(poller.poll())
 
@@ -483,11 +473,11 @@ class DetokenizerProc(Detokenizer):
                     if engine_core_outputs_socket in socks:
                         (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
-                        detokenizer_outputs, _ = self.step(engine_core_outputs)
+                        request_outputs, _ = self.step(engine_core_outputs)
                         # msg = encoder.encode(detokenizer_outputs)
                         # # output_socket.send_multipart((msg, ), copy=False)
                         # output_socket.send(msg)
-                        output_socket.send_pyobj(detokenizer_outputs)
+                        output_socket.send_pyobj(request_outputs)
         
         except Exception as e:
             logger.error(e)
@@ -544,7 +534,7 @@ class DetokenizerClient:
         msg = (self.encoder.encode(request), )
         await self.input_socket.send_multipart(msg, copy=False)
 
-    async def get_output_async(self) -> DetokenizerOutputs:
+    async def get_output_async(self) -> List[RequestOutput]:
         """Get RequestOutputs, RequestsToAbort from Detokenizer."""
 
         # (frame, ) = await self.output_socket.recv_multipart(copy=False)
