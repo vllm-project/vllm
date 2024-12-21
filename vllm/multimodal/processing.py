@@ -587,7 +587,7 @@ def iter_placeholders(
 
 
 class ProcessorInputs(NamedTuple):
-    """Keyword arguments to :meth:`BaseMultiModalProcessor`"""
+    """Keyword arguments to :meth:`BaseMultiModalProcessor`."""
     prompt_text: str
     mm_data: MultiModalDataDict
     hf_mm_kwargs: Mapping[str, object]
@@ -615,6 +615,29 @@ class ProcessingCache:
             logger.debug("ProcessingCache: %s.hit_ratio = %.2f", name,
                          cache_stats.hit_ratio)
 
+    def _hash_item(self, obj: object) -> bytes:
+        # Simple cases
+        if isinstance(obj, str):
+            return obj.encode("utf-8")
+        if isinstance(obj, bytes):
+            return obj
+        if isinstance(obj, Image):
+            return obj.tobytes()
+
+        # Convertible to NumPy arrays
+        if isinstance(obj, torch.Tensor):
+            obj = obj.numpy()
+        if isinstance(obj, (int, float)):
+            obj = np.array(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tobytes()
+
+        logger.warning(
+            "No serialization method found for %s. "
+            "Falling back to pickle.", type(obj))
+
+        return pickle.dumps(obj)
+
     def _iter_bytes_to_hash(
         self,
         key: str,
@@ -624,39 +647,13 @@ class ProcessingCache:
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
                 yield from self._iter_bytes_to_hash(f"{key}.{i}", elem)
-            return
-        if isinstance(obj, dict):
+        elif isinstance(obj, dict):
             for k, v in obj.items():
                 yield from self._iter_bytes_to_hash(f"{key}.{k}", v)
-            return
-
-        key_bytes = key.encode("utf-8")
-
-        # Simple cases
-        if isinstance(obj, str):
-            yield key_bytes, obj.encode("utf-8")
-            return
-        if isinstance(obj, bytes):
-            yield key_bytes, obj
-            return
-        if isinstance(obj, Image):
-            yield key_bytes, obj.tobytes()
-            return
-
-        # Convertible to NumPy arrays
-        if isinstance(obj, torch.Tensor):
-            obj = obj.numpy()
-        if isinstance(obj, (int, float)):
-            obj = np.array(obj)
-        if isinstance(obj, np.ndarray):
-            yield key_bytes, obj.tobytes()
-            return
-
-        logger.warning(
-            "No serialization method found for %s. "
-            "Falling back to pickle.", type(obj))
-
-        yield key_bytes, pickle.dumps(obj)
+        else:
+            key_bytes = self._hash_item(key)
+            value_bytes = self._hash_item(obj)
+            yield key_bytes, value_bytes
 
     def _hash_kwargs(self, **kwargs: object) -> str:
         hasher = blake3()

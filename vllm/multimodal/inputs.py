@@ -1,6 +1,6 @@
 from collections import UserDict, defaultdict
-from typing import (Any, Dict, List, Literal, Mapping, Sequence, Tuple,
-                    TypedDict, TypeVar, Union, cast, final)
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal, TypedDict, TypeVar, Union, cast, final
 
 import numpy as np
 import torch
@@ -44,7 +44,7 @@ item, which can be passed to a HuggingFace :code:`AudioProcessor`.
 """
 # yapf: enable
 
-MultiModalData: TypeAlias = Union[_T, List[_T]]
+MultiModalData: TypeAlias = Union[_T, list[_T]]
 """
 Either a single data item, or a list of data items.
 
@@ -97,13 +97,13 @@ class PlaceholderRange(TypedDict):
     """The length of the placeholder."""
 
 
-NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor,
-                      Tuple[torch.Tensor, ...]]
+NestedTensors = Union[list["NestedTensors"], list[torch.Tensor], torch.Tensor,
+                      tuple[torch.Tensor, ...]]
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
-BatchedTensorInputs: TypeAlias = Dict[str, NestedTensors]
+BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
 :meth:`MultiModalKwargs.batch`.
@@ -139,7 +139,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             # Only tensors (not lists) can be stacked.
             return stacked
 
-        tensors_ = cast(List[torch.Tensor], stacked)
+        tensors_ = cast(list[torch.Tensor], stacked)
         if any(t.shape != tensors_[0].shape for t in tensors_):
             # The tensors have incompatible shapes and can't be stacked.
             return tensors_
@@ -147,7 +147,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         return torch.stack(tensors_)
 
     @staticmethod
-    def batch(inputs_list: List["MultiModalKwargs"]) -> BatchedTensorInputs:
+    def batch(inputs_list: list["MultiModalKwargs"]) -> BatchedTensorInputs:
         """
         Batch multiple inputs together into a dictionary.
 
@@ -162,7 +162,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         # We need to consider the case where each item in the batch
         # contains different modalities (i.e. different keys).
-        item_lists: Dict[str, List[NestedTensors]] = defaultdict(list)
+        item_lists = defaultdict[str, list[NestedTensors]](list)
 
         for inputs in inputs_list:
             for k, v in inputs.items():
@@ -207,16 +207,16 @@ class MultiModalInputsV2(TypedDict):
     prompt: str
     """The processed prompt text."""
 
-    prompt_token_ids: List[int]
+    prompt_token_ids: list[int]
     """The processed token IDs which includes placeholder tokens."""
 
-    token_type_ids: NotRequired[List[int]]
+    token_type_ids: NotRequired[list[int]]
     """The token type IDs of the prompt."""
 
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: NotRequired[List[str]]
+    mm_hashes: NotRequired[list[str]]
     """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict
