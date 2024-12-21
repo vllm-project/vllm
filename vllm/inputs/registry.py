@@ -323,8 +323,8 @@ class InputRegistry:
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
         from vllm.multimodal import MultiModalKwargs
-        from vllm.multimodal.utils import cached_get_tokenizer
         from vllm.multimodal.processing import EncDecMultiModalProcessor
+        from vllm.multimodal.utils import cached_get_tokenizer
 
         if mm_registry.has_processor(model_config):
             tokenizer = cached_get_tokenizer(

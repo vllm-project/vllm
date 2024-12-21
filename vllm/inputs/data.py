@@ -9,7 +9,8 @@ from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
 if TYPE_CHECKING:
     from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
                                  MultiModalPlaceholderDict)
-    from vllm.multimodal.inputs import MultiModalInputsV2, MultiModalEncDecInputs
+    from vllm.multimodal.inputs import (MultiModalEncDecInputs,
+                                        MultiModalInputsV2)
 
 
 class TextPrompt(TypedDict):

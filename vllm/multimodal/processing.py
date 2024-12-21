@@ -19,8 +19,8 @@ from vllm.utils import flatten_2d_lists, full_groupby, is_list_of
 
 from .audio import resample_audio
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
-                     MultiModalInputsV2, MultiModalKwargs, PlaceholderRange,
-                     VideoItem, MultiModalEncDecInputs)
+                     MultiModalEncDecInputs, MultiModalInputsV2,
+                     MultiModalKwargs, PlaceholderRange, VideoItem)
 
 logger = init_logger(__name__)
 

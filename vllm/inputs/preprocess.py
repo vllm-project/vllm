@@ -1,5 +1,5 @@
 import asyncio
-from typing import cast, List, Mapping, Optional, Union
+from typing import List, Mapping, Optional, Union, cast
 
 from typing_extensions import assert_never
 
@@ -7,7 +7,9 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.processing import MultiModalDataDict, MultiModalInputsV2, MultiModalEncDecInputs
+from vllm.multimodal.processing import (MultiModalDataDict,
+                                        MultiModalEncDecInputs,
+                                        MultiModalInputsV2)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_info_once, print_warning_once
