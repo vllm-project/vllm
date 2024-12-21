@@ -1,5 +1,6 @@
 import re
 
+
 def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
