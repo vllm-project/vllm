@@ -319,9 +319,9 @@ class OpenAIServingCompletion(OpenAIServing):
                         )
                     else:
                         logprobs = None
+
                     previous_text_lens[i] += len(output.text)
                     previous_num_tokens[i] += len(output.token_ids)
-
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
@@ -431,6 +431,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         output_text = prompt_text + output.text
                 else:
+                    # return just the delta
                     token_ids = output.token_ids
                     out_logprobs = output.logprobs
                     output_text = output.text
