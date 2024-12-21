@@ -171,6 +171,7 @@ def run_vllm(
         end = time.perf_counter()
     return end - start
 
+
 async def run_vllm_async(
     requests: List[SampleRequest],
     n: int,
@@ -198,20 +199,18 @@ async def run_vllm_async(
                     max_tokens=request.expected_output_len,
                 ))
 
-        async def run(generator):
-            async for res in generator:
-                pass
-
-        tasks = []
+        generators = []
         start = time.perf_counter()
         for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
-            tasks.append(run(generator))
-
-        await asyncio.gather(*tasks)
-
+            generators.append(generator)
+        
+        all_gens = merge_async_iterators(*generators)
+        async for i, res in all_gens:
+            pass
         end = time.perf_counter()
         return end - start
+
 
 def run_hf(
     requests: List[SampleRequest],
