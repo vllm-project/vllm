@@ -1,12 +1,11 @@
 import functools
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Literal, Mapping, NamedTuple,
+from typing import (TYPE_CHECKING, Any, Callable, Mapping, NamedTuple,
                     Optional, Protocol, Union)
 
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
-from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
@@ -112,39 +111,6 @@ class InputContext:
 
         return hf_processor
 
-    def get_modality_processor(
-        self,
-        hf_processor: ProcessorMixin,
-        modality_data_key: Literal["text", "images", "videos", "audios"],
-    ) -> Callable[..., BatchFeature]:
-        """
-        Get the HuggingFace modality-specific processor which is
-        a child of a :class:`transformers.ProcessorMixin`, identified by
-        the corresponding keyword argument in its `__call__` method.
-        """
-        if modality_data_key == "text":
-            attributes = ["tokenizer"]
-        elif modality_data_key == "images":
-            attributes = ["image_processor"]
-        elif modality_data_key == "videos":
-            attributes = ["video_processor", "image_processor"]
-        elif modality_data_key == "audios":
-            attributes = ["audio_processor", "feature_extractor"]
-        else:
-            assert_never(modality_data_key)
-
-        modality_processor = next(
-            (getattr(hf_processor, attr)
-             for attr in attributes if hasattr(hf_processor, attr)),
-            None,
-        )
-        if modality_processor is None:
-            raise AttributeError(
-                f"Cannot find HuggingFace processor for {modality_data_key} "
-                f"inside {type(hf_processor)}")
-
-        return modality_processor
-
 
 @dataclass(frozen=True)
 class InputProcessingContext(InputContext):
@@ -165,7 +131,7 @@ class InputProcessingContext(InputContext):
 
     def call_hf_processor(
         self,
-        hf_processor: Union[ProcessorMixin, Callable[..., BatchFeature]],
+        hf_processor: ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Optional[Mapping[str, object]] = None,
     ) -> BatchFeature:
@@ -183,17 +149,8 @@ class InputProcessingContext(InputContext):
             kwargs,
             hf_processor,
             requires_kw_only=False,
-            # Modality-specific processors should state each kwarg individually
-            allow_var_kwargs=isinstance(hf_processor, ProcessorMixin),
+            allow_var_kwargs=True,
         )
-
-        # WhisperFeatureExtractor accepts `raw_speech`
-        # but the parent HF processor accepts `audios`
-        # Making `audios` an alias of `raw_speech` simplifies the calling code
-        if (isinstance(hf_processor, WhisperFeatureExtractor)
-                and "raw_speech" not in data):
-            data = dict(data)
-            data["raw_speech"] = data.pop("audios")
 
         try:
             return hf_processor(**data, **merged_kwargs, return_tensors="pt")

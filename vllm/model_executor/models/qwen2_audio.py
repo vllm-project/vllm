@@ -94,8 +94,6 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         *,
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
-        return_attention_mask: Optional[bool] = None,
-        padding: Optional[str] = None,
     ) -> Qwen2AudioProcessor:
         return self.ctx.get_hf_processor(Qwen2AudioProcessor)
 

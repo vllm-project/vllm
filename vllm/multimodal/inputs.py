@@ -329,7 +329,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     ) -> "MultiModalKwargs":
         """
         Construct a new :class:`MultiModalKwargs` from multiple items returned
-        by :meth:`get_modality_item`.
+        by :meth:`get_fields_by_modality`.
         """
         tag_per_key = defaultdict[str, MultiModalFieldTag]()
         data_per_key = defaultdict[str, list[NestedTensors]](list)
