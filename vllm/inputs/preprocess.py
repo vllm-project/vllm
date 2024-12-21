@@ -512,12 +512,17 @@ class InputPreprocessor:
                     request_id=request_id,
                 )
         else:
-            encoder_inputs = self._prompt_to_llm_inputs(
+            inputs = self._prompt_to_llm_inputs(
                 prompt,
                 request_id=request_id,
             )
+            if "encoder_inputs" in inputs and "decoder_inputs" in inputs:
+                encoder_inputs = inputs["encoder_inputs"]
+                decoder_inputs = inputs["decoder_inputs"]
+            else:
+                encoder_inputs = inputs
 
-            decoder_inputs = None
+                decoder_inputs = None
 
         return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 

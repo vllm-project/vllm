@@ -249,6 +249,12 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
 
         return BatchFeature(data=data, tensor_type="pt")
 
+    def _create_encoder_prompt(self, prompt: str):
+        hf_processor = self._get_hf_processor()
+        image_token = hf_processor.image_token
+        num_images = prompt.count(image_token)
+        return image_token * num_images
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
