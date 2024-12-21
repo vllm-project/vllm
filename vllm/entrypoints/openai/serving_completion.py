@@ -319,7 +319,6 @@ class OpenAIServingCompletion(OpenAIServing):
                         )
                     else:
                         logprobs = None
-
                     previous_text_lens[i] += len(output.text)
                     previous_num_tokens[i] += len(output.token_ids)
 
@@ -378,7 +377,6 @@ class OpenAIServingCompletion(OpenAIServing):
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
-
 
     def request_output_to_completion_response(
         self,
