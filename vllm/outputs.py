@@ -132,7 +132,6 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
 
-
     @classmethod
     def new(
         cls,
