@@ -104,37 +104,6 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
         )
 
-    @classmethod
-    def from_eco(
-        cls,
-        tokenizer: AnyTokenizer,
-        eco: EngineCoreOutput,
-    ):
-        tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
-            tokenizer=tokenizer,
-            prompt_ids=eco.prompt_token_ids,
-            skip_special_tokens=True,
-        )
-
-        return cls(
-            output_text="",
-            tokens=tokens,
-            token_ids=eco.prompt_token_ids,
-            stop=[],
-            include_stop_str_in_output=False,
-            prefix_offset=prefix_offset,
-            read_offset=read_offset,
-            skip_special_tokens=True,
-            spaces_between_special_tokens=True,
-            output_kind=RequestOutputKind.DELTA,
-            request_id=eco.request_id,
-            prompt=eco.prompt,
-            prompt_token_ids=eco.prompt_token_ids,
-            tokenizer=tokenizer,
-            stop_buffer_length=0,
-        )
-        
-
     def add_tokens(
         self,
         new_token_ids: List[int],
@@ -275,14 +244,6 @@ class Detokenizer:
         request_state = IncrementalDetokenizer.from_new_request(
             self.tokenizer, request)
         self.request_states[request.request_id] = request_state
-
-    def add_request_eco(
-        self,
-        eco: EngineCoreOutput,
-    ):
-        request_state = IncrementalDetokenizer.from_eco(
-            self.tokenizer, eco)
-        self.request_states[eco.request_id] = request_state
         
         
     def step(
@@ -295,9 +256,6 @@ class Detokenizer:
 
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
-
-            if request_id not in self.request_states:
-                self.add_request_eco(engine_core_output)
 
             detokenizer = self.request_states.get(request_id)
             if detokenizer is None:
@@ -514,11 +472,10 @@ class DetokenizerClient:
         if self.proc_handle.proc.is_alive():
             kill_process_tree(self.proc_handle.proc.pid)
 
-    async def add_request_async(self, request: DetokenizerRequest):
+    async def add_request_async(self, request: EngineRequest):
         """Send new DetokenizerRequest to Detokenizer."""
 
-        msg = (self.encoder.encode(request), )
-        await self.input_socket.send_multipart(msg, copy=False)
+        await self.input_socket.send_pyobj(request)
 
     async def get_output_async(self) -> List[RequestOutput]:
         """Get RequestOutputs, RequestsToAbort from Detokenizer."""
