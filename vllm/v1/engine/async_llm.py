@@ -18,7 +18,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine.core_client import AsyncMPClient
+from vllm.v1.engine.core_client import MultiprocessEngineCore
 from vllm.v1.engine.detokenizer import DetokenizerClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
@@ -64,18 +64,20 @@ class AsyncLLM(EngineClient):
         # List of cancelled request ids to be aborted.
         self.client_aborted_requests: List[str] = []
 
-        # Processor (converts Inputs --> EngineCoreRequests).
+        # Processor (converts Inputs --> EngineRequest).
         self.processor = Processor(vllm_config.model_config,
                                    vllm_config.lora_config, self.tokenizer,
                                    input_registry)
 
 
-        # IPC path for EngineCore -> Detokenizer.
+        # IPC paths.
         engine_core_outputs_path = get_open_zmq_ipc_path()
+        engine_core_inputs_path = get_open_zmq_ipc_path()
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
         self.detokenizer = DetokenizerClient(
             engine_core_outputs_path=engine_core_outputs_path,
+            engine_core_inputs_path=engine_core_inputs_path,
             tokenizer_name=vllm_config.model_config.tokenizer,
             tokenizer_mode=vllm_config.model_config.tokenizer_mode,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
@@ -83,7 +85,8 @@ class AsyncLLM(EngineClient):
         )
 
         # EngineCore (starts the engine in background process).
-        self.engine_core = AsyncMPClient(
+        self.engine_core = MultiprocessEngineCore(
+            input_path=engine_core_inputs_path,
             output_path=engine_core_outputs_path,
             vllm_config=vllm_config,
             executor_class=executor_class,

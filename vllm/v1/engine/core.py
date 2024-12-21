@@ -19,7 +19,7 @@ from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion,
+                            EngineRequestType, EngineRequestUnion,
                             BackgroundProcHandle)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
@@ -155,7 +155,7 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[EngineCoreRequestUnion] = queue.Queue()
+        self.input_queue: queue.Queue[EngineRequestUnion] = queue.Queue()
         self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
@@ -289,10 +289,10 @@ class EngineCoreProc(EngineCore):
 
             self._last_logging_time = now
 
-    def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
-        """Handle EngineCoreRequest or EngineCoreABORT from Client."""
+    def _handle_client_request(self, request: EngineRequestUnion) -> None:
+        """Handle EngineRequest or EngineCoreABORT from Client."""
 
-        if isinstance(request, EngineCoreRequest):
+        if isinstance(request, EngineRequest):
             self.add_request(request)
         elif isinstance(request, EngineCoreProfile):
             self.model_executor.profile(request.is_start)
@@ -311,21 +311,23 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(input_path, zmq.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
-                type_frame, data_frame = socket.recv_multipart(copy=False)
-                request_type = type_frame.buffer
-                request_data = data_frame.buffer
+                # type_frame, data_frame = socket.recv_multipart(copy=False)
+                # request_type = type_frame.buffer
+                # request_data = data_frame.buffer
+                
 
-                # Deserialize the request data.
-                if request_type == EngineCoreRequestType.ADD.value:
-                    request = decoder_add_req.decode(request_data)
-                elif request_type == EngineCoreRequestType.ABORT.value:
-                    request = decoder_abort_req.decode(request_data)
-                elif request_type == EngineCoreRequestType.PROFILE.value:
-                    request = pickle.loads(request_data)
-                else:
-                    raise ValueError(f"Unknown RequestType: {request_type}")
+                # # Deserialize the request data.
+                # if request_type == EngineRequestType.ADD.value:
+                #     request = decoder_add_req.decode(request_data)
+                # elif request_type == EngineRequestType.ABORT.value:
+                #     request = decoder_abort_req.decode(request_data)
+                # elif request_type == EngineRequestType.PROFILE.value:
+                #     request = pickle.loads(request_data)
+                # else:
+                #     raise ValueError(f"Unknown RequestType: {request_type}")
 
                 # Push to input queue for core busy loop.
+                request = socket.recv_pyobj()
                 self.input_queue.put_nowait(request)
 
     def process_output_socket(self, output_path: str):

@@ -3,7 +3,7 @@ import zmq.asyncio
 import msgspec
 import signal
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.executor.multiproc_worker_utils import get_mp_context
@@ -75,7 +75,7 @@ class IncrementalDetokenizer:
             skip_special_tokens=sampling_params.skip_special_tokens,
         )
 
-        stops = request.sampling_params
+        stops = request.sampling_params.stop
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
         if stops and not sampling_params.include_stop_str_in_output:
@@ -231,20 +231,7 @@ class Detokenizer:
         """Remove the request_ids from the Detokenizer."""
 
         for request_id in request_ids:
-            self.request_states.pop(request_id, None)
-
-    def add_request(
-        self,
-        request: EngineRequest,
-    ):
-        """Add new request to the Detokenizer."""
-
-        assert (request.request_id not in self.request_states)
-
-        request_state = IncrementalDetokenizer.from_new_request(
-            self.tokenizer, request)
-        self.request_states[request.request_id] = request_state
-        
+            self.request_states.pop(request_id, None)        
         
     def step(
         self, encore_core_outputs: List[EngineCoreOutput]
@@ -295,6 +282,7 @@ class DetokenizerProc(Detokenizer):
         self,
         *args,
         engine_core_outputs_path: str,
+        engine_core_inputs_path: str,
         input_path: str,
         output_path: str,
         ready_path: str,
@@ -303,6 +291,7 @@ class DetokenizerProc(Detokenizer):
         super().__init__(*args, **kwargs)
 
         self.engine_core_outputs_path = engine_core_outputs_path
+        self.engine_core_inputs_path = engine_core_inputs_path
         self.input_path = input_path
         self.output_path = output_path
 
@@ -314,6 +303,7 @@ class DetokenizerProc(Detokenizer):
     @staticmethod
     def make_detokenizer_process(
         engine_core_outputs_path: str,
+        engine_core_inputs_path: str,
         input_path: str,
         output_path: str,
         tokenizer_name: str,
@@ -326,6 +316,7 @@ class DetokenizerProc(Detokenizer):
 
         process_kwargs = {
             "engine_core_outputs_path": engine_core_outputs_path,
+            "engine_core_inputs_path": engine_core_inputs_path,
             "input_path": input_path,
             "output_path": output_path,
             "ready_path": ready_path,
@@ -391,12 +382,12 @@ class DetokenizerProc(Detokenizer):
             # TODO: pickle -> msgpack
             # TODO: send stop string aborts back to EngineCore directly
 
-            decoder_new = msgspec.msgpack.Decoder(EngineRequest)
             decoder_out = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
             with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as from_engine_core, 
                   zmq_socket_ctx(self.input_path, zmq.PULL) as from_llm_engine,
-                  zmq_socket_ctx(self.output_path, zmq.PUSH) as output_socket):
+                  zmq_socket_ctx(self.engine_core_inputs_path, zmq.PUSH) as to_engine_core,
+                  zmq_socket_ctx(self.output_path, zmq.PUSH) as to_llm_engine):
 
                 # TODO: avoid poll by having both EngineCore
                 # and AsyncLLM send to the same socket (unclear why this 
@@ -414,16 +405,25 @@ class DetokenizerProc(Detokenizer):
 
                     # Handle NewRequest.
                     if from_llm_engine in socks:
-                        (frame, ) = from_llm_engine.recv_multipart(copy=False)
-                        engine_request = decoder_new.decode(frame.buffer)
-                        self.add_request(engine_request)
+                        pickled_request = from_llm_engine.recv()
+                        request = pickle.loads(pickled_request)
+
+                        assert (request.request_id not in self.request_states)
+
+                        # Add to Detokenizer.
+                        request_state = IncrementalDetokenizer.from_new_request(
+                            self.tokenizer, request)
+                        self.request_states[request.request_id] = request_state
+
+                        # Forward to EngineCore.
+                        to_engine_core.send(pickled_request)
 
                     # Handle EngineCoreOutput.
                     if from_engine_core in socks:
                         (frame, ) = from_engine_core.recv_multipart(copy=False)
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
                         request_outputs, _ = self.step(engine_core_outputs)
-                        output_socket.send_pyobj(request_outputs)
+                        to_llm_engine.send_pyobj(request_outputs)
         
         except Exception as e:
             logger.error(e)
@@ -431,7 +431,11 @@ class DetokenizerProc(Detokenizer):
 
 class DetokenizerClient:
     
-    def __init__(self, *args, engine_core_outputs_path: str, **kwargs):
+    def __init__(self,
+                 *args,
+                 engine_core_outputs_path: str,
+                 engine_core_inputs_path: str,
+                 **kwargs):
 
         # Serialization setup.
         self.encoder = msgspec.msgpack.Encoder()
@@ -460,6 +464,7 @@ class DetokenizerClient:
         self.proc_handle = DetokenizerProc.make_detokenizer_process(
             *args,
             engine_core_outputs_path=engine_core_outputs_path,
+            engine_core_inputs_path=engine_core_inputs_path,
             input_path=input_path,
             output_path=output_path,
             **kwargs,

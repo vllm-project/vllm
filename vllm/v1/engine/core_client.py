@@ -10,8 +10,8 @@ from vllm.logger import init_logger
 from vllm.utils import kill_process_tree, get_open_zmq_ipc_path
 from vllm.v1.engine import (BackgroundProcHandle,
                             EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion)
+                            EngineCoreProfile, EngineRequest,
+                            EngineRequestType, EngineRequestUnion)
 from vllm.v1.engine.core import (EngineCore, EngineCoreProc)
 from vllm.v1.serial_utils import PickleEncoder
 from vllm.v1.utils import make_zmq_socket
@@ -58,7 +58,7 @@ class EngineCoreClient:
     def get_output(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
 
-    def add_request(self, request: EngineCoreRequest) -> None:
+    def add_request(self, request: EngineRequest) -> None:
         raise NotImplementedError
 
     def profile(self, is_start: bool = True) -> None:
@@ -70,7 +70,7 @@ class EngineCoreClient:
     async def get_output_async(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
 
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
+    async def add_request_async(self, request: EngineRequest) -> None:
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
@@ -86,7 +86,7 @@ class InprocClient(EngineCoreClient):
     for use in LLMEngine for V0-style add_request() and step()
         EngineCore setup in this process (no busy loop).
 
-        * pushes EngineCoreRequest directly into the EngineCore
+        * pushes EngineRequest directly into the EngineCore
         * pulls EngineCoreOutputs by stepping the EngineCore
 
         TODO: support asyncio-mode for debugging.
@@ -98,7 +98,7 @@ class InprocClient(EngineCoreClient):
     def get_output(self) -> List[EngineCoreOutput]:
         return self.engine_core.step()
 
-    def add_request(self, request: EngineCoreRequest) -> None:
+    def add_request(self, request: EngineRequest) -> None:
         self.engine_core.add_request(request)
 
     def abort_requests(self, request_ids: List[str]) -> None:
@@ -114,53 +114,29 @@ class InprocClient(EngineCoreClient):
         self.engine_core.profile(is_start)
 
 
-class MPClient(EngineCoreClient):
+class MultiprocessEngineCore:
     """
-    MPClient: base client for multi-proc EngineCore.
+    MultiprocessEngineCore: base client for multi-proc EngineCore.
         EngineCore runs in a background process busy loop, getting
-        new EngineCoreRequests and returning EngineCoreOutputs
+        new EngineRequests and returning EngineCoreOutputs
 
-        * pushes EngineCoreRequests via input_socket
+        * pushes EngineRequests via input_socket
         * pulls EngineCoreOutputs via output_socket
-    
-        * AsyncMPClient subclass for AsyncLLM usage
-        * SyncMPClient subclass for LLM usage
     """
 
     def __init__(
         self,
         *args,
-        asyncio_mode: bool,
+        input_path: Optional[str] = None,
         output_path: Optional[str] = None,
         **kwargs,
     ):
-        # Serialization setup.
-        self.encoder = PickleEncoder()
-        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
-
-        # ZMQ setup.
-        if asyncio_mode:
-            print("HERE HERE HERE")
-            self.ctx = zmq.asyncio.Context(io_threads=2)
-        else:
-            self.ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
-
-        input_path = get_open_zmq_ipc_path()
-        self.input_socket = make_zmq_socket(
-            self.ctx,
-            input_path,
-            zmq.PUSH,
-        )
-
-        if output_path is None:
-            output_path = get_open_zmq_ipc_path()
-
         # Start EngineCore in background process.
         self.proc_handle: Optional[BackgroundProcHandle]
         self.proc_handle = EngineCoreProc.make_engine_core_process(
             *args,
-            input_path=input_path,
-            output_path=output_path,
+            input_path=(input_path or get_open_zmq_ipc_path()),
+            output_path=(output_path or get_open_zmq_ipc_path()),
             **kwargs,
         )
         atexit.register(self.shutdown)
@@ -171,9 +147,6 @@ class MPClient(EngineCoreClient):
         if atexit:
             # in case shutdown gets called via __del__ first
             atexit.unregister(self.shutdown)
-
-        # Shut down the zmq context.
-        self.ctx.destroy(linger=0)
 
         if hasattr(self, "proc_handle") and self.proc_handle:
             # Shutdown the process if needed.
@@ -197,51 +170,3 @@ class MPClient(EngineCoreClient):
 
     def __del__(self):
         self.shutdown()
-
-
-class SyncMPClient(MPClient):
-    """Synchronous client for multi-proc EngineCore."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, asyncio_mode=False, **kwargs)
-
-    def _send_input(self, request_type: EngineCoreRequestType,
-                    request: EngineCoreRequestUnion) -> None:
-
-        # (RequestType, SerializedRequest)
-        msg = (request_type.value, self.encoder.encode(request))
-        self.input_socket.send_multipart(msg, copy=False)
-
-    def add_request(self, request: EngineCoreRequest) -> None:
-        self._send_input(EngineCoreRequestType.ADD, request)
-
-    def abort_requests(self, request_ids: List[str]) -> None:
-        self._send_input(EngineCoreRequestType.ABORT, request_ids)
-
-    def profile(self, is_start: bool = True) -> None:
-        self._send_input(EngineCoreRequestType.PROFILE,
-                         EngineCoreProfile(is_start))
-
-
-class AsyncMPClient(MPClient):
-    """Asyncio-compatible client for multi-proc EngineCore."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, asyncio_mode=True, **kwargs)
-
-    async def _send_input(self, request_type: EngineCoreRequestType,
-                          request: EngineCoreRequestUnion) -> None:
-
-        msg = (request_type.value, self.encoder.encode(request))
-        await self.input_socket.send_multipart(msg, copy=False)
-
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
-        await self._send_input(EngineCoreRequestType.ADD, request)
-
-    async def abort_requests_async(self, request_ids: List[str]) -> None:
-        if len(request_ids) > 0:
-            await self._send_input(EngineCoreRequestType.ABORT, request_ids)
-
-    async def profile_async(self, is_start: bool = True) -> None:
-        await self._send_input(EngineCoreRequestType.PROFILE,
-                               EngineCoreProfile(is_start))

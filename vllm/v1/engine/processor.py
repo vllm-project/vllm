@@ -14,7 +14,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import DetokenizerData, EngineRequest
+from vllm.v1.engine import EngineRequest
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 
 

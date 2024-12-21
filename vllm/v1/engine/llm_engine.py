@@ -54,7 +54,7 @@ class LLMEngine:
             lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
-        # Processor (convert Inputs --> EngineCoreRequests)
+        # Processor (convert Inputs --> EngineRequests)
         self.processor = Processor(vllm_config.model_config,
                                    vllm_config.lora_config, self.tokenizer,
                                    input_registry, mm_registry)
@@ -67,7 +67,7 @@ class LLMEngine:
             revision=vllm_config.model_config.tokenizer_revision,
         )
 
-        # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
+        # EngineCore (gets EngineRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
             vllm_config,
             executor_class,

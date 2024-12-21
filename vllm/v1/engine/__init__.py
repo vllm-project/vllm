@@ -66,7 +66,7 @@ class EngineCoreProfile:
     is_start: bool
 
 
-class EngineCoreRequestType(enum.Enum):
+class EngineRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
@@ -76,4 +76,4 @@ class EngineCoreRequestType(enum.Enum):
     PROFILE = b'\x02'
 
 
-EngineCoreRequestUnion = Union[EngineRequest, EngineCoreProfile, List[str]]
+EngineRequestUnion = Union[EngineRequest, EngineCoreProfile, List[str]]
