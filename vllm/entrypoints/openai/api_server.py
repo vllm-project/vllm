@@ -245,7 +245,7 @@ async def build_async_engine_client_from_engine_args(
             multiprocess.mark_process_dead(engine_process.pid)
 
 
-router = APIRouter()
+# router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
@@ -303,190 +303,6 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-@router.get("/health")
-async def health(raw_request: Request) -> Response:
-    """Health check."""
-    await engine_client(raw_request).check_health()
-    return Response(status_code=200)
-
-
-@router.post("/tokenize")
-async def tokenize(request: TokenizeRequest, raw_request: Request):
-    handler = tokenization(raw_request)
-
-    generator = await handler.create_tokenize(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    elif isinstance(generator, TokenizeResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post("/detokenize")
-async def detokenize(request: DetokenizeRequest, raw_request: Request):
-    handler = tokenization(raw_request)
-
-    generator = await handler.create_detokenize(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    elif isinstance(generator, DetokenizeResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.get("/v1/models")
-async def show_available_models(raw_request: Request):
-    handler = base(raw_request)
-
-    models = await handler.show_available_models()
-    return JSONResponse(content=models.model_dump())
-
-
-@router.get("/version")
-async def show_version():
-    ver = {"version": VLLM_VERSION}
-    return JSONResponse(content=ver)
-
-
-@router.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest,
-                                 raw_request: Request):
-    handler = chat(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Chat Completions API")
-
-    generator = await handler.create_chat_completion(request, raw_request)
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-
-    elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post("/v1/completions")
-async def create_completion(request: CompletionRequest, raw_request: Request):
-    raw_request.app.count += 1
-    should_profile = raw_request.app.count == 500
-    handler = completion(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Completions API")
-
-    generator = await handler.create_completion(request, raw_request, 
-                                                should_profile=should_profile)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    elif isinstance(generator, CompletionResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post("/v1/embeddings")
-async def create_embedding(request: EmbeddingRequest, raw_request: Request):
-    handler = embedding(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Embeddings API")
-
-    generator = await handler.create_embedding(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    elif isinstance(generator, EmbeddingResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post("/score")
-async def create_score(request: ScoreRequest, raw_request: Request):
-    handler = score(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Score API")
-
-    generator = await handler.create_score(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    elif isinstance(generator, ScoreResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post("/v1/score")
-async def create_score_v1(request: ScoreRequest, raw_request: Request):
-    logger.warning(
-        "To indicate that Score API is not part of standard OpenAI API, we "
-        "have moved it to `/score`. Please update your client accordingly.")
-
-    return await create_score(request, raw_request)
-
-
-if envs.VLLM_TORCH_PROFILER_DIR:
-    logger.warning(
-        "Torch Profiler is enabled in the API server. This should ONLY be "
-        "used for local development!")
-
-    @router.post("/start_profile")
-    async def start_profile(raw_request: Request):
-        logger.info("Starting profiler...")
-        await engine_client(raw_request).start_profile()
-        logger.info("Profiler started.")
-        return Response(status_code=200)
-
-    @router.post("/stop_profile")
-    async def stop_profile(raw_request: Request):
-        logger.info("Stopping profiler...")
-        await engine_client(raw_request).stop_profile()
-        logger.info("Profiler stopped.")
-        return Response(status_code=200)
-
-
-if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-    logger.warning(
-        "Lora dynamic loading & unloading is enabled in the API server. "
-        "This should ONLY be used for local development!")
-
-    @router.post("/v1/load_lora_adapter")
-    async def load_lora_adapter(request: LoadLoraAdapterRequest,
-                                raw_request: Request):
-        for route in [chat, completion, embedding]:
-            handler = route(raw_request)
-            if handler is not None:
-                response = await handler.load_lora_adapter(request)
-                if isinstance(response, ErrorResponse):
-                    return JSONResponse(content=response.model_dump(),
-                                        status_code=response.code)
-
-        return Response(status_code=200, content=response)
-
-    @router.post("/v1/unload_lora_adapter")
-    async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
-                                  raw_request: Request):
-        for route in [chat, completion, embedding]:
-            handler = route(raw_request)
-            if handler is not None:
-                response = await handler.unload_lora_adapter(request)
-                if isinstance(response, ErrorResponse):
-                    return JSONResponse(content=response.model_dump(),
-                                        status_code=response.code)
-
-        return Response(status_code=200, content=response)
-
-
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(openapi_url=None,
@@ -495,7 +311,7 @@ def build_app(args: Namespace) -> FastAPI:
                       lifespan=lifespan)
     else:
         app = FastAPI(lifespan=lifespan)
-    app.include_router(router)
+    # app.include_router(router)
     app.root_path = args.root_path
     app.count = 0
 
@@ -509,47 +325,232 @@ def build_app(args: Namespace) -> FastAPI:
         allow_headers=args.allowed_headers,
     )
 
-    @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(_, exc):
-        err = ErrorResponse(message=str(exc),
-                            type="BadRequestError",
-                            code=HTTPStatus.BAD_REQUEST)
-        return JSONResponse(err.model_dump(),
-                            status_code=HTTPStatus.BAD_REQUEST)
+    @app.get("/health")
+    async def health(raw_request: Request) -> Response:
+        """Health check."""
+        await engine_client(raw_request).check_health()
+        return Response(status_code=200)
 
-    if token := envs.VLLM_API_KEY or args.api_key:
 
-        @app.middleware("http")
-        async def authentication(request: Request, call_next):
-            if request.method == "OPTIONS":
-                return await call_next(request)
-            url_path = request.url.path
-            if app.root_path and url_path.startswith(app.root_path):
-                url_path = url_path[len(app.root_path):]
-            if not url_path.startswith("/v1"):
-                return await call_next(request)
-            if request.headers.get("Authorization") != "Bearer " + token:
-                return JSONResponse(content={"error": "Unauthorized"},
-                                    status_code=401)
-            return await call_next(request)
+    @app.post("/tokenize")
+    async def tokenize(request: TokenizeRequest, raw_request: Request):
+        handler = tokenization(raw_request)
 
-    @app.middleware("http")
-    async def add_request_id(request: Request, call_next):
-        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
-        response = await call_next(request)
-        response.headers["X-Request-Id"] = request_id
-        return response
+        generator = await handler.create_tokenize(request, raw_request)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        elif isinstance(generator, TokenizeResponse):
+            return JSONResponse(content=generator.model_dump())
 
-    for middleware in args.middleware:
-        module_path, object_name = middleware.rsplit(".", 1)
-        imported = getattr(importlib.import_module(module_path), object_name)
-        if inspect.isclass(imported):
-            app.add_middleware(imported)
-        elif inspect.iscoroutinefunction(imported):
-            app.middleware("http")(imported)
-        else:
-            raise ValueError(f"Invalid middleware {middleware}. "
-                             f"Must be a function or a class.")
+        assert_never(generator)
+
+
+    @app.post("/detokenize")
+    async def detokenize(request: DetokenizeRequest, raw_request: Request):
+        handler = tokenization(raw_request)
+
+        generator = await handler.create_detokenize(request, raw_request)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        elif isinstance(generator, DetokenizeResponse):
+            return JSONResponse(content=generator.model_dump())
+
+        assert_never(generator)
+
+
+    @app.get("/v1/models")
+    async def show_available_models(raw_request: Request):
+        handler = base(raw_request)
+
+        models = await handler.show_available_models()
+        return JSONResponse(content=models.model_dump())
+
+
+    @app.get("/version")
+    async def show_version():
+        ver = {"version": VLLM_VERSION}
+        return JSONResponse(content=ver)
+
+
+    @app.post("/v1/chat/completions")
+    async def create_chat_completion(request: ChatCompletionRequest,
+                                    raw_request: Request):
+        handler = chat(raw_request)
+        if handler is None:
+            return base(raw_request).create_error_response(
+                message="The model does not support Chat Completions API")
+
+        generator = await handler.create_chat_completion(request, raw_request)
+
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+
+        elif isinstance(generator, ChatCompletionResponse):
+            return JSONResponse(content=generator.model_dump())
+
+        return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+    @app.post("/v1/completions")
+    async def create_completion(request: CompletionRequest, raw_request: Request):
+        raw_request.app.count += 1
+        should_profile = raw_request.app.count == 500
+        print(f"{should_profile=}")
+        handler = completion(raw_request)
+        if handler is None:
+            return base(raw_request).create_error_response(
+                message="The model does not support Completions API")
+
+        generator = await handler.create_completion(request, raw_request, 
+                                                    should_profile=should_profile)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        elif isinstance(generator, CompletionResponse):
+            return JSONResponse(content=generator.model_dump())
+
+        return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+    @app.post("/v1/embeddings")
+    async def create_embedding(request: EmbeddingRequest, raw_request: Request):
+        handler = embedding(raw_request)
+        if handler is None:
+            return base(raw_request).create_error_response(
+                message="The model does not support Embeddings API")
+
+        generator = await handler.create_embedding(request, raw_request)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        elif isinstance(generator, EmbeddingResponse):
+            return JSONResponse(content=generator.model_dump())
+
+        assert_never(generator)
+
+
+# @router.post("/score")
+# async def create_score(request: ScoreRequest, raw_request: Request):
+#     handler = score(raw_request)
+#     if handler is None:
+#         return base(raw_request).create_error_response(
+#             message="The model does not support Score API")
+
+#     generator = await handler.create_score(request, raw_request)
+#     if isinstance(generator, ErrorResponse):
+#         return JSONResponse(content=generator.model_dump(),
+#                             status_code=generator.code)
+#     elif isinstance(generator, ScoreResponse):
+#         return JSONResponse(content=generator.model_dump())
+
+#     assert_never(generator)
+
+
+# @router.post("/v1/score")
+# async def create_score_v1(request: ScoreRequest, raw_request: Request):
+#     logger.warning(
+#         "To indicate that Score API is not part of standard OpenAI API, we "
+#         "have moved it to `/score`. Please update your client accordingly.")
+
+#     return await create_score(request, raw_request)
+
+
+# if envs.VLLM_TORCH_PROFILER_DIR:
+#     logger.warning(
+#         "Torch Profiler is enabled in the API server. This should ONLY be "
+#         "used for local development!")
+
+#     @router.post("/start_profile")
+#     async def start_profile(raw_request: Request):
+#         logger.info("Starting profiler...")
+#         await engine_client(raw_request).start_profile()
+#         logger.info("Profiler started.")
+#         return Response(status_code=200)
+
+#     @router.post("/stop_profile")
+#     async def stop_profile(raw_request: Request):
+#         logger.info("Stopping profiler...")
+#         await engine_client(raw_request).stop_profile()
+#         logger.info("Profiler stopped.")
+#         return Response(status_code=200)
+
+
+# if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+#     logger.warning(
+#         "Lora dynamic loading & unloading is enabled in the API server. "
+#         "This should ONLY be used for local development!")
+
+#     @router.post("/v1/load_lora_adapter")
+#     async def load_lora_adapter(request: LoadLoraAdapterRequest,
+#                                 raw_request: Request):
+#         for route in [chat, completion, embedding]:
+#             handler = route(raw_request)
+#             if handler is not None:
+#                 response = await handler.load_lora_adapter(request)
+#                 if isinstance(response, ErrorResponse):
+#                     return JSONResponse(content=response.model_dump(),
+#                                         status_code=response.code)
+
+#         return Response(status_code=200, content=response)
+
+#     @router.post("/v1/unload_lora_adapter")
+#     async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
+#                                   raw_request: Request):
+#         for route in [chat, completion, embedding]:
+#             handler = route(raw_request)
+#             if handler is not None:
+#                 response = await handler.unload_lora_adapter(request)
+#                 if isinstance(response, ErrorResponse):
+#                     return JSONResponse(content=response.model_dump(),
+#                                         status_code=response.code)
+
+#         return Response(status_code=200, content=response)
+
+    # @app.exception_handler(RequestValidationError)
+    # async def validation_exception_handler(_, exc):
+    #     err = ErrorResponse(message=str(exc),
+    #                         type="BadRequestError",
+    #                         code=HTTPStatus.BAD_REQUEST)
+    #     return JSONResponse(err.model_dump(),
+    #                         status_code=HTTPStatus.BAD_REQUEST)
+
+    # if token := envs.VLLM_API_KEY or args.api_key:
+
+    #     @app.middleware("http")
+    #     async def authentication(request: Request, call_next):
+    #         if request.method == "OPTIONS":
+    #             return await call_next(request)
+    #         url_path = request.url.path
+    #         if app.root_path and url_path.startswith(app.root_path):
+    #             url_path = url_path[len(app.root_path):]
+    #         if not url_path.startswith("/v1"):
+    #             return await call_next(request)
+    #         if request.headers.get("Authorization") != "Bearer " + token:
+    #             return JSONResponse(content={"error": "Unauthorized"},
+    #                                 status_code=401)
+    #         return await call_next(request)
+
+    # @app.middleware("http")
+    # async def add_request_id(request: Request, call_next):
+    #     request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+    #     response = await call_next(request)
+    #     response.headers["X-Request-Id"] = request_id
+    #     return response
+
+    # print(f"{args.middleware=}")
+    # for middleware in args.middleware:
+    #     module_path, object_name = middleware.rsplit(".", 1)
+    #     imported = getattr(importlib.import_module(module_path), object_name)
+    #     if inspect.isclass(imported):
+    #         app.add_middleware(imported)
+    #     elif inspect.iscoroutinefunction(imported):
+    #         app.middleware("http")(imported)
+    #     else:
+    #         raise ValueError(f"Invalid middleware {middleware}. "
+    #                          f"Must be a function or a class.")
 
     return app
 
