@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -165,22 +165,16 @@ class AsyncLLM(EngineClient):
     ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
-        # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
-        _, engine_core_req = self.processor.process_inputs(
+        # 1) Convert Input --> EngineRequest.
+        engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
         
-        # 1) Add to RequestState tracker. The "event" is used to manage
-        # concurrency between generate() and output_handler().
+        # 2) Create Queue (output_handler pushes, generate pulls)
         self.rid_to_queue[request_id] = asyncio.Queue()
 
-        # 3) Add the DetokenizerRequest to Detokenizer.
-        # TODO: sending these separately is a race condition. We should instead
-        # have the EngineCore do the "AddRequest" logic.
-        # await self.detokenizer.add_request_async(detokenizer_req)
-
-        # 4) Add the EngineCoreRequest to EngineCore.
-        await self.engine_core.add_request_async(engine_core_req)
+        # 3) Send to Detokenizer.
+        await self.detokenizer.add_request_async(engine_request)
 
         return self.rid_to_queue[request_id]
 
@@ -201,16 +195,15 @@ class AsyncLLM(EngineClient):
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
-            * 1) Make RequestState corresponding to the Request.
+            * 1) Make a queue corresponding to the Request.
             # 2) Processing the Input.
-            * 3) Adding the Request to the Detokenizer.
-            * 4) Adding the Request to the EngineCore (separate process).
+            * 3) Adding the Request to the Detokenize + EngineCore.
 
-        The output_handler() loop runs in a background task, pulling from
-        EngineCore and updating the RequestState and setting the asyncio event.
+        The output_handler() loop runs in a background task, pulling
+        from Detokenizer and pushing to the per request queue.
 
-        The caller of generate() waits on the asyncio event and forwards
-        the latest RequestOutput back to the caller. 
+        The generate() pulls from the per requests queue and yeilds
+        to the caller which iterates the AsyncGenerator.
         """
 
         # We start the output_handler on the first call to generate() so that
@@ -218,7 +211,6 @@ class AsyncLLM(EngineClient):
         # to handle startup failure gracefully in the OpenAI server.
         # if self.output_handler is None:
         if self.to_create_loop:
-            
             import signal
             def signal_handler(self, signum=None, frame=None):
                 logger.warning(

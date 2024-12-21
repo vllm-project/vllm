@@ -18,9 +18,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
+                            EngineCoreProfile, EngineRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion,
-                            DetokenizerRequestType,
                             BackgroundProcHandle)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
@@ -89,7 +88,7 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks
 
-    def add_request(self, request: EngineCoreRequest):
+    def add_request(self, request: EngineRequest):
         """Add request to the scheduler."""
 
         if request.mm_hashes is not None:

@@ -14,11 +14,10 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
-from vllm.v1.engine import (DetokenizerRequest, EngineCoreOutput,
-                            EngineCoreOutputs, BackgroundProcHandle,)
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+                            BackgroundProcHandle, EngineRequest)
 from vllm.v1.utils import (make_zmq_socket, zmq_socket_ctx, 
                            wait_for_startup)
-from vllm.v1.serial_utils import PickleEncoder
 
 logger = init_logger(__name__)
 
@@ -66,19 +65,20 @@ class IncrementalDetokenizer:
     def from_new_request(
         cls,
         tokenizer: AnyTokenizer,
-        request: DetokenizerRequest,
+        request: EngineRequest,
     ) -> "IncrementalDetokenizer":
 
+        sampling_params = request.sampling_params
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,
             prompt_ids=request.prompt_token_ids,
-            skip_special_tokens=request.skip_special_tokens,
+            skip_special_tokens=sampling_params.skip_special_tokens,
         )
 
-        stops = request.stop
+        stops = request.sampling_params
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        if stops and not request.include_stop_str_in_output:
+        if stops and not sampling_params.include_stop_str_in_output:
             stop_buffer_length = max(len(s) for s in stops) - 1
         else:
             stop_buffer_length = 0
@@ -90,13 +90,13 @@ class IncrementalDetokenizer:
             # NOTE(Nick): could we take ownership of it though?
             token_ids=request.prompt_token_ids.copy(),
             stop=stops,
-            include_stop_str_in_output=request.include_stop_str_in_output,
+            include_stop_str_in_output=sampling_params.include_stop_str_in_output,
             prefix_offset=prefix_offset,
             read_offset=read_offset,
-            skip_special_tokens=request.skip_special_tokens,
-            spaces_between_special_tokens=request.
+            skip_special_tokens=sampling_params.skip_special_tokens,
+            spaces_between_special_tokens=sampling_params.
             spaces_between_special_tokens,
-            output_kind=request.output_kind,
+            output_kind=sampling_params.output_kind,
             request_id=request.request_id,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
@@ -266,7 +266,7 @@ class Detokenizer:
 
     def add_request(
         self,
-        request: DetokenizerRequest,
+        request: EngineRequest,
     ):
         """Add new request to the Detokenizer."""
 
@@ -428,29 +428,24 @@ class DetokenizerProc(Detokenizer):
     def run_busy_loop(self):
         """Core busy loop of the Detokenizer."""
 
-        log_interval = 0
-        import time
-
-        last_log = time.perf_counter()
         try:
             # TODO: handle aborted due to client cancellation
             # TODO: pickle -> msgpack
             # TODO: send stop string aborts back to EngineCore directly
 
-            decoder_new = msgspec.msgpack.Decoder(DetokenizerRequest)
+            decoder_new = msgspec.msgpack.Decoder(EngineRequest)
             decoder_out = msgspec.msgpack.Decoder(EngineCoreOutputs)
-            encoder = msgspec.msgpack.Encoder()
 
-            with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as engine_core_outputs_socket, 
-                  zmq_socket_ctx(self.input_path, zmq.PULL) as input_socket,
+            with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as from_engine_core, 
+                  zmq_socket_ctx(self.input_path, zmq.PULL) as from_llm_engine,
                   zmq_socket_ctx(self.output_path, zmq.PUSH) as output_socket):
 
                 # TODO: avoid poll by having both EngineCore
                 # and AsyncLLM send to the same socket (unclear why this 
                 # was not working when I originally tried it)
                 poller = zmq.Poller()
-                poller.register(engine_core_outputs_socket, zmq.POLLIN)
-                poller.register(input_socket, zmq.POLLIN)
+                poller.register(from_engine_core, zmq.POLLIN)
+                poller.register(from_llm_engine, zmq.POLLIN)
 
                 epoch = 0
                 while True:
@@ -460,19 +455,16 @@ class DetokenizerProc(Detokenizer):
                     socks = dict(poller.poll())
 
                     # Handle NewRequest.
-                    if input_socket in socks:
-                        (frame, ) = input_socket.recv_multipart(copy=False)
-                        detokenizer_request = decoder_new.decode(frame.buffer)
-                        self.add_request(detokenizer_request)
+                    if from_llm_engine in socks:
+                        (frame, ) = from_llm_engine.recv_multipart(copy=False)
+                        engine_request = decoder_new.decode(frame.buffer)
+                        self.add_request(engine_request)
 
                     # Handle EngineCoreOutput.
-                    if engine_core_outputs_socket in socks:
-                        (frame, ) = engine_core_outputs_socket.recv_multipart(copy=False)
+                    if from_engine_core in socks:
+                        (frame, ) = from_engine_core.recv_multipart(copy=False)
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
                         request_outputs, _ = self.step(engine_core_outputs)
-                        # msg = encoder.encode(detokenizer_outputs)
-                        # # output_socket.send_multipart((msg, ), copy=False)
-                        # output_socket.send(msg)
                         output_socket.send_pyobj(request_outputs)
         
         except Exception as e:

@@ -18,33 +18,10 @@ class BackgroundProcHandle:
     output_path: str
 
 
-class DetokenizerRequest(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
-    request_id: str
-    prompt: Optional[str]
-    prompt_token_ids: List[int]
-    skip_special_tokens: bool
-    spaces_between_special_tokens: bool
-    output_kind: RequestOutputKind
-
-    stop: List[str]
-    include_stop_str_in_output: bool
-
-
 @dataclass
-class EngineCoreRequest:
-
-    # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
-    # but this object is currently not playing well with msgspec
-    # due to circular imports and typing we have in data.py
+class EngineRequest:
 
     request_id: str
-    #NOTE(Nick): I don't think we need to pass prompt here since it should
-    # always be tokenized?
     prompt: Optional[str]
     prompt_token_ids: List[int]
     mm_inputs: Optional[List[Optional[MultiModalKwargs]]]
@@ -99,4 +76,4 @@ class EngineCoreRequestType(enum.Enum):
     PROFILE = b'\x02'
 
 
-EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, List[str]]
+EngineCoreRequestUnion = Union[EngineRequest, EngineCoreProfile, List[str]]

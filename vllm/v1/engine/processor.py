@@ -14,7 +14,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
+from vllm.v1.engine import DetokenizerData, EngineRequest
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 
 
@@ -61,7 +61,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
+    ) -> EngineRequest:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Check max_logprobs
@@ -122,20 +122,8 @@ class Processor:
                 decoder_inputs.multi_modal_data, mm_hashes,
                 decoder_inputs.mm_processor_kwargs, precomputed_mm_inputs)
 
-        # Make Request for Detokenizer.
-        detokenizer_request = DetokenizerRequest(
-            request_id,
-            decoder_inputs.prompt,
-            decoder_inputs.prompt_token_ids,
-            sampling_params.skip_special_tokens,
-            sampling_params.spaces_between_special_tokens,
-            sampling_params.output_kind,
-            sampling_params.stop,
-            sampling_params.include_stop_str_in_output,
-        )
-
         # Make Request for EngineCore.
-        engine_core_request = EngineCoreRequest(
+        engine_request = EngineRequest(
             request_id,
             decoder_inputs.prompt,
             decoder_inputs.prompt_token_ids,
@@ -148,7 +136,7 @@ class Processor:
             lora_request,
         )
 
-        return detokenizer_request, engine_core_request
+        return engine_request
 
     def _validate_model_inputs(self, inputs: ProcessorInputs):
         if is_encoder_decoder_inputs(inputs):
