@@ -706,7 +706,11 @@ class ProcessingCache:
 
                 for k, v in processed_modal_item.items():
                     # Remove the extra batch dimension (if it exists)
-                    processed_modal_items[k].append(v.squeeze(0))
+                    # NOTE: v may be a list instead of a tensor
+                    if len(v) == 1:
+                        v = v[0]
+
+                    processed_modal_items[k].append(v)
 
             for k, vs in processed_modal_items.items():
                 # Try to merge elements into a single tensor
