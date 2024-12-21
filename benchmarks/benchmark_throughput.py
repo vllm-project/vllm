@@ -6,6 +6,7 @@ import random
 import time
 from typing import List, Optional
 
+import asyncio
 import torch
 import uvloop
 from PIL import Image
@@ -170,7 +171,6 @@ def run_vllm(
         end = time.perf_counter()
     return end - start
 
-import asyncio
 async def run_vllm_async(
     requests: List[SampleRequest],
     n: int,
@@ -334,8 +334,7 @@ def main(args: argparse.Namespace):
                          for request in requests)
     if args.backend == "vllm":
         if args.async_engine:
-            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-            elapsed_time = asyncio.run(
+            elapsed_time = uvloop.run(
                 run_vllm_async(
                     requests,
                     args.n,
