@@ -38,7 +38,8 @@ from vllm.inputs import InputContext
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import (MultiModalField, MultiModalFields,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -73,7 +74,7 @@ class Qwen2AudioMultiModalProjector(nn.Module):
 
 
 # From Qwen2AudioEncoder._get_feat_extract_output_lengths
-def _get_feat_extract_output_lengths(input_lengths: torch.LongTensor):
+def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     feat_lengths = (input_lengths - 1) // 2 + 1
     output_lengths = (feat_lengths - 2) // 2 + 1
     return feat_lengths, output_lengths
@@ -127,10 +128,6 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs = dict(
                 **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
-                # When fine-grained caching is applied,
-                # the individual processors are called separately.
-                return_attention_mask=True,
-                padding="max_length",
             )
         else:
             # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
@@ -142,27 +139,32 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs=mm_kwargs,
         )
 
-        # When fine-grained caching is applied,
-        # the individual processors are called separately.
-        if "attention_mask" in processed_outputs:
-            processed_outputs["feature_attention_mask"] = \
-                processed_outputs.pop("attention_mask")
-
         return processed_outputs
+
+    def _get_mm_fields(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalField]:
+        return dict(
+            input_features=MultiModalFields.index("audio"),
+            feature_attention_mask=MultiModalFields.index("audio"),
+        )
 
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        hf_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         hf_config = self.ctx.get_hf_config(Qwen2AudioConfig)
         placeholder = hf_config.audio_token_index
 
-        feature_attention_mask = hf_inputs.get("feature_attention_mask")
+        feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
         if feature_attention_mask is None:
             audio_output_lengths = []
         else:
+            assert isinstance(feature_attention_mask, torch.Tensor)
             _, audio_output_lengths = _get_feat_extract_output_lengths(
                 feature_attention_mask.sum(-1))
 
@@ -192,7 +194,6 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text="<|AUDIO|>" * audio_count,
             mm_data=data,
-            hf_mm_kwargs={},
         )
 
 

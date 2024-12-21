@@ -54,7 +54,9 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, NestedTensors
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalField,
+                                    MultiModalFields, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -805,7 +807,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
                       and v[0].ndim == 2):
                     # Pass through embedding inputs (multi)
                     passthrough_data[f"{k}_embeds"] = v
-                else:
+                elif len(v) > 0:
                     # Map keys to plural form, e.g.: image -> images
                     processor_data[f"{k}s"] = v
             else:
@@ -813,31 +815,11 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
         return processor_data, passthrough_data
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
-
-        # Remove the extra dimension
-        if (not self.ctx.model_config.disable_mm_preprocessor_cache
-                and "pixel_values" in processed_outputs):
-            processed_outputs["pixel_values"] = \
-                processed_outputs["pixel_values"].squeeze(0)
-
-        return processed_outputs
-
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        hf_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
         image_processor = _get_image_processor(hf_processor)
@@ -851,7 +833,9 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         merge_length = image_processor.merge_size**2
 
         def get_replacement_qwen2vl(item_idx: int, modality: str):
-            grid_thw = hf_inputs[f"{modality}_grid_thw"][item_idx]
+            grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
+            assert isinstance(grid_thw, torch.Tensor)
+
             num_tokens = grid_thw.prod() // merge_length
             return placeholder[modality] * num_tokens
 
@@ -863,6 +847,34 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
                                     modality=modality),
             ) for modality in ("image", "video")
         ]
+
+    def _get_mm_fields(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalField]:
+        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+        image_slice_idxs = image_grid_thw.prod(-1).tolist() + [None]
+        image_slices = [
+            slice(image_slice_idxs[i], image_slice_idxs[i + i])
+            for i in range(len(image_grid_thw))
+        ]
+
+        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
+        video_slice_idxs = video_grid_thw.prod(-1).tolist() + [None]
+        video_slices = [
+            slice(video_slice_idxs[i], video_slice_idxs[i + i])
+            for i in range(len(video_grid_thw))
+        ]
+
+        return dict(
+            pixel_values=MultiModalFields.flat("image", image_slices),
+            image_embeds=MultiModalFields.flat("image", image_slices),
+            image_grid_thw=MultiModalFields.index("image"),
+            pixel_values_videos=MultiModalFields.flat("video", video_slices),
+            video_embeds=MultiModalFields.flat("video", video_slices),
+            video_grid_thw=MultiModalFields.index("video"),
+        )
 
     def _get_dummy_mm_inputs(
         self,
@@ -889,7 +901,6 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text=image_token * num_images,
             mm_data=data,
-            hf_mm_kwargs={},
         )
 
 

@@ -1,12 +1,11 @@
 import pickle
 import re
 from abc import ABC, abstractmethod
-from collections import UserDict, defaultdict
+from collections import UserDict
 from collections.abc import Callable, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache, partial
-from typing import (Any, Literal, NamedTuple, Optional, Protocol, TypeVar,
-                    Union, cast)
+from functools import lru_cache
+from typing import Any, NamedTuple, Optional, Protocol, TypeVar, Union
 
 import numpy as np
 import torch
@@ -21,7 +20,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby, is_list_of
 
 from .audio import resample_audio
-from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
+from .inputs import (AudioItem, ImageItem, MultiModalDataDict, MultiModalField,
                      MultiModalInputsV2, MultiModalKwargs, NestedTensors,
                      PlaceholderRange, VideoItem)
 
@@ -586,11 +585,12 @@ def iter_placeholders(
             )
 
 
-class ProcessorInputs(NamedTuple):
+@dataclass
+class ProcessorInputs:
     """Keyword arguments to :meth:`BaseMultiModalProcessor`."""
     prompt_text: str
     mm_data: MultiModalDataDict
-    hf_mm_kwargs: Mapping[str, object]
+    hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
 
 
 class ProcessingCache:
@@ -601,18 +601,16 @@ class ProcessingCache:
         # DEBUG: Set to None to disable
         self.debug_cache_hit_ratio_steps: Optional[int] = None
 
-        self._fine_text_cache = LRUCache[str, BatchFeature](capacity)
-        self._fine_mm_cache = LRUCache[str, BatchFeature](capacity)
-        self._coarse_cache = LRUCache[str, BatchFeature](capacity)
+        self._cache = LRUCache[str, Mapping[str, NestedTensors]](capacity)
 
-    def maybe_log_cache_stats(self, cache: LRUCache, name: str) -> None:
+    def _maybe_log_cache_stats(self) -> None:
         steps = self.debug_cache_hit_ratio_steps
         if not steps:
             return
 
-        cache_stats = cache.stat()
+        cache_stats = self._cache.stat()
         if cache_stats.total % steps == 0:
-            logger.debug("ProcessingCache: %s.hit_ratio = %.2f", name,
+            logger.debug("ProcessingCache: hit_ratio = %.2f",
                          cache_stats.hit_ratio)
 
     def _hash_item(self, obj: object) -> bytes:
@@ -665,123 +663,26 @@ class ProcessingCache:
 
         return hasher.hexdigest()
 
-    def _cached_call_fine(
+    def get(
         self,
-        ctx: InputProcessingContext,
-        hf_processor: ProcessorMixin,
-        text: str,
-        mm_data: Mapping[Literal["images", "videos", "audios"], list[Any]],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        self.maybe_log_cache_stats(self._fine_text_cache, "fine_text_cache")
+        modality: str,
+        input_item: object,
+        input_kwargs: Mapping[str, object],
+    ) -> Optional[Mapping[str, NestedTensors]]:
+        self._maybe_log_cache_stats()
 
-        processed_text = self._fine_text_cache.get_or_put(
-            text,
-            default_factory=partial(
-                ctx.call_hf_processor,
-                ctx.get_modality_processor(hf_processor, "text"),
-                dict(text=text),
-            ),
-        )
+        cache_key = self._hash_kwargs(**{modality: input_item}, **input_kwargs)
+        return self._cache.get(cache_key)
 
-        processed_data = dict(**processed_text)
-        for data_key, items in mm_data.items():
-            processed_modal_items = defaultdict[str, Union[
-                list[torch.Tensor], list[NestedTensors]]](list)
-
-            for item in items:
-                self.maybe_log_cache_stats(self._fine_mm_cache,
-                                           "fine_mm_cache")
-
-                modal_item = cast(Mapping[str, object], {data_key: item})
-                processed_modal_item = self._fine_mm_cache.get_or_put(
-                    self._hash_kwargs(**modal_item, **mm_kwargs),
-                    default_factory=partial(
-                        ctx.call_hf_processor,
-                        ctx.get_modality_processor(hf_processor, data_key),
-                        modal_item,
-                        mm_kwargs,
-                    ),
-                )
-
-                for k, v in processed_modal_item.items():
-                    # Remove the extra batch dimension (if it exists)
-                    # NOTE: v may be a list instead of a tensor
-                    if len(v) == 1:
-                        v = v[0]
-
-                    processed_modal_items[k].append(v)
-
-            for k, vs in processed_modal_items.items():
-                # Try to merge elements into a single tensor
-                if is_list_of(vs, torch.Tensor, check="all") and len(vs) > 0:
-                    first_shape = vs[0].shape
-                    if all(v.shape == first_shape for v in vs):
-                        vs = torch.stack(vs)
-
-                processed_data[k] = vs
-
-        return BatchFeature(processed_data)
-
-    def _cached_call_coarse(
+    def put(
         self,
-        ctx: InputProcessingContext,
-        hf_processor: ProcessorMixin,
-        text: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        self.maybe_log_cache_stats(self._coarse_cache, "coarse_cache")
-
-        processed_data = self._coarse_cache.get_or_put(
-            self._hash_kwargs(text=text, **mm_data, **mm_kwargs),
-            default_factory=partial(
-                ctx.call_hf_processor,
-                hf_processor,
-                dict(text=text, **mm_data),
-                mm_kwargs,
-            ),
-        )
-
-        # Shallow copy to avoid footgun when downstream methods
-        # mutate the returned dictionary (since the result is cached)
-        return BatchFeature(processed_data)  # type: ignore[arg-type]
-
-    def call_hf_processor(
-        self,
-        ctx: InputProcessingContext,
-        # Assumes that hf_processor has been initialized according to kwargs
-        hf_processor: ProcessorMixin,
-        text: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Try to cache each item separately to improve hit rate
-        extra_keys = mm_data.keys() - {"images", "videos", "audios"}
-        if (mm_data and not extra_keys
-                and all(isinstance(v, list) for v in mm_data.values())):
-            try:
-                return self._cached_call_fine(
-                    ctx,
-                    hf_processor,
-                    text=text,
-                    mm_data=mm_data,  # type: ignore[arg-type]
-                    mm_kwargs=mm_kwargs,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to apply processor on each item separately! "
-                    "Falling back to coarse caching.",
-                    stack_info=True,
-                )
-
-        return self._cached_call_coarse(
-            ctx,
-            hf_processor,
-            text=text,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+        modality: str,
+        input_item: object,
+        input_kwargs: Mapping[str, object],
+        output_kwargs: Mapping[str, NestedTensors],
+    ) -> None:
+        cache_key = self._hash_kwargs(**{modality: input_item}, **input_kwargs)
+        self._cache.put(cache_key, output_kwargs)
 
 
 class BaseMultiModalProcessor(ABC):
@@ -789,24 +690,24 @@ class BaseMultiModalProcessor(ABC):
     Abstract base class to process multi-modal inputs to be used in vLLM.
     """
 
-    def __init__(
-        self,
-        ctx: InputProcessingContext,
-        *,
-        cache: Optional[ProcessingCache] = None,
-    ) -> None:
+    def __init__(self,
+                 ctx: InputProcessingContext,
+                 *,
+                 cache: Optional[ProcessingCache] = None,
+                 enable_sanity_checks: bool = True) -> None:
         super().__init__()
 
         self.ctx = ctx
         self.cache = cache
+        self.enable_sanity_checks = enable_sanity_checks
 
     def __call__(
         self,
         prompt: str,
         mm_data: MultiModalDataDict,
-        hf_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
-        return self.apply(prompt, mm_data, hf_mm_kwargs)
+        return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
     def _get_hf_processor(self) -> ProcessorMixin:
         """
@@ -825,11 +726,20 @@ class BaseMultiModalProcessor(ABC):
         return MultiModalDataItems.from_dict(mm_data)
 
     @abstractmethod
+    def _get_mm_fields(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalField]:
+        """Given the HF-processed data, output the metadata of each field."""
+        raise NotImplementedError
+
+    @abstractmethod
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        hf_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         """
         Given the original multi-modal items for this modality
@@ -869,7 +779,7 @@ class BaseMultiModalProcessor(ABC):
                       and v[0].ndim == 2):
                     # Pass through embedding inputs (multi)
                     passthrough_data[f"{k}_embeds"] = v
-                else:
+                elif len(v) > 0:
                     # Map keys to plural form, e.g.: image -> images
                     processor_data[f"{k}s"] = v
             else:
@@ -885,37 +795,115 @@ class BaseMultiModalProcessor(ABC):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if self.cache is None:
-            return self.ctx.call_hf_processor(
-                self._get_hf_processor(**mm_kwargs),
-                dict(text=prompt, **mm_data),
-                mm_kwargs,
-            )
-
-        return self.cache.call_hf_processor(
-            self.ctx,
+        return self.ctx.call_hf_processor(
             self._get_hf_processor(**mm_kwargs),
-            text=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+            dict(text=prompt, **mm_data),
+            mm_kwargs,
         )
 
     def _apply_hf_processor(
         self,
         prompt: str,
         mm_items: MultiModalDataItems,
-        hf_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], MultiModalKwargs]:
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
         processed_data = self._call_hf_processor(
             prompt=prompt,
             mm_data=processor_data,
-            mm_kwargs=hf_mm_kwargs,
+            mm_kwargs=hf_processor_mm_kwargs,
         )
         processed_data.update(passthrough_data)
 
-        return processed_data
+        prompt_ids, = processed_data.pop("input_ids").tolist()
+
+        mm_fields = self._get_mm_fields(processed_data, hf_processor_mm_kwargs)
+        mm_kwargs = MultiModalKwargs(processed_data, fields=mm_fields)
+
+        return prompt_ids, mm_kwargs
+
+    def _cached_apply_hf_processor(
+        self,
+        prompt: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], MultiModalKwargs]:
+        cache = self.cache
+
+        if cache is None:
+            return self._apply_hf_processor(
+                prompt=prompt,
+                mm_items=mm_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            )
+
+        mm_cached_batch = {
+            modality: [
+                cache.get(modality, item, hf_processor_mm_kwargs)
+                for item in items
+            ]
+            for modality, items in mm_items.items()
+        }
+
+        mm_missing_idxs = {
+            modality: [idx for idx, out in enumerate(outputs) if out is None]
+            for modality, outputs in mm_cached_batch.items()
+        }
+        mm_missing_data = {
+            modality: [mm_items[modality][idx] for idx in idxs]
+            for modality, idxs in mm_missing_idxs.items()
+        }
+        mm_missing_items = self._get_mm_items(mm_missing_data)
+
+        # Rely on our placeholder replacement logic instead of HF
+        # to insert the placeholder tokens
+        prompt_ids = _encode(self._get_tokenizer(),
+                             prompt,
+                             add_special_tokens=True)
+
+        _, mm_missing_kwargs = self._apply_hf_processor(
+            prompt=prompt,
+            mm_items=mm_missing_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        mm_missing_next_idx = {modality: 0 for modality in mm_missing_items}
+
+        mm_merged_batch = dict[str, list[Mapping[str, NestedTensors]]]()
+        for modality, output_kwargs in mm_cached_batch.items():
+            merged_output_kwargs = list[Mapping[str, NestedTensors]]()
+
+            for idx, item_kwargs in enumerate(output_kwargs):
+                if item_kwargs is None:
+                    item_kwargs = mm_missing_kwargs.get_item_by_modality(
+                        modality,
+                        mm_missing_next_idx[modality],
+                    )
+
+                    cache.put(
+                        modality,
+                        mm_items[modality][idx],
+                        hf_processor_mm_kwargs,
+                        item_kwargs,
+                    )
+
+                    mm_missing_next_idx[modality] += 1
+
+                merged_output_kwargs.append(item_kwargs)
+
+            mm_merged_batch[modality] = merged_output_kwargs
+
+        if self.enable_sanity_checks:
+            for modality, item_count in mm_missing_next_idx.items():
+                assert item_count == len(mm_missing_items[modality])
+
+        mm_kwargs = mm_missing_kwargs.reduce_batch_by_modality(
+            mm_merged_batch,
+            enable_sanity_checks=self.enable_sanity_checks,
+        )
+
+        return prompt_ids, mm_kwargs
 
     def _bind_prompt_replacements(
         self,
@@ -983,7 +971,7 @@ class BaseMultiModalProcessor(ABC):
         self,
         prompt_text: str,
         mm_data: MultiModalDataDict,
-        hf_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1000,18 +988,29 @@ class BaseMultiModalProcessor(ABC):
         """
         mm_items = self._get_mm_items(mm_data)
 
-        hf_inputs = self._apply_hf_processor(prompt_text, mm_items,
-                                             hf_mm_kwargs)
-        prompt_ids, = hf_inputs.pop("input_ids").tolist()
-        mm_kwargs = MultiModalKwargs(hf_inputs)
+        prompt_ids, mm_kwargs = self._cached_apply_hf_processor(
+            prompt_text,
+            mm_items,
+            hf_processor_mm_kwargs,
+        )
 
-        prompt_repls = self._get_prompt_replacements(mm_items, hf_inputs,
-                                                     hf_mm_kwargs)
+        mm_item_counts = mm_items.get_item_counts()
+
+        if self.enable_sanity_checks:
+            for modality, item_count in mm_item_counts.items():
+                for item_idx in range(item_count):
+                    # Check that this can run successfully
+                    mm_kwargs.get_item_by_modality(modality, item_idx)
+
+        prompt_repls = self._get_prompt_replacements(
+            mm_items,
+            hf_processor_mm_kwargs,
+            mm_kwargs,
+        )
         all_prompt_repls = self._bind_prompt_replacements(prompt_repls)
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        mm_item_counts = mm_items.get_item_counts()
         all_placeholders = self._find_placeholders(all_prompt_repls,
                                                    prompt_ids, mm_item_counts)
 
@@ -1063,7 +1062,11 @@ class BaseMultiModalProcessor(ABC):
         from vllm.sequence import SequenceData
 
         processor_inputs = self._get_dummy_mm_inputs(mm_counts)
-        mm_inputs = self.apply(*processor_inputs)
+        mm_inputs = self.apply(
+            prompt_text=processor_inputs.prompt_text,
+            mm_data=processor_inputs.mm_data,
+            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+        )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         placeholders_by_modality = mm_inputs["mm_placeholders"]

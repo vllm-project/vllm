@@ -32,7 +32,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import (MultiModalField, MultiModalFields,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -306,11 +307,11 @@ def get_max_phi3v_image_tokens(
     *,
     num_crops: Optional[int] = None,
 ) -> int:
-    hf_mm_kwargs = {}
+    hf_processor_mm_kwargs = {}
     if num_crops:
-        hf_mm_kwargs["num_crops"] = num_crops
+        hf_processor_mm_kwargs["num_crops"] = num_crops
 
-    processor = ctx.get_hf_processor(**hf_mm_kwargs)
+    processor = ctx.get_hf_processor(**hf_processor_mm_kwargs)
 
     return processor.calc_num_image_tokens_from_image_size(
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
@@ -350,11 +351,22 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
 
         return processed_outputs
 
+    def _get_mm_fields(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalField]:
+        return dict(
+            pixel_values=MultiModalFields.index("image"),
+            image_sizes=MultiModalFields.index("image"),
+            image_embeds=MultiModalFields.index("image"),
+        )
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        hf_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
@@ -399,7 +411,6 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text="".join(image_tokens[:num_images]),
             mm_data=data,
-            hf_mm_kwargs={},
         )
 
 

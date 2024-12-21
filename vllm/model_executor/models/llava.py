@@ -20,7 +20,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import (MultiModalField, MultiModalFields,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -139,11 +140,22 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
 
         return processed_outputs
 
+    def _get_mm_fields(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalField]:
+        return dict(
+            pixel_values=MultiModalFields.index("image"),
+            image_embeds=MultiModalFields.index("image"),
+            is_pixtral=MultiModalFields.index("image"),
+        )
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        hf_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         hf_config = self.ctx.get_hf_config(LlavaConfig)
         image_token_id = hf_config.image_token_index
@@ -216,7 +228,6 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text=image_token * num_images,
             mm_data=data,
-            hf_mm_kwargs={},
         )
 
 

@@ -1,6 +1,8 @@
+from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, TypedDict, TypeVar, Union, cast, final
+from typing import (Any, Literal, Optional, TypedDict, TypeVar, Union, cast,
+                    final)
 
 import numpy as np
 import torch
@@ -8,7 +10,7 @@ import torch.types
 from PIL.Image import Image
 from typing_extensions import NotRequired, TypeAlias
 
-from vllm.utils import JSONTree, is_list_of, json_map_leaves
+from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
 
 _T = TypeVar("_T")
 
@@ -110,11 +112,113 @@ A dictionary containing nested tensors which have been batched via
 """
 
 
+class MultiModalField(ABC):
+    """Metadata for a field in :class:`MultiModalKwargs`."""
+
+    def __init__(self, modality: str) -> None:
+        super().__init__()
+
+        self.modality = modality
+
+    @abstractmethod
+    def get(
+        self,
+        ref: "MultiModalKwargs",
+        key: str,
+        item_index: int,
+    ) -> NestedTensors:
+        raise NotImplementedError
+
+    @classmethod
+    def reduce(cls, batch: list[NestedTensors]) -> NestedTensors:
+        """Merge elements returned by multiple calls of :meth:`get`."""
+        raise NotImplementedError
+
+
+class MultiModalKwargsIndexedField(MultiModalField):
+    """
+    A :class:`MultiModalField` implementation where indexing into
+    the batch dimension directly indexes into the first dimension.
+    """
+
+    def get(
+        self,
+        ref: "MultiModalKwargs",
+        key: str,
+        item_index: int,
+    ) -> NestedTensors:
+        return ref[key][item_index]
+
+    @classmethod
+    def reduce(cls, batch: list[NestedTensors]) -> NestedTensors:
+        if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            first_shape = batch[0].shape
+            if all(item.shape == first_shape for item in batch):
+                return torch.stack(batch)
+
+        return batch
+
+
+class MultiModalKwargsFlatField(MultiModalField):
+    """
+    A :class:`MultiModalField` implementation where indexing into
+    the batch dimension corresponds to a slice along the first dimension.
+    """
+
+    def __init__(self, modality: str, slices: Sequence[slice]) -> None:
+        super().__init__(modality)
+
+        self.slices = slices
+
+    def get(
+        self,
+        ref: "MultiModalKwargs",
+        key: str,
+        item_index: int,
+    ) -> NestedTensors:
+        return ref[key][self.slices[item_index]]
+
+    @classmethod
+    def reduce(cls, batch: list[NestedTensors]) -> NestedTensors:
+        if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            first_shape = batch[0].shape
+            if all(item.shape == first_shape for item in batch):
+                return torch.concat(batch)
+
+        return [elem for item in batch for elem in item]
+
+
+class MultiModalFields:
+    """
+    Convenience class containing factory methods for :class:`MultiModalField`.
+    """
+    index = MultiModalKwargsIndexedField
+    flat = MultiModalKwargsFlatField
+
+
 class MultiModalKwargs(UserDict[str, NestedTensors]):
     """
     A dictionary that represents the keyword arguments to
     :meth:`~torch.nn.Module.forward`.
+
+    Passing :code:`fields` enables the use of :meth:`slice` to
+    obtain individual items by modality.
     """
+
+    def __init__(
+        self,
+        data: Mapping[str, NestedTensors],
+        *,
+        fields: Optional[Mapping[str, MultiModalField]] = None,
+    ) -> None:
+        if fields is None:
+            fields = {}
+
+        super().__init__(data)
+
+        self._fields = fields
+        self._fields_by_modality = dict(
+            full_groupby(fields.items(), key=lambda x: x[1].modality))
 
     @staticmethod
     def _try_stack(nested_tensors: NestedTensors) -> NestedTensors:
@@ -187,6 +291,50 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         )
 
         return cast(BatchedTensorInputs, json_mapped)
+
+    def get_item_by_modality(
+        self,
+        modality: str,
+        item_index: int,
+    ) -> Mapping[str, NestedTensors]:
+        """
+        Get the keyword arguments corresponding to an item identified by
+        its modality and index.
+        """
+        fields_to_gather = self._fields_by_modality[modality]
+
+        return {
+            key: field.get(self, key, item_index)
+            for key, field in fields_to_gather if key in self
+        }
+
+    def reduce_batch_by_modality(
+        self,
+        batch_by_modality: Mapping[str, list[Mapping[str, NestedTensors]]],
+        *,
+        enable_sanity_checks: bool = True,
+    ) -> "MultiModalKwargs":
+        """
+        Construct a new :class:`MultiModalKwargs` from multiple items returned
+        by :meth:`get_modality_item`.
+        """
+        batch_per_key = defaultdict[str, list[NestedTensors]](list)
+        for batch in batch_by_modality.values():
+            for item in batch:
+                for k, v in item.items():
+                    batch_per_key[k].append(v)
+
+        if enable_sanity_checks:
+            batch_sizes = {k: len(v) for k, v in batch_per_key.items()}
+            batch_size = next(iter(batch_sizes.values()))
+            assert all(bs == batch_size
+                       for bs in batch_sizes.values()), batch_sizes
+
+        fields = self._fields
+
+        data = {k: fields[k].reduce(vs) for k, vs in batch_per_key.items()}
+
+        return MultiModalKwargs(data, fields=fields)
 
 
 MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]

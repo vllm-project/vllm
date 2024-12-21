@@ -23,7 +23,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (MultiModalField, MultiModalFields,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -144,17 +146,27 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         )
         return BatchFeature(combined_outputs)
 
+    def _get_mm_fields(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalField]:
+        return dict(
+            audio_features=MultiModalFields.index("audio"),
+            audio_embeds=MultiModalFields.index("audio"),
+        )
+
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        hf_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
         placeholder = hf_processor.audio_token_replacement  # type: ignore
 
         def get_replacement_ultravox(item_idx: int):
-            audio_token_len = hf_inputs["audio_token_len"][item_idx]
+            audio_token_len = out_mm_kwargs["audio_token_len"][item_idx]
             return placeholder * audio_token_len
 
         return [
@@ -180,7 +192,6 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text="<|audio|>" * audio_count,
             mm_data=data,
-            hf_mm_kwargs={},
         )
 
 
