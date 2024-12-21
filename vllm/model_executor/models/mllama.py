@@ -1172,10 +1172,6 @@ class MllamaForCausalLM(nn.Module):
         return hidden_states
 
 
-# @MULTIMODAL_REGISTRY.register_image_input_mapper()
-# @INPUT_REGISTRY.register_dummy_data(dummy_decoder_data_for_mllama)
-# @INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_mllama)
-# @INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_mllama_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):

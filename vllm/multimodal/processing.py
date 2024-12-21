@@ -895,15 +895,6 @@ class BaseMultiModalProcessor(ABC):
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor):
-    # def apply(
-    #     self,
-    #     prompt_text: str,
-    #     mm_data: MultiModalDataDict,
-    #     mm_processor_kwargs: Mapping[str, object],
-    # ) -> MultiModalInputsV2:
-    #     decoder_inputs = super().apply(prompt_text, mm_data, mm_processor_kwargs)
-    #     encoder_inputs = self.create_encoder_inputs(decoder_inputs)
-    #     return dict(encoder_inputs=encoder_inputs, decoder_inputs=decoder_inputs)
 
     def apply(
         self,

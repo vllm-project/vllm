@@ -520,12 +520,9 @@ class InputPreprocessor:
                 assert ("encoder_prompt" in inputs
                         and "encoder_prompt_token_ids" in inputs)
                 inputs = cast(MultiModalEncDecInputs, inputs)
-                encoder_inputs = MultiModalInputsV2(
-                    type="multimodal",
+                encoder_inputs = token_inputs(
                     prompt=inputs["encoder_prompt"],
                     prompt_token_ids=inputs["encoder_prompt_token_ids"],
-                    mm_kwargs=inputs["mm_kwargs"],
-                    mm_placeholders=inputs["mm_placeholders"],
                 )
                 decoder_inputs = MultiModalInputsV2(
                     type="multimodal",
