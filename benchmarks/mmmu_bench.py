@@ -114,8 +114,7 @@ async def main(args: argparse.Namespace):
     engine_args = EngineArgs.from_cli_args(args)
 
     sampling_params = SamplingParams(max_tokens=args.output_len, temperature=0)
-    chat_template = (load_chat_template(args.chat_template)
-                     if args.chat_template else None)
+    chat_template = load_chat_template(args.chat_template)
 
     # Concurrently initialize the LLM and sample data. Note that since
     # both initialize_llm and sample_hf_requests are blocking, we need to
@@ -131,7 +130,8 @@ async def main(args: argparse.Namespace):
     print(f"Data sampling + LLM init time: {time.perf_counter() - st:.2f}s")
 
     st = time.perf_counter()
-    outputs = llm.chat(sampled, sampling_params=sampling_params,
+    outputs = llm.chat(sampled,
+                       sampling_params=sampling_params,
                        chat_template=chat_template)
     duration = time.perf_counter() - st
 
