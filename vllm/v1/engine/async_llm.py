@@ -240,8 +240,8 @@ class AsyncLLM(EngineClient):
                 out = await asyncio.wait_for(queue.get(), timeout=4)
 
                 q_size = queue.qsize()
-                if q_size > 0:
-                    logger.info(f"{q_size}")
+                # if q_size > 0:
+                #     logger.info(f"{q_size=}")
                 if out.finished:
                     del self.rid_to_queue[request_id]
                     yield out
@@ -253,9 +253,6 @@ class AsyncLLM(EngineClient):
                 # TODO(rob): do request cancellation checking here.
                 # logger.debug("Timeout waiting for %s", request_id)
                 continue
-
-        
-
                 
 
     # async def _process_cancellations(self) -> None:

@@ -399,20 +399,18 @@ class DetokenizerProc(Detokenizer):
                 epoch = 0
                 while True:
                     logger.info(f"EPOCH: {epoch}")
-                    epoch += 1
 
                     socks = dict(poller.poll())
 
                     # Handle NewRequest.
                     if from_llm_engine in socks:
                         pickled_request = from_llm_engine.recv()
-                        request = pickle.loads(pickled_request)
+                        request: EngineRequest = pickle.loads(pickled_request)
 
                         assert (request.request_id not in self.request_states)
 
                         # Add to Detokenizer.
-                        request_state = IncrementalDetokenizer.from_new_request(
-                            self.tokenizer, request)
+                        request_state = IncrementalDetokenizer.from_new_request(self.tokenizer, request)
                         self.request_states[request.request_id] = request_state
 
                         # Forward to EngineCore.
@@ -420,6 +418,8 @@ class DetokenizerProc(Detokenizer):
 
                     # Handle EngineCoreOutput.
                     if from_engine_core in socks:
+                        epoch += 1
+
                         (frame, ) = from_engine_core.recv_multipart(copy=False)
                         engine_core_outputs = decoder_out.decode(frame.buffer).outputs
                         request_outputs, _ = self.step(engine_core_outputs)
@@ -436,9 +436,6 @@ class DetokenizerClient:
                  engine_core_outputs_path: str,
                  engine_core_inputs_path: str,
                  **kwargs):
-
-        # Serialization setup.
-        self.encoder = msgspec.msgpack.Encoder()
         
         # ZMQ setup.
         self.ctx = zmq.asyncio.Context(2)
