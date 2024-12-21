@@ -65,7 +65,7 @@ class InputBatch:
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
-        self.num_prompt_token_ids = np.empty(max_num_reqs, dtype=np.int32)
+        self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
 
         # Attention-related.
         self.block_table = torch.zeros(
@@ -179,7 +179,7 @@ class InputBatch:
 
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
-        self.num_prompt_token_ids[req_index] = num_prompt_tokens
+        self.num_prompt_tokens[req_index] = num_prompt_tokens
         self.token_ids_cpu[
             req_index, :num_prompt_tokens] = request.prompt_token_ids
         start_idx = num_prompt_tokens
@@ -243,8 +243,6 @@ class InputBatch:
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
-        self.min_tokens[req_index] = 0
-        self.stop_token_ids[req_index].clear()
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
@@ -260,9 +258,6 @@ class InputBatch:
         self.frequency_penalties_reqs.clear()
         self.presence_penalties_reqs.clear()
         self.repetition_penalties_reqs.clear()
-        self.min_tokens = [0] * self.max_num_reqs
-        for stop_token_ids in self.stop_token_ids:
-            stop_token_ids.clear()
         self.generators.clear()
         self.num_logprobs.clear()
         self.prompt_logprob_reqs.clear()
@@ -296,8 +291,8 @@ class InputBatch:
             # block_table_cpu.
             self.token_ids_cpu[empty_index] = self.token_ids_cpu[
                 last_req_index]
-            self.num_prompt_token_ids[empty_index] = \
-                self.num_prompt_token_ids[last_req_index]
+            self.num_prompt_tokens[empty_index] = \
+                self.num_prompt_tokens[last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
             self.block_table_cpu[empty_index] = self.block_table_cpu[
@@ -392,7 +387,7 @@ class InputBatch:
         vocab_size: int,
         device: torch.device,
     ) -> torch.Tensor:
-        max_prompt_len = max(self.num_prompt_token_ids[:self.num_reqs])
+        max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
         # use the value of vocab_size as a pad since we don't have a
         # token_id of this value.
         # TODO - Add a method in vllm/utils.py to pad a numpy array similar
@@ -402,9 +397,9 @@ class InputBatch:
                                  vocab_size,
                                  dtype=np.int64)
         for i in range(self.num_reqs):
-            padded_prompts[i, :self.num_prompt_token_ids[i]] = \
-                self.token_ids_cpu[i, :self.num_prompt_token_ids[i]]
-        prompt_tokens_cpu_tensor = torch.from_numpy(padded_prompts).to("cpu")
+            padded_prompts[i, :self.num_prompt_tokens[i]] = \
+                self.token_ids_cpu[i, :self.num_prompt_tokens[i]]
+        prompt_tokens_cpu_tensor = torch.from_numpy(padded_prompts)
         if self.pin_memory:
             prompt_tokens_cpu_tensor = \
                 prompt_tokens_cpu_tensor.pin_memory()
