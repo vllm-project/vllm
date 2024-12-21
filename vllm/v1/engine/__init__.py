@@ -89,15 +89,6 @@ class EngineCoreProfile:
     is_start: bool
 
 
-class DetokenizerRequestType(enum.Enum):
-    """
-    Request types defined as hex byte strings, so it can be sent over sockets
-    without separate encoding step.
-    """
-    NEW = b'\x00'
-    OUT = b'\x01'
-
-
 class EngineCoreRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
