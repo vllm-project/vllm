@@ -935,7 +935,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
                                                      mm_processor_kwargs)
         all_prompt_repls = self._bind_prompt_replacements(prompt_repls)
 
-        encoder_prompt_text, = self._create_encoder_prompt(prompt_text)
+        encoder_prompt_text = self._create_encoder_prompt(prompt_text)
         encoder_prompt_ids = _encode(self._get_tokenizer(), encoder_prompt_text)
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
@@ -969,9 +969,12 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs=mm_kwargs,
             mm_placeholders=mm_placeholders,
         )
-        decoder_inputs = token_inputs(
+        decoder_inputs = MultiModalInputsV2(
+            type="multimodal",
             prompt=prompt_text,
             prompt_token_ids=decoder_prompt_ids,
+            mm_kwargs=mm_kwargs,
+            mm_placeholders=mm_placeholders,
         )
         return dict(encoder_inputs=encoder_inputs, decoder_inputs=decoder_inputs)
 
