@@ -134,6 +134,9 @@ class MultiModalField(ABC):
         """Merge elements returned by multiple calls of :meth:`get`."""
         raise NotImplementedError
 
+    def __repr__(self) -> str:
+        return (f"{type(self).__name__}(modality={self.modality})")
+
 
 class MultiModalKwargsIndexedField(MultiModalField):
     """
@@ -169,6 +172,10 @@ class MultiModalKwargsFlatField(MultiModalField):
         super().__init__(modality)
 
         self.slices = slices
+
+    def __repr__(self) -> str:
+        return (f"{type(self).__name__}(modality={self.modality}, "
+                f"slices={self.slices})")
 
     def get(
         self,
