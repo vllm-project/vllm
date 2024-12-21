@@ -287,12 +287,11 @@ class Detokenizer:
         
     def step(
         self, encore_core_outputs: List[EngineCoreOutput]
-    ) -> DetokenizerOutputs:
+    ) -> List[RequestOutput]:
         """Update state and request the RequestOutputs to the LLMEngine."""
 
         request_outputs: List[RequestOutput] = []
         # requests_to_abort: List[str] = []
-        # detokenizer_outputs = DetokenizerOutputs(outputs=[])
 
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
