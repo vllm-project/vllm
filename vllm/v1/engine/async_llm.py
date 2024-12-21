@@ -28,29 +28,6 @@ logger = init_logger(__name__)
 import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
-@dataclass
-class RequestState:
-    """
-    RequestState manages concurrency between:
-        * the output_handler(), which pulls outputs from EngineCore
-        * the per-request generate(), which yields to the API server
-
-    The output_handler adds new RequestOutputs to out_list and sets the 
-    asyncio event, notifying the generate() that there is work to do.
-
-    generate() waits on the asyncio event and yields the data from 
-    out_list back to the caller generate()
-    """
-
-    prompt: str
-    prompt_token_ids: List[int]
-    event: asyncio.Event
-    out_list: List[RequestOutput]
-
-    @classmethod
-    def new(cls, prompt, prompt_token_ids) -> "RequestState":
-        return cls(prompt, prompt_token_ids, asyncio.Event(), [])
-
 
 class AsyncLLM(EngineClient):
 
@@ -82,8 +59,8 @@ class AsyncLLM(EngineClient):
             lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
-        # RequestId -> RequestState.
-        self.rid_to_state: Dict[str, RequestState] = {}
+        # RequestId -> OutputQueue.
+        self.rid_to_queue: Dict[str, asyncio.Queue[RequestOutput]] = {}
         # List of cancelled request ids to be aborted.
         self.client_aborted_requests: List[str] = []
 
@@ -186,7 +163,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> RequestState:
+    ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
         # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
@@ -196,8 +173,7 @@ class AsyncLLM(EngineClient):
         
         # 1) Add to RequestState tracker. The "event" is used to manage
         # concurrency between generate() and output_handler().
-        self.rid_to_state[request_id] = RequestState.new(prompt,
-                                                         engine_core_req.prompt_token_ids)
+        self.rid_to_queue[request_id] = asyncio.Queue()
 
         # 3) Add the DetokenizerRequest to Detokenizer.
         # TODO: sending these separately is a race condition. We should instead
@@ -207,7 +183,7 @@ class AsyncLLM(EngineClient):
         # 4) Add the EngineCoreRequest to EngineCore.
         await self.engine_core.add_request_async(engine_core_req)
 
-        return self.rid_to_state[request_id]
+        return self.rid_to_queue[request_id]
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -238,10 +214,6 @@ class AsyncLLM(EngineClient):
         the latest RequestOutput back to the caller. 
         """
 
-        # DELTA streaming is not supported due to dynamic chunking.
-        assert (sampling_params.output_kind == RequestOutputKind.CUMULATIVE or
-                sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
-
         # We start the output_handler on the first call to generate() so that
         # we can call __init__ before the event loop starts, which enables us
         # to handle startup failure gracefully in the OpenAI server.
@@ -259,7 +231,7 @@ class AsyncLLM(EngineClient):
             loop.create_task(self._run_output_handler())
             loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
-        state = await self.add_request(
+        queue = await self.add_request(
             request_id,
             prompt,
             sampling_params,
@@ -271,33 +243,22 @@ class AsyncLLM(EngineClient):
 
         while True:
             try:
-                await asyncio.wait_for(state.event.wait(), timeout=4)
+                out = await asyncio.wait_for(queue.get(), timeout=4)
+                if out.finished:
+                    del self.rid_to_queue[request_id]
+                    yield out
+                    break
 
-                # NOTE(rob): out_list can have more than one item. However,
-                # in the streaming case, we use RequestOutputKind.CUMULATIVE,
-                # which has the full generated text output (not just the text
-                # corresponding to the last token). So, we can just send the
-                # last RequestOutput and the API Client handles converting into
-                # a delta text. This way we do "dynamic chunked streaming", such
-                # that the API client does not fall behind the EngineCor,
-                # which happens at high QPS otherwise.
-                out = state.out_list[-1]
-                if len(state.out_list) > 1:
-                    logger.info(f"{len(state.out_list)=}")
+                yield out
 
             except asyncio.TimeoutError:
                 # TODO(rob): do request cancellation checking here.
                 # logger.debug("Timeout waiting for %s", request_id)
                 continue
-                
-            state.out_list = []
-            if out.finished:
-                del self.rid_to_state[request_id]
-                yield out
-                break
 
-            state.event.clear()
-            yield out
+        
+
+                
 
     # async def _process_cancellations(self) -> None:
     #     """
@@ -331,30 +292,18 @@ class AsyncLLM(EngineClient):
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
-        epoch = 0
 
         while True:
-            logger.info(f"EPOCH: {epoch}")
-            epoch += 1
-            # self.warned = False
-            # if self.epoch % 10 == 0:
-            #     logger.info(f"\n{self.epoch=}\n")
 
             # 1) Pull outputs from the Detokenizer.
-            outputs = await self.detokenizer.output_socket.recv_pyobj()
+            outputs: List[RequestOutput] = await self.detokenizer.output_socket.recv_pyobj()
 
             for out in outputs:
-                if out.request_id not in self.rid_to_state:
+                if out.request_id not in self.rid_to_queue:
                     raise RuntimeError(f"{out.request_id} "
                                         "not in RequestStates")
 
-                state = self.rid_to_state[out.request_id]
-
-                # Update the RequestState and alert generate() that there
-                # is a RequestOutput ready to return to the user.
-                
-                state.out_list.append(out)
-                state.event.set()
+                self.rid_to_queue[out.request_id].put_nowait(out)
 
             # 3) Abort any requests that finished due to stop strings.
             # await self.engine_core.abort_requests_async(reqs_to_abort)

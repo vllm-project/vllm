@@ -128,7 +128,7 @@ class IncrementalDetokenizer:
             read_offset=read_offset,
             skip_special_tokens=True,
             spaces_between_special_tokens=True,
-            output_kind=RequestOutputKind.CUMULATIVE,
+            output_kind=RequestOutputKind.DELTA,
             request_id=eco.request_id,
             prompt=eco.prompt,
             prompt_token_ids=eco.prompt_token_ids,
@@ -458,8 +458,8 @@ class DetokenizerProc(Detokenizer):
 
                 epoch = 0
                 while True:
-                    logger.info(f"EPOCH: {epoch}")
-                    epoch += 1
+                    # logger.info(f"EPOCH: {epoch}")
+                    # epoch += 1
 
                     socks = dict(poller.poll())
 

@@ -374,15 +374,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @router.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
-    raw_request.app.count += 1
-    should_profile = raw_request.app.count == 500
     handler = completion(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Completions API")
 
-    generator = await handler.create_completion(request, raw_request, 
-                                                should_profile=should_profile)
+    generator = await handler.create_completion(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -533,12 +530,12 @@ def build_app(args: Namespace) -> FastAPI:
                                     status_code=401)
             return await call_next(request)
 
-    @app.middleware("http")
-    async def add_request_id(request: Request, call_next):
-        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
-        response = await call_next(request)
-        response.headers["X-Request-Id"] = request_id
-        return response
+    # @app.middleware("http")
+    # async def add_request_id(request: Request, call_next):
+    #     request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+    #     response = await call_next(request)
+    #     response.headers["X-Request-Id"] = request_id
+    #     return response
 
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)
