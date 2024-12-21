@@ -338,13 +338,8 @@ class EngineCoreProc(EngineCore):
         buffer = bytearray()
 
         with zmq_socket_ctx(output_path, zmq.PUSH) as socket:
-            idx = 0
             while True:
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
-                # msg = (DetokenizerRequestType.OUT.value, buffer)
-                msg = (buffer, )
-                # logger.info(f"SEND: {idx}: {len(engine_core_outputs)}")
-                # idx += 1
-                socket.send_multipart(msg, copy=False)
+                socket.send_multipart((buffer,), copy=False)
