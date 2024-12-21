@@ -24,7 +24,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalField, MultiModalFields,
+from vllm.multimodal.inputs import (MultiModalFieldTag, MultiModalFieldTags,
                                     MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
@@ -146,14 +146,14 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         )
         return BatchFeature(combined_outputs)
 
-    def _get_mm_fields(
+    def _get_mm_field_tags(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalField]:
+    ) -> Mapping[str, MultiModalFieldTag]:
         return dict(
-            audio_features=MultiModalFields.index("audio"),
-            audio_embeds=MultiModalFields.index("audio"),
+            audio_features=MultiModalFieldTags.indexed("audio"),
+            audio_embeds=MultiModalFieldTags.indexed("audio"),
         )
 
     def _get_prompt_replacements(

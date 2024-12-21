@@ -54,8 +54,8 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalField,
-                                    MultiModalFields, MultiModalKwargs,
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldTag,
+                                    MultiModalFieldTags, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
@@ -848,32 +848,33 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
             ) for modality in ("image", "video")
         ]
 
-    def _get_mm_fields(
+    def _get_mm_field_tags(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalField]:
+    ) -> Mapping[str, MultiModalFieldTag]:
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
-        image_slice_idxs = image_grid_thw.prod(-1).tolist() + [None]
+        image_slice_idxs = [None] + image_grid_thw.prod(-1).tolist()
         image_slices = [
             slice(image_slice_idxs[i], image_slice_idxs[i + i])
             for i in range(len(image_grid_thw))
         ]
 
         video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_slice_idxs = video_grid_thw.prod(-1).tolist() + [None]
+        video_slice_idxs = [None] + video_grid_thw.prod(-1).tolist()
         video_slices = [
             slice(video_slice_idxs[i], video_slice_idxs[i + i])
             for i in range(len(video_grid_thw))
         ]
 
         return dict(
-            pixel_values=MultiModalFields.flat("image", image_slices),
-            image_embeds=MultiModalFields.flat("image", image_slices),
-            image_grid_thw=MultiModalFields.index("image"),
-            pixel_values_videos=MultiModalFields.flat("video", video_slices),
-            video_embeds=MultiModalFields.flat("video", video_slices),
-            video_grid_thw=MultiModalFields.index("video"),
+            pixel_values=MultiModalFieldTags.flat("image", image_slices),
+            image_embeds=MultiModalFieldTags.flat("image", image_slices),
+            image_grid_thw=MultiModalFieldTags.indexed("image"),
+            pixel_values_videos=MultiModalFieldTags.flat(
+                "video", video_slices),
+            video_embeds=MultiModalFieldTags.flat("video", video_slices),
+            video_grid_thw=MultiModalFieldTags.indexed("video"),
         )
 
     def _get_dummy_mm_inputs(

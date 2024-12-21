@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalField, MultiModalFields,
+from vllm.multimodal.inputs import (MultiModalFieldTag, MultiModalFieldTags,
                                     MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
@@ -140,15 +140,15 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
 
         return processed_outputs
 
-    def _get_mm_fields(
+    def _get_mm_field_tags(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalField]:
+    ) -> Mapping[str, MultiModalFieldTag]:
         return dict(
-            pixel_values=MultiModalFields.index("image"),
-            image_embeds=MultiModalFields.index("image"),
-            is_pixtral=MultiModalFields.index("image"),
+            pixel_values=MultiModalFieldTags.indexed("image"),
+            image_embeds=MultiModalFieldTags.indexed("image"),
+            is_pixtral=MultiModalFieldTags.indexed("image"),
         )
 
     def _get_prompt_replacements(

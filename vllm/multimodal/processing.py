@@ -21,7 +21,7 @@ from vllm.utils import LRUCache, flatten_2d_lists, full_groupby, is_list_of
 
 from .audio import resample_audio
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict, MultiModalField,
-                     MultiModalInputsV2, MultiModalKwargs, NestedTensors,
+                     MultiModalFieldTag, MultiModalInputsV2, MultiModalKwargs,
                      PlaceholderRange, VideoItem)
 
 logger = init_logger(__name__)
@@ -601,7 +601,7 @@ class ProcessingCache:
         # DEBUG: Set to None to disable
         self.debug_cache_hit_ratio_steps: Optional[int] = None
 
-        self._cache = LRUCache[str, Mapping[str, NestedTensors]](capacity)
+        self._cache = LRUCache[str, Mapping[str, MultiModalField]](capacity)
 
     def _maybe_log_cache_stats(self) -> None:
         steps = self.debug_cache_hit_ratio_steps
@@ -668,7 +668,7 @@ class ProcessingCache:
         modality: str,
         input_item: object,
         input_kwargs: Mapping[str, object],
-    ) -> Optional[Mapping[str, NestedTensors]]:
+    ) -> Optional[Mapping[str, MultiModalField]]:
         self._maybe_log_cache_stats()
 
         cache_key = self._hash_kwargs(**{modality: input_item}, **input_kwargs)
@@ -679,7 +679,7 @@ class ProcessingCache:
         modality: str,
         input_item: object,
         input_kwargs: Mapping[str, object],
-        output_kwargs: Mapping[str, NestedTensors],
+        output_kwargs: Mapping[str, MultiModalField],
     ) -> None:
         cache_key = self._hash_kwargs(**{modality: input_item}, **input_kwargs)
         self._cache.put(cache_key, output_kwargs)
@@ -726,11 +726,11 @@ class BaseMultiModalProcessor(ABC):
         return MultiModalDataItems.from_dict(mm_data)
 
     @abstractmethod
-    def _get_mm_fields(
+    def _get_mm_field_tags(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalField]:
+    ) -> Mapping[str, MultiModalFieldTag]:
         """Given the HF-processed data, output the metadata of each field."""
         raise NotImplementedError
 
@@ -817,9 +817,11 @@ class BaseMultiModalProcessor(ABC):
         processed_data.update(passthrough_data)
 
         prompt_ids, = processed_data.pop("input_ids").tolist()
-
-        mm_fields = self._get_mm_fields(processed_data, hf_processor_mm_kwargs)
-        mm_kwargs = MultiModalKwargs(processed_data, fields=mm_fields)
+        mm_kwargs = MultiModalKwargs(
+            processed_data,
+            tags=self._get_mm_field_tags(processed_data,
+                                         hf_processor_mm_kwargs),
+        )
 
         return prompt_ids, mm_kwargs
 
@@ -838,7 +840,7 @@ class BaseMultiModalProcessor(ABC):
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             )
 
-        mm_cached_batch = {
+        mm_maybe_cached_fields = {
             modality: [
                 cache.get(modality, item, hf_processor_mm_kwargs)
                 for item in items
@@ -847,8 +849,8 @@ class BaseMultiModalProcessor(ABC):
         }
 
         mm_missing_idxs = {
-            modality: [idx for idx, out in enumerate(outputs) if out is None]
-            for modality, outputs in mm_cached_batch.items()
+            modality: [idx for idx, out in enumerate(fields) if out is None]
+            for modality, fields in mm_maybe_cached_fields.items()
         }
         mm_missing_data = {
             modality: [mm_items[modality][idx] for idx in idxs]
@@ -870,13 +872,13 @@ class BaseMultiModalProcessor(ABC):
 
         mm_missing_next_idx = {modality: 0 for modality in mm_missing_items}
 
-        mm_merged_batch = dict[str, list[Mapping[str, NestedTensors]]]()
-        for modality, output_kwargs in mm_cached_batch.items():
-            merged_output_kwargs = list[Mapping[str, NestedTensors]]()
+        mm_merged_fields = dict[str, list[Mapping[str, MultiModalField]]]()
+        for modality, output_fields in mm_maybe_cached_fields.items():
+            merged_fields = list[Mapping[str, MultiModalField]]()
 
-            for idx, item_kwargs in enumerate(output_kwargs):
-                if item_kwargs is None:
-                    item_kwargs = mm_missing_kwargs.get_item_by_modality(
+            for idx, item_fields in enumerate(output_fields):
+                if item_fields is None:
+                    item_fields = mm_missing_kwargs.get_fields_by_modality(
                         modality,
                         mm_missing_next_idx[modality],
                     )
@@ -885,21 +887,21 @@ class BaseMultiModalProcessor(ABC):
                         modality,
                         mm_items[modality][idx],
                         hf_processor_mm_kwargs,
-                        item_kwargs,
+                        item_fields,
                     )
 
                     mm_missing_next_idx[modality] += 1
 
-                merged_output_kwargs.append(item_kwargs)
+                merged_fields.append(item_fields)
 
-            mm_merged_batch[modality] = merged_output_kwargs
+            mm_merged_fields[modality] = merged_fields
 
         if self.enable_sanity_checks:
             for modality, item_count in mm_missing_next_idx.items():
                 assert item_count == len(mm_missing_items[modality])
 
-        mm_kwargs = mm_missing_kwargs.reduce_batch_by_modality(
-            mm_merged_batch,
+        mm_kwargs = MultiModalKwargs.from_fields_by_modality(
+            mm_merged_fields,
             enable_sanity_checks=self.enable_sanity_checks,
         )
 
@@ -1000,7 +1002,7 @@ class BaseMultiModalProcessor(ABC):
             for modality, item_count in mm_item_counts.items():
                 for item_idx in range(item_count):
                     # Check that this can run successfully
-                    mm_kwargs.get_item_by_modality(modality, item_idx)
+                    mm_kwargs.get_fields_by_modality(modality, item_idx)
 
         prompt_repls = self._get_prompt_replacements(
             mm_items,
