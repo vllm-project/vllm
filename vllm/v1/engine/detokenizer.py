@@ -485,8 +485,6 @@ class DetokenizerClient:
 
         # Serialization setup.
         self.encoder = msgspec.msgpack.Encoder()
-        # self.decoder = PickleEncoder()
-        self.decoder = msgspec.msgpack.Decoder(DetokenizerOutputs)
         
         # ZMQ setup.
         self.ctx = zmq.asyncio.Context(2)
@@ -533,7 +531,4 @@ class DetokenizerClient:
     async def get_output_async(self) -> List[RequestOutput]:
         """Get RequestOutputs, RequestsToAbort from Detokenizer."""
 
-        # (frame, ) = await self.output_socket.recv_multipart(copy=False)
-        # return self.decoder.decode(frame.buffer)
         return await self.output_socket.recv_pyobj()
-        # return self.decoder.decode(msg)
