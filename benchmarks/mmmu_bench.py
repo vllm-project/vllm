@@ -27,6 +27,7 @@ from PIL import Image
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -56,7 +57,7 @@ def sample_mmmu_pro_vision_requests(
             "format: 'Answer: $LETTER' (without quotes) where LETTER is one of "
             "options.")
 
-        image: Image = data["image"]
+        image: Image.Image = data["image"]
         image = image.convert("RGB")
         image_data = io.BytesIO()
         image.save(image_data, format='JPEG')
@@ -113,6 +114,8 @@ async def main(args: argparse.Namespace):
     engine_args = EngineArgs.from_cli_args(args)
 
     sampling_params = SamplingParams(max_tokens=args.output_len, temperature=0)
+    chat_template = (load_chat_template(args.chat_template)
+                     if args.chat_template else None)
 
     # Concurrently initialize the LLM and sample data. Note that since
     # both initialize_llm and sample_hf_requests are blocking, we need to
@@ -128,7 +131,8 @@ async def main(args: argparse.Namespace):
     print(f"Data sampling + LLM init time: {time.perf_counter() - st:.2f}s")
 
     st = time.perf_counter()
-    outputs = llm.chat(sampled, sampling_params=sampling_params)
+    outputs = llm.chat(sampled, sampling_params=sampling_params,
+                       chat_template=chat_template)
     duration = time.perf_counter() - st
 
     total_generated_tokens = sum(
@@ -156,6 +160,10 @@ if __name__ == "__main__":
                         type=float,
                         default=0.0,
                         help="Image hit rate between 0 and 1.")
+    parser.add_argument("--chat-template",
+                        type=str,
+                        default=None,
+                        help="Set the chat template to use.")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     if args.tokenizer is None:
