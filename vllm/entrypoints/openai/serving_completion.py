@@ -298,6 +298,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             ]
                         has_echoed[i] = True
                     else:
+                        # return just the delta
                         delta_text = output.text
                         delta_token_ids = output.token_ids
                         out_logprobs = output.logprobs
@@ -431,7 +432,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         output_text = prompt_text + output.text
                 else:
-                    # return just the delta
                     token_ids = output.token_ids
                     out_logprobs = output.logprobs
                     output_text = output.text
