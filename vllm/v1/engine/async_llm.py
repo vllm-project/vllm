@@ -244,7 +244,9 @@ class AsyncLLM(EngineClient):
             try:
                 out = await asyncio.wait_for(queue.get(), timeout=4)
 
-                logger.info(f"{queue.qsize()=}")
+                q_size = queue.qsize()
+                if len(q_size) > 0:
+                    logger.info(f"{q_size}")
                 if out.finished:
                     del self.rid_to_queue[request_id]
                     yield out
