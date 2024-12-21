@@ -6,7 +6,6 @@ from typing import Tuple, Union, cast
 
 from fastapi import Request
 
-from pyinstrument import Profiler
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -73,7 +72,6 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
-
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -273,9 +271,8 @@ class OpenAIServingCompletion(OpenAIServing):
             such that the API server falls behind, we dynamically fall back
             to streaming chunks of tokens.
         """
-        print(f"GENERATOR: {should_profile=}")
-        should_profile=False
         if should_profile:
+            from pyinstrument import Profiler
             print("STARTING PROFILER")
             profiler = Profiler(async_mode="disabled")
             profiler.start()
@@ -307,7 +304,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 if res.finished and should_profile:
                     profiler.stop()
-                    profiler.write_html("vllm-proxy.html")
+                    profiler.write_html("task-disabled.html")
 
                 # Prompt details are excluded from later streamed outputs
                 if res.prompt_token_ids is not None:
