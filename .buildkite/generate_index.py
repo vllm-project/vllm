@@ -6,7 +6,7 @@ template = """<!DOCTYPE html>
 <html>
     <body>
     <h1>Links for vLLM</h1/>
-        <a href="../{wheel}#{sha256}">{wheel}</a><br/>
+        <a href="../{wheel}#sha256={sha256}">{wheel}</a><br/>
     </body>
 </html>
 """
