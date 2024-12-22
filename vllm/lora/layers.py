@@ -425,8 +425,9 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
                        if self.base_layer.skip_bias_add else None)
         return output, output_bias
 
+    # ReplicatedLinear should always be replaced, regardless of the fully
+    # sharded LoRAs setting, because it is, by definition, copied per GPU.
     @classmethod
-    @_not_fully_sharded_can_replace
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
