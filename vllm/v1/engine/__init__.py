@@ -40,8 +40,6 @@ class EngineCoreOutput(
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
-    prompt_token_ids: List[int]
-    prompt: Optional[str]
     new_token_ids: List[int]
     finished: bool
     finish_reason: Optional[str] = None
