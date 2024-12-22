@@ -295,7 +295,6 @@ async def async_request_openai_completions(
                     if first_chunk_received:
                         output.success = True
                     else:
-                        print("error 0!")
                         output.success = False
                         output.error = (
                             "Never received a valid chunk to calculate TTFT."
@@ -303,15 +302,12 @@ async def async_request_openai_completions(
                     output.generated_text = generated_text
                     output.latency = latency
                 else:
-                    print("error 1!")
                     output.error = response.reason or ""
                     output.success = False
         except Exception:
-            print("error 2!")
             output.success = False
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
-            print(f"{output.error=}")
 
     if pbar:
         pbar.update(1)
