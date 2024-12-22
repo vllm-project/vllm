@@ -25,9 +25,6 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
-import uvloop
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-
 
 class AsyncLLM(EngineClient):
 
