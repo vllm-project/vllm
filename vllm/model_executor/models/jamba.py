@@ -423,12 +423,13 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-        effective_max_batch_size = int(self.vllm_config.scheduler_config.max_num_seqs * 2)
+        effective_max_batch_size = int(
+            self.vllm_config.scheduler_config.max_num_seqs * 2)
         if not self.model_config.enforce_eager \
             and effective_max_batch_size <= \
                 vllm_config.compilation_config.max_capture_size:
             self.max_batch_size = vllm_config.pad_for_cudagraph(
-               effective_max_batch_size)
+                effective_max_batch_size)
         else:
             self.max_batch_size = effective_max_batch_size
 
