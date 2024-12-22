@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from transformers import JambaConfig
 
+from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
@@ -424,7 +425,9 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             self.model.make_empty_intermediate_tensors)
 
         effective_max_batch_size = int(
-            self.vllm_config.scheduler_config.max_num_seqs * 2)
+            self.vllm_config.scheduler_config.max_num_seqs * \
+                envs.VLLM_MAMBA_NUM_OF_SLOTS_MULTIPLIER
+        )
         if not self.model_config.enforce_eager \
             and effective_max_batch_size <= \
                 vllm_config.compilation_config.max_capture_size:

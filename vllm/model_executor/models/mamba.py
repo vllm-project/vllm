@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from transformers import MambaConfig
 
+from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -195,17 +196,18 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.backbone.make_empty_intermediate_tensors)
-        if self.scheduler_config is not None and \
-            not self.model_config.enforce_eager:
-            if self.scheduler_config.max_num_seqs > \
+
+        effective_max_batch_size = int(
+            self.vllm_config.scheduler_config.max_num_seqs * \
+                envs.VLLM_MAMBA_NUM_OF_SLOTS_MULTIPLIER
+        )
+        if not self.model_config.enforce_eager \
+            and effective_max_batch_size <= \
                 vllm_config.compilation_config.max_capture_size:
-                self.max_batch_size = \
-                    vllm_config.compilation_config.max_capture_size
-            else:
-                self.max_batch_size = vllm_config.pad_for_cudagraph(
-                    self.scheduler_config.max_num_seqs)
+            self.max_batch_size = vllm_config.pad_for_cudagraph(
+                effective_max_batch_size)
         else:
-            self.max_batch_size = 8192 + 2
+            self.max_batch_size = effective_max_batch_size
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.backbone.get_input_embeddings(input_ids)
