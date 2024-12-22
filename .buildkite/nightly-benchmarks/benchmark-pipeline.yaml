@@ -65,9 +65,9 @@ steps:
         - VLLM_USAGE_SOURCE
         - HF_TOKEN
 
-  - block: "Run H100 Benchmark"
-    key: block-h100
-    depends_on: ~
+  #- block: "Run H100 Benchmark"
+    #key: block-h100
+    #depends_on: ~
 
   - label: "H100"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
