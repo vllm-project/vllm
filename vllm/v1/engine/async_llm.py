@@ -152,7 +152,7 @@ class AsyncLLM(EngineClient):
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
-        
+
         if detokenizer := getattr(self, "detokenizer", None):
             detokenizer.shutdown()
 
