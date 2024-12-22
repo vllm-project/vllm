@@ -420,10 +420,10 @@ class DetokenizerProc(Detokenizer):
 
         # Deserialize the EngineOutput (use msgpack for performance).
         (frame, ) = from_engine_core.recv_multipart(copy=False)
-        outputs: EngineCoreOutputs =  decoder.decode(frame.buffer)
+        outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
 
         # Detokenize.
-        request_outputs, requests_to_abort = self.step(outputs.outputs)
+        request_outputs, requests_to_abort = self.step(outputs)
 
         # Send request outputs back to LLMEngine.
         to_llm_engine.send_pyobj(request_outputs)
@@ -450,19 +450,25 @@ class DetokenizerProc(Detokenizer):
 
             epoch = 0
             while True:
-                logger.info(f"EPOCH: {epoch}")
                 socks = dict(poller.poll())
 
                 # Handle input from LLMEngine.
                 if from_llm_engine in socks:
                     self._handle_from_llm_engine(
-                        from_llm_engine, to_engine_core)
+                        from_llm_engine=from_llm_engine,
+                        to_engine_core=to_engine_core,
+                    )
 
                 # Handle output from EngineCoreOutput.
                 if from_engine_core in socks:
+                    logger.info(f"EPOCH: {epoch}")
                     epoch += 1
                     self._handle_from_engine_core(
-                        from_engine_core, to_llm_engine, decoder)
+                        from_engine_core=from_engine_core,
+                        to_engine_core=to_engine_core,
+                        to_llm_engine=to_llm_engine,
+                        decoder=decoder,
+                    )
 
 class DetokenizerClient:
     

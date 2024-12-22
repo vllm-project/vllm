@@ -243,7 +243,7 @@ class EngineCoreProc(EngineCore):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
-        
+
         # Loop until process is sent a SIGINT or SIGTERM
         epoch = 0
         while True:
