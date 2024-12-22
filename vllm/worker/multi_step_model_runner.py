@@ -407,7 +407,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 break
 
     def _final_process_outputs(self, model_input: StatefulModelInput,
-                               output_proc_callback: Optional[Callable]):
+            output_proc_callback: Optional[Callable]) -> List[SamplerOutput]:
         assert model_input.frozen_model_input is not None
 
         has_async_callback = output_proc_callback is not None
@@ -594,8 +594,9 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # should be [SamplerOutput]
         return output
 
-    def _update_sampling_metadata(self, sampling_metadata, num_seqs,
-                                  num_queries):
+    def _update_sampling_metadata(self, sampling_metadata: SamplingMetadata, 
+                                  num_seqs: Optional[int],
+                                  num_queries: int):
 
         assert sampling_metadata.num_prompts == 0
         assert len(sampling_metadata.seq_groups) == num_queries
@@ -858,7 +859,7 @@ def _pythonize_sampler_output(
             seq_outputs: List[
                 SequenceOutput] = completion_seq_group_output.samples
         else:
-            seq_outputs = []
+            seq_outputs: List[SequenceOutput] = []
 
         for tdx, (parent_id,
                   next_token_id) in enumerate(zip(parent_ids, next_token_ids)):
