@@ -93,8 +93,8 @@ class BlockTable:
             # Copy the entire block table to the GPU.
             # NOTE(woosuk): This can be a performance bottleneck when the block
             # table is large.
-            self.block_table[:num_reqs].copy_(
-                self.block_table_cpu[:num_reqs], non_blocking=True)
+            self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
+                                              non_blocking=True)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
