@@ -99,7 +99,9 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
         image_features = image_processor(**processor_data)
 
         tokenizer = self._get_tokenizer()
-        encoding = tokenizer(prompt, return_tensors="pt")
+        encoding = tokenizer(prompt,
+                             add_special_tokens=False,
+                             return_tensors="pt")
         data = dict(**encoding, **image_features)
 
         return BatchFeature(data=data, tensor_type="pt")
