@@ -180,6 +180,10 @@ class MMHasher:
             return None
 
         mm_data = prompt["multi_modal_data"]
+        if not mm_data:
+            # mm_data can be None or an empty dict.
+            return None
+
         image_inputs = mm_data["image"]
 
         return self.hash_images(image_inputs)
