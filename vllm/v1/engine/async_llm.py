@@ -18,6 +18,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
+from vllm.v1.engine import EngineAbortRequest
 from vllm.v1.engine.core_client import MultiprocessEngineCore
 from vllm.v1.engine.detokenizer import DetokenizerClient
 from vllm.v1.engine.processor import Processor
@@ -92,7 +93,6 @@ class AsyncLLM(EngineClient):
             usage_context=usage_context,
         )
 
-        # self.output_handler: Optional[asyncio.Task] = None
         self.to_create_loop = True
 
     def __del__(self):
@@ -172,11 +172,11 @@ class AsyncLLM(EngineClient):
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
         
-        # 2) Create Queue (output_handler pushes, generate pulls)
+        # 2) Create Queue (output_handler() pushes, generate() pulls)
         self.rid_to_queue[request_id] = asyncio.Queue()
 
-        # 3) Send to Detokenizer.
-        await self.detokenizer.add_request_async(engine_request)
+        # 3) Send to Detokenizer (which forwards to EngineCore).
+        await self.detokenizer.input_socket.send_pyobj(engine_request)
 
         return self.rid_to_queue[request_id]
 
@@ -197,93 +197,68 @@ class AsyncLLM(EngineClient):
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
-            * 1) Make a queue corresponding to the Request.
-            # 2) Processing the Input.
-            * 3) Adding the Request to the Detokenize + EngineCore.
+            * 1) Make an output queue for the Request.
+            # 2) Processing the Input (e.g. Tokenizer).
+            * 3) Adding the Request to Detokenizer + EngineCore.
 
         The output_handler() loop runs in a background task, pulling
         from Detokenizer and pushing to the per request queue.
 
-        The generate() pulls from the per requests queue and yeilds
+        The generate() pulls from the per request queue and yeilds
         to the caller which iterates the AsyncGenerator.
         """
 
-        # We start the output_handler on the first call to generate() so that
-        # we can call __init__ before the event loop starts, which enables us
-        # to handle startup failure gracefully in the OpenAI server.
-        if self.to_create_loop:
-            import signal
-            def signal_handler(self, signum=None, frame=None):
-                logger.warning(
-                    f"SIGTERM received. {signum=} {frame=}. Draining requests and shutting down..."
+        try:
+            # We start the output_handler on the first call to generate() so that
+            # we can call __init__ before the event loop starts, which enables us
+            # to handle startup failure gracefully in the OpenAI server.
+            if self.to_create_loop:
+                import signal
+                def signal_handler(self, signum=None, frame=None):
+                    logger.warning(
+                        f"SIGTERM received. {signum=} {frame=}. Draining requests and shutting down..."
+                )
+
+                self.to_create_loop = False
+                loop = asyncio.get_event_loop()
+                loop.create_task(self.output_handler())
+                loop.add_signal_handler(signal.SIGTERM, signal_handler)
+
+            q = await self.add_request(
+                request_id,
+                prompt,
+                sampling_params,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
+                priority=priority,
             )
 
-            self.to_create_loop = False
-            loop = asyncio.get_event_loop()
-            loop.create_task(self._run_output_handler())
-            loop.add_signal_handler(signal.SIGTERM, signal_handler)
+            # The output_handler task pushes items into the queue.
+            # This task pulls from the queue and yields them.
+            while True:
+                # Note: drain queue without await if possible (avoids
+                # task switching under load --> helps performance).
+                out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
-        queue = await self.add_request(
-            request_id,
-            prompt,
-            sampling_params,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request,
-            priority=priority,
-        )
-
-        while True:
-            try:
-                # Note: drain queue without awaiting if possible (this helps 
-                # to avoid task switching under load + helps performance).
-                if queue.qsize() > 0:
-                    out = queue.get_nowait()
-                else:
-                    out = await asyncio.wait_for(queue.get(), timeout=4)
-
+                # Note: both Detokenizer and EngineCore handle their
+                # own cleanup based on finished.
                 if out.finished:
                     del self.rid_to_queue[request_id]
                     yield out
                     break
-                    
+
                 yield out
+        
+        # Client request cancellation is handled through calling
+        # task.cancel() on generate. So we abort to alert the Detokenizer
+        # and the EngineCore.
+        except asyncio.CancelledError:
+            await self.abort(request_id)
+            raise
 
-            except asyncio.TimeoutError:
-                logger.debug("%s request timed out waiting", request_id)
-                continue
 
-    # async def _process_cancellations(self) -> None:
-    #     """
-    #     Process requests cancelled from user disconnecting.
-
-    #     When a client disconnects, AsyncStream._cancel() is called.
-    #     We passed a callback to AsyncStream(), which appends to 
-    #     self.client_aborted_requests.
-
-    #     As a result, if any requests are canceled from the user side
-    #     the request_id will show up in self.client_aborted_requests.
-    #     """
-
-    #     # Avoid streams having circular ref to parent AsyncLLM object.
-    #     if not self.client_aborted_requests:
-    #         return
-    #     reqs_to_abort = self.client_aborted_requests.copy()
-    #     self.client_aborted_requests.clear()
-
-    #     # Remove from Detokenizer.
-    #     self.detokenizer.abort_requests(reqs_to_abort)
-
-    #     # Remove from RequestStreams.
-    #     for request_id in reqs_to_abort:
-    #         if self.log_requests:
-    #             logger.info("User-cancelled request %s.", request_id)
-    #         self._finish_stream(request_id)
-
-    #     # Remove from EngineCore.
-    #     await self.engine_core.abort_requests_async(reqs_to_abort)
-
-    async def _run_output_handler(self):
+    async def output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
         epoch = 0
@@ -301,16 +276,14 @@ class AsyncLLM(EngineClient):
 
                 self.rid_to_queue[out.request_id].put_nowait(out)
 
-            # 3) Abort any requests that finished due to stop strings.
-            # await self.engine_core.abort_requests_async(reqs_to_abort)
 
-            # 4) Abort any requests due to client cancellations.
-            # TODO: send back to detokenizer if this fails.
-            # await self._process_cancellations()
+    async def abort(self, request_id: str):
 
-    async def abort(self, request_id: str) -> None:
-        # Note: this is not used outside of testing.
-        pass
+        await self.detokenizer.input_socket.send_pyobj(
+            EngineAbortRequest([request_id]))
+        
+        if self.log_requests:
+            logger.info("Aborted %s.", request_id)
 
     def encode(
         self,

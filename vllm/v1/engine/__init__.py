@@ -32,6 +32,17 @@ class EngineRequest:
     arrival_time: float
     lora_request: Optional[LoRARequest]
 
+@dataclass
+class EngineAbortRequest:
+
+    request_ids: List[str]
+
+@dataclass
+class EngineProfileRequest:
+
+    is_start: bool
+
+EngineRequestUnion = Union[EngineRequest, EngineAbortRequest, EngineProfileRequest]
 
 class EngineCoreOutput(
         msgspec.Struct,
@@ -59,19 +70,4 @@ class EngineCoreOutputs(
     outputs: List[EngineCoreOutput]
 
 
-@dataclass
-class EngineCoreProfile:
-    is_start: bool
 
-
-class EngineRequestType(enum.Enum):
-    """
-    Request types defined as hex byte strings, so it can be sent over sockets
-    without separate encoding step.
-    """
-    ADD = b'\x00'
-    ABORT = b'\x01'
-    PROFILE = b'\x02'
-
-
-EngineRequestUnion = Union[EngineRequest, EngineCoreProfile, List[str]]

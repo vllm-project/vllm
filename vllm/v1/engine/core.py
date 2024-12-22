@@ -18,8 +18,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreProfile, EngineRequest,
-                            EngineRequestType, EngineRequestUnion,
+                            EngineAbortRequest, EngineRequest,
+                            EngineProfileRequest, EngineRequestUnion,
                             BackgroundProcHandle)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
@@ -92,6 +92,8 @@ class EngineCore:
     def add_request(self, request: EngineRequest):
         """Add request to the scheduler."""
 
+        logger.debug("Adding request: %s", request.request_id)
+
         if request.mm_hashes is not None:
             # Here, if hash exists for an image, then it will be fetched
             # from the cache, else it will be added to the cache.
@@ -102,16 +104,15 @@ class EngineCore:
             request.mm_inputs = self.mm_input_mapper_server.process_inputs(
                 request.mm_inputs, request.mm_hashes)
 
+        # TODO: instead of sending EngineRequest, should we just send
+        # around Request?
         req = Request.from_engine_core_request(request)
-
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
         """Abort requests from the scheduler."""
 
-        # TODO: The scheduler doesn't really need to know the
-        # specific finish reason, TBD whether we propagate that
-        # (i.e. client-aborted vs stop criteria met).
+        logger.debug("Aborting requests: %s", request_ids)
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
@@ -294,38 +295,18 @@ class EngineCoreProc(EngineCore):
 
         if isinstance(request, EngineRequest):
             self.add_request(request)
-        elif isinstance(request, EngineCoreProfile):
+        elif isinstance(request, EngineProfileRequest):
             self.model_executor.profile(request.is_start)
+        elif isinstance(request, EngineAbortRequest):
+            self.abort_requests(request.request_ids)
         else:
-            # TODO: make an EngineCoreAbort wrapper
-            assert isinstance(request, list)
-            self.abort_requests(request)
+            raise ValueError("Unknown request type: {request}")
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding.
-        decoder_add_req = PickleEncoder()
-        decoder_abort_req = PickleEncoder()
-
         with zmq_socket_ctx(input_path, zmq.PULL) as socket:
             while True:
-                # (RequestType, RequestData)
-                # type_frame, data_frame = socket.recv_multipart(copy=False)
-                # request_type = type_frame.buffer
-                # request_data = data_frame.buffer
-                
-
-                # # Deserialize the request data.
-                # if request_type == EngineRequestType.ADD.value:
-                #     request = decoder_add_req.decode(request_data)
-                # elif request_type == EngineRequestType.ABORT.value:
-                #     request = decoder_abort_req.decode(request_data)
-                # elif request_type == EngineRequestType.PROFILE.value:
-                #     request = pickle.loads(request_data)
-                # else:
-                #     raise ValueError(f"Unknown RequestType: {request_type}")
-
                 # Push to input queue for core busy loop.
                 request = socket.recv_pyobj()
                 self.input_queue.put_nowait(request)

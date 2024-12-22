@@ -142,9 +142,6 @@ class MultiprocessEngineCore:
         self._finalizer = weakref.finalize(self, self.shutdown)
 
     def shutdown(self):
-        # Shut down the zmq context.
-        self.ctx.destroy(linger=0)
-
         if hasattr(self, "proc_handle") and self.proc_handle:
             # Shutdown the process if needed.
             if self.proc_handle.proc.is_alive():

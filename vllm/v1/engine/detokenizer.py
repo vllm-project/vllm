@@ -3,7 +3,7 @@ import zmq.asyncio
 import msgspec
 import signal
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Tuple,Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.executor.multiproc_worker_utils import get_mp_context
@@ -15,7 +15,8 @@ from vllm.transformers_utils.detokenizer_utils import (
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            BackgroundProcHandle, EngineRequest)
+                            BackgroundProcHandle, 
+                            EngineRequest, EngineAbortRequest)
 from vllm.v1.utils import (make_zmq_socket, zmq_socket_ctx, 
                            wait_for_startup)
 
@@ -234,14 +235,14 @@ class Detokenizer:
             self.request_states.pop(request_id, None)        
         
     def step(
-        self, encore_core_outputs: List[EngineCoreOutput]
-    ) -> List[RequestOutput]:
-        """Update state and request the RequestOutputs to the LLMEngine."""
+        self, encore_core_outputs: EngineCoreOutputs,
+    ) -> Tuple[List[RequestOutput], List[str]]:
+        """Update state and make RequestOutputs for the LLMEngine."""
 
         request_outputs: List[RequestOutput] = []
-        # requests_to_abort: List[str] = []
+        requests_to_abort: List[str] = []
 
-        for engine_core_output in encore_core_outputs:
+        for engine_core_output in encore_core_outputs.outputs:
             request_id = engine_core_output.request_id
 
             detokenizer = self.request_states.get(request_id)
@@ -261,17 +262,16 @@ class Detokenizer:
                 request_outputs.append(request_output)
 
                 # # Free completed requests.
-                # if request_output.finished:
-                #     self.request_states.pop(request_id)
-                #     # If Request finished but EngineCore not finished,
-                #     # this was caused by a stop string + we need to send
-                #     # an abort signal to the EngineCore.
-                #     if not engine_core_output.finished:
-                #         requests_to_abort.append(request_id)
+                if request_output.finished:
+                    self.request_states.pop(request_id)
+                    # If Request finished but EngineCore not finished,
+                    # this was caused by a stop string + we need to send
+                    # an abort signal to the EngineCore.
+                    if not engine_core_output.finished:
+                        requests_to_abort.append(request_id)
 
         # Return to EngineClient.
-        # return request_outputs, requests_to_abort
-        return request_outputs, []
+        return request_outputs, requests_to_abort
 
 class DetokenizerProc(Detokenizer):
     """ZMQ-wrapper for running Detokenizer in background process."""
@@ -374,60 +374,95 @@ class DetokenizerProc(Detokenizer):
             if detokenizer is not None:
                 detokenizer = None
 
+    def _handle_from_llm_engine(
+        self, 
+        from_llm_engine: zmq.Socket,
+        to_engine_core: zmq.Socket,
+    ) -> None:
+        """Handle EngineRequest from the LLMEngine."""
+
+        pickled_req = from_llm_engine.recv()
+        req = pickle.loads(pickled_req)
+
+        # Request added by client, add to RequestStates.
+        if isinstance(req, EngineRequest):
+            if req.request_id in self.request_states:
+                raise ValueError(
+                    f"{req.request_id} already in Request States!")
+
+            # Add to RequestStates.
+            request_state = IncrementalDetokenizer.from_new_request(
+                self.tokenizer, req)
+            self.request_states[req.request_id] = request_state
+
+        # Request aborted by client, delete from RequestStates.
+        elif isinstance(req, EngineAbortRequest):
+            if req.request_id not in self.request_states:
+                # If not found, the request is already completed
+                # and we can safely ignore.
+                pass
+            del self.request_states[req.request_id]
+            
+        else:
+            raise ValueError(f"Unknown type: {req}")
+
+        # Forward to EngineCore.
+        to_engine_core.send(pickled_req)
+    
+    def _handle_from_engine_core(
+        self,
+        from_engine_core: zmq.Socket,
+        to_engine_core: zmq.Socket,
+        to_llm_engine: zmq.Socket,
+        decoder: msgspec.msgpack.Decoder,
+    ) -> None:
+        """Handle Outputs from the EngineCore."""
+
+        # Deserialize the EngineOutput (use msgpack for performance).
+        (frame, ) = from_engine_core.recv_multipart(copy=False)
+        outputs: EngineCoreOutputs =  decoder.decode(frame.buffer)
+
+        # Detokenize.
+        request_outputs, requests_to_abort = self.step(outputs.outputs)
+
+        # Send request outputs back to LLMEngine.
+        to_llm_engine.send_pyobj(request_outputs)
+
+        # Abort requests that finished due to stop strings.
+        to_engine_core.send_pyobj(EngineAbortRequest(requests_to_abort))
+        
+
     def run_busy_loop(self):
         """Core busy loop of the Detokenizer."""
 
-        try:
-            # TODO: handle aborted due to client cancellation
-            # TODO: pickle -> msgpack
-            # TODO: send stop string aborts back to EngineCore directly
+        decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
-            decoder_out = msgspec.msgpack.Decoder(EngineCoreOutputs)
+        with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as from_engine_core, 
+              zmq_socket_ctx(self.engine_core_inputs_path, zmq.PUSH) as to_engine_core,
+              zmq_socket_ctx(self.input_path, zmq.PULL) as from_llm_engine,
+              zmq_socket_ctx(self.output_path, zmq.PUSH) as to_llm_engine):
 
-            with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as from_engine_core, 
-                  zmq_socket_ctx(self.input_path, zmq.PULL) as from_llm_engine,
-                  zmq_socket_ctx(self.engine_core_inputs_path, zmq.PUSH) as to_engine_core,
-                  zmq_socket_ctx(self.output_path, zmq.PUSH) as to_llm_engine):
+            # TODO(rob): avoid poll by having both EngineCore and 
+            # LLMEngine send to the same socket.
+            poller = zmq.Poller()
+            poller.register(from_engine_core, zmq.POLLIN)
+            poller.register(from_llm_engine, zmq.POLLIN)
 
-                # TODO: avoid poll by having both EngineCore
-                # and AsyncLLM send to the same socket (unclear why this 
-                # was not working when I originally tried it)
-                poller = zmq.Poller()
-                poller.register(from_engine_core, zmq.POLLIN)
-                poller.register(from_llm_engine, zmq.POLLIN)
+            epoch = 0
+            while True:
+                logger.info(f"EPOCH: {epoch}")
+                socks = dict(poller.poll())
 
-                epoch = 0
-                while True:
-                    logger.info(f"EPOCH: {epoch}")
+                # Handle input from LLMEngine.
+                if from_llm_engine in socks:
+                    self._handle_from_llm_engine(
+                        from_llm_engine, to_engine_core)
 
-                    socks = dict(poller.poll())
-
-                    # Handle NewRequest.
-                    if from_llm_engine in socks:
-                        pickled_request = from_llm_engine.recv()
-                        request: EngineRequest = pickle.loads(pickled_request)
-
-                        assert (request.request_id not in self.request_states)
-
-                        # Add to Detokenizer.
-                        request_state = IncrementalDetokenizer.from_new_request(self.tokenizer, request)
-                        self.request_states[request.request_id] = request_state
-
-                        # Forward to EngineCore.
-                        to_engine_core.send(pickled_request)
-
-                    # Handle EngineCoreOutput.
-                    if from_engine_core in socks:
-                        epoch += 1
-
-                        (frame, ) = from_engine_core.recv_multipart(copy=False)
-                        engine_core_outputs = decoder_out.decode(frame.buffer).outputs
-                        request_outputs, _ = self.step(engine_core_outputs)
-                        to_llm_engine.send_pyobj(request_outputs)
-        
-        except Exception as e:
-            logger.error(e)
-            raise e
+                # Handle output from EngineCoreOutput.
+                if from_engine_core in socks:
+                    epoch += 1
+                    self._handle_from_engine_core(
+                        from_engine_core, to_llm_engine, decoder)
 
 class DetokenizerClient:
     
@@ -450,8 +485,7 @@ class DetokenizerClient:
 
         # Get output (RequestOutput) from Detokenizer.
         output_path = get_open_zmq_ipc_path()
-        self.output_socket = make_zmq_socket(
-            self.ctx,
+        self.output_socket = make_zmq_socket(self.ctx,
             output_path,
             zmq.PULL,
         )
@@ -473,13 +507,3 @@ class DetokenizerClient:
 
         if self.proc_handle.proc.is_alive():
             kill_process_tree(self.proc_handle.proc.pid)
-
-    async def add_request_async(self, request: EngineRequest):
-        """Send new DetokenizerRequest to Detokenizer."""
-
-        await self.input_socket.send_pyobj(request)
-
-    async def get_output_async(self) -> List[RequestOutput]:
-        """Get RequestOutputs, RequestsToAbort from Detokenizer."""
-
-        return await self.output_socket.recv_pyobj()
