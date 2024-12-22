@@ -41,7 +41,7 @@ if [[ $version == *dev* ]]; then
 fi
 
 # Upload the wheel to S3
-python3 generate_index.py --wheel "$normal_wheel"
+python3 .buildkite/generate_index.py --wheel "$normal_wheel"
 
 # generate index for this commit
 aws s3 cp "$wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
