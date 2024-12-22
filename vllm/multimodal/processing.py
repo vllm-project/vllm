@@ -902,70 +902,25 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> MultiModalEncDecInputs:
-        """
-        Process multi-modal inputs to be used in vLLM.
-
-        The main steps are:
-
-        1. Apply HF Processor on prompt text and multi-modal data together,
-           outputting token IDs and processed tensors.
-        2. Find and replace sequences in the token IDs with placeholder tokens.
-           The number of placeholder tokens equals the feature size of the
-           multi-modal data outputted by the multi-modal encoder.
-        3. Extract information about the placeholder tokens from the
-           processed token IDs.
-        """
-        mm_items = self._get_mm_items(mm_data)
-
-        hf_inputs = self._apply_hf_processor(prompt_text, mm_items,
-                                             mm_processor_kwargs)
-        decoder_prompt_ids, = hf_inputs.pop("input_ids").tolist()
-        mm_kwargs = MultiModalKwargs(hf_inputs)
-
-        prompt_repls = self._get_prompt_replacements(mm_items, hf_inputs,
-                                                     mm_processor_kwargs)
-        all_prompt_repls = self._bind_prompt_replacements(prompt_repls)
-
         encoder_prompt_text = self._create_encoder_prompt(prompt_text)
-        encoder_prompt_ids = _encode(self._get_tokenizer(),
-                                     encoder_prompt_text)
-        # If HF processor already inserts placeholder tokens,
-        # there is no need for us to insert them
-        mm_item_counts = mm_items.get_item_counts()
-        all_placeholders = self._find_placeholders(all_prompt_repls,
-                                                   encoder_prompt_ids,
-                                                   mm_item_counts)
-
-        if all_placeholders:
-            tokenizer = self._get_tokenizer()
-            prompt_text = _decode(tokenizer, encoder_prompt_ids)
-        else:
-            (
-                encoder_prompt_ids,
-                prompt_text,
-                all_placeholders,
-            ) = self._apply_prompt_replacements(
-                encoder_prompt_ids,
-                all_prompt_repls,
-                mm_item_counts,
-            )
-
-        mm_placeholders = {
-            modality: [item.to_range() for item in items]
-            for modality, items in full_groupby_modality(all_placeholders)
-        }
-
-        decoder_inputs = MultiModalInputsV2(
-            type="multimodal",
-            prompt=prompt_text,
-            prompt_token_ids=decoder_prompt_ids,
-            mm_kwargs=mm_kwargs,
-            mm_placeholders=mm_placeholders,
+        encoder_inputs = super().apply(
+            prompt_text=encoder_prompt_text,
+            mm_data=mm_data,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
-        return MultiModalEncDecInputs(
-            encoder_prompt=encoder_prompt_text,
-            encoder_prompt_token_ids=encoder_prompt_ids,
-            **decoder_inputs)
+
+        tokenizer = self._get_tokenizer()
+        decoder_prompt_ids = _encode(tokenizer, prompt_text)
+
+        mm_inputs = MultiModalEncDecInputs(
+            encoder_prompt=encoder_inputs["prompt"],
+            encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
+            **encoder_inputs)
+        mm_inputs.update({
+            "prompt": prompt_text,
+            "prompt_token_ids": decoder_prompt_ids
+        })
+        return mm_inputs
 
     def _create_encoder_prompt(
         self,
