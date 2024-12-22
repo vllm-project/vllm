@@ -155,6 +155,7 @@ class InputBatch:
         self.stop_token_ids: List[Set[int]] = [
             set() for _ in range(max_num_reqs)
         ]
+        self.prompt_token_ids: Optional[torch.Tensor] = None
 
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
@@ -322,7 +323,6 @@ class InputBatch:
         req_id_output_token_ids: Dict[str, List[int]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
-        prompt_token_ids: Optional[torch.Tensor] = None
         if not skip_copy:
             self.temperature[:self.num_reqs].copy_(
                 self.temperature_cpu_tensor[:self.num_reqs], non_blocking=True)
@@ -346,7 +346,7 @@ class InputBatch:
                 # The prompt tokens are used only for applying penalties during
                 # the sampling process. Hence copy these tensors only when
                 # there are requests which need penalties to be applied.
-                prompt_token_ids = self._make_prompt_token_ids_tensor()
+                self.prompt_token_ids = self._make_prompt_token_ids_tensor()
 
         output_token_ids: List[List[int]] = []
 
@@ -371,7 +371,7 @@ class InputBatch:
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
-            prompt_token_ids=prompt_token_ids,
+            prompt_token_ids=self.prompt_token_ids,
             frequency_penalties=self.frequency_penalties[:self.num_reqs],
             presence_penalties=self.presence_penalties[:self.num_reqs],
             repetition_penalties=self.repetition_penalties[:self.num_reqs],
