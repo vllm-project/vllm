@@ -46,12 +46,26 @@ python3 .buildkite/generate_index.py --wheel "$normal_wheel"
 # generate index for this commit
 aws s3 cp "$wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
 aws s3 cp "$normal_wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
-aws s3 cp index.html "s3://vllm-wheels/$BUILDKITE_COMMIT/vllm/index.html"
-aws s3 cp "s3://vllm-wheels/nightly/index.html" "s3://vllm-wheels/$BUILDKITE_COMMIT/index.html"
+
+if [[ $normal_wheel == *"cu118"* ]]; then
+    # if $normal_wheel matches cu118, do not upload the index.html
+    echo "Skipping index files for cu118 wheels"
+else
+    # only upload index.html for cu12 wheels (default wheels)
+    aws s3 cp index.html "s3://vllm-wheels/$BUILDKITE_COMMIT/vllm/index.html"
+    aws s3 cp "s3://vllm-wheels/nightly/index.html" "s3://vllm-wheels/$BUILDKITE_COMMIT/index.html"
+fi
 
 # generate index for nightly
 aws s3 cp "$wheel" "s3://vllm-wheels/nightly/"
 aws s3 cp "$normal_wheel" "s3://vllm-wheels/nightly/"
-aws s3 cp index.html "s3://vllm-wheels/nightly/vllm/index.html"
+
+if [[ $normal_wheel == *"cu118"* ]]; then
+    # if $normal_wheel matches cu118, do not upload the index.html
+    echo "Skipping index files for cu118 wheels"
+else
+    # only upload index.html for cu12 wheels (default wheels)
+    aws s3 cp index.html "s3://vllm-wheels/nightly/vllm/index.html"
+fi
 
 aws s3 cp "$wheel" "s3://vllm-wheels/$version/"
