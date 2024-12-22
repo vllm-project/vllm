@@ -55,7 +55,16 @@ void copy_subranges(torch::Tensor& matrix_src, torch::Tensor& matrix_diff,
 
   // One thread block per row.
   int blocks = n;
-  int threads = 1024;
+  int threads;
+  if (blocks < 128) {
+    threads = 1024;
+  } else if (blocks < 256) {
+    threads = 512;
+  } else if (blocks < 512) {
+    threads = 256;
+  } else {
+    threads = 128;
+  }
   const at::cuda::OptionalCUDAGuard device_guard(device_of(matrix_tgt));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vllm::copy_subranges_kernel<<<blocks, threads, 0, stream>>>(
