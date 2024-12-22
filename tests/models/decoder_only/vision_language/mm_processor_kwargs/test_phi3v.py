@@ -16,8 +16,8 @@ models = ["microsoft/Phi-3.5-vision-instruct"]
 # Wrap lazy imports to avoid initializing CUDA during test collection
 @pytest.fixture()
 def processor_for_phi3v():
-    from vllm.model_executor.models.phi3v import Phi3VProcessor
-    return Phi3VProcessor
+    from vllm.model_executor.models.phi3v import Phi3VMultiModalProcessor
+    return Phi3VMultiModalProcessor
 
 
 @pytest.fixture()
@@ -58,16 +58,14 @@ def test_max_tokens_override(get_max_phi3v_image_tokens, model: str,
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
-    "num_crops,expected_toks_per_img,num_imgs",
+    "num_crops,expected_toks_per_img",
     [
-        (4, 757, 1),
-        (4, 757, 2),
-        (16, 1921, 1),
-        (16, 1921, 2),
+        (4, 757),
+        (16, 1921),
         # the default num_crops of phi-3.5-vision is 4
-        (None, 757, 2),
-        (None, 757, 2),
+        (None, 757),
     ])
+@pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_override(processor_for_phi3v, image_assets: _ImageAssets,
                             model: str, num_crops: Optional[int],
                             expected_toks_per_img: int, num_imgs: int):

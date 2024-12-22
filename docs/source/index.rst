@@ -82,17 +82,21 @@ Documentation
    serving/openai_compatible_server
    serving/deploying_with_docker
    serving/deploying_with_k8s
+   serving/deploying_with_helm
    serving/deploying_with_nginx
    serving/distributed_serving
    serving/metrics
    serving/integrations
    serving/tensorizer
+   serving/runai_model_streamer
 
 .. toctree::
    :maxdepth: 1
    :caption: Models
 
    models/supported_models
+   models/generative_models
+   models/pooling_models
    models/adding_model
    models/enabling_multimodal_inputs
 
@@ -111,6 +115,7 @@ Documentation
    usage/engine_args
    usage/env_vars
    usage/usage_stats
+   usage/disagg_prefill
 
 .. toctree::
    :maxdepth: 1
@@ -170,6 +175,7 @@ Documentation
    design/input_processing/model_inputs_index
    design/kernel/paged_attention
    design/multimodal/multimodal_index
+   design/multiprocessing
 
 .. For Developers: contributing to the vLLM project
 

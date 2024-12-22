@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 import ipaddress
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -19,14 +20,14 @@ import time
 import uuid
 import warnings
 import weakref
-from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
-from collections import UserDict, defaultdict
+from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
+from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
-from platform import uname
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
-                    Dict, Generic, Hashable, List, Literal, Optional,
-                    OrderedDict, Set, Tuple, Type, TypeVar, Union, overload)
+                    Dict, Generator, Generic, Hashable, List, Literal,
+                    Optional, Tuple, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np
@@ -152,9 +153,11 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 }
 
 P = ParamSpec('P')
-K = TypeVar("K")
 T = TypeVar("T")
 U = TypeVar("U")
+
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
 
 
 class _Sentinel:
@@ -167,6 +170,11 @@ ALL_PINNED_SENTINEL = _Sentinel()
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
+
+
+class LayerBlockType(enum.Enum):
+    attention = "attention"
+    mamba = "mamba"
 
 
 class Counter:
@@ -183,50 +191,48 @@ class Counter:
         self.counter = 0
 
 
-class LRUCache(Generic[T]):
+class LRUCache(Generic[_K, _V]):
 
-    def __init__(self, capacity: int):
-        self.cache: OrderedDict[Hashable, T] = OrderedDict()
-        self.pinned_items: Set[Hashable] = set()
+    def __init__(self, capacity: int) -> None:
+        self.cache = OrderedDict[_K, _V]()
+        self.pinned_items = set[_K]()
         self.capacity = capacity
 
-    def __contains__(self, key: Hashable) -> bool:
+    def __contains__(self, key: _K) -> bool:
         return key in self.cache
 
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> T:
+    def __getitem__(self, key: _K) -> _V:
         value = self.cache[key]  # Raise KeyError if not exists
         self.cache.move_to_end(key)
         return value
 
-    def __setitem__(self, key: Hashable, value: T) -> None:
+    def __setitem__(self, key: _K, value: _V) -> None:
         self.put(key, value)
 
-    def __delitem__(self, key: Hashable) -> None:
+    def __delitem__(self, key: _K) -> None:
         self.pop(key)
 
-    def touch(self, key: Hashable) -> None:
+    def touch(self, key: _K) -> None:
         self.cache.move_to_end(key)
 
-    def get(self,
-            key: Hashable,
-            default_value: Optional[T] = None) -> Optional[T]:
-        value: Optional[T]
+    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
+        value: Optional[_V]
         if key in self.cache:
             value = self.cache[key]
             self.cache.move_to_end(key)
         else:
-            value = default_value
+            value = default
         return value
 
-    def put(self, key: Hashable, value: T) -> None:
+    def put(self, key: _K, value: _V) -> None:
         self.cache[key] = value
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
-    def pin(self, key: Hashable) -> None:
+    def pin(self, key: _K) -> None:
         """
         Pins a key in the cache preventing it from being
         evicted in the LRU order.
@@ -235,13 +241,13 @@ class LRUCache(Generic[T]):
             raise ValueError(f"Cannot pin key: {key} not in cache.")
         self.pinned_items.add(key)
 
-    def _unpin(self, key: Hashable) -> None:
+    def _unpin(self, key: _K) -> None:
         self.pinned_items.remove(key)
 
-    def _on_remove(self, key: Hashable, value: Optional[T]):
+    def _on_remove(self, key: _K, value: Optional[_V]) -> None:
         pass
 
-    def remove_oldest(self, remove_pinned=False):
+    def remove_oldest(self, *, remove_pinned: bool = False) -> None:
         if not self.cache:
             return
 
@@ -255,17 +261,15 @@ class LRUCache(Generic[T]):
                                    "cannot remove oldest from the cache.")
         else:
             lru_key = next(iter(self.cache))
-        self.pop(lru_key)
+        self.pop(lru_key)  # type: ignore
 
     def _remove_old_if_needed(self) -> None:
         while len(self.cache) > self.capacity:
             self.remove_oldest()
 
-    def pop(self,
-            key: Hashable,
-            default_value: Optional[T] = None) -> Optional[T]:
+    def pop(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
         run_on_remove = key in self.cache
-        value: Optional[T] = self.cache.pop(key, default_value)
+        value = self.cache.pop(key, default)
         # remove from pinned items
         if key in self.pinned_items:
             self._unpin(key)
@@ -273,7 +277,7 @@ class LRUCache(Generic[T]):
             self._on_remove(key, value)
         return value
 
-    def clear(self):
+    def clear(self) -> None:
         while len(self.cache) > 0:
             self.remove_oldest(remove_pinned=True)
         self.cache.clear()
@@ -338,12 +342,6 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-@lru_cache(maxsize=None)
-def in_wsl() -> bool:
-    # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(uname()).lower()
-
-
 def make_async(
     func: Callable[P, T],
     executor: Optional[concurrent.futures.Executor] = None
@@ -369,72 +367,23 @@ def _next_task(iterator: AsyncGenerator[T, None],
     return loop.create_task(iterator.__anext__())  # type: ignore[arg-type]
 
 
-async def iterate_with_cancellation(
-    iterator: AsyncGenerator[T, None],
-    is_cancelled: Callable[[], Awaitable[bool]],
-) -> AsyncGenerator[T, None]:
-    """Convert async iterator into one that polls the provided function
-    at least once per second to check for client cancellation.
-    """
-
-    loop = asyncio.get_running_loop()
-
-    awaits: List[Future[T]] = [_next_task(iterator, loop)]
-    next_cancel_check: float = 0
-    while True:
-        done, pending = await asyncio.wait(awaits, timeout=1.5)
-
-        # Check for cancellation at most once per second
-        time_now = time.time()
-        if time_now >= next_cancel_check:
-            if await is_cancelled():
-                with contextlib.suppress(BaseException):
-                    awaits[0].cancel()
-                    await iterator.aclose()
-                raise asyncio.CancelledError("client cancelled")
-            next_cancel_check = time_now + 1
-
-        if done:
-            try:
-                item = await awaits[0]
-                awaits[0] = _next_task(iterator, loop)
-                yield item
-            except StopAsyncIteration:
-                # we are done
-                return
-
-
 async def merge_async_iterators(
-    *iterators: AsyncGenerator[T, None],
-    is_cancelled: Optional[Callable[[], Awaitable[bool]]] = None,
-) -> AsyncGenerator[Tuple[int, T], None]:
+    *iterators: AsyncGenerator[T,
+                               None], ) -> AsyncGenerator[Tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
-
-    It also optionally polls a provided function at least once per second
-    to check for client cancellation.
     """
 
     loop = asyncio.get_running_loop()
 
     awaits = {_next_task(pair[1], loop): pair for pair in enumerate(iterators)}
-    timeout = None if is_cancelled is None else 1.5
-    next_cancel_check: float = 0
     try:
         while awaits:
-            done, pending = await asyncio.wait(awaits.keys(),
-                                               return_when=FIRST_COMPLETED,
-                                               timeout=timeout)
-            if is_cancelled is not None:
-                # Check for cancellation at most once per second
-                time_now = time.time()
-                if time_now >= next_cancel_check:
-                    if await is_cancelled():
-                        raise asyncio.CancelledError("client cancelled")
-                    next_cancel_check = time_now + 1
+            done, _ = await asyncio.wait(awaits.keys(),
+                                         return_when=FIRST_COMPLETED)
             for d in done:
                 pair = awaits.pop(d)
                 try:
@@ -723,25 +672,7 @@ def print_warning_once(msg: str) -> None:
 
 @lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
-
-    if in_wsl():
-        # Pinning memory in WSL is not supported.
-        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
-        return False
-    elif current_platform.is_xpu():
-        print_warning_once("Pin memory is not supported on XPU.")
-        return False
-    elif current_platform.is_neuron():
-        print_warning_once("Pin memory is not supported on Neuron.")
-        return False
-    elif current_platform.is_hpu():
-        print_warning_once("Pin memory is not supported on HPU.")
-        return False
-    elif current_platform.is_cpu() or current_platform.is_openvino():
-        return False
-    return True
+    return current_platform.is_pin_memory_available()
 
 
 class DeviceMemoryProfiler:
@@ -841,7 +772,7 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 # `collections` helpers
 def is_list_of(
     value: object,
-    typ: Type[T],
+    typ: Union[type[T], tuple[type[T], ...]],
     *,
     check: Literal["first", "all"] = "first",
 ) -> TypeIs[List[T]]:
@@ -907,10 +838,6 @@ def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
 def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
-
-
-_K = TypeVar("_K", bound=Hashable)
-_V = TypeVar("_V")
 
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
@@ -1348,6 +1275,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,
+    *,
     requires_kw_only: bool = False,
     allow_var_kwargs: bool = True,
 ) -> bool:
@@ -1389,9 +1317,11 @@ def supports_kw(
 
 
 def resolve_mm_processor_kwargs(
-    init_kwargs: Optional[Dict[str, Any]],
-    inference_kwargs: Optional[Dict[str, Any]],
+    init_kwargs: Optional[Mapping[str, object]],
+    inference_kwargs: Optional[Mapping[str, object]],
     callable: Callable[..., object],
+    *,
+    requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
 ) -> Dict[str, Any]:
     """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
@@ -1410,11 +1340,17 @@ def resolve_mm_processor_kwargs(
     runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
         callable,
         overrides=inference_kwargs,
-        allow_var_kwargs=allow_var_kwargs)
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
 
     # Filter init time multimodal processor kwargs provided
     init_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable, overrides=init_kwargs, allow_var_kwargs=allow_var_kwargs)
+        callable,
+        overrides=init_kwargs,
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
 
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
@@ -1424,7 +1360,9 @@ def resolve_mm_processor_kwargs(
 
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
-    overrides: Optional[Dict[str, Any]],
+    overrides: Optional[Mapping[str, object]],
+    *,
+    requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -1456,16 +1394,21 @@ def get_allowed_kwarg_only_overrides(
         for kwarg_name, val in overrides.items()
         if supports_kw(callable,
                        kwarg_name,
-                       requires_kw_only=True,
+                       requires_kw_only=requires_kw_only,
                        allow_var_kwargs=allow_var_kwargs)
     }
 
     # If anything is dropped, log a warning
     dropped_keys = overrides.keys() - filtered_overrides.keys()
     if dropped_keys:
-        logger.warning(
-            "The following intended overrides are not keyword-only args "
-            "and and will be dropped: %s", dropped_keys)
+        if requires_kw_only:
+            logger.warning(
+                "The following intended overrides are not keyword-only args "
+                "and and will be dropped: %s", dropped_keys)
+        else:
+            logger.warning(
+                "The following intended overrides are not keyword args "
+                "and and will be dropped: %s", dropped_keys)
 
     return filtered_overrides
 
@@ -1543,8 +1486,14 @@ class ClassRegistry(UserDict[Type[T], _V]):
         raise KeyError(key)
 
     def __contains__(self, key: object) -> bool:
+        return self.contains(key)
+
+    def contains(self, key: object, *, strict: bool = False) -> bool:
         if not isinstance(key, type):
             return False
+
+        if strict:
+            return key in self.data
 
         return any(cls in self.data for cls in key.mro())
 
@@ -1628,8 +1577,18 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if is_in_doc_build() or not supports_custom_op():
+    if is_in_doc_build():
         return
+
+    if not supports_custom_op():
+        assert not current_platform.is_cuda_alike(), (
+            "cuda platform needs torch>=2.4 to support custom op, "
+            "chances are you are using an old version of pytorch "
+            "or a custom build of pytorch. It is recommended to "
+            "use vLLM in a fresh new environment and let it install "
+            "the required dependencies.")
+        return
+
     import torch.library
     if hasattr(torch.library, "infer_schema"):
         schema_str = torch.library.infer_schema(op_func,
@@ -1652,3 +1611,147 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
+
+
+def kill_process_tree(pid: int):
+    """
+    Kills all descendant processes of the given pid by sending SIGKILL.
+
+    Args:
+        pid (int): Process ID of the parent process
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    # Get all children recursively
+    children = parent.children(recursive=True)
+
+    # Send SIGKILL to all children first
+    for child in children:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child.pid, signal.SIGKILL)
+
+    # Finally kill the parent
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
+@dataclass
+class MemorySnapshot:
+    """Memory snapshot."""
+    torch_peak_in_bytes: int = 0
+    torch_memory_in_bytes: int = 0
+    timestamp: float = 0.0
+
+    def measure(self):
+        self.torch_peak_in_bytes = torch.cuda.memory_stats(
+        )["allocated_bytes.all.peak"]
+        self.torch_memory_in_bytes = torch.cuda.memory_stats(
+        )["allocated_bytes.all.current"]
+        self.timestamp = time.time()
+
+    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
+        """support a - b"""
+        return MemorySnapshot(
+            torch_peak_in_bytes=self.torch_peak_in_bytes -
+            other.torch_peak_in_bytes,
+            torch_memory_in_bytes=self.torch_memory_in_bytes -
+            other.torch_memory_in_bytes,
+            timestamp=self.timestamp - other.timestamp)
+
+
+@dataclass
+class MemoryProfilingResult:
+    """Memory profiling result.
+    """  # noqa
+    baseline_memory_in_bytes: int = 0
+    non_kv_cache_memory_in_bytes: int = 0
+    torch_peak_increase_in_bytes: int = 0
+    non_torch_increase_in_bytes: int = 0
+    weights_memory_in_bytes: float = 0
+    before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
+    after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
+    profile_time: float = 0.0
+
+
+@contextlib.contextmanager
+def memory_profiling(
+    baseline_memory_in_bytes: int, weights_memory_in_bytes: int
+) -> Generator[MemoryProfilingResult, None, None]:
+    """Memory profiling context manager.
+    baseline_memory_in_bytes: memory used by all the components other than
+        the current vLLM instance. It contains: memory used by other processes, memory
+        used by another vLLM instance in the same process, etc. It is usually measured
+        before the current vLLM instance initialize the device. And we assume it is
+        constant during the profiling of the current vLLM instance.
+    weights_memory_in_bytes: memory used by PyTorch when loading the model weights.
+        Note that, before loading the model weights, we also initialize the device
+        and distributed environment, which may consume some memory. This part is not
+        included in the weights_memory_in_bytes because PyTorch does not control it.
+
+    The memory in one GPU can be classified into 3 categories:
+    1. memory used by anything other than the current vLLM instance.
+    2. memory used by torch in the current vLLM instance.
+    3. memory used in the current vLLM instance, but not by torch.
+
+    A quantitive example:
+
+    Before creating the current vLLM instance:
+        category 1: 1 GiB
+        category 2: 0 GiB
+        category 3: 0 GiB
+
+    After creating the current vLLM instance and loading the model,
+    (i.e. before profiling):
+        category 1: 1 GiB
+        category 2: 2 GiB (model weights take 2 GiB)
+        category 3: 0.5 GiB (memory used by NCCL)
+
+    During profiling (peak):
+        category 1: 1 GiB
+        category 2: 4 GiB (peak activation tensors take 2 GiB)
+        category 3: 1 GiB (memory used by NCCL + buffers for some attention backends)
+
+    After profiling:
+        category 1: 1 GiB
+        category 2: 3 GiB (after garbage-collecting activation tensors)
+        category 3: 1 GiB (memory used by NCCL + buffers for some attention backends)
+
+    In this case, non-kv cache takes 5 GiB in total, including:
+    a. 2 GiB used by the model weights (category 2)
+    b. 2 GiB reserved for the peak activation tensors (category 2)
+    c. 1 GiB used by non-torch components (category 3)
+
+    The memory used for loading weights (a.) is directly given from the argument `weights_memory_in_bytes`.
+
+    The increase of ``torch.cuda.memory_stats()["allocated_bytes.all.peak"]` after profiling gives (b.).
+
+    (c.) is tricky. We measure the total memory used in this GPU (`torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]`),
+    subtract the baseline memory, the memory used by the model weights, and diff of `torch.cuda.memory_stats()["allocated_bytes.all.current"]`.
+    """ # noqa
+    torch.cuda.reset_peak_memory_stats()
+
+    result = MemoryProfilingResult()
+
+    result.baseline_memory_in_bytes = baseline_memory_in_bytes
+    # the part of memory used for holding the model weights
+    result.weights_memory_in_bytes = weights_memory_in_bytes
+
+    result.before_profile.measure()
+
+    yield result
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    result.after_profile.measure()
+
+    diff = result.after_profile - result.before_profile
+    result.torch_peak_increase_in_bytes = diff.torch_peak_in_bytes
+    current_cuda_memory_bytes = torch.cuda.mem_get_info(
+    )[1] - torch.cuda.mem_get_info()[0]
+    result.non_torch_increase_in_bytes = current_cuda_memory_bytes - baseline_memory_in_bytes - weights_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
+    result.profile_time = diff.timestamp
+    result.non_kv_cache_memory_in_bytes = result.non_torch_increase_in_bytes + result.torch_peak_increase_in_bytes + result.weights_memory_in_bytes  # noqa
