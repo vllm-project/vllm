@@ -1,3 +1,7 @@
+import argparse
+import hashlib
+import os
+
 template = """<!DOCTYPE html>
 <html>
     <body>
@@ -7,9 +11,6 @@ template = """<!DOCTYPE html>
 </html>
 """
 
-import argparse
-import hashlib
-import os
 parser = argparse.ArgumentParser()
 parser.add_argument("--wheel", help="The wheel path.", required=True)
 args = parser.parse_args()
