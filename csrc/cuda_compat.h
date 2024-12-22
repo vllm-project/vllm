@@ -47,3 +47,11 @@
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     hipFuncSetAttribute(FUNC, hipFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #endif
+
+// #ifndef USE_ROCM
+//   #define VLLM_cudaHostGetDevicePointer(device_ptr, host_ptr, flags) \
+//     cudaHostGetDevicePointer(device_ptr, host_ptr, flags)
+// #else
+//   #define VLLM_cudaHostGetDevicePointer(device_ptr, host_ptr, flags) \
+//     hipHostGetDevicePointer(device_ptr, host_ptr, flags)
+// #endif
