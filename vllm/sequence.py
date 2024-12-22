@@ -768,7 +768,7 @@ class SequenceGroup:
         # If still in prefill phase, raise Error.
         if self.is_prefill():
             raise ValueError(
-                "seq_group.get_last_latency() should not be called "
+                "seq_group.set_last_token_time() should not be called "
                 "if the seq_group is in prefill phase.")
         self.last_token_latency = now - self.metrics.last_token_time
         self.metrics.last_token_time = now
