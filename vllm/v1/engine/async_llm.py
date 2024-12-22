@@ -234,16 +234,16 @@ class AsyncLLM(EngineClient):
 
         while True:
             try:
-                out = await asyncio.wait_for(queue.get(), timeout=4)
+                if queue.qsize() > 0:
+                    out = queue.get_nowait()
+                else:
+                    out = await asyncio.wait_for(queue.get(), timeout=4)
 
-                q_size = queue.qsize()
-                # if q_size > 0:
-                #     logger.info(f"{q_size=}")
                 if out.finished:
                     del self.rid_to_queue[request_id]
                     yield out
                     break
-
+                    
                 yield out
 
             except asyncio.TimeoutError:
