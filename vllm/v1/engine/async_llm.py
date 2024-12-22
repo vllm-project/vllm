@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass
+import fastapi
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -234,6 +234,8 @@ class AsyncLLM(EngineClient):
 
         while True:
             try:
+                # Note: drain queue without awaiting if possible (this helps 
+                # to avoid task switching under load + helps performance)
                 if queue.qsize() > 0:
                     out = queue.get_nowait()
                 else:
@@ -247,8 +249,7 @@ class AsyncLLM(EngineClient):
                 yield out
 
             except asyncio.TimeoutError:
-                # TODO(rob): do request cancellation checking here.
-                # logger.debug("Timeout waiting for %s", request_id)
+                logger.debug("%s request timed out waiting", request_id)
                 continue
 
     # async def _process_cancellations(self) -> None:
@@ -308,7 +309,7 @@ class AsyncLLM(EngineClient):
 
     async def abort(self, request_id: str) -> None:
         # Note: this is not used outside of testing.
-        raise ValueError("Not Supported on V1 yet.")
+        pass
 
     def encode(
         self,
