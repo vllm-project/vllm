@@ -196,6 +196,7 @@ async def test_single_chat_session_video_base64encoded(
         model=model_name,
         messages=messages,
         max_completion_tokens=10,
+        temperature=0.0,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
