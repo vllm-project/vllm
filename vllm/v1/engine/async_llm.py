@@ -206,55 +206,50 @@ class AsyncLLM(EngineClient):
         to the caller which iterates the AsyncGenerator.
         """
 
-        try:
-            # We start the output_handler on the first call to generate() so that
-            # we can call __init__ before the event loop starts, which enables us
-            # to handle startup failure gracefully in the OpenAI server.
-            # if self.output_handler is None:
-            if self.to_create_loop:
-                import signal
-                def signal_handler(self, signum=None, frame=None):
-                    logger.warning(
-                        f"SIGTERM received. {signum=} {frame=}. Draining requests and shutting down..."
-                )
-
-                self.to_create_loop = False
-                loop = asyncio.get_event_loop()
-                loop.create_task(self._run_output_handler())
-                loop.add_signal_handler(signal.SIGTERM, signal_handler)
-
-            queue = await self.add_request(
-                request_id,
-                prompt,
-                sampling_params,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=priority,
+        # We start the output_handler on the first call to generate() so that
+        # we can call __init__ before the event loop starts, which enables us
+        # to handle startup failure gracefully in the OpenAI server.
+        # if self.output_handler is None:
+        if self.to_create_loop:
+            import signal
+            def signal_handler(self, signum=None, frame=None):
+                logger.warning(
+                    f"SIGTERM received. {signum=} {frame=}. Draining requests and shutting down..."
             )
 
-            while True:
-                try:
-                    out = await asyncio.wait_for(queue.get(), timeout=4)
+            self.to_create_loop = False
+            loop = asyncio.get_event_loop()
+            loop.create_task(self._run_output_handler())
+            loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
-                    q_size = queue.qsize()
-                    # if q_size > 0:
-                    #     logger.info(f"{q_size=}")
-                    if out.finished:
-                        del self.rid_to_queue[request_id]
-                        yield out
-                        break
+        queue = await self.add_request(
+            request_id,
+            prompt,
+            sampling_params,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            prompt_adapter_request=prompt_adapter_request,
+            priority=priority,
+        )
 
+        while True:
+            try:
+                out = await asyncio.wait_for(queue.get(), timeout=4)
+
+                q_size = queue.qsize()
+                # if q_size > 0:
+                #     logger.info(f"{q_size=}")
+                if out.finished:
+                    del self.rid_to_queue[request_id]
                     yield out
+                    break
 
-                except asyncio.TimeoutError:
-                    # TODO(rob): do request cancellation checking here.
-                    # logger.debug("Timeout waiting for %s", request_id)
-                    continue
-        except BaseException as e:
-            logger.error(repr(e))
-            raise e
-                
+                yield out
+
+            except asyncio.TimeoutError:
+                # TODO(rob): do request cancellation checking here.
+                # logger.debug("Timeout waiting for %s", request_id)
+                continue
 
     # async def _process_cancellations(self) -> None:
     #     """
