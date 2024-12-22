@@ -62,10 +62,12 @@ class AsyncLLM(EngineClient):
         self.client_aborted_requests: List[str] = []
 
         # Processor (converts Inputs --> EngineRequest).
-        self.processor = Processor(vllm_config.model_config,
-                                   vllm_config.lora_config, self.tokenizer,
-                                   input_registry)
-
+        self.processor = Processor(
+            model_config=vllm_config.model_config,
+            cache_config=vllm_config.cache_config,
+            lora_config=vllm_config.lora_config,
+            tokenizer=self.tokenizer,
+            input_registry=input_registry)
 
         # IPC paths.
         engine_core_outputs_path = get_open_zmq_ipc_path()
@@ -104,7 +106,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-    ) -> "AsyncLLMEngine":
+    ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
         # Create the engine configs.
@@ -209,7 +211,6 @@ class AsyncLLM(EngineClient):
         # We start the output_handler on the first call to generate() so that
         # we can call __init__ before the event loop starts, which enables us
         # to handle startup failure gracefully in the OpenAI server.
-        # if self.output_handler is None:
         if self.to_create_loop:
             import signal
             def signal_handler(self, signum=None, frame=None):
@@ -235,7 +236,7 @@ class AsyncLLM(EngineClient):
         while True:
             try:
                 # Note: drain queue without awaiting if possible (this helps 
-                # to avoid task switching under load + helps performance)
+                # to avoid task switching under load + helps performance).
                 if queue.qsize() > 0:
                     out = queue.get_nowait()
                 else:
@@ -371,7 +372,3 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return Exception()  # TODO: implement
-
-
-# Retain V0 name for backwards compatibility.
-AsyncLLMEngine = AsyncLLM

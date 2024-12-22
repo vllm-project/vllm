@@ -1,5 +1,5 @@
-import atexit
 import os
+import weakref
 from typing import List, Optional
 
 import msgspec
@@ -139,14 +139,11 @@ class MultiprocessEngineCore:
             output_path=(output_path or get_open_zmq_ipc_path()),
             **kwargs,
         )
-        atexit.register(self.shutdown)
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
     def shutdown(self):
-        # During final garbage collection in process shutdown, atexit may be
-        # None.
-        if atexit:
-            # in case shutdown gets called via __del__ first
-            atexit.unregister(self.shutdown)
+        # Shut down the zmq context.
+        self.ctx.destroy(linger=0)
 
         if hasattr(self, "proc_handle") and self.proc_handle:
             # Shutdown the process if needed.

@@ -65,7 +65,8 @@ class EngineCore:
 
         self._last_logging_time = time.time()
 
-        self.mm_input_mapper_server = MMInputMapperServer()
+        self.mm_input_mapper_server = MMInputMapperServer(
+            vllm_config.model_config)
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -98,9 +99,8 @@ class EngineCore:
             # MM mapper, so anything that has a hash must have a HIT cache
             # entry here as well.
             assert request.mm_inputs is not None
-            request.mm_inputs, request.mm_hashes = (
-                self.mm_input_mapper_server.process_inputs(
-                    request.mm_inputs, request.mm_hashes))
+            request.mm_inputs = self.mm_input_mapper_server.process_inputs(
+                request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
 

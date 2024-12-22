@@ -2,16 +2,23 @@
 import pytest
 
 from vllm.inputs import token_inputs
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, hash_block_tokens
 
 
-def make_request(request_id, prompt_token_ids):
+def make_request(request_id,
+                 prompt_token_ids,
+                 mm_positions=None,
+                 mm_hashes=None):
     return Request(
         request_id=request_id,
-        inputs=token_inputs(prompt_token_ids=prompt_token_ids),
+        inputs=token_inputs(prompt_token_ids=prompt_token_ids,
+                            multi_modal_placeholders={"image": mm_positions}
+                            if mm_positions else None,
+                            multi_modal_hashes=mm_hashes),
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
         arrival_time=0,
@@ -38,6 +45,7 @@ def test_prefill():
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
     computed_blocks = manager.get_computed_blocks(req0)
+    assert len(req0.kv_block_hashes) == 3
     assert not computed_blocks
     blocks = manager.allocate_slots(req0, 55, computed_blocks)
     assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
@@ -61,6 +69,7 @@ def test_prefill():
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
     computed_blocks = manager.get_computed_blocks(req1)
+    assert len(req1.kv_block_hashes) == 3
     assert [b.block_id for b in computed_blocks] == [0, 1, 2]
     num_new_tokens = 53 - 3 * 16
     blocks = manager.allocate_slots(req1, num_new_tokens, computed_blocks)
@@ -90,6 +99,7 @@ def test_prefill():
     unique_token_ids = [3] * 6
     req2 = make_request("2", common_token_ids + unique_token_ids)
     computed_block = manager.get_computed_blocks(req2)
+    assert len(req2.kv_block_hashes) == 3
     assert [b.block_id for b in computed_block] == [0, 1, 2]
     num_new_tokens = 53 - 3 * 16
     blocks = manager.allocate_slots(req2, num_new_tokens, computed_blocks)
@@ -416,3 +426,77 @@ def test_cache_blocks():
     )
     assert len(manager.cached_block_hash_to_block) == 3
     assert blocks[0].block_hash is not None
+
+
+def test_mm_prefix_caching():
+    """
+    This tests that the multi-modal prefix caching is correct.
+    """
+    manager = KVCacheManager(
+        block_size=16,
+        num_gpu_blocks=10,
+        max_model_len=8192,
+        sliding_window=None,
+        enable_caching=True,
+        num_preallocate_tokens=16,
+    )
+
+    # Common prompt tokens (T is text tokens and P is image placeholder tokens)
+    # [T,...,T, P0,...,P0], [P0,...,P0,T,...,T,P1,...,P1], [P1,...,P1]
+    common_token_ids = list(range(10)) + [-1] * 6
+    common_token_ids += [-1] * 4 + list(range(10, 20)) + [-1] * 2
+    common_token_ids += [-1] * 16
+
+    common_mm_positions = [
+        PlaceholderRange(offset=11, length=10),
+        PlaceholderRange(offset=30, length=18),
+    ]
+    common_mm_hashes = ["aaa", "bbb"]
+
+    # A unique image plus some text tokens.
+    unique_token_ids = [-1] * 7 + [100] * 4
+    all_token_ids = common_token_ids + unique_token_ids
+    mm_positions = common_mm_positions + [
+        PlaceholderRange(offset=48, length=7)
+    ]
+    mm_hashes = common_mm_hashes + ["ccc"]
+    req0 = make_request("0",
+                        all_token_ids,
+                        mm_positions=mm_positions,
+                        mm_hashes=mm_hashes)
+    computed_blocks = manager.get_computed_blocks(req0)
+
+    # Completed block should have hashes with extra keys.
+    assert not computed_blocks
+    assert len(req0.kv_block_hashes) == 3
+    assert req0.kv_block_hashes[0].extra_keys == (("aaa", 0), )
+    assert req0.kv_block_hashes[1].extra_keys == (("aaa", 5), ("bbb", 0))
+    assert req0.kv_block_hashes[2].extra_keys == (("bbb", 2), )
+
+    blocks = manager.allocate_slots(req0, 59, computed_blocks)
+    assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
+    req0.num_computed_tokens = 59
+
+    # Append slots without allocating a new block.
+    for _ in range(5):
+        req0.append_output_token_ids(8)
+    new_blocks = manager.append_slots(req0, 5)
+    assert new_blocks is not None and len(new_blocks) == 0
+
+    # The just completed block should have hashes with extra keys.
+    assert len(req0.kv_block_hashes) == 4
+    assert req0.kv_block_hashes[3].extra_keys == (("ccc", 0), )
+
+    # Cache hit.
+    unique_token_ids = [-1] * 7 + [200] * 5
+    all_token_ids = common_token_ids + unique_token_ids
+    mm_positions = common_mm_positions + [
+        PlaceholderRange(offset=48, length=7)
+    ]
+    mm_hashes = common_mm_hashes + ["ccc"]
+    req1 = make_request("1",
+                        all_token_ids,
+                        mm_positions=mm_positions,
+                        mm_hashes=mm_hashes)
+    computed_blocks = manager.get_computed_blocks(req1)
+    assert len(computed_blocks) == 3

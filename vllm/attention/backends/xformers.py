@@ -17,9 +17,7 @@ from vllm.attention.backends.utils import (
     is_all_cross_attn_metadata_set, is_all_encoder_attn_metadata_set)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.utils import print_warning_once
 
 
 class XFormersBackend(AttentionBackend):
@@ -386,8 +384,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             raise ValueError(
                 "XFormers does not support block-sparse attention.")
         if logits_soft_cap is not None:
-            raise ValueError(
-                "XFormers does not support attention logits soft capping.")
+            print_warning_once("XFormers does not support logits soft cap. "
+                               "Outputs may be slightly off.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
