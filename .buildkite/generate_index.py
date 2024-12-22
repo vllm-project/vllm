@@ -1,5 +1,4 @@
 import argparse
-import html
 import os
 
 template = """<!DOCTYPE html>
@@ -19,6 +18,7 @@ filename = os.path.basename(args.wheel)
 
 with open("index.html", "w") as f:
     print(f"Generated index.html for {args.wheel}")
+    # cloudfront requires escaping the '+' character
     f.write(
         template.format(wheel=filename,
-                        wheel_html_escaped=html.escape(filename)))
+                        wheel_html_escaped=filename.replace("+", "%2B")))
