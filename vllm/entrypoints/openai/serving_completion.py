@@ -159,10 +159,8 @@ class OpenAIServingCompletion(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        # result_generator = merge_async_iterators(
-        #     *generators, is_cancelled=raw_request.is_disconnected)
-        assert len(generators) == 1
-        result_generator = generators[0]
+        result_generator = merge_async_iterators(
+            *generators, is_cancelled=raw_request.is_disconnected)
 
         model_name = self._get_model_name(lora_request)
         num_prompts = len(engine_prompts)
@@ -258,9 +256,7 @@ class OpenAIServingCompletion(OpenAIServing):
             include_usage, include_continuous_usage = False, False
 
         try:
-            # async for prompt_idx, res in result_generator:
-            async for res in result_generator:
-                prompt_idx = 0
+            async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
                 prompt_text = res.prompt
