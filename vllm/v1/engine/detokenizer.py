@@ -241,10 +241,8 @@ class Detokenizer:
 
         request_outputs: List[RequestOutput] = []
         requests_to_abort: List[str] = []
-
         for engine_core_output in encore_core_outputs.outputs:
             request_id = engine_core_output.request_id
-
             detokenizer = self.request_states.get(request_id)
             if detokenizer is None:
                 # Ignore output for already-aborted request.
@@ -256,12 +254,12 @@ class Detokenizer:
                 finish_reason=engine_core_output.finish_reason,
                 stop_reason=engine_core_output.stop_reason,
             )
-            
+
             if request_output is not None:
                 # Add to RequestOutputs list.
                 request_outputs.append(request_output)
 
-                # # Free completed requests.
+                # Free completed requests.
                 if request_output.finished:
                     self.request_states.pop(request_id)
                     # If Request finished but EngineCore not finished,
