@@ -104,8 +104,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def(
       "copy_subranges(Tensor matrix_src, Tensor matrix_diff, Tensor! "
-      "matrix_tgt, "
-      "int n) -> ()");
+      "matrix_tgt, int n) -> ()");
   ops.impl("copy_subranges", torch::kCUDA, &copy_subranges);
 
   // Layernorm
