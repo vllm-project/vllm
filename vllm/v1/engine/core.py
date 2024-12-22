@@ -48,7 +48,8 @@ class EngineStartupError:
         """Recreate the original exception with the full context."""
         exception_class = globals().get(self.error_type) or Exception
         exc = exception_class(
-            f"{self.error_message}\n\nOriginal traceback from EngineCore:\n{self.traceback}")
+            f"{self.error_message}\n\n"
+            f"Original traceback from EngineCore:\n{self.traceback}")
         return exc
 
 
@@ -271,8 +272,8 @@ class EngineCoreProc(EngineCore):
                             raise status.startup_error.recreate_exception()
 
                     # Fallback error if no specific error was received
-                    raise RuntimeError(
-                        "EngineCoreProc failed to start without providing error details")
+                    raise RuntimeError("EngineCoreProc failed to start"
+                                       "without providing error details")
 
             message = socket.recv_string()
             assert message == EngineCoreProc.READY_STR
@@ -315,17 +316,13 @@ class EngineCoreProc(EngineCore):
 
         except Exception as e:
             # Capture the full error context
-            error_info = EngineStartupError(
-                error_type=e.__class__.__name__,
-                error_message=str(e),
-                traceback=traceback.format_exc()
-            )
+            error_info = EngineStartupError(error_type=e.__class__.__name__,
+                                            error_message=str(e),
+                                            traceback=traceback.format_exc())
 
             # Send error information to parent process
-            status_pipe.send(EngineCoreStatus(
-                is_ready=False,
-                startup_error=error_info
-            ))
+            status_pipe.send(
+                EngineCoreStatus(is_ready=False, startup_error=error_info))
             logger.exception(e)
             raise
 
