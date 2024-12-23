@@ -115,7 +115,7 @@ class LLM:
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
-            :ref:`engine_args`)
+            :ref:`engine-args`)
 
     Note:
         This class is intended to be used for offline inference. For online
