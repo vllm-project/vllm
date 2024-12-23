@@ -103,11 +103,11 @@ def make_zmq_socket(ctx: Union[zmq.asyncio.Context, zmq.Context], path: str,
     if type == zmq.PULL:
         socket.setsockopt(zmq.RCVHWM, 0)
         socket.setsockopt(zmq.RCVBUF, buf_size)
-        socket.connect(path)
+        socket.bind(path)
     elif type == zmq.PUSH:
         socket.setsockopt(zmq.SNDHWM, 0)
         socket.setsockopt(zmq.SNDBUF, buf_size)
-        socket.bind(path)
+        socket.connect(path)
     else:
         raise ValueError(f"Unknown Socket Type: {type}")
 
@@ -125,7 +125,7 @@ def zmq_socket_ctx(
         yield make_zmq_socket(ctx, path, type)
 
     except KeyboardInterrupt:
-        logger.debug("Worker had Keyboard Interrupt.")
+        logger.debug("Got Keyboard Interrupt.")
 
     finally:
         ctx.destroy(linger=0)
@@ -155,8 +155,6 @@ class BackgroundProcHandle:
 
 
 class MPBackgroundProcess:
-
-    READY_STR = "READY"
 
     def __init__(self):
         self.proc_handle: Optional[BackgroundProcHandle]

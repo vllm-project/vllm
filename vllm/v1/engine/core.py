@@ -20,7 +20,8 @@ from vllm.utils import get_exception_traceback
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineAbortRequest, EngineRequest,
-                            EngineProfileRequest, EngineRequestUnion)
+                            EngineRequestType, EngineProfileRequest,
+                            EngineRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -162,7 +163,7 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        ready_pipe.send({"status": EngineCoreProc.READY_STR})
+        ready_pipe.send({"status": "READY"})
 
 
     @staticmethod
@@ -226,6 +227,7 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
+                        logger.info(f"EPOCH: {epoch}")
                         self._log_stats()
                         logger.debug("EngineCore busy loop waiting.")
                     except BaseException:
@@ -293,7 +295,8 @@ class EngineCoreProc(EngineCore):
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ), copy=False)
+                msg = (EngineRequestType.FROM_ENGINE_CORE.value, buffer)
+                socket.send_multipart(msg, copy=False)
 
 
 class MPEngineCoreClient(MPBackgroundProcess):
@@ -319,3 +322,4 @@ class MPEngineCoreClient(MPBackgroundProcess):
                 "usage_context": usage_context,
             },
         )
+        print("STARTED ENGINE CORE")

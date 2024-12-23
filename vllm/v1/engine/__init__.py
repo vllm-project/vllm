@@ -1,3 +1,4 @@
+import enum
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -60,3 +61,12 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
+
+
+class EngineRequestType(enum.Enum):	
+    """	
+    Request types defined as hex byte strings, so it can be sent over sockets	
+    without separate encoding step.	
+    """	
+    FROM_ENGINE_CORE = b'\x00'
+    FROM_ENGINE = b'\x01'	

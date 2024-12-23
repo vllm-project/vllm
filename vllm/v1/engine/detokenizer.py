@@ -14,11 +14,10 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
-                        get_exception_traceback)
-from vllm.v1.engine import (EngineCoreOutputs,
+from vllm.utils import get_exception_traceback
+from vllm.v1.engine import (EngineCoreOutputs, EngineRequestType,
                             EngineRequest, EngineAbortRequest)
-from vllm.v1.utils import zmq_socket_ctx, MPBackgroundProcess
+from vllm.v1.utils import make_zmq_socket, MPBackgroundProcess
 
 logger = init_logger(__name__)
 
@@ -287,27 +286,23 @@ class Detokenizer:
 class DetokenizerProc(Detokenizer):
     """ZMQ-wrapper for running Detokenizer in background process."""
 
-    READY_STR = "READY"
-
     def __init__(
         self,
         *args,
-        from_engine_core_path: str,
-        to_engine_core_path: str,
         input_path: str,
         output_path: str,
+        to_engine_core_path: str,
         ready_pipe: Connection,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
-        self.from_engine_core_path = from_engine_core_path
-        self.to_engine_core_path = to_engine_core_path
         self.input_path = input_path
         self.output_path = output_path
+        self.to_engine_core_path = to_engine_core_path
 
         # Send Readiness signal to DetokenizerClient.
-        ready_pipe.send({"status": DetokenizerProc.READY_STR})
+        ready_pipe.send({"status": "READY"})
 
     
     @staticmethod
@@ -350,13 +345,12 @@ class DetokenizerProc(Detokenizer):
 
     def _handle_from_llm_engine(
         self, 
-        from_llm_engine: zmq.Socket,
+        request_bytes: bytes,
         to_engine_core: zmq.Socket,
     ) -> None:
         """Handle EngineRequest from the LLMEngine."""
 
-        pickled_req = from_llm_engine.recv()
-        req = pickle.loads(pickled_req)
+        req = pickle.loads(request_bytes)
 
         if isinstance(req, EngineRequest):
             self.add_request(req)
@@ -366,11 +360,11 @@ class DetokenizerProc(Detokenizer):
             raise ValueError(f"Unknown type: {req}")
 
         # Forward to EngineCore.
-        to_engine_core.send(pickled_req)
+        to_engine_core.send(request_bytes)
     
     def _handle_from_engine_core(
         self,
-        from_engine_core: zmq.Socket,
+        output_bytes: bytes,
         to_engine_core: zmq.Socket,
         to_llm_engine: zmq.Socket,
         decoder: msgspec.msgpack.Decoder,
@@ -378,8 +372,7 @@ class DetokenizerProc(Detokenizer):
         """Handle Outputs from the EngineCore."""
 
         # Deserialize the EngineOutput (use msgpack for performance).
-        (frame, ) = from_engine_core.recv_multipart(copy=False)
-        outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
+        outputs: EngineCoreOutputs = decoder.decode(output_bytes)
 
         # Detokenize.
         request_outputs, requests_to_abort = self.step(outputs)
@@ -398,39 +391,37 @@ class DetokenizerProc(Detokenizer):
 
         decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
-        with (zmq_socket_ctx(self.from_engine_core_path, zmq.PULL) as from_engine_core, 
-              zmq_socket_ctx(self.to_engine_core_path, zmq.PUSH) as to_engine_core,
-              zmq_socket_ctx(self.input_path, zmq.PULL) as from_llm_engine,
-              zmq_socket_ctx(self.output_path, zmq.PUSH) as to_llm_engine):
-
-            # TODO(rob): avoid poll by having both EngineCore and 
-            # LLMEngine send to the same socket.
-            poller = zmq.Poller()
-            poller.register(from_engine_core, zmq.POLLIN)
-            poller.register(from_llm_engine, zmq.POLLIN)
-
+        ctx = zmq.Context(io_threads=2)
+        try:
+            input_socket = make_zmq_socket(ctx, self.input_path, zmq.PULL)
+            to_llm_engine = make_zmq_socket(ctx, self.output_path, zmq.PUSH)
+            to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path, zmq.PUSH)
             epoch = 0
             while True:
-                logger.info(f"EPOCH: {epoch}")
+                (msg_type, msg_bytes) = input_socket.recv_multipart()
 
-                socks = dict(poller.poll())
+                # Handle message from LLMEngine (Abort or New Request).
+                if msg_type == EngineRequestType.FROM_ENGINE.value:
+                    self._handle_from_llm_engine(msg_bytes, to_engine_core)
 
-                # Handle input from LLMEngine.
-                if from_llm_engine in socks:
-                    self._handle_from_llm_engine(
-                        from_llm_engine=from_llm_engine,
-                        to_engine_core=to_engine_core,
-                    )
-
-                # Handle output from EngineCoreOutput.
-                if from_engine_core in socks:
+                # Handle message from EngineCore (EngineCoreOutputs).
+                elif msg_type == EngineRequestType.FROM_ENGINE_CORE.value:
                     epoch += 1
                     self._handle_from_engine_core(
-                        from_engine_core=from_engine_core,
+                        output_bytes=msg_bytes,
                         to_engine_core=to_engine_core,
                         to_llm_engine=to_llm_engine,
                         decoder=decoder,
                     )
+                else:
+                    raise ValueError(f"Unknown Message Type: {msg_type}")
+
+        except KeyboardInterrupt:
+            logger.debug("Got Keyboard Interrupt.")
+
+        finally:
+            ctx.destroy(linger=0)
+
 
 class MPDetokenizerClient(MPBackgroundProcess):
     """Client for multi-proc Detokenizer."""
@@ -438,7 +429,6 @@ class MPDetokenizerClient(MPBackgroundProcess):
     def __init__(self,
                  input_path: str,
                  output_path: str,
-                 from_engine_core_path: str,
                  to_engine_core_path: str,
                  tokenizer_name: str,
                  tokenizer_mode: str = "auto",
@@ -453,7 +443,6 @@ class MPDetokenizerClient(MPBackgroundProcess):
             process_name="Detokenizer",
             target_fn=DetokenizerProc.run_detokenizer,
             process_kwargs={
-                "from_engine_core_path": from_engine_core_path,
                 "to_engine_core_path": to_engine_core_path,
                 "tokenizer_name": tokenizer_name,
                 "tokenizer_mode": tokenizer_mode,
@@ -461,3 +450,4 @@ class MPDetokenizerClient(MPBackgroundProcess):
                 "revision": revision,
             },
         )
+        print("STARTED DETOKENIZER")
