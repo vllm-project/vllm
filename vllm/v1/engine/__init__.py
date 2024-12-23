@@ -1,4 +1,3 @@
-import enum
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from typing import List, Optional, Union
@@ -7,7 +6,7 @@ import msgspec
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import SamplingParams
 
 
 @dataclass
