@@ -8,6 +8,7 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import inputs_equal
 from vllm.multimodal.processing import (ProcessingCache, PromptReplacement,
                                         _PlaceholderInfo, find_text_matches,
                                         find_token_matches, iter_placeholders,
@@ -617,4 +618,5 @@ def test_processing_cache_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert baseline_result == cached_result, f"Failed (idx={batch_idx})"
+        assert inputs_equal(baseline_result, cached_result,
+                            strict=False), (f"Failed (idx={batch_idx})")

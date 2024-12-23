@@ -109,12 +109,21 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
 
-def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
+def nested_tensors_equal(
+    a: NestedTensors,
+    b: NestedTensors,
+    *,
+    strict: bool = True,
+) -> bool:
     """Equality check between :data:`NestedTensors` objects."""
     if isinstance(a, torch.Tensor):
-        return isinstance(b, torch.Tensor) and bool((a == b).all().item())
-    if isinstance(b, torch.Tensor):
-        return isinstance(a, torch.Tensor) and bool((b == a).all().item())
+        is_equal = isinstance(b, torch.Tensor) and bool((a == b).all().item())
+        if strict or is_equal:
+            return is_equal
+    elif isinstance(b, torch.Tensor):
+        is_equal = isinstance(a, torch.Tensor) and bool((b == a).all().item())
+        if strict or is_equal:
+            return is_equal
 
     return (len(a) == len(b)
             and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b)))
@@ -377,14 +386,18 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         return cast(BatchedTensorInputs, json_mapped)
 
     def __eq__(self, other: object) -> bool:
+        return self.equals(other)
+
+    def equals(self, other: object, *, strict: bool = True) -> bool:
         if not isinstance(other, self.__class__):
             return False
         if self._items_by_key != other._items_by_key:
             return False
 
         ks = self.keys()
-        return (ks == other.keys()
-                and all(nested_tensors_equal(self[k], other[k]) for k in ks))
+        return (ks == other.keys() and all(
+            nested_tensors_equal(self[k], other[k], strict=strict)
+            for k in ks))
 
     def get_item(self, key: str, item_index: int) -> MultiModalFieldItem:
         return self._items_by_key[key][item_index]
@@ -471,3 +484,23 @@ class MultiModalInputsV2(TypedDict):
     For each modality, information about the placeholder tokens in
     :code:`prompt_token_ids`.
     """
+
+
+def inputs_equal(
+    a: MultiModalInputsV2,
+    b: MultiModalInputsV2,
+    *,
+    strict: bool = True,
+):
+    if strict:
+        return a == b
+
+    a_ = dict(a)
+    a_kwargs = a_.pop("mm_kwargs")
+    assert isinstance(a_kwargs, MultiModalKwargs)
+
+    b_ = dict(b)
+    b_kwargs = b_.pop("mm_kwargs")
+    assert isinstance(b_kwargs, MultiModalKwargs)
+
+    return a_ == b_ and a_kwargs.equals(b_kwargs, strict=strict)

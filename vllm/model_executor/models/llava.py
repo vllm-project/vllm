@@ -131,13 +131,21 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs=mm_kwargs,
         )
 
-        if "images" in mm_data:
+        if "pixel_values" in processed_outputs:
             images = mm_data["images"]
             assert isinstance(images, list)
 
-            is_pixtral = isinstance(self._get_hf_processor(), PixtralProcessor)
-            processed_outputs["is_pixtral"] = \
-                torch.tensor([is_pixtral] * len(images))
+            pixel_values = processed_outputs["pixel_values"]
+
+            if isinstance(self._get_hf_processor(), PixtralProcessor):
+                # Original output: (1, num_images, C, H, W)
+                # New output: (num_images, C, H, W)
+                assert (isinstance(pixel_values, list)
+                        and len(pixel_values) == 1
+                        and isinstance(pixel_values[0], list)
+                        and len(pixel_values[0]) == len(images))
+
+                processed_outputs["pixel_values"] = pixel_values[0]
 
         return processed_outputs
 
@@ -149,7 +157,6 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            is_pixtral=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_replacements(
@@ -390,7 +397,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        is_pixtral = kwargs.pop("is_pixtral", None)
 
         if pixel_values is None and image_embeds is None:
             return None
@@ -399,33 +405,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
-
-            assert isinstance(is_pixtral, torch.Tensor)
-            if is_pixtral.any():
-                images = pixel_values
-
-                def flatten_to_3d_tensors(item):
-                    if isinstance(item, torch.Tensor):
-                        if item.dim() >= 3:
-                            return [t for t in item.view(-1, *item.shape[-3:])]
-                        else:
-                            raise ValueError(
-                                f"Unexpected tensor dimension: {item.dim()}")
-                    elif isinstance(item, list):
-                        return [
-                            t for subitem in item
-                            for t in flatten_to_3d_tensors(subitem)
-                        ]
-                    else:
-                        raise ValueError(f"Unexpected type: {type(item)}")
-
-                # Restructure the batched images into a list of lists of images
-                images = flatten_to_3d_tensors(pixel_values)
-
-                return LlavaImagePixelInputs(
-                    type="pixel_values",
-                    data=images,
-                )
 
             return LlavaImagePixelInputs(
                 type="pixel_values",
