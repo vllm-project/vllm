@@ -511,6 +511,12 @@ def _rand_video(
 ):
     num_frames = rng.randint(min_frames, max_frames)
     w, h = rng.randint(min_wh, max_wh, size=(2, ))
+
+    # Temporary fix. Qwen2-VL video processor fails on video of shape
+    # (b, 199, 178, 3) where b in (3, 5, 7)
+    w = (w // 32) * 32
+    h = (h // 32) * 32
+
     return rng.randint(0, 255, size=(num_frames, w, h, 3), dtype=np.uint8)
 
 
