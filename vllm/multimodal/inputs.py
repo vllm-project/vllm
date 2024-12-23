@@ -280,23 +280,20 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             for key, config in config_by_key.items() if key in hf_inputs
         }
 
-        if enable_sanity_checks:
-            batch_sizes = {k: len(v) for k, v in items_by_key.items()}
-            batch_size = next(iter(batch_sizes.values()), 0)
-            assert all(bs == batch_size for bs in batch_sizes.values()), dict(
-                batch_sizes=batch_sizes, items_by_key=items_by_key)
-
         # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`
         # We assume that those fields are not used in vLLM
         data = {k: hf_inputs[k] for k in items_by_key}
 
-        return MultiModalKwargs(data, items_by_key=items_by_key)
+        return MultiModalKwargs(data,
+                                items_by_key=items_by_key,
+                                enable_sanity_checks=enable_sanity_checks)
 
     def __init__(
         self,
         data: Mapping[str, NestedTensors],
         *,
         items_by_key: Optional[Mapping[str, list[MultiModalFieldItem]]] = None,
+        enable_sanity_checks: bool = False,
     ) -> None:
         if items_by_key is None:
             items_by_key = {}
@@ -312,6 +309,17 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
                 keys_by_modality[item.modality].add(key)
 
         self._keys_by_modality = dict(keys_by_modality)
+
+        if enable_sanity_checks:
+            for modality, keys in keys_by_modality.items():
+                items_in_modality = {k: items_by_key[k] for k in keys}
+                batch_sizes = {k: len(v) for k, v in items_in_modality.items()}
+                batch_size = next(iter(batch_sizes.values()), 0)
+                assert all(bs == batch_size
+                           for bs in batch_sizes.values()), dict(
+                               modality=modality,
+                               batch_sizes=batch_sizes,
+                               items_by_key=items_by_key)
 
     @staticmethod
     def _try_stack(nested_tensors: NestedTensors) -> NestedTensors:
@@ -435,18 +443,14 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
                 for k, v in field.items():
                     items_by_key[k].append(v)
 
-        if enable_sanity_checks:
-            batch_sizes = {k: len(v) for k, v in items_by_key.items()}
-            batch_size = next(iter(batch_sizes.values()), 0)
-            assert all(bs == batch_size for bs in batch_sizes.values()), dict(
-                batch_sizes=batch_sizes, items_by_key=items_by_key)
-
         data = {
             k: items[0].field.reduce(items).data
             for k, items in items_by_key.items()
         }
 
-        return MultiModalKwargs(data, items_by_key=items_by_key)
+        return MultiModalKwargs(data,
+                                items_by_key=items_by_key,
+                                enable_sanity_checks=enable_sanity_checks)
 
 
 MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]

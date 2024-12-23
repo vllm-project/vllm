@@ -509,14 +509,12 @@ def _rand_video(
     min_wh: int,
     max_wh: int,
 ):
-    num_frames = rng.randint(min_frames, max_frames)
-    w, h = rng.randint(min_wh, max_wh, size=(2, ))
-
     # Temporary fix. Qwen2-VL video processor fails on video of shape
     # (b, 199, 178, 3) where b in (3, 5, 7)
-    w = (w // 32) * 32
-    h = (h // 32) * 32
+    num_frames = rng.randint(min_frames, max_frames)
+    num_frames = (num_frames // 2) * 2
 
+    w, h = rng.randint(min_wh, max_wh, size=(2, ))
     return rng.randint(0, 255, size=(num_frames, w, h, 3), dtype=np.uint8)
 
 
@@ -527,7 +525,7 @@ def _rand_audio(
     sr: int,
 ):
     audio_len = rng.randint(min_len, max_len)
-    return rng.randint(0, 255, size=(audio_len, ), dtype=np.uint8), sr
+    return rng.rand(audio_len), sr
 
 
 # yapf: disable
@@ -542,7 +540,7 @@ def _rand_audio(
     ("fixie-ai/ultravox-v0_3", {"audio"}),
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
-@pytest.mark.parametrize("num_batches", [10])
+@pytest.mark.parametrize("num_batches", [32])
 @pytest.mark.parametrize("simplify_rate", [1.0])
 # yapf: enable
 def test_processing_cache_correctness(
@@ -588,7 +586,7 @@ def test_processing_cache_correctness(
         "video":
         partial(_rand_video,
                 rng,
-                min_frames=1,
+                min_frames=2,
                 max_frames=8,
                 min_wh=128,
                 max_wh=256),
