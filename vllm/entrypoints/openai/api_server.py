@@ -684,7 +684,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGQUIT, sigquit_handler)
 
-
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
 
