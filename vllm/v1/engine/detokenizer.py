@@ -298,7 +298,7 @@ class DetokenizerProc(Detokenizer):
         to_engine_core_path: str,
         input_path: str,
         output_path: str,
-        ready_path: str,
+        write_: str,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
@@ -325,14 +325,14 @@ class DetokenizerProc(Detokenizer):
         revision: Optional[str] = None,
     ) -> BackgroundProcHandle:
         context = get_mp_context()
-        ready_path = get_open_zmq_ipc_path()
+        reader, writer = context.Pipe(duplex=False)
 
         process_kwargs = {
             "from_engine_core_path": from_engine_core_path,
             "to_engine_core_path": to_engine_core_path,
             "input_path": input_path,
             "output_path": output_path,
-            "ready_path": ready_path,
+            "ready_pipe": writer,
             "tokenizer_name": tokenizer_name,
             "tokenizer_mode": tokenizer_mode,
             "trust_remote_code": trust_remote_code,
@@ -342,13 +342,14 @@ class DetokenizerProc(Detokenizer):
         proc = context.Process(target=DetokenizerProc.run_detokenizer,
                                kwargs=process_kwargs)
         proc.start()
-        wait_for_startup(proc=proc,
-                         ready_path=ready_path,
-                         ready_str=DetokenizerProc.READY_STR,
-                         timeout_ms=POLLING_TIMEOUT_MS)
+        
+        # Wait for startup.
+        if reader.recv()["status"] != "READY":
+            raise RuntimeError(
+                "Detokenizer initalization failed. See root cause above."
+            )
 
         return BackgroundProcHandle(proc=proc,
-                                    ready_path=ready_path,
                                     input_path=input_path,
                                     output_path=output_path)
     
@@ -512,8 +513,6 @@ class MPDetokenizerClient:
         )
     
     def shutdown(self):
-        self.proc_handle.proc.terminate()
-        self.proc_handle.proc.join(5)
-
-        if self.proc_handle.proc.is_alive():
-            kill_process_tree(self.proc_handle.proc.pid)
+        if hasattr(self, "proc_handle") and self.proc_handle:
+            self.proc_handle.shutdown()
+            self.proc_handle = None

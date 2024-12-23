@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple, Type
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
+from multiprocessing.connection import Connection
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.executor.multiproc_worker_utils import get_mp_context
@@ -17,8 +18,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (get_open_zmq_ipc_path, get_exception_traceback,
-                        kill_process_tree)
+from vllm.utils import get_exception_traceback, kill_process_tree
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineAbortRequest, EngineRequest,
@@ -27,7 +27,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.utils import zmq_socket_ctx, wait_for_startup
+from vllm.v1.utils import zmq_socket_ctx
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -138,8 +138,6 @@ class EngineCore:
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
-    READY_STR = "READY"
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -147,7 +145,7 @@ class EngineCoreProc(EngineCore):
         usage_context: UsageContext,
         input_path: str,
         output_path: str,
-        ready_path: str,
+        ready_pipe: Connection,
     ):
         super().__init__(vllm_config, executor_class, usage_context)
 
@@ -166,8 +164,7 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        with zmq_socket_ctx(ready_path, zmq.PUSH) as ready_socket:
-            ready_socket.send_string(EngineCoreProc.READY_STR)
+        ready_pipe.send({"status": "READY"})
 
     @staticmethod
     def make_engine_core_process(
@@ -178,27 +175,29 @@ class EngineCoreProc(EngineCore):
         output_path: str,
     ) -> BackgroundProcHandle:
         context = get_mp_context()
-        ready_path = get_open_zmq_ipc_path()
+        reader, writer = context.Pipe(duplex=False)
 
         process_kwargs = {
             "input_path": input_path,
             "output_path": output_path,
-            "ready_path": ready_path,
+            "ready_pipe": writer,
             "vllm_config": vllm_config,
             "executor_class": executor_class,
             "usage_context": usage_context,
         }
+        
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=EngineCoreProc.run_engine_core,
                                kwargs=process_kwargs)
         proc.start()
-        wait_for_startup(proc=proc,
-                         ready_path=ready_path,
-                         ready_str=EngineCoreProc.READY_STR,
-                         timeout_ms=POLLING_TIMEOUT_MS)
+
+        # Wait for startup.
+        if reader.recv()["status"] != "READY":
+            raise RuntimeError(
+                "EngineCore initalization failed. See root cause above."
+            )
 
         return BackgroundProcHandle(proc=proc,
-                                    ready_path=ready_path,
                                     input_path=input_path,
                                     output_path=output_path)
 
@@ -355,24 +354,7 @@ class MPEngineCoreClient:
 
     def shutdown(self):
         if hasattr(self, "proc_handle") and self.proc_handle:
-            # Shutdown the process if needed.
-            if self.proc_handle.proc.is_alive():
-                self.proc_handle.proc.terminate()
-                self.proc_handle.proc.join(5)
-
-                if self.proc_handle.proc.is_alive():
-                    kill_process_tree(self.proc_handle.proc.pid)
-
-            # Remove zmq ipc socket files
-            ipc_sockets = [
-                self.proc_handle.ready_path,
-                self.proc_handle.output_path,
-                self.proc_handle.input_path
-            ]
-            for ipc_socket in ipc_sockets:
-                socket_file = ipc_socket.replace("ipc://", "")
-                if os and os.path.exists(socket_file):
-                    os.remove(socket_file)
+            self.proc_handle.shutdown()
             self.proc_handle = None
 
     def __del__(self):

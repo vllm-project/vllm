@@ -1,4 +1,5 @@
 from multiprocessing.process import BaseProcess
+from multiprocessing.connection import Connection
 
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -125,27 +126,4 @@ def zmq_socket_ctx(
 
     finally:
         ctx.destroy(linger=0)
-
-
-def wait_for_startup(
-    proc: BaseProcess,
-    ready_path: str,
-    ready_str: str,
-    timeout_ms: int,
-) -> None:
-    """Wait until a background process is ready."""
-
-    with zmq_socket_ctx(ready_path, zmq.PULL) as socket:
-        try:
-            while socket.poll(timeout=timeout_ms) == 0:
-                logger.debug("Waiting for background proc to startup.")
-
-                if not proc.is_alive():
-                    raise RuntimeError("Background process failed to start.")
-
-            message = socket.recv_string()
-            assert message == ready_str
-
-        except BaseException as e:
-            logger.exception(e)
-            raise e
+    
