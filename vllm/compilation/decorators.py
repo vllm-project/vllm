@@ -30,6 +30,15 @@ def support_torch_compile(
 def support_torch_compile(cls: _T) -> _T:
     ...
 
+import time
+after_dynamo_time: float = 0
+
+def simple_backend(gm, example_inputs):
+    def returned_gm(*args):
+        global after_dynamo_time
+        after_dynamo_time = time.perf_counter()
+        return gm(*args)
+    return returned_gm
 
 def support_torch_compile(
     cls: Optional[_T] = None,
@@ -132,14 +141,14 @@ def _support_torch_compile(
     """
     A decorator to add support for compiling the forward method of a class.
     """
-    if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
-        # support decorating multiple times
-        return cls
+    # if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
+    #     # support decorating multiple times
+    #     return cls
 
-    # take care of method resolution order
-    # make sure super().__init__ is called on the base class
-    #  other than TorchCompileWrapperWithCustomDispatcher
-    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
+    # # take care of method resolution order
+    # # make sure super().__init__ is called on the base class
+    # #  other than TorchCompileWrapperWithCustomDispatcher
+    # cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
     old_init = cls.__init__
 
@@ -148,62 +157,32 @@ def _support_torch_compile(
         self.vllm_config = vllm_config
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
-        self.do_not_compile = \
-            vllm_config.compilation_config.level in [
-            CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-        ] or not supports_dynamo()
-        if self.do_not_compile:
-            return
+        self.do_not_compile = False
         compilation_counter.num_models_seen += 1
-        TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level)
+        self.num_runs = 0
+        self.compiled_callable = torch.compile(self.forward, backend=simple_backend, dynamic=False)
+        self.seen_bs = set()
 
     cls.__init__ = __init__
 
     def __call__(self, *args, **kwargs):
-        # torch.compiler.is_compiling() means we are inside the compilation
-        # e.g. TPU has the compilation logic in model runner, so we don't
-        # need to compile the model inside.
-        if self.do_not_compile or torch.compiler.is_compiling():
+        self.num_runs += 1
+        if self.num_runs <= 1:
+            # profile run, skip compilation
             return self.forward(*args, **kwargs)
 
-        # the first compilation needs to have dynamic shapes marked
-        if len(self.compiled_codes) < 1:
-            sig = inspect.signature(self.__class__.forward)
-            bound_args = sig.bind(self, *args, **kwargs)
-            bound_args.apply_defaults()
-            for k, dims in dynamic_arg_dims.items():
-                arg = bound_args.arguments.get(k)
-                if arg is not None:
-                    if isinstance(arg, torch.Tensor):
-                        torch._dynamo.mark_dynamic(arg, dims)
-                    elif isinstance(arg, IntermediateTensors):
-                        for tensor in arg.tensors.values():
-                            torch._dynamo.mark_dynamic(tensor, dims)
-                    else:
-                        raise ValueError(
-                            "Unsupported dynamic dimensions"
-                            f" {dims} for argument {k} with type {type(arg)}.")
-            # here, it is the starting point of the `torch.compile` process
-            start_monitoring_torch_compile(self.vllm_config)
-
-        # if we don't use custom dispatcher, we can directly call the
-        # compiled function and let torch.compile handle the dispatching,
-        # with the overhead of guard evaluation and recompilation.
-        if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
-            # it seems Dynamo reuse the compilation across instances,
-            # while we need to make sure the compiled code is not reused.
-            # we need to control all the compilation of the model.
-            torch._dynamo.eval_frame.remove_from_cache(
-                self.original_code_object)
-            return self.compiled_callable(*args, **kwargs)
-
-        # usually, capturing the model once is enough, and then we can
-        # dispatch to the compiled code directly, without going through
-        # the Dynamo guard mechanism.
-        with self.dispatch_to_code(0):
-            model_output = self.forward(*args, **kwargs)
-            return model_output
+        input_ids = args[0]
+        bs = input_ids.size(0)
+        # if bs not in self.seen_bs, it means we are seeing a new batch size
+        # and we need to compile the forward method for this batch size.
+        # only measure the dynamo overhead for the following runs
+        if bs in self.seen_bs:
+            before_dynamo_time = time.perf_counter()
+        output = self.compiled_callable(*args, **kwargs)
+        if bs in self.seen_bs:
+            logger.info("Time taken for dynamo guard evaluation for bs %s: %f (ms)", bs, (after_dynamo_time - before_dynamo_time) * 1000)
+        self.seen_bs.add(bs)
+        return output
 
     cls.__call__ = __call__
     return cls
