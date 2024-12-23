@@ -131,8 +131,6 @@ def test_models_distributed(
     from vllm.envs import VLLM_USE_V1
     if not VLLM_USE_V1:
         pytest.skip("Skipping test on vllm V0")
-    if VLLM_USE_V1 and distributed_executor_backend != "mp":
-        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     dtype = "half"
     max_tokens = 5
