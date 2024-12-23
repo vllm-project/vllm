@@ -205,7 +205,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                             seq_group_metadata, seq_data)
                     else:
                         # disable mrope for text-only inputs
-                        self.use_mrope = False
+                        self.input_data.use_mrope = False
                 else:
                     self._compute_decode_input_tokens(self.input_data,
                                                       seq_group_metadata,
