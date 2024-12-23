@@ -114,7 +114,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         def __init__(self, use_mrope: bool):
             self.use_mrope = use_mrope
             self.input_tokens: List[int] = []
-            self.input_positions: Optional[List[int]] = []
+            self.input_positions: List[int] = []
             self.token_type_ids: Optional[List[int]] = []
             self.seq_lens: List[int] = []
             self.query_lens: List[int] = []
