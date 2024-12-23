@@ -15,9 +15,7 @@
 
 # Inspired by https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/tokenizer_manager.py
 
-import os
 import asyncio
-import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -35,10 +33,10 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
+from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import EngineAbortRequest
-from vllm.v1.engine.core_client import MultiprocessEngineCore
-from vllm.v1.engine.detokenizer import DetokenizerClient
+from vllm.v1.engine.core import MPEngineCoreClient
+from vllm.v1.engine.detokenizer import MPDetokenizerClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -89,7 +87,7 @@ class AsyncLLM(EngineClient):
         to_engine_core_path = get_open_zmq_ipc_path()
 
         # Detokenizer (background process).
-        self.detokenizer = DetokenizerClient(
+        self.detokenizer = MPDetokenizerClient(
             from_engine_core_path=from_engine_core_path,
             to_engine_core_path=to_engine_core_path,
             tokenizer_name=vllm_config.model_config.tokenizer,
@@ -99,7 +97,7 @@ class AsyncLLM(EngineClient):
         )
 
         # EngineCore (background process).
-        self.engine_core = MultiprocessEngineCore(
+        self.engine_core = MPEngineCoreClient(
             input_path=to_engine_core_path,
             output_path=from_engine_core_path,
             vllm_config=vllm_config,
@@ -107,9 +105,7 @@ class AsyncLLM(EngineClient):
             usage_context=usage_context,
         )
 
-        # Create output handler loop during first call to generate().
-        self.to_create_loop = True
-        self.gracefully_exit = False
+        self.output_handler: Optional[asyncio.Task] = None
         self.asyncio_tasks = set()
 
     def __del__(self):
@@ -147,6 +143,9 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
+
+        if output_handler := getattr(self, "output_hander", None):
+            output_handler.cancel()
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
@@ -224,9 +223,13 @@ class AsyncLLM(EngineClient):
 
         try:
             # Start output_handler on first request.
-            if self.to_create_loop:
-                self.create_output_handler()
+            if not self.output_handler:
+                loop = asyncio.get_event_loop()
+                self.output_handler = loop.create_task(
+                    self.output_handler_loop())
 
+            # Add to Detokenizer and EngineCore and makes queue
+            # to which the output_handler will push RequestOutputs.
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -260,61 +263,32 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
-    def create_output_handler(self):
-        """Creates output handler loop. Called on first generate()."""
+    async def output_handler_loop(self):
+        """Background loop: pulls from Detokenizer and push to Queues."""
 
-        self.to_create_loop = False
-        loop = asyncio.get_event_loop()
+        try:
+            while True:
+                # Note: use socket directly to avoid calling await multiple
+                # times, which causes too much task switching at high QPS.
+                outputs: List[RequestOutput] = [] 
+                outputs = await self.detokenizer.output_socket.recv_pyobj()
 
-        # Start output handler.
-        self.asyncio_tasks.add(loop.create_task(self.output_handler()))
-
-        # Start signal handlers for shutdown.
-        signal_handler = SignalHandler(self)
-        loop.add_signal_handler(signal.SIGTERM, signal_handler.signal_handler)
-        self.asyncio_tasks.add(loop.create_task(self.sigterm_watchdog()))
-
-    async def sigterm_watchdog(self):
-        """Handle shutdown from sigterm."""
-
-        while not self.gracefully_exit:
-            await asyncio.sleep(5)
-        # Drain requests
-        while True:
-            remain_num_req = len(self.rid_to_state)
-            logger.info(
-                f"Gracefully exiting... remaining number of requests {remain_num_req}"
-            )
-            if remain_num_req > 0:
-                await asyncio.sleep(5)
-            else:
-                break
-        self.shutdown()
-
-    async def output_handler(self):
-        """Background loop: pulls from Detokenizer and pushes to queues."""
-
-        epoch = 0
-        while True:
-            logger.info(f"EPOCH: {epoch}")
-            epoch += 1
-
-            # 1) Pull outputs from the Detokenizer.
-            outputs: List[
-                RequestOutput] = await self.detokenizer.output_socket.recv_pyobj(
-                )
-
-            # 2) Put each output into a per request Queue.
-            for out in outputs:
-                if out.request_id not in self.rid_to_queue:
-                    raise RuntimeError(f"{out.request_id} "
-                                       "not in RequestStates")
-
-                self.rid_to_queue[out.request_id].put_nowait(out)
+                for out in outputs:
+                    # Note: it is possible that a request was aborted
+                    # due to client cancellation while EngineCoreOutputs
+                    # are still flowing, so we just ignore.
+                    if out.request_id in self.rid_to_queue:
+                        self.rid_to_queue[out.request_id].put_nowait(out)
+        
+        except asyncio.CancelledError:
+            logger.info("Shutting down output_handler_loop")
+            raise
+            
 
     async def abort(self, request_id: str):
-        # Remove from Detokenizer and EngineCore (Detokenizer
-        # forwards the message to EngineCore).
+        """Abort request if the client cancels the request."""
+
+        # Send abort to Detokenizer (which will fwd to EngineCore)
         await self.detokenizer.input_socket.send_pyobj(
             EngineAbortRequest([request_id]))
 
@@ -385,18 +359,3 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return Exception()  # TODO: implement
-
-
-class SignalHandler:
-
-    def __init__(self, async_llm):
-        self.async_llm = async_llm
-
-    def signal_handler(self, signum=None, frame=None):
-        logger.warning(
-            "SIGTERM received. signum=%s frame=%s. Draining "
-            "requests and shutting down...",
-            signum,
-            frame,
-        )
-        self.async_llm.gracefully_exit = True

@@ -456,7 +456,7 @@ class DetokenizerProc(Detokenizer):
             epoch = 0
             while True:
                 logger.info(f"EPOCH: {epoch}")
-                socks = dict(poller.poll(timeout=1000))
+                socks = dict(poller.poll())
 
                 # Handle input from LLMEngine.
                 if from_llm_engine in socks:
@@ -475,7 +475,7 @@ class DetokenizerProc(Detokenizer):
                         decoder=decoder,
                     )
 
-class DetokenizerClient:
+class MPDetokenizerClient:
     
     def __init__(self,
                  *args,

@@ -3,7 +3,9 @@ import queue
 import signal
 import threading
 import time
-from typing import List, Tuple, Type
+import os
+import weakref
+from typing import List, Optional, Tuple, Type
 
 import zmq
 import zmq.asyncio
@@ -15,7 +17,8 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_open_zmq_ipc_path, get_exception_traceback
+from vllm.utils import (get_open_zmq_ipc_path, get_exception_traceback,
+                        kill_process_tree)
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineAbortRequest, EngineRequest,
@@ -246,8 +249,8 @@ class EngineCoreProc(EngineCore):
         while True:
             logger.info(f"EPOCH: {epoch}")
             epoch += 1
-            if epoch == 10:
-                raise ValueError("Died")
+            # if epoch == 10:
+            #     raise ValueError("Died")
 
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
@@ -325,3 +328,50 @@ class EngineCoreProc(EngineCore):
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)
+
+
+class MPEngineCoreClient:
+    """
+    MPEngineCoreClient: client for multi-proc EngineCore.
+        EngineCore runs in a background process busy loop, getting
+        new EngineRequests and returning EngineCoreOutputs
+
+        * pushes EngineRequests via input_socket
+        * pulls EngineCoreOutputs via output_socket
+    """
+
+    def __init__(self, *args, input_path: str, output_path: str, **kwargs):
+        # Start EngineCore in background process.
+        self.proc_handle: Optional[BackgroundProcHandle]
+        self.proc_handle = EngineCoreProc.make_engine_core_process(
+            *args,
+            input_path=input_path,
+            output_path=output_path,
+            **kwargs,
+        )
+        self._finalizer = weakref.finalize(self, self.shutdown)
+
+    def shutdown(self):
+        if hasattr(self, "proc_handle") and self.proc_handle:
+            # Shutdown the process if needed.
+            if self.proc_handle.proc.is_alive():
+                self.proc_handle.proc.terminate()
+                self.proc_handle.proc.join(5)
+
+                if self.proc_handle.proc.is_alive():
+                    kill_process_tree(self.proc_handle.proc.pid)
+
+            # Remove zmq ipc socket files
+            ipc_sockets = [
+                self.proc_handle.ready_path,
+                self.proc_handle.output_path,
+                self.proc_handle.input_path
+            ]
+            for ipc_socket in ipc_sockets:
+                socket_file = ipc_socket.replace("ipc://", "")
+                if os and os.path.exists(socket_file):
+                    os.remove(socket_file)
+            self.proc_handle = None
+
+    def __del__(self):
+        self.shutdown()
