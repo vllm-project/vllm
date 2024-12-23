@@ -6,6 +6,7 @@ from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
 
 import torch
 import torch.nn as nn
+from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -17,7 +18,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available, weak_ref_tensor, print_warning_once
+from vllm.utils import (is_pin_memory_available, print_warning_once,
+                        weak_ref_tensor)
 
 logger = init_logger(__name__)
 
@@ -238,6 +240,19 @@ class AutoWeightsLoader:
         return autoloaded_weights
 
 
+class OffloadedTensorMode(TorchDispatchMode):
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = {} if kwargs is None else kwargs
+        tensor = func(*args, **kwargs)
+
+        if func is torch.ops.aten.empty.memory_format and tensor.device != "cpu":
+            global _CPU_OFFLOAD_BYTES, _CPU_OFFLOAD_MAX_BYTES
+            if _CPU_OFFLOAD_BYTES < _CPU_OFFLOAD_MAX_BYTES:
+                _CPU_OFFLOAD_BYTES += tensor.numel() * tensor.element_size()
+                return OffloadedTensor(tensor)
+        return tensor
+
+
 class OffloadedTensor(torch.Tensor):
 
     @staticmethod
@@ -279,29 +294,33 @@ class OffloadedTensor(torch.Tensor):
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
+
+        def unwrap(x):
+            return x.offloaded_tensor if isinstance(x, cls) else x
+
+        def load(x):
+            return x.load() if isinstance(x, cls) else x
+
+        def tree_map(func, x):
+            if isinstance(x, (list, tuple)):
+                return type(x)(tree_map(func, y) for y in x)
+            if isinstance(x, dict):
+                return {k: tree_map(func, v) for k, v in x.items()}
+            return func(x)
+
         if str(func) == "aten.detach.default":
             # `nn.Parameter(data)` will call `data.detach()`
             # and assert the returned data type is the same
             # as the original data
             return args[0]
-        if str(func) in ["aten.copy_.default", "aten.slice.Tensor"]:
+        if str(func) in ["aten.copy_.default"]:
             # inplace or view operation on the offloaded tensor
             # TODO: support more inplace operations if needed
-            new_args = (x.offloaded_tensor if isinstance(x, cls) else x
-                        for x in args)
-            new_kwargs = {
-                k: v.offloaded_tensor if isinstance(v, cls) else v
-                for k, v in kwargs.items()
-            }
-            return OffloadedTensor(func(*new_args, **new_kwargs))
-
+            return func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
         if str(func) == "aten.uniform_.default":
-            # the generator will be on the device
-            # and the offloaded tensor will be on the CPU,
-            # so we cannot support this operation.
-            # we need to call `to()` and then `copy_()`
-            raise ValueError("Cannot perform uniform_ on an offloaded tensor")
-
+            res = func(*tree_map(load, args), **tree_map(load, kwargs))
+            args[0].offloaded_tensor = res.cpu()
+            return args[0]
         if func._schema.is_mutable:
             # the behavior of mutable ops for offloaded tensor
             # is not well-defined and needs case-by-case discussion
@@ -312,12 +331,7 @@ class OffloadedTensor(torch.Tensor):
 
         # for the rest of the operations, we will load the offloaded tensor
         # on the fly and perform the operation on the device
-        new_args = (x.load() if isinstance(x, cls) else x for x in args)
-        new_kwargs = {
-            k: v.load() if isinstance(v, cls) else v
-            for k, v in kwargs.items()
-        }
-        return func(*new_args, **new_kwargs)
+        return func(*tree_map(load, args), **tree_map(load, kwargs))
 
 
 def init_vllm_registered_model(
@@ -559,27 +573,6 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
 
 
-@contextmanager
-def maybe_offload_to_cpu():
-    old_empty = torch.empty
-
-    def fake_empty(*args, **kwargs):
-        global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-        tensor = old_empty(*args, **kwargs)
-        if tensor.device != torch.device("cpu") and \
-            _CPU_OFFLOAD_BYTES < _CPU_OFFLOAD_MAX_BYTES:
-            _CPU_OFFLOAD_BYTES += tensor.numel() * tensor.element_size()
-            offloaded_tensor = OffloadedTensor(tensor)
-            return offloaded_tensor
-        return tensor
-
-    torch.empty = fake_empty
-    try:
-        yield
-    finally:
-        torch.empty = old_empty
-
-
 def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
@@ -593,7 +586,8 @@ def make_layers(
     start_layer, end_layer = get_pp_indices(num_hidden_layers,
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
-    with maybe_offload_to_cpu():
+    # with maybe_offload_to_cpu():
+    with OffloadedTensorMode():
         modules = torch.nn.ModuleList(
             [PPMissingLayer() for _ in range(start_layer)] + [
                 layer_fn(prefix=f"{prefix}.{idx}")

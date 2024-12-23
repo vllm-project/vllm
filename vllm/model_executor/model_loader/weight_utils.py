@@ -626,12 +626,7 @@ def initialize_dummy_weights(
                                                generator=generator).to(dtype)
                 param.data.copy_(tmp_param)
             else:
-                # param itself might be offloaded, so we need to move the
-                # param to the generator's device by cloning it.
-                uniform_data = param.clone().data.uniform_(low,
-                                                           high,
-                                                           generator=generator)
-                param.copy_(uniform_data)
+                param.uniform_(low, high, generator=generator)
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
