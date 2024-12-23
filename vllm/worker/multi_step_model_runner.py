@@ -595,7 +595,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # should be [SamplerOutput]
         return output
 
-    def _update_sampling_metadata(self, sampling_metadata: SamplingMetadata, 
+    def _update_sampling_metadata(self, sampling_metadata: SamplingMetadata,
                                   num_seqs: Optional[int], num_queries: int):
 
         assert sampling_metadata.num_prompts == 0
