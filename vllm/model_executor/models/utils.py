@@ -17,8 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (is_pin_memory_available, print_warning_once,
-                        weak_ref_tensor)
+from vllm.utils import (is_pin_memory_available, print_warning_once)
 
 logger = init_logger(__name__)
 
