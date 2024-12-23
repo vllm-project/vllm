@@ -1,10 +1,35 @@
 """Custom normalization layers."""
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
+
+
+def _cast_if_autocast_enabled(
+        tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if tensor is not None and torch.is_autocast_enabled():
+        return tensor.to(dtype=torch.get_autocast_dtype(tensor.device.type))
+    return tensor
+
+
+class LPLayerNorm(nn.LayerNorm):
+    """Low Precision LayerNorm."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        module_device = x.device
+        downcast_x = _cast_if_autocast_enabled(x)
+        downcast_weight = _cast_if_autocast_enabled(self.weight)
+        downcast_bias = _cast_if_autocast_enabled(self.bias)
+        with torch.autocast(enabled=False, device_type=module_device.type):
+            return nn.functional.layer_norm(
+                downcast_x,
+                self.normalized_shape,
+                downcast_weight,
+                downcast_bias,
+                self.eps,
+            )
 
 
 @CustomOp.register("rms_norm")
@@ -148,6 +173,24 @@ class RMSNorm(CustomOp):
         return s
 
 
+class LPRMSNorm(RMSNorm):
+    """Low Precision root mean square normalization."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        downcast_x = _cast_if_autocast_enabled(x)
+        downcast_residual = _cast_if_autocast_enabled(residual)
+        weight_backup = self.weight.data
+        self.weight.data = _cast_if_autocast_enabled(self.weight.data)
+        with torch.autocast(enabled=False, device_type=x.device.type):
+            ret = super().forward(downcast_x, downcast_residual)
+        self.weight.data = weight_backup
+        return ret
+
+
 @CustomOp.register("gemma_rms_norm")
 class GemmaRMSNorm(CustomOp):
     """RMS normalization for Gemma.
@@ -210,3 +253,11 @@ class GemmaRMSNorm(CustomOp):
                 self.forward_static)
             self._is_compiled = True
         return self.forward_native(x, residual)
+
+
+NORM_CLASS_REGISTRY: Dict[str, Type[torch.nn.Module]] = {
+    "layernorm": torch.nn.LayerNorm,
+    "low_precision_layernorm": LPLayerNorm,
+    "rmsnorm": RMSNorm,
+    "low_precision_rmsnorm": LPRMSNorm,
+}
