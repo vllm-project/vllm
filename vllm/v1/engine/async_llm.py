@@ -257,8 +257,7 @@ class AsyncLLM(EngineClient):
                 yield out
 
         # Client request cancellation is handled through calling
-        # task.cancel() on generate. So if we get this error, we
-        # need to abort the request.
+        # task.cancel() on generate. So we call abort if canceled.
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
@@ -266,23 +265,18 @@ class AsyncLLM(EngineClient):
     async def output_handler_loop(self):
         """Background loop: pulls from Detokenizer and push to Queues."""
 
-        try:
-            while True:
-                # Note: use socket directly to avoid calling await multiple
-                # times, which causes too much task switching at high QPS.
-                outputs: List[RequestOutput] = [] 
-                outputs = await self.detokenizer.output_socket.recv_pyobj()
+        while True:
+            # Note: use socket directly to avoid calling await multiple
+            # times, which causes too much task switching at high QPS.
+            outputs: List[RequestOutput] = [] 
+            outputs = await self.detokenizer.output_socket.recv_pyobj()
 
-                for out in outputs:
-                    # Note: it is possible that a request was aborted
-                    # due to client cancellation while EngineCoreOutputs
-                    # are still flowing, so we just ignore.
-                    if out.request_id in self.rid_to_queue:
-                        self.rid_to_queue[out.request_id].put_nowait(out)
-        
-        except asyncio.CancelledError:
-            logger.info("Shutting down output_handler_loop")
-            raise
+            for out in outputs:
+                # Note: it is possible that a request was aborted
+                # due to client cancellation while EngineCoreOutputs
+                # are still flowing, so we just ignore.
+                if out.request_id in self.rid_to_queue:
+                    self.rid_to_queue[out.request_id].put_nowait(out)
             
 
     async def abort(self, request_id: str):
