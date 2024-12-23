@@ -14,7 +14,9 @@ class PEFTHelper:
 
     bias: Literal["none", "all", "lora_only"] = field(default="none")
     modules_to_save: Optional[list[str]] = field(default=None)
+    # True to use Rank-Stabilized LoRA (rsLoRA, see: https://arxiv.org/abs/2312.03732)
     use_rslora: bool = field(default=False)
+    # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
     # long lora field
     context_length: int = field(default=0)
