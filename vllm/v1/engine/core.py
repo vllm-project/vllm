@@ -3,7 +3,6 @@ import queue
 import signal
 import threading
 import time
-import os
 import weakref
 from typing import List, Optional, Tuple, Type
 
@@ -18,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_exception_traceback, kill_process_tree
+from vllm.utils import get_exception_traceback
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineAbortRequest, EngineRequest,
