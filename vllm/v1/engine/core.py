@@ -230,7 +230,7 @@ class EngineCoreProc(EngineCore):
 
         except Exception:
             traceback = get_exception_traceback()
-            logger.error(f"EngineCore hit an exception: {traceback}")
+            logger.error("EngineCore hit an exception: %s", traceback)
             parent_process.send_signal(signal.SIGQUIT)
 
         finally:
