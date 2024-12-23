@@ -175,7 +175,7 @@ class MPBackgroundProcess:
         process_name: str,
         target_fn: Callable,
         process_kwargs: Dict[Any, Any],
-    ) -> "MPBackgroundProcess":
+    ) -> BackgroundProcHandle:
         context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)
 
