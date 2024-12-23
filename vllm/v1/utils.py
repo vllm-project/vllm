@@ -84,8 +84,11 @@ class ConstantList(Generic[T], Sequence):
         return len(self._x)
 
 
-def make_zmq_socket(ctx: Union[zmq.asyncio.Context, zmq.Context], path: str,
-                    type: Any) -> Union[zmq.Socket, zmq.asyncio.Socket]:
+def make_zmq_socket(
+    ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
+    path: str,
+    type: Any,
+) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connext semantics."""
 
     import psutil
@@ -100,13 +103,13 @@ def make_zmq_socket(ctx: Union[zmq.asyncio.Context, zmq.Context], path: str,
     else:
         buf_size = -1
 
-    if type == zmq.PULL:
-        socket.setsockopt(zmq.RCVHWM, 0)
-        socket.setsockopt(zmq.RCVBUF, buf_size)
+    if type == zmq.constants.PULL:
+        socket.setsockopt(zmq.constants.RCVHWM, 0)
+        socket.setsockopt(zmq.constants.RCVBUF, buf_size)
         socket.bind(path)
-    elif type == zmq.PUSH:
-        socket.setsockopt(zmq.SNDHWM, 0)
-        socket.setsockopt(zmq.SNDBUF, buf_size)
+    elif type == zmq.constants.PUSH:
+        socket.setsockopt(zmq.constants.SNDHWM, 0)
+        socket.setsockopt(zmq.constants.SNDBUF, buf_size)
         socket.connect(path)
     else:
         raise ValueError(f"Unknown Socket Type: {type}")

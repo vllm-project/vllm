@@ -267,7 +267,7 @@ class EngineCoreProc(EngineCore):
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
 
-        with zmq_socket_ctx(input_path, zmq.PULL) as socket:
+        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
             while True:
                 # Push to input queue for core busy loop.
                 request = socket.recv_pyobj()
@@ -281,7 +281,7 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        with zmq_socket_ctx(output_path, zmq.PUSH) as socket:
+        with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)

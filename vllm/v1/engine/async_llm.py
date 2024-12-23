@@ -98,9 +98,9 @@ class AsyncLLM(EngineClient):
         # Detokenizer IPC.
         self.ctx = zmq.asyncio.Context(io_threads=2)
         self.from_detokenizer = make_zmq_socket(self.ctx, to_llm_engine_path,
-                                                zmq.PULL)
+                                                zmq.constants.PULL)
         self.to_detokenizer = make_zmq_socket(self.ctx, to_detokenizer_path,
-                                              zmq.PUSH)
+                                              zmq.constants.PUSH)
 
         # Detokenizer (background process).
         self.detokenizer_client = MPDetokenizerClient(

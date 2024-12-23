@@ -15,8 +15,9 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import get_exception_traceback
-from vllm.v1.engine import (EngineCoreOutputs, EngineRequestType,
-                            EngineRequest, EngineAbortRequest)
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+                            EngineRequestType, EngineRequest,
+                            EngineAbortRequest)
 from vllm.v1.utils import make_zmq_socket, MPBackgroundProcess
 
 logger = init_logger(__name__)
@@ -250,13 +251,13 @@ class Detokenizer:
 
     def step(
         self,
-        encore_core_outputs: EngineCoreOutputs,
+        encore_core_outputs: List[EngineCoreOutput],
     ) -> Tuple[List[RequestOutput], List[str]]:
         """Update state and make RequestOutputs for the LLMEngine."""
 
         request_outputs: List[RequestOutput] = []
         requests_to_abort: List[str] = []
-        for engine_core_output in encore_core_outputs.outputs:
+        for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
             detokenizer = self.request_states.get(request_id)
             if detokenizer is None:
@@ -349,7 +350,7 @@ class DetokenizerProc(Detokenizer):
     def _handle_from_llm_engine(
         self,
         request_bytes: bytes,
-        to_engine_core: zmq.Socket,
+        to_engine_core: zmq.constants.Socket,
     ) -> None:
         """Handle EngineRequest from the LLMEngine."""
 
@@ -368,14 +369,14 @@ class DetokenizerProc(Detokenizer):
     def _handle_from_engine_core(
         self,
         output_bytes: bytes,
-        to_engine_core: zmq.Socket,
-        to_llm_engine: zmq.Socket,
+        to_engine_core: zmq.constants.Socket,
+        to_llm_engine: zmq.constants.Socket,
         decoder: msgspec.msgpack.Decoder,
     ) -> None:
         """Handle Outputs from the EngineCore."""
 
         # Deserialize the EngineOutput (use msgpack for performance).
-        outputs: EngineCoreOutputs = decoder.decode(output_bytes)
+        outputs: List[EngineCoreOutput] = decoder.decode(output_bytes).outputs
 
         # Detokenize.
         request_outputs, requests_to_abort = self.step(outputs)
@@ -392,12 +393,14 @@ class DetokenizerProc(Detokenizer):
 
         decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
-        ctx = zmq.Context(io_threads=2)
+        ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
         try:
-            input_socket = make_zmq_socket(ctx, self.input_path, zmq.PULL)
-            to_llm_engine = make_zmq_socket(ctx, self.output_path, zmq.PUSH)
+            input_socket = make_zmq_socket(ctx, self.input_path,
+                                           zmq.constants.PULL)
+            to_llm_engine = make_zmq_socket(ctx, self.output_path,
+                                            zmq.constants.PUSH)
             to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path,
-                                             zmq.PUSH)
+                                             zmq.constants.PUSH)
             while True:
                 (msg_type, msg_bytes) = input_socket.recv_multipart()
 
