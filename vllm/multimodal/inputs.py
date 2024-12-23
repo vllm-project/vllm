@@ -127,7 +127,7 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
     return a == b
 
 
-BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
+BatchedTensorInputs: TypeAlias = Mapping[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
 :meth:`MultiModalKwargs.batch`.
