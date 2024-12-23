@@ -10,9 +10,6 @@ import torch.nn as nn
 from vllm.model_executor.layers.sampler import MaybeDeferredSampleResultType, SampleResultArgsType, SampleReturnType, SamplerOutput, _apply_top_k_top_p, _get_bin_counts_and_mask
 from vllm.triton_utils import HAS_TRITON
 
-if HAS_TRITON:
-    from vllm.model_executor.layers.ops.sample import sample as sample_triton
-
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
@@ -20,8 +17,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.utils import (PyObjectCache, async_tensor_h2d,
-                        is_pin_memory_available, make_tensor_with_pad,
-                        maybe_expand_dim)
+                        is_pin_memory_available, make_tensor_with_pad)
 
 from einops import rearrange
 
@@ -242,9 +238,6 @@ class MultiheadSampler(nn.Module):
             min_ps=None,
             presence_penalties=None,
             frequency_penalties=None,
-            sampling_seeds=None,
-            sample_indices=None,
-            extra_seeds=None,
             prompt_tokens=None
         )
         

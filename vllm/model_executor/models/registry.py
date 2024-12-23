@@ -168,6 +168,9 @@ _MULTIMODAL_MODELS = {
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
+    
+    # TTS
+    "FishTtsLlm": ("fishtts", "FishTtsLlm"),
 }
 
 _SPECULATIVE_DECODING_MODELS = {

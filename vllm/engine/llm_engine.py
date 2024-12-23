@@ -1263,21 +1263,25 @@ class LLMEngine:
 
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
-                if sample.output_tokens and len(sample.output_tokens) > 1:
-                    seq.append_token_id(sample.output_tokens,
-                                        sample.logprobs)
-                else:
-                    seq.append_token_id(sample.output_token,
-                                        sample.logprobs)
 
                 if self.scheduler_config.is_multi_step:
                     is_prefill_append = seq.data.get_num_uncomputed_tokens(
                     ) == 0
-                    seq.append_token_id(sample.output_token, sample.logprobs)
+                    if sample.output_tokens and len(sample.output_tokens) > 1:
+                        seq.append_token_id(sample.output_tokens,
+                                            sample.logprobs)
+                    else:
+                        seq.append_token_id(sample.output_token,
+                                            sample.logprobs)
                     if not is_prefill_append:
                         seq_group.update_num_computed_tokens(1)
                 else:
-                    seq.append_token_id(sample.output_token, sample.logprobs)
+                    if sample.output_tokens and len(sample.output_tokens) > 1:
+                        seq.append_token_id(sample.output_tokens,
+                                            sample.logprobs)
+                    else:
+                        seq.append_token_id(sample.output_token,
+                                            sample.logprobs)
 
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.

@@ -8,8 +8,8 @@ from torch.nn.utils.parametrizations import weight_norm
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.config import CacheConfig, VllmConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, DummyData
 from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.multi_head_sampler import MultiheadSampler
@@ -23,6 +23,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.speech import SpeechPlugin
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors
+from .interfaces import SupportsMultiModal
 
 from einops import rearrange
 from transformers.generation import TopKLogitsWarper, TopPLogitsWarper
@@ -38,7 +39,7 @@ def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int, mm_counts: Mapping[st
     dummy_seq_data = SequenceData([0] * seq_len)
     dummy_multi_modal_data = {"audio": SpeechPlugin.sample_random_speaker()}
 
-    return dummy_seq_data, dummy_multi_modal_data
+    return DummyData(dummy_seq_data, dummy_multi_modal_data, None)
 
 def get_max_speech_tokens(ctx: InputContext):
     return 16
@@ -46,7 +47,7 @@ def get_max_speech_tokens(ctx: InputContext):
 @MULTIMODAL_REGISTRY.register_speech_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_ttsllm)
 @MULTIMODAL_REGISTRY.register_max_speech_tokens(get_max_speech_tokens)
-class FishTtsLlm(nn.Module, SupportsLoRA):
+class FishTtsLlm(nn.Module, SupportsLoRA, SupportsMultiModal):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -78,13 +79,13 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(self,
-                 config: LlamaConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None,) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         
+        config = vllm_config.model_config.hf_config
+        lora_config = vllm_config.lora_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         
         # static parameters, put them in config later
@@ -94,7 +95,7 @@ class FishTtsLlm(nn.Module, SupportsLoRA):
         self.audio_start_token_id = config.audio_start_token_id
         self.audio_ref_token_id = config.audio_ref_start_token_id
 
-        self.gpt = LlamaModel(config, lora_config=lora_config)
+        self.gpt = LlamaModel(vllm_config=vllm_config, prefix=prefix)
         self.model_dim = self.gpt.config.hidden_size
         self.emb_text = VocabParallelEmbedding(self.num_text_tokens, self.model_dim) 
         self.emb_code = nn.ModuleList([

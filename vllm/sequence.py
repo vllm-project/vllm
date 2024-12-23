@@ -203,17 +203,17 @@ class SequenceData(msgspec.Struct,
         Construct a :class:`SequenceData` instance from prompt and output
         token sequences.
         """
-        prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                     prompt_token_ids)
+        # prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+        #                              prompt_token_ids)
 
         if output_token_ids is None:
-            return SequenceData(prompt_token_ids_arr)
+            return SequenceData(prompt_token_ids)
 
-        output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                     output_token_ids)
+        # output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+        #                              output_token_ids)
 
-        return SequenceData(prompt_token_ids_arr,
-                            _output_token_ids=output_token_ids_arr)
+        return SequenceData(prompt_token_ids,
+                            _output_token_ids=output_token_ids)
 
     def __post_init__(self) -> None:
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(

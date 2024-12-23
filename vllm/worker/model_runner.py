@@ -513,12 +513,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             if inter_data.is_prompt:
                 inter_data.input_tokens[seq_idx].extend(tokens)
             else:
-                inter_data.input_tokens[seq_idx].append(tokens)
+                inter_data.input_tokens[seq_idx].extend(tokens)
         else:
             if isinstance(tokens, list):
                 inter_data.input_tokens[seq_idx].extend(tokens)
             else:
-                inter_data.input_tokens[seq_idx].append(tokens)
+                inter_data.input_tokens[seq_idx].extend(tokens)
 
         if seq_data.mrope_position_delta is not None:
             if inter_data.mrope_input_positions is None:

@@ -8,15 +8,13 @@ import torch.nn.functional as F
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
-from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from .base import MultiModalInputs, MultiModalPlugin
-import base64
-import pickle
+from .base import MultiModalPlugin
+from .inputs import MultiModalKwargs
+
 
 class SpeechPlugin(MultiModalPlugin):
 
@@ -24,12 +22,12 @@ class SpeechPlugin(MultiModalPlugin):
         return "audio"
 
     def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
+                              data: object) -> MultiModalKwargs:
         model_config = ctx.model_config
         if data is None:
-            return MultiModalInputs({"audio": torch.zeros(16, model_config.hf_config.hidden_size)})
+            return MultiModalKwargs({"audio": torch.zeros(16, model_config.hf_config.hidden_size)})
         else:
-            return MultiModalInputs({"audio": data})
+            return MultiModalKwargs({"audio": data})
 
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         return 3000
