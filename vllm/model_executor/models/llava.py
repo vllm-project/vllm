@@ -131,12 +131,13 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs=mm_kwargs,
         )
 
-        images = mm_data.get("images", [])
-        assert isinstance(images, list)
+        if "images" in mm_data:
+            images = mm_data["images"]
+            assert isinstance(images, list)
 
-        is_pixtral = isinstance(self._get_hf_processor(), PixtralProcessor)
-        processed_outputs["is_pixtral"] = \
-            torch.tensor([is_pixtral] * len(images))
+            is_pixtral = isinstance(self._get_hf_processor(), PixtralProcessor)
+            processed_outputs["is_pixtral"] = \
+                torch.tensor([is_pixtral] * len(images))
 
         return processed_outputs
 

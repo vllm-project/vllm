@@ -567,7 +567,7 @@ def test_processing_cache_correctness(
     rng = np.random.RandomState(0)
 
     repeating_image = Image.new("RGB", size=(128, 128))
-    repeating_video = [repeating_image] * 8
+    repeating_video = np.zeros((4, 128, 128, 3), dtype=np.uint8)
     repeating_audio = np.zeros((512, )), 16000
 
     baseline_results = []
