@@ -235,7 +235,19 @@ class Detokenizer:
 
         for request_id in request_ids:
             self.request_states.pop(request_id, None)        
-        
+    
+    def add_request(	
+        self,	
+        request: EngineRequest,	
+    ):	
+        """Add new request to the Detokenizer."""	
+
+        assert (request.request_id not in self.request_states)	
+
+        request_state = IncrementalDetokenizer.from_new_request(	
+            self.tokenizer, request)	
+        self.request_states[request.request_id] = request_state
+
     def step(
         self, encore_core_outputs: EngineCoreOutputs,
     ) -> Tuple[List[RequestOutput], List[str]]:
