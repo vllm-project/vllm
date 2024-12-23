@@ -671,11 +671,11 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # workaround to ensure user has enough fds available for uvicorn + ipc
     set_ulimit()
 
-    def sigterm_handler(*_) -> None:
+    def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
         raise KeyboardInterrupt("terminated")
 
-    signal.signal(signal.SIGTERM, sigterm_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     # The child processes will send SIGQUIT to this process when
     # any error happens. This process then clean up the whole tree.
