@@ -246,6 +246,8 @@ class EngineCoreProc(EngineCore):
         while True:
             logger.info(f"EPOCH: {epoch}")
             epoch += 1
+            if epoch == 10:
+                raise ValueError("Died")
 
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
@@ -260,7 +262,7 @@ class EngineCoreProc(EngineCore):
                     except BaseException:
                         raise
 
-            # 2) Handle any new client requests (Abort or Add).
+            # 2) Handle any new inputs.
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
                 self._handle_client_request(req)

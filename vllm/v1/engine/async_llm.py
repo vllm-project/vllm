@@ -60,18 +60,11 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
     ) -> None:
         assert start_engine_loop
-
+        
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
-
-        # Register the signal handler.
-        # The child processes will send SIGQUIT to this process when
-        # any error happens. This process then clean up the whole tree.
-        def sigquit_handler(signum, frame):
-            kill_process_tree(os.getpid())
-        signal.signal(signal.SIGQUIT, sigquit_handler)
 
         # RequestId -> OutputQueue.
         self.rid_to_queue: Dict[str, asyncio.Queue[RequestOutput]] = {}
