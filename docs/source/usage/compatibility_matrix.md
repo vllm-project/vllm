@@ -25,30 +25,29 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 </style>
 ```
 
-```{eval-rst}
-.. list-table::
+```{list-table}
    :header-rows: 1
    :stub-columns: 1
    :widths: auto
 
    * - Feature
-     - Chunked-Prefill
-     - APC
-     - LoRA
-     - Prompt Adapter
-     - Speculative Decoding
+     - [CP](#chunked-prefill)
+     - [APC](#apc)
+     - [LoRA](#lora)
+     - <abbr title="Prompt Adapter">prmpt adptr</abbr>
+     - [SD](#spec_decode)
      - CUDA graph
-     - Pooling Models
-     - Encoder-Decoder
-     - Logprobs
-     - Prompt Logprobs
-     - Async Output Processing
+     - <abbr title="Pooling Models">pooling</abbr>
+     - <abbr title="Encoder-Decoder Models">enc-dec</abbr>
+     - <abbr title="Logprobs">logP</abbr>
+     - <abbr title="Prompt Logprobs">prmpt logP</abbr>
+     - <abbr title="Async Output Processing">async output</abbr>
      - multi-step
-     - Multimodal Inputs
+     - <abbr title="Multimodal Inputs">mm</abbr>
      - best-of
      - beam-search
-     - Guided Decoding
-   * - Chunked-Prefill
+     - <abbr title="Guided Decoding">guided dec</abbr>
+   * - [CP](#chunked-prefill)
      -
      -
      -
@@ -65,7 +64,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - APC
+   * - [APC](#apc)
      - ✅
      -
      -
@@ -82,8 +81,8 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - LoRA
-     - `✗ <https://github.com/vllm-project/vllm/pull/9057>`__
+   * - [LoRA](#lora)
+     - [✗](https://github.com/vllm-project/vllm/pull/9057)
      - ✅
      -
      -
@@ -99,7 +98,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - Prompt Adapter
+   * - <abbr title="Prompt Adapter">prmpt adptr</abbr>
      - ✅
      - ✅
      - ✅
@@ -116,7 +115,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - Speculative Decoding
+   * - [SD](#spec_decode)
      - ✅
      - ✅
      - ✗
@@ -150,7 +149,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - Pooling Models
+   * - <abbr title="Pooling Models">pooling</abbr>
      - ✗
      - ✗
      - ✗
@@ -167,12 +166,12 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - Encoder-Decoder
+   * - <abbr title="Encoder-Decoder Models">enc-dec</abbr>
      - ✗
-     - `✗ <https://github.com/vllm-project/vllm/issues/7366>`__
+     - [✗](https://github.com/vllm-project/vllm/issues/7366)
      - ✗
      - ✗
-     - `✗ <https://github.com/vllm-project/vllm/issues/7366>`__
+     - [✗](https://github.com/vllm-project/vllm/issues/7366)
      - ✅
      - ✅
      -
@@ -184,32 +183,32 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - Logprobs
+   * - <abbr title="Logprobs">logP</abbr>
      - ✅
      - ✅
      - ✅
      - ✅
      - ✅
-     - ✅
-     - ✗
-     - ✅
-     -
-     -
-     -
-     -
-     -
-     -
-     -
-     -
-   * - Prompt Logprobs
-     - ✅
-     - ✅
-     - ✅
-     - ✅
-     - `✗ <https://github.com/vllm-project/vllm/pull/8199>`__
      - ✅
      - ✗
      - ✅
+     -
+     -
+     -
+     -
+     -
+     -
+     -
+     -
+   * - <abbr title="Prompt Logprobs">prmpt logP</abbr>
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - [✗](https://github.com/vllm-project/vllm/pull/8199)
+     - ✅
+     - ✗
+     - ✅
      - ✅
      -
      -
@@ -218,7 +217,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - Async Output Processing
+   * - <abbr title="Async Output Processing">async output</abbr>
      - ✅
      - ✅
      - ✅
@@ -245,17 +244,17 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✗
      - ✗
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/issues/8198>`__
+     - [✗](ttps://github.com/vllm-project/vllm/issues/8198)
      - ✅
      -
      -
      -
      -
      -
-   * - Multimodal Inputs
+   * - <abbr title="Multimodal Inputs">mm</abbr>
      - ✅
-     -  `✗ <https://github.com/vllm-project/vllm/pull/8348>`__
-     -  `✗ <https://github.com/vllm-project/vllm/pull/7199>`__
+     -  [✗](https://github.com/vllm-project/vllm/pull/8348)
+     -  [✗](https://github.com/vllm-project/vllm/pull/7199)
      - ?
      - ?
      - ✅
@@ -274,14 +273,14 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/issues/6137>`__
+     - [✗](https://github.com/vllm-project/vllm/issues/6137)
      - ✅
      - ✗
      - ✅
      - ✅
      - ✅
      - ?
-     - `✗ <https://github.com/vllm-project/vllm/issues/7968>`__
+     - [✗](https://github.com/vllm-project/vllm/issues/7968)
      - ✅
      -
      -
@@ -291,19 +290,19 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/issues/6137>`__
+     - [✗](https://github.com/vllm-project/vllm/issues/6137)
      - ✅
      - ✗
      - ✅
      - ✅
      - ✅
      - ?
-     - `✗ <https://github.com/vllm-project/vllm/issues/7968>`__
+     - [✗](https://github.com/vllm-project/vllm/issues/7968>)
      - ?
      - ✅
      -
      -
-   * - Guided Decoding
+   * - <abbr title="Guided Decoding">guided dec</abbr>
      - ✅
      - ✅
      - ?
@@ -315,7 +314,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/issues/9893>`__
+     - [✗](https://github.com/vllm-project/vllm/issues/9893)
      - ?
      - ✅
      - ✅
@@ -325,8 +324,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 
 ### Feature x Hardware
 
-```{eval-rst}
-.. list-table::
+```{list-table}
    :header-rows: 1
    :stub-columns: 1
    :widths: auto
@@ -339,39 +337,39 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - Hopper
      - CPU
      - AMD
-   * - Chunked-Prefill
-     - `✗ <https://github.com/vllm-project/vllm/issues/2729>`__
+   * - [CP](#chunked-prefill)
+     - [✗](https://github.com/vllm-project/vllm/issues/2729)
      - ✅
      - ✅
      - ✅
      - ✅
      - ✅
      - ✅
-   * - APC
-     - `✗ <https://github.com/vllm-project/vllm/issues/3687>`__
+   * - [APC](#apc)
+     - [✗](https://github.com/vllm-project/vllm/issues/3687)
      - ✅
      - ✅
      - ✅
      - ✅
      - ✅
      - ✅
-   * - LoRA
+   * - [LoRA](#lora)
      - ✅
      - ✅
      - ✅
      - ✅
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/pull/4830>`__
+     - [✗](https://github.com/vllm-project/vllm/pull/4830)
      - ✅
-   * - Prompt Adapter
-     - ✅
-     - ✅
+   * - <abbr title="Prompt Adapter">prmpt adptr</abbr>
      - ✅
      - ✅
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/issues/8475>`__
      - ✅
-   * - Speculative Decoding
+     - ✅
+     - [✗](https://github.com/vllm-project/vllm/issues/8475)
+     - ✅
+   * - [SD](#spec_decode)
      - ✅
      - ✅
      - ✅
@@ -387,7 +385,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✗
      - ✅
-   * - Pooling Models
+   * - <abbr title="Pooling Models">pooling</abbr>
      - ✅
      - ✅
      - ✅
@@ -395,7 +393,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ?
-   * - Encoder-Decoder
+   * - <abbr title="Encoder-Decoder Models">enc-dec</abbr>
      - ✅
      - ✅
      - ✅
@@ -403,7 +401,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✗
-   * - Multimodal Inputs
+   * - <abbr title="Multimodal Inputs">mm</abbr>
      - ✅
      - ✅
      - ✅
@@ -411,7 +409,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - Logprobs
+   * - <abbr title="Logprobs">logP</abbr>
      - ✅
      - ✅
      - ✅
@@ -419,7 +417,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - Prompt Logprobs
+   * - <abbr title="Prompt Logprobs">prmpt logP</abbr>
      - ✅
      - ✅
      - ✅
@@ -427,7 +425,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - Async Output Processing
+   * - <abbr title="Async Output Processing">async output</abbr>
      - ✅
      - ✅
      - ✅
@@ -441,7 +439,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/issues/8477>`__
+     - [✗](https://github.com/vllm-project/vllm/issues/8477)
      - ✅
    * - best-of
      - ✅
@@ -459,7 +457,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - Guided Decoding
+   * - <abbr title="Guided Decoding">guided dec</abbr>
      - ✅
      - ✅
      - ✅
