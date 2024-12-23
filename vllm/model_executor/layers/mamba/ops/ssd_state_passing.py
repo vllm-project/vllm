@@ -108,7 +108,7 @@ def _state_passing_fwd_kernel(
             if HAS_INITSTATES:
                 if IS_CONT_BATCHED and seq_idx != seq_idx_new:
                     # this means in the current chunk the rightmost flushed seq
-                    # has changed. 
+                    # has changed.
                     # - so we do not propagate the state from previous chunk
                     # - but rather we load that sequence's init state
                     initstates_ptrs = initstates_ptr + seq_idx_new * stride_initstates_batch

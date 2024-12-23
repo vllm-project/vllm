@@ -95,9 +95,9 @@ def _mamba_chunk_scan_combined_fwd(x,
     # (middle term of factorization of off-diag blocks; A terms)
     # - for handling chunked prefill, this requires i) initial_states
     #   ii) seq_idx and iii) has_cu_seqlens to be all specified.
-    # - When a new seq_idx is detected, we will stopp passing the prev_state
+    # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
-    # - this will ensure that states will be updated with the righmost flushed seq_idx
+    # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
     states, final_states = _state_passing_fwd(
@@ -121,10 +121,10 @@ def _mamba_chunk_scan_combined_fwd(x,
 
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
-    # - if initial states are provided, then states information will be 
+    # - if initial states are provided, then states information will be
     #   augmented with initial_states.
     # - to do this properly, we need to account for example changes in
-    #   the continous batch, therefore we introduce pseudo chunks, which is
+    #   the continuous batch, therefore we introduce pseudo chunks, which is
     #   a chunk that is split up each time an example changes.
     # - in each (pseudo) chunk, we detect if the previous (pseudo) chunk had
     #   a seq_idx change, in which case we take states information from
@@ -140,16 +140,20 @@ def _mamba_chunk_scan_combined_fwd(x,
         z=z,
         seq_idx=seq_idx,
         initial_states=initial_states,
-        )
+    )
     if cu_seqlens is None:
         return out, out_x, dt, dA_cumsum, states, final_states
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
-        varlen_states = chunk_state_varlen(B.squeeze(0), x.squeeze(0),
-                                           dt.squeeze(0), dA_cumsum.squeeze(0),
-                                           cu_seqlens, states.squeeze(0),
-                                           initial_states=initial_states,
-                                           )
+        varlen_states = chunk_state_varlen(
+            B.squeeze(0),
+            x.squeeze(0),
+            dt.squeeze(0),
+            dA_cumsum.squeeze(0),
+            cu_seqlens,
+            states.squeeze(0),
+            initial_states=initial_states,
+        )
         return out, out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 

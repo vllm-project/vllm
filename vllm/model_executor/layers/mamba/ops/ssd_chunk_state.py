@@ -502,15 +502,10 @@ def _chunk_state_varlen_kernel(
     # If HAS_INITSTATES==True need to consider two possiblties
     # - if start_idx < pid_c * chunk_size, then we need to take the past_states_ptrs
     # - if state_idx >= pid * chunk_size, then we need to insert initstates
-    if (
-        (start_idx < pid_c * chunk_size) # first chunk
-        or 
-        (
-            HAS_INITSTATES 
-        )
-    ):
+    if ((start_idx < pid_c * chunk_size)  # first chunk
+            or (HAS_INITSTATES)):
 
-        dA_cs_boundary = 0.0 # default
+        dA_cs_boundary = 0.0  # default
 
         if not HAS_INITSTATES:
             past_states_ptrs = chunk_states_ptr + (
@@ -525,20 +520,21 @@ def _chunk_state_varlen_kernel(
                     offs_n[None, :] * stride_chunk_states_dstate)
             else:
                 past_states_ptrs = initstates_ptr + (
-                    pid_b * stride_init_states_batch + 
+                    pid_b * stride_init_states_batch +
                     offs_m[:, None] * stride_init_states_hdim +
                     offs_n[None, :] * stride_init_states_dstate)
 
                 # need to adjust the boundary
-                if start_idx >  pid_c * chunk_size:
-                    dA_cs_boundary = tl.load(
-                        dA_cumsum_ptr + (start_idx - pid_c * chunk_size - 1) *
-                                        stride_dA_cs_csize).to(tl.float32)
+                if start_idx > pid_c * chunk_size:
+                    dA_cs_boundary = tl.load(dA_cumsum_ptr +
+                                             (start_idx - pid_c * chunk_size -
+                                              1) * stride_dA_cs_csize).to(
+                                                  tl.float32)
 
         past_states = tl.load(past_states_ptrs,
-                            mask=(offs_m[:, None] < hdim) &
-                            (offs_n[None, :] < dstate),
-                            other=0.0).to(tl.float32)
+                              mask=(offs_m[:, None] < hdim) &
+                              (offs_n[None, :] < dstate),
+                              other=0.0).to(tl.float32)
 
         scale = tl.exp(dA_cs_last - dA_cs_boundary)
         acc += past_states * scale
@@ -680,7 +676,13 @@ def _chunk_state_fwd(B,
     return states
 
 
-def chunk_state_varlen(B, x, dt, dA_cumsum, cu_seqlens, chunk_states, initial_states=None):
+def chunk_state_varlen(B,
+                       x,
+                       dt,
+                       dA_cumsum,
+                       cu_seqlens,
+                       chunk_states,
+                       initial_states=None):
     total_seqlen, nheads, headdim = x.shape
     _, nchunks, chunk_size = dt.shape
     _, ngroups, dstate = B.shape
@@ -738,12 +740,9 @@ def chunk_state_varlen(B, x, dt, dA_cumsum, cu_seqlens, chunk_states, initial_st
             states.stride(1),
             states.stride(2),
             states.stride(3),
-            *(
-                (
-                    initial_states.stride(0), initial_states.stride(1),
-                    initial_states.stride(2), initial_states.stride(3)
-                ) if initial_states is not None else (0, 0, 0, 0)
-            ),
-            HAS_INITSTATES=initial_states is not None
-        )
+            *((initial_states.stride(0), initial_states.stride(1),
+               initial_states.stride(2),
+               initial_states.stride(3)) if initial_states is not None else
+              (0, 0, 0, 0)),
+            HAS_INITSTATES=initial_states is not None)
     return states
