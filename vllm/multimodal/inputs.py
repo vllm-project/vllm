@@ -280,6 +280,17 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             for key, config in config_by_key.items() if key in hf_inputs
         }
 
+        return MultiModalKwargs.from_items_by_key(
+            items_by_key,
+            enable_sanity_checks=enable_sanity_checks,
+        )
+
+    @staticmethod
+    def from_items_by_key(
+        items_by_key: Mapping[str, list[MultiModalFieldItem]],
+        *,
+        enable_sanity_checks: bool = False,
+    ) -> "MultiModalKwargs":
         data = {
             k: items[0].field.reduce(items).data
             for k, items in items_by_key.items()
@@ -440,14 +451,10 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
                 for k, v in field.items():
                     items_by_key[k].append(v)
 
-        data = {
-            k: items[0].field.reduce(items).data
-            for k, items in items_by_key.items()
-        }
-
-        return MultiModalKwargs(data,
-                                items_by_key=items_by_key,
-                                enable_sanity_checks=enable_sanity_checks)
+        return MultiModalKwargs.from_items_by_key(
+            items_by_key,
+            enable_sanity_checks=enable_sanity_checks,
+        )
 
 
 MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]
