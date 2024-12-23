@@ -863,8 +863,13 @@ class BaseMultiModalProcessor(ABC):
         prompt_ids = self._get_tokenizer().encode(prompt_text)
 
         if mm_missing_items:
+            # Some HF processors (e.g. Qwen2-VL) expect corresponding
+            # multi-modal tokens to be in the prompt text
+            mm_missing_counts = mm_missing_items.get_item_counts()
+            dummy_inputs = self._get_dummy_mm_inputs(mm_missing_counts)
+
             _, mm_missing_kwargs = self._apply_hf_processor(
-                prompt_text=prompt_text,
+                prompt_text=dummy_inputs.prompt_text,
                 mm_items=mm_missing_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             )

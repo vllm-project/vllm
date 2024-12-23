@@ -341,9 +341,10 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         if enable_sanity_checks:
             batch_sizes = {k: len(v) for k, v in data_per_key.items()}
-            batch_size = next(iter(batch_sizes.values()))
-            assert all(bs == batch_size
-                       for bs in batch_sizes.values()), batch_sizes
+            batch_size = next(iter(batch_sizes.values()), None)
+            if batch_size:
+                assert all(bs == batch_size
+                           for bs in batch_sizes.values()), batch_sizes
 
         data = {k: tag_per_key[k].reduce(vs) for k, vs in data_per_key.items()}
 

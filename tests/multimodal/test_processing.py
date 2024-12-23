@@ -1,12 +1,21 @@
 from typing import cast
 
+import numpy as np
 import pytest
+from PIL import Image
 
-from vllm.multimodal.processing import (PromptReplacement, _PlaceholderInfo,
-                                        find_text_matches, find_token_matches,
-                                        iter_placeholders, iter_token_matches,
+from vllm.config import ModelConfig
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.multimodal.processing import (InputProcessingContext,
+                                        ProcessingCache, PromptReplacement,
+                                        _PlaceholderInfo, find_text_matches,
+                                        find_token_matches, iter_placeholders,
+                                        iter_token_matches,
                                         replace_text_matches,
                                         replace_token_matches)
+# yapf: enable
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import full_groupby
 
@@ -483,3 +492,112 @@ def test_iter_placeholders(
 
     # Manually constructed results
     assert result == expected
+
+
+def _rand_img(rng: np.random.RandomState, min_wh: int, max_wh: int):
+    w, h = rng.randint(min_wh, max_wh, size=(2,))
+    arr = rng.randint(0, 255, size=(w, h, 3), dtype=np.uint8)
+    return Image.fromarray(arr)
+
+def _rand_video(
+    rng: np.random.RandomState,
+    max_frames: int,
+    min_wh: int,
+    max_wh: int,
+):
+    num_frames = rng.randint(max_frames)
+    w, h = rng.randint(min_wh, max_wh, size=(2,))
+    return rng.randint(0, 255, size=(num_frames, w, h, 3), dtype=np.uint8)
+
+
+
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+def test_processing_cache_correctness_mixed_modality(model_id, hit_rate):
+    from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalProcessor
+
+    model_config = ModelConfig(model_id,
+                               task="auto",
+                               tokenizer=model_id,
+                               tokenizer_mode="auto",
+                               trust_remote_code=False,
+                               seed=0,
+                               dtype="float16",
+                               revision=None)
+
+    ctx = InputProcessingContext(
+        model_config,
+        cached_get_tokenizer(model_config.tokenizer),
+    )
+    baseline_processor = Qwen2VLMultiModalProcessor(
+        ctx,
+        cache=None,
+        enable_sanity_checks=True,
+    )
+    cached_processor = Qwen2VLMultiModalProcessor(
+        ctx,
+        # Ensure that the cache capacity is sufficient to contain all inputs
+        cache=ProcessingCache(1 << 30),
+        enable_sanity_checks=True,
+    )
+
+    rng = np.random.RandomState(0)
+
+    hf_processor =  baseline_processor._get_hf_processor()
+    image_token = hf_processor.image_token
+    video_token = hf_processor.video_token
+    repeating_image = Image.new("RGB", size=(128, 128))
+    repeating_video = [repeating_image] * 8
+
+    baseline_results = []
+    cached_results = []
+    for batch_idx in range(10):
+        images = []
+        for image_idx in range(rng.randint(3)):
+            if rng.rand() < hit_rate:
+                image = repeating_image
+            else:
+                image = _rand_img(rng, min_wh=128, max_wh=256)
+
+            images.append(image)
+
+        videos = []
+        for video_idx in range(rng.randint(1)):
+            if rng.rand() < hit_rate:
+                video = repeating_video
+            else:
+                video = _rand_video(rng, max_frames=8, min_wh=128, max_wh=256)
+
+            videos.append(video)
+
+        prompt = "".join(["Images: ", image_token * len(images),
+                          "\nVideos: ", video_token * len(videos)])
+        mm_data = {"image": images, "video": videos}
+
+        # Drop unnecessary keys and test single -> multi conversion
+        if rng.rand() < 1:
+            if not images:
+                del mm_data["image"]
+            elif len(images) == 1:
+                mm_data["image"] = mm_data["image"][0]
+
+            if not videos:
+                del mm_data["video"]
+            elif len(videos) == 1:
+                mm_data["video"] = mm_data["video"][0]
+
+        baseline_result = baseline_processor.apply(
+            prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
+        baseline_results.append(baseline_result)
+
+        cached_result = cached_processor.apply(
+            prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
+        cached_results.append(cached_result)
+
+    assert baseline_results == cached_results
