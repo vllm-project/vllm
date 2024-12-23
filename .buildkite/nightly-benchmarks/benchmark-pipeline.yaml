@@ -11,39 +11,19 @@ steps:
             - sh .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
 
   - wait
-
+  
   - label: "A100"
-    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: A100
-    plugins:
-    - kubernetes:
-        podSpec:
-          priorityClassName: perf-benchmark
-          containers:
-          - image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
-            command:
-            - bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
-            resources:
-              limits:
-                nvidia.com/gpu: 8
-            volumeMounts:
-            - name: devshm
-              mountPath: /dev/shm
-            env:
-            - name: VLLM_USAGE_SOURCE
-              value: ci-test
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: token
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-          volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
+    env:
+      GPU: "A100"
+      VLLM_USAGE_SOURCE: "ci-test"
+      CMD: "bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh"
+    commands:
+      - pip install -U modal
+      - modal token set --token-id "$(buildkite-agent secret get modal_token_id)" --token-secret "$(buildkite-agent secret get modal_token_secret)"
+      - export HF_TOKEN="$(buildkite-agent secret get hf_token_secret)"
+      - modal run .buildkite/nightly-benchmarks/scripts/launch-modal-runner.py
 
   - label: "H200"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
@@ -70,22 +50,15 @@ steps:
     #depends_on: ~
 
   - label: "H100"
-    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H100
     depends_on: block-h100
-    plugins:
-    - docker#v5.12.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
-        command:
-        - bash
-        - .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
-        mount-buildkite-agent: true
-        propagate-environment: true
-        ipc: host
-        gpus: all # see CUDA_VISIBLE_DEVICES for actual GPUs used
-        volumes:
-          - /data/benchmark-hf-cache:/root/.cache/huggingface
-        environment:
-        - VLLM_USAGE_SOURCE
-        - HF_TOKEN
+    env:
+      GPU: "H100"
+      VLLM_USAGE_SOURCE: "ci-test"
+      CMD: "bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh"
+    commands:
+      - pip install -U modal
+      - modal token set --token-id "$(buildkite-agent secret get modal_token_id)" --token-secret "$(buildkite-agent secret get modal_token_secret)"
+      - export HF_TOKEN="$(buildkite-agent secret get hf_token_secret)"
+      - modal run .buildkite/nightly-benchmarks/scripts/launch-modal-runner.py
