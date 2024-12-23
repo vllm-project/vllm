@@ -587,9 +587,7 @@ def test_processing_cache_correctness(
         "audio": 3,
     }
 
-    baseline_results = []
-    cached_results = []
-    for _ in range(num_batches):
+    for batch_idx in range(num_batches):
         mm_data = {
             k:
             [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
@@ -613,13 +611,10 @@ def test_processing_cache_correctness(
             mm_data=mm_data,
             hf_processor_mm_kwargs={},
         )
-        baseline_results.append(baseline_result)
-
         cached_result = cached_processor.apply(
             prompt,
             mm_data=mm_data,
             hf_processor_mm_kwargs={},
         )
-        cached_results.append(cached_result)
 
-    assert baseline_results == cached_results
+        assert baseline_result == cached_result, f"Failed (idx={batch_idx})"
