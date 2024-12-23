@@ -1,7 +1,7 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/ssd_chunk_scan.py
 
-# ruff: noqa: E501
+# ruff: noqa: E501,SIM102
 
 import torch
 import triton

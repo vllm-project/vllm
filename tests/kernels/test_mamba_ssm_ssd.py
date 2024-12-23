@@ -1,3 +1,5 @@
+from typing import Dict
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -6,8 +8,6 @@ from einops import rearrange, repeat
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined)
 from vllm.platforms import current_platform
-
-import numpy as np
 
 # Added by the IBM Team, 2024
 
@@ -131,10 +131,10 @@ def generate_continous_batched_examples(example_lens_by_batch,
     def take(example_lens):
 
         indices = []
-        for i, l in enumerate(example_lens):
+        for i, x in enumerate(example_lens):
             c = last_taken.get(i, 0)
-            indices.append((c, c + l))
-            last_taken[i] = (c + l) % full_length
+            indices.append((c, c + x))
+            last_taken[i] = (c + x) % full_length
             exhausted[i] = last_taken[i] == 0
 
         return (torch.concat([x[i, s:e] for i, (s, e) in enumerate(indices)
@@ -144,7 +144,7 @@ def generate_continous_batched_examples(example_lens_by_batch,
         return n - ((n - 1) // full_length) * full_length
 
     IND_E = None
-    for i, spec in enumerate(example_lens_by_batch):
+    for spec in example_lens_by_batch:
 
         # get the (maybe partial) example seen in this cont batch
         dt2, X2, B2, C2 = take(spec)
@@ -161,7 +161,6 @@ def generate_continous_batched_examples(example_lens_by_batch,
             sed_idx[srt:end] = i
 
         # for cont batch
-        # IND = np.insert(np.cumsum(spec), [0], [0]) # torch.cumsum
         if IND_E is None:
             IND_S = [0 for _ in range(len(spec))]
         else:
@@ -176,7 +175,7 @@ def generate_continous_batched_examples(example_lens_by_batch,
                          [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n_heads", [4, 16, 32])
 @pytest.mark.parametrize("dim", [128, 512])
-@pytest.mark.parametrize("seq_len_chunk_size", [(32, 128)])
+@pytest.mark.parametrize("seq_len_chunk_size", [(128, 32)])
 def test_mamba_chunk_scan_single_example(dim, n_heads, seq_len_chunk_size,
                                          itype):
 
@@ -213,26 +212,39 @@ def test_mamba_chunk_scan_single_example(dim, n_heads, seq_len_chunk_size,
                                rtol=1e1)
 
 
-@pytest.mark.parametrize("itype", [torch.float16])
-@pytest.mark.parametrize("n_heads", [4])
+@pytest.mark.parametrize("itype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("n_heads", [4, 8])
 @pytest.mark.parametrize("dim", [64])
-@pytest.mark.parametrize("seq_len_chunk_size_cases", [
-    64,
-    8,
-    2,
-    [(32, 32), (32, 32)],
-])
-def test_mamba_chunk_scan_batch(dim, n_heads, seq_len_chunk_size_cases, itype):
+@pytest.mark.parametrize(
+    "seq_len_chunk_size_cases",
+    [
+
+        # small-ish chunk_size (8)
+        (64, 8, 2, [(64, 32), (64, 32)]),
+        (64, 8, 2, [(32, 32), (32, 32), (32, 32)]),
+        (64, 8, 2, [(8, 8), (8, 8), (8, 8)]),  # chunk size boundary
+        (64, 8, 2, [(4, 4), (4, 4), (4, 4),
+                    (4, 4)]),  # chunk_size larger than cont batches
+
+        # large-ish chunk_size (256)
+        (64, 8, 1, [(5, ), (1, ), (1, ),
+                    (1, )]),  # irregular sizes with small sequences
+        (64, 8, 2, [(5, 30), (1, 2), (1, 2),
+                    (1, 2)]),  # irregular sizes with small sequences
+    ])
+def test_mamba_chunk_scan_cont_batch(dim, n_heads, seq_len_chunk_size_cases,
+                                     itype):
 
     # this test with multiple examples in a continuous batch
+    # (i.e. chunked prefill)
 
     seqlen, chunk_size, num_examples, cases = seq_len_chunk_size_cases
     d_head = dim // n_heads
 
     # hold state during the cutting process so we know if an
     # example has been exhausted and needs to cycle
-    last_taken = {}  # map: eg -> pointer to last taken sample
-    exhausted = {}  # map: eg -> boolean indicating example is exhausted
+    last_taken: Dict = {}  # map: eg -> pointer to last taken sample
+    exhausted: Dict = {}  # map: eg -> boolean indicating example is exhausted
 
     states = None
     for Y_min, cu_seqlens, sed_idx, (A, dt, X, B,
@@ -265,6 +277,7 @@ def test_mamba_chunk_scan_batch(dim, n_heads, seq_len_chunk_size_cases, itype):
 
         # update states
         states = new_states
-        for i in [i for i, clear in exhausted.items() if clear]:
-            states[i].fill_(0.)
-        exhausted = {}
+        for i, clear in exhausted.items():
+            if clear:
+                states[i].fill_(0.)
+                exhausted[i] = False

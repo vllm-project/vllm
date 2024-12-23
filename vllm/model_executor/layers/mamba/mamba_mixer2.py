@@ -4,8 +4,8 @@ import torch
 from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
