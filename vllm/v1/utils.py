@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import (Any, Generic, Dict, Iterator, List, Optional, TypeVar, 
+from typing import (Any, Generic, Dict, Iterator, List, Optional, TypeVar,
                     Union, Callable, overload)
 
 import zmq
@@ -179,23 +179,20 @@ class MPBackgroundProcess:
         context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)
 
-        assert ("ready_pipe" not in process_kwargs and
-                "input_path" not in process_kwargs and
-                "output_path" not in process_kwargs)
+        assert ("ready_pipe" not in process_kwargs
+                and "input_path" not in process_kwargs
+                and "output_path" not in process_kwargs)
         process_kwargs["ready_pipe"] = writer
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
 
         # Run Detokenizer busy loop in background process.
-        proc = context.Process(target=target_fn,
-                               kwargs=process_kwargs)
+        proc = context.Process(target=target_fn, kwargs=process_kwargs)
         proc.start()
-        
+
         # Wait for startup.
         if reader.recv()["status"] != "READY":
-            raise RuntimeError(
-                f"{process_name} initalization failed. "
-                "See root cause above."
-            )
+            raise RuntimeError(f"{process_name} initalization failed. "
+                               "See root cause above.")
 
         return BackgroundProcHandle(proc, input_path, output_path)

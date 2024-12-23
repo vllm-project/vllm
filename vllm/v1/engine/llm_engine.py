@@ -86,7 +86,7 @@ class LLMEngine:
                 executor_class=executor_class,
                 usage_context=usage_context,
             )
-        
+
         else:
             # Detokenizer (in process).
             self.detokenizer = Detokenizer(
@@ -190,7 +190,7 @@ class LLMEngine:
             self.engine_core.add_request(engine_request)
 
     def step(self) -> List[RequestOutput]:
-        
+
         if self.multiprocess_mode:
             # Get next output from the Detokenizer.
             return self.detokenizer_client.output_socket.recv_pyobj()
@@ -203,7 +203,7 @@ class LLMEngine:
             # Abort any requests that hit a stop string.
             if requests_to_abort:
                 self.abort_request(requests_to_abort)
-            
+
             return request_outputs
 
     def get_model_config(self):

@@ -11,7 +11,6 @@ from msgspec import msgpack
 from multiprocessing.connection import Connection
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -108,8 +107,8 @@ class EngineCore:
     def abort_requests(self, request_ids: List[str]):
         """Abort requests from the scheduler."""
 
-        # TODO: The scheduler doesn't really need to know the	
-        # specific finish reason, TBD whether we propagate that	
+        # TODO: The scheduler doesn't really need to know the
+        # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
@@ -150,7 +149,7 @@ class EngineCoreProc(EngineCore):
         super().__init__(vllm_config, executor_class, usage_context)
 
         # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ IO with GPU since they release the GIL and 
+        # overlap ZMQ IO with GPU since they release the GIL and
         # some serialization/deserialization with the model forward.
         # Threads handle Socket <-> Queues and busy_loop uses Queues.
         self.input_queue: queue.Queue[EngineRequestUnion] = queue.Queue()
@@ -164,7 +163,6 @@ class EngineCoreProc(EngineCore):
 
         # Send Readiness signal to EngineClient.
         ready_pipe.send({"status": "READY"})
-
 
     @staticmethod
     def run_engine_core(*args, **kwargs):
@@ -226,7 +224,7 @@ class EngineCoreProc(EngineCore):
                     except BaseException:
                         raise
 
-            # 2) Handle any new inputs.
+            # 2) Handle any new client requests (Abort or Add).
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
                 self._handle_client_request(req)
@@ -295,11 +293,8 @@ class EngineCoreProc(EngineCore):
 class MPEngineCoreClient(MPBackgroundProcess):
     """Client for multi-proc EngineCore."""
 
-    def __init__(self,
-                 input_path: str,
-                 output_path: str,
-                 vllm_config: VllmConfig,
-                 executor_class: Type[Executor],
+    def __init__(self, input_path: str, output_path: str,
+                 vllm_config: VllmConfig, executor_class: Type[Executor],
                  usage_context: UsageContext):
 
         super().__init__()

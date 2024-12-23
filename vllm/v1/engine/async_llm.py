@@ -20,7 +20,8 @@ import zmq
 import zmq.asyncio
 import pickle
 
-from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
+from typing import (Any, AsyncGenerator, Dict, List, Mapping, Optional, Type,
+                    Union)
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -93,15 +94,14 @@ class AsyncLLM(EngineClient):
         to_detokenizer_path = get_open_zmq_ipc_path()
         to_engine_core_path = get_open_zmq_ipc_path()
         to_llm_engine_path = get_open_zmq_ipc_path()
-        
 
         # Detokenizer IPC.
         self.ctx = zmq.asyncio.Context(io_threads=2)
-        self.from_detokenizer = make_zmq_socket(
-            self.ctx, to_llm_engine_path, zmq.PULL)
-        self.to_detokenizer = make_zmq_socket(
-            self.ctx, to_detokenizer_path, zmq.PUSH)
-        
+        self.from_detokenizer = make_zmq_socket(self.ctx, to_llm_engine_path,
+                                                zmq.PULL)
+        self.to_detokenizer = make_zmq_socket(self.ctx, to_detokenizer_path,
+                                              zmq.PUSH)
+
         # Detokenizer (background process).
         self.detokenizer_client = MPDetokenizerClient(
             output_path=to_llm_engine_path,
@@ -162,7 +162,7 @@ class AsyncLLM(EngineClient):
 
         if ctx := getattr(self, "ctx", None):
             ctx.destroy(linger=0)
-        
+
         if output_handler := getattr(self, "output_hander", None):
             output_handler.cancel()
 
@@ -278,12 +278,11 @@ class AsyncLLM(EngineClient):
                 yield out
 
         # Client request cancellation is handled through calling
-        # task.cancel() on generate(). Calling self.abort() forwards the 
+        # task.cancel() on generate(). Calling self.abort() forwards the
         # cancellation to the EngineCore and Detokenizer.
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
-
 
     async def output_handler_loop(self):
         """Background loop: pulls from Detokenizer and push to Queues."""
@@ -300,7 +299,6 @@ class AsyncLLM(EngineClient):
                 # are still flowing, so we just ignore.
                 if out.request_id in self.rid_to_queue:
                     self.rid_to_queue[out.request_id].put_nowait(out)
-            
 
     async def abort(self, request_id: str):
         """Abort request if the client cancels the request."""
@@ -314,7 +312,7 @@ class AsyncLLM(EngineClient):
 
         if self.log_requests:
             logger.info("Aborted %s.", request_id)
-    
+
     async def send_to_detokenizer(self, object: Any):
         """Send object to Detokenizer with a FROM_ENGINE flag."""
 

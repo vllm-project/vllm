@@ -5,7 +5,7 @@ import msgspec
 import signal
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-from typing import Dict, Iterable, List, Optional, Tuple,Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -22,6 +22,7 @@ from vllm.v1.utils import make_zmq_socket, MPBackgroundProcess
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 5000
+
 
 @dataclass
 class IncrementalDetokenizer:
@@ -90,7 +91,8 @@ class IncrementalDetokenizer:
             # NOTE(Nick): could we take ownership of it though?
             token_ids=request.prompt_token_ids.copy(),
             stop=stops,
-            include_stop_str_in_output=sampling_params.include_stop_str_in_output,
+            include_stop_str_in_output=sampling_params.
+            include_stop_str_in_output,
             prefix_offset=prefix_offset,
             read_offset=read_offset,
             skip_special_tokens=sampling_params.skip_special_tokens,
@@ -247,7 +249,8 @@ class Detokenizer:
         self.request_states[request.request_id] = request_state
 
     def step(
-        self, encore_core_outputs: EngineCoreOutputs,
+        self,
+        encore_core_outputs: EngineCoreOutputs,
     ) -> Tuple[List[RequestOutput], List[str]]:
         """Update state and make RequestOutputs for the LLMEngine."""
 
@@ -283,6 +286,7 @@ class Detokenizer:
         # Return to EngineClient.
         return request_outputs, requests_to_abort
 
+
 class DetokenizerProc(Detokenizer):
     """ZMQ-wrapper for running Detokenizer in background process."""
 
@@ -304,7 +308,6 @@ class DetokenizerProc(Detokenizer):
         # Send Readiness signal to DetokenizerClient.
         ready_pipe.send({"status": "READY"})
 
-    
     @staticmethod
     def run_detokenizer(*args, **kwargs):
         """Launch Detokenizer busy loop in background process."""
@@ -336,7 +339,7 @@ class DetokenizerProc(Detokenizer):
 
         except Exception:
             traceback = get_exception_traceback()
-            logger.error(f"Detokenizer hit an exception: {traceback}")
+            logger.error("Detokenizer hit an exception: %s", traceback)
             parent_process.send_signal(signal.SIGQUIT)
 
         finally:
@@ -344,7 +347,7 @@ class DetokenizerProc(Detokenizer):
                 detokenizer = None
 
     def _handle_from_llm_engine(
-        self, 
+        self,
         request_bytes: bytes,
         to_engine_core: zmq.Socket,
     ) -> None:
@@ -361,7 +364,7 @@ class DetokenizerProc(Detokenizer):
 
         # Forward to EngineCore.
         to_engine_core.send(request_bytes)
-    
+
     def _handle_from_engine_core(
         self,
         output_bytes: bytes,
@@ -382,9 +385,7 @@ class DetokenizerProc(Detokenizer):
 
         # Abort requests that finished due to stop strings.
         if len(requests_to_abort) > 0:
-            to_engine_core.send_pyobj(
-                EngineAbortRequest(requests_to_abort))
-        
+            to_engine_core.send_pyobj(EngineAbortRequest(requests_to_abort))
 
     def run_busy_loop(self):
         """Core busy loop of the Detokenizer."""
@@ -395,7 +396,8 @@ class DetokenizerProc(Detokenizer):
         try:
             input_socket = make_zmq_socket(ctx, self.input_path, zmq.PULL)
             to_llm_engine = make_zmq_socket(ctx, self.output_path, zmq.PUSH)
-            to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path, zmq.PUSH)
+            to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path,
+                                             zmq.PUSH)
             while True:
                 (msg_type, msg_bytes) = input_socket.recv_multipart()
 
@@ -423,7 +425,7 @@ class DetokenizerProc(Detokenizer):
 
 class MPDetokenizerClient(MPBackgroundProcess):
     """Client for multi-proc Detokenizer."""
-    
+
     def __init__(self,
                  input_path: str,
                  output_path: str,
