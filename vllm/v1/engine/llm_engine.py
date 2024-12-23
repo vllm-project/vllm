@@ -219,7 +219,7 @@ class LLMEngine:
             request_outputs: List[
                 RequestOutput] = self.from_detokenizer.recv_pyobj()
 
-            # Removed finsihed requests from the state tracker.
+            # Removed finished requests from the state tracker.
             for out in request_outputs:
                 if out.finished:
                     self.running_requests.remove(out.request_id)
