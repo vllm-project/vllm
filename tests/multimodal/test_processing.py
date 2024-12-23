@@ -534,7 +534,7 @@ def _rand_audio(
 @pytest.mark.parametrize("num_batches", [10])
 @pytest.mark.parametrize("simplify_rate", [1.0])
 # yapf: enable
-def test_processing_cache_correctness_mixed_modality(
+def test_processing_cache_correctness(
     model_id: str,
     modalities: set[str],
     hit_rate: float,
