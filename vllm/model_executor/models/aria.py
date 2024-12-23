@@ -521,6 +521,15 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     This model combines a vision tower, a multi-modal projector, and a language
     model to perform tasks that involve both image and text inputs.
     """
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "language_model.model": "language_model",
+            "language_model.lm_head": "lm_head",
+        },
+        orig_to_new_suffix={
+            "router.weight": "router_weight",
+        },
+    )
 
     def __init__(
         self,
@@ -662,15 +671,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                "language_model.model": "language_model",
-                "language_model.lm_head": "lm_head",
-            },
-            orig_to_new_suffix={
-                "router.weight": "router_weight",
-            },
-        )
 
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
