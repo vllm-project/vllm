@@ -813,6 +813,9 @@ class BaseMultiModalProcessor(ABC):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs]:
+        """
+        Apply the HF processor on the full prompt text and multi-modal data.
+        """
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
         processed_data = self._call_hf_processor(
@@ -832,12 +835,51 @@ class BaseMultiModalProcessor(ABC):
 
         return prompt_ids, mm_kwargs
 
+    def _apply_hf_processor_missing(
+        self,
+        prompt_text: str,
+        mm_missing_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ):
+        """
+        Apply the HF processor on the full prompt text, but only on the
+        multi-modal data that are missing from the cache.
+
+        Note: We pass prompt text and multi-modal data into the HF processor
+        in separate calls to avoid HF prompt replacement being done for
+        cached items; instead, we rely on our own prompt replacement logic
+        for the full text.
+        """
+        mm_missing_counts = mm_missing_data_items.get_item_counts()
+
+        prompt_ids, _ = self._apply_hf_processor(
+            prompt_text=prompt_text,
+            mm_items=MultiModalDataItems({}),
+            hf_processor_mm_kwargs={},
+        )
+
+        # Some HF processors (e.g. Qwen2-VL) expect corresponding
+        # multi-modal tokens to be in the prompt text
+        dummy_inputs = self._get_dummy_mm_inputs(mm_missing_counts)
+
+        _, mm_missing_kwargs = self._apply_hf_processor(
+            prompt_text=dummy_inputs.prompt_text,
+            mm_items=mm_missing_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return prompt_ids, mm_missing_kwargs
+
     def _cached_apply_hf_processor(
         self,
         prompt_text: str,
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs]:
+        """
+        Apply the HF processor on the full prompt text,
+        caching the results and reusing cached results.
+        """
         cache = self.cache
 
         if cache is None:
@@ -864,35 +906,12 @@ class BaseMultiModalProcessor(ABC):
             for modality, idxs in mm_missing_idxs.items()
         }
         mm_missing_data_items = self._get_mm_items(mm_missing_data)
-        mm_missing_counts = mm_missing_data_items.get_item_counts()
 
-        if any(count > 0 for count in mm_missing_counts.values()):
-            # Some HF processors (e.g. Qwen2-VL) expect corresponding
-            # multi-modal tokens to be in the prompt text
-            dummy_inputs = self._get_dummy_mm_inputs(mm_missing_counts)
-
-            _, mm_missing_kwargs = self._apply_hf_processor(
-                prompt_text=dummy_inputs.prompt_text,
-                mm_items=mm_missing_data_items,
-                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            )
-        else:
-            # Avoid unnecessary tokenization of the prompt text
-            mm_missing_kwargs = MultiModalKwargs({})
-
-        # NOTE: Some HF processors insert BOS/EOS while others don't.
-        # We try to maintain consistent behavior when calling only
-        # the tokenizer vs when calling its parent processor
-        empty_ids, _ = self._apply_hf_processor(
-            prompt_text="",
-            mm_items=self._get_mm_items({}),
-            hf_processor_mm_kwargs={},
+        prompt_ids, mm_missing_kwargs = self._apply_hf_processor_missing(
+            prompt_text=prompt_text,
+            mm_missing_data_items=mm_missing_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )
-        # Rely on our placeholder replacement logic instead of HF
-        # to insert the placeholder tokens
-        prompt_ids = _encode(self._get_tokenizer(),
-                             prompt_text,
-                             add_special_tokens=len(empty_ids) > 0)
 
         mm_missing_next_idx = {
             modality: 0
@@ -925,6 +944,7 @@ class BaseMultiModalProcessor(ABC):
             mm_merged_field_items[modality] = merged_modal_items_lst
 
         if self.enable_sanity_checks:
+            mm_missing_counts = mm_missing_data_items.get_item_counts()
             assert all(
                 item_count == mm_missing_counts[modality]
                 for modality, item_count in mm_missing_next_idx.items()), dict(

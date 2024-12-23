@@ -12,9 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -36,7 +36,9 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement)
+                                        PromptReplacement,
+                                        _BoundPromptReplacement,
+                                        _PlaceholderInfo)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -342,12 +344,13 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs=mm_kwargs,
         )
 
+        input_ids = processed_outputs["input_ids"]
+        assert isinstance(input_ids, torch.Tensor)
+
         # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
         # which will cause OverflowError when decoding the prompt_ids.
         # Therefore, we need to do an early replacement here
-        token_ids = processed_outputs['input_ids']
-        token_ids[token_ids < 0] = _IMAGE_TOKEN_ID
-        processed_outputs['input_ids'] = token_ids
+        input_ids.masked_fill_(input_ids < 0, _IMAGE_TOKEN_ID)
 
         return processed_outputs
 
@@ -372,8 +375,9 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
         image_processor = hf_processor.image_processor  # type: ignore
 
-        mm_config = self.ctx.get_mm_config()
-        max_images = mm_config.limit_per_prompt.get("image", 1)
+        tokenizer = self._get_tokenizer()
+        bos_token_id = tokenizer.bos_token_id
+        assert isinstance(bos_token_id, int)
 
         def get_replacement_phi3v(item_idx: int):
             image_size = mm_items.get_image_size(item_idx)
@@ -382,15 +386,38 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
                 height=image_size.height,
             )
 
-            return [_IMAGE_TOKEN_ID] * num_tokens
+            return [_IMAGE_TOKEN_ID] * num_tokens + [bos_token_id]
 
         return [
             PromptReplacement(
                 modality="image",
                 target=image_token,
                 replacement=get_replacement_phi3v,
-            ) for image_token in image_tokens[:max_images]
+            ) for image_token in image_tokens[:len(mm_items.images)]
         ]
+
+    def _apply_prompt_replacements(
+        self,
+        token_ids: list[int],
+        prompt_repls: Sequence[_BoundPromptReplacement],
+        mm_item_counts: Mapping[str, int],
+    ) -> tuple[list[int], str, list[_PlaceholderInfo]]:
+        token_ids, text, placeholders = super()._apply_prompt_replacements(
+            token_ids=token_ids,
+            prompt_repls=prompt_repls,
+            mm_item_counts=mm_item_counts,
+        )
+
+        # Keep the behavior in line with HF processor
+        if text.startswith("<s> <|image|>"):
+            text = text.replace("<s> <|image|>", "<s><|image|>", 1)
+            token_ids = [token_ids[0], *token_ids[2:]]
+            placeholders = [
+                _PlaceholderInfo(p.modality, p.start_idx - 1, p.replacement)
+                for p in placeholders
+            ]
+
+        return token_ids, text, placeholders
 
     def _get_dummy_mm_inputs(
         self,
