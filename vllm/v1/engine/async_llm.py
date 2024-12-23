@@ -89,7 +89,7 @@ class AsyncLLM(EngineClient):
         to_engine_core_path = get_open_zmq_ipc_path()
 
         # Detokenizer (background process).
-        self.detokenizer = MPDetokenizerClient(
+        self.detokenizer_client = MPDetokenizerClient(
             from_engine_core_path=from_engine_core_path,
             to_engine_core_path=to_engine_core_path,
             tokenizer_name=vllm_config.model_config.tokenizer,
@@ -99,7 +99,7 @@ class AsyncLLM(EngineClient):
         )
 
         # EngineCore (background process).
-        self.engine_core = MPEngineCoreClient(
+        self.engine_core_client = MPEngineCoreClient(
             input_path=to_engine_core_path,
             output_path=from_engine_core_path,
             vllm_config=vllm_config,
@@ -148,11 +148,11 @@ class AsyncLLM(EngineClient):
         if output_handler := getattr(self, "output_hander", None):
             output_handler.cancel()
 
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+        if engine_core_client := getattr(self, "engine_core_client", None):
+            engine_core_client.shutdown()
 
-        if detokenizer := getattr(self, "detokenizer", None):
-            detokenizer.shutdown()
+        if detokenizer_client := getattr(self, "detokenizer_client", None):
+            detokenizer_client.shutdown()
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
@@ -190,7 +190,7 @@ class AsyncLLM(EngineClient):
         self.rid_to_queue[request_id] = asyncio.Queue()
 
         # 3) Send to Detokenizer (which forwards to EngineCore).
-        await self.detokenizer.input_socket.send_pyobj(engine_request)
+        await self.detokenizer_client.input_socket.send_pyobj(engine_request)
 
         return self.rid_to_queue[request_id]
 
@@ -272,7 +272,7 @@ class AsyncLLM(EngineClient):
             # Note: use socket directly to avoid calling await multiple
             # times, which causes too much task switching at high QPS.
             outputs: List[RequestOutput] = []
-            outputs = await self.detokenizer.output_socket.recv_pyobj()
+            outputs = await self.detokenizer_client.output_socket.recv_pyobj()
 
             for out in outputs:
                 # Note: it is possible that a request was aborted
@@ -286,7 +286,7 @@ class AsyncLLM(EngineClient):
         """Abort request if the client cancels the request."""
 
         # Send abort to Detokenizer (which will fwd to EngineCore)
-        await self.detokenizer.input_socket.send_pyobj(
+        await self.detokenizer_client.input_socket.send_pyobj(
             EngineAbortRequest([request_id]))
 
         # Remove from request output queues.
@@ -336,10 +336,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        await self.engine_core.profile_async(True)
+        await self.engine_core_client.profile_async(True)
 
     async def stop_profile(self) -> None:
-        await self.engine_core.profile_async(False)
+        await self.engine_core_client.profile_async(False)
 
     @property
     def is_running(self) -> bool:
