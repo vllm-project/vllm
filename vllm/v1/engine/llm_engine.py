@@ -1,8 +1,8 @@
+import pickle
 from typing import Any, Dict, List, Mapping, Optional, Type, Union
-from typing_extensions import TypeVar
 
 import zmq
-import pickle
+from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -198,7 +198,7 @@ class LLMEngine:
             # Send to Detokenizer (which forwards to EngineCore).
             # Note: we forward the message rather than sending
             # to each process separately to avoid race conditions.
-            self.send_to_detokenizer(engine_request)
+            self._send_to_detokenizer(engine_request)
         else:
             # Add directly to Detokenizer and EngineCore.
             self.detokenizer.add_request(engine_request)
@@ -221,7 +221,7 @@ class LLMEngine:
 
             return request_outputs
 
-    def send_to_detokenizer(self, object: Any):
+    def _send_to_detokenizer(self, object: Any):
         """Send object to Detokenizer with a FROM_ENGINE flag."""
 
         msg = (EngineRequestType.FROM_ENGINE.value, pickle.dumps(object))

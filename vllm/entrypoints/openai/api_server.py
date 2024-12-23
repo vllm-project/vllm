@@ -64,7 +64,7 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, set_ulimit, kill_process_tree)
+                        is_valid_ipv6_address, kill_process_tree, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds

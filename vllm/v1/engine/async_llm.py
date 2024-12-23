@@ -16,12 +16,12 @@
 # Inspired by https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/tokenizer_manager.py
 
 import asyncio
-import zmq
-import zmq.asyncio
 import pickle
-
 from typing import (Any, AsyncGenerator, Dict, List, Mapping, Optional, Type,
                     Union)
+
+import zmq
+import zmq.asyncio
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -39,7 +39,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import EngineAbortRequest
+from vllm.v1.engine import EngineAbortRequest, EngineRequestType
 from vllm.v1.engine.core import MPEngineCoreClient
 from vllm.v1.engine.detokenizer import MPDetokenizerClient
 from vllm.v1.engine.processor import Processor
@@ -238,7 +238,7 @@ class AsyncLLM(EngineClient):
         The output_handler() loop runs in a background task, pulling
         from Detokenizer and pushing to the per request queue.
 
-        The generate() pulls from the per request queue and yeilds
+        The generate() pulls from the per request queue and yields
         to the caller which iterates the AsyncGenerator.
         """
 
@@ -312,6 +312,12 @@ class AsyncLLM(EngineClient):
 
         if self.log_requests:
             logger.info("Aborted %s.", request_id)
+
+    async def _send_to_detokenizer(self, obj: Any):
+        """Send object to Detokenizer with a FROM_ENGINE flag."""
+
+        msg = (EngineRequestType.FROM_ENGINE.value, pickle.dumps(object))
+        self.to_detokenizer.send_multipart(msg, copy=False)
 
     def encode(
         self,

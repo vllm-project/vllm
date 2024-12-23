@@ -1,11 +1,12 @@
-import psutil
 import pickle
-import zmq.asyncio
-import msgspec
 import signal
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
+
+import msgspec
+import psutil
+import zmq
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -15,10 +16,10 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import get_exception_traceback
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineRequestType, EngineRequest,
-                            EngineAbortRequest)
-from vllm.v1.utils import make_zmq_socket, MPBackgroundProcess
+from vllm.v1.engine import (EngineAbortRequest, EngineCoreOutput,
+                            EngineCoreOutputs, EngineRequest,
+                            EngineRequestType)
+from vllm.v1.utils import MPBackgroundProcess, make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -348,9 +349,9 @@ class DetokenizerProc(Detokenizer):
                 detokenizer = None
 
     def _handle_from_llm_engine(
-        self,
-        request_bytes: bytes,
-        to_engine_core: zmq.constants.Socket,
+            self,
+            request_bytes: bytes,
+            to_engine_core: zmq.Socket,  # type: ignore[name-defined]
     ) -> None:
         """Handle EngineRequest from the LLMEngine."""
 
@@ -369,8 +370,8 @@ class DetokenizerProc(Detokenizer):
     def _handle_from_engine_core(
         self,
         output_bytes: bytes,
-        to_engine_core: zmq.constants.Socket,
-        to_llm_engine: zmq.constants.Socket,
+        to_engine_core: zmq.Socket,  # type: ignore[name-defined]
+        to_llm_engine: zmq.Socket,  # type: ignore[name-defined]
         decoder: msgspec.msgpack.Decoder,
     ) -> None:
         """Handle Outputs from the EngineCore."""

@@ -1,14 +1,14 @@
-import psutil
 import queue
 import signal
 import threading
 import time
+from multiprocessing.connection import Connection
 from typing import List, Tuple, Type
 
+import psutil
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
-from multiprocessing.connection import Connection
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
@@ -17,14 +17,14 @@ from vllm.transformers_utils.config import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_exception_traceback
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineAbortRequest, EngineRequest,
-                            EngineRequestType, EngineProfileRequest,
+from vllm.v1.engine import (EngineAbortRequest, EngineCoreOutput,
+                            EngineCoreOutputs, EngineProfileRequest,
+                            EngineRequest, EngineRequestType,
                             EngineRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.utils import zmq_socket_ctx, MPBackgroundProcess
+from vllm.v1.utils import MPBackgroundProcess, zmq_socket_ctx
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -310,3 +310,7 @@ class MPEngineCoreClient(MPBackgroundProcess):
                 "usage_context": usage_context,
             },
         )
+
+    async def profile_async(self, is_start: bool = True):
+        # TODO: enable this.
+        pass

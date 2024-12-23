@@ -1,18 +1,18 @@
 import os
 import weakref
-from dataclasses import dataclass
-from multiprocessing.process import BaseProcess
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import (Any, Generic, Dict, Iterator, List, Optional, TypeVar,
-                    Union, Callable, overload)
+from dataclasses import dataclass
+from multiprocessing.process import BaseProcess
+from typing import (Any, Callable, Dict, Generic, Iterator, List, Optional,
+                    TypeVar, Union, overload)
 
 import zmq
 import zmq.asyncio
 
+from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.utils import kill_process_tree
-from vllm.executor.multiproc_worker_utils import get_mp_context
 
 logger = init_logger(__name__)
 
@@ -195,7 +195,7 @@ class MPBackgroundProcess:
 
         # Wait for startup.
         if reader.recv()["status"] != "READY":
-            raise RuntimeError(f"{process_name} initalization failed. "
+            raise RuntimeError(f"{process_name} initialization failed. "
                                "See root cause above.")
 
         return BackgroundProcHandle(proc, input_path, output_path)
