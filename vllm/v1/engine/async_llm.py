@@ -301,7 +301,7 @@ class AsyncLLM(EngineClient):
         epoch = 0
         while True:
             logger.info(f"EPOCH: {epoch}")
-            epoch+=1
+            epoch += 1
 
             # 1) Pull outputs from the Detokenizer.
             outputs: List[RequestOutput] = await self.detokenizer.output_socket.recv_pyobj()

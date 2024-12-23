@@ -14,7 +14,7 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+from vllm.v1.engine import (EngineCoreOutputs,
                             BackgroundProcHandle, 
                             EngineRequest, EngineAbortRequest)
 from vllm.v1.utils import (make_zmq_socket, zmq_socket_ctx, 
@@ -450,6 +450,7 @@ class DetokenizerProc(Detokenizer):
 
             epoch = 0
             while True:
+                logger.info(f"EPOCH: {epoch}")
                 socks = dict(poller.poll())
 
                 # Handle input from LLMEngine.
@@ -461,7 +462,6 @@ class DetokenizerProc(Detokenizer):
 
                 # Handle output from EngineCoreOutput.
                 if from_engine_core in socks:
-                    logger.info(f"EPOCH: {epoch}")
                     epoch += 1
                     self._handle_from_engine_core(
                         from_engine_core=from_engine_core,
