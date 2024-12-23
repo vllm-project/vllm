@@ -82,13 +82,19 @@ class LogitsProcessor(nn.Module):
                     lm_head: Union[VocabParallelEmbedding, nn.Linear],
                     embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
         # Get the logits for the next tokens.
-        if isinstance(lm_head, nn.Linear):
-            logits = lm_head(hidden_states)
+        logits = lm_head.linear_method.apply(lm_head,
+                                             hidden_states,
+                                             bias=embedding_bias)
+        if self.use_gather:
+            # None may be returned for rank > 0
+            logits = tensor_model_parallel_gather(logits)
         else:
-            logits = lm_head.linear_method.apply(lm_head,
-                                                hidden_states,
-                                                bias=embedding_bias)
-        logits = tensor_model_parallel_gather(logits)
+            # Gather is not supported for some devices such as TPUs.
+            # Use all-gather instead.
+            # NOTE(woosuk): Here, the outputs of every device should not be None
+            # because XLA requires strict SPMD among all devices. Every device
+            # should execute the same operations after gathering the logits.
+            logits = tensor_model_parallel_all_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[..., :self.org_vocab_size]

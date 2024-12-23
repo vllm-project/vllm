@@ -247,10 +247,6 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        # dummy_seq_data = SequenceData([0] * seq_len)
-        # dummy_multi_modal_data = None
-
-        # return dummy_seq_data, dummy_multi_modal_data
         return DummyData(SequenceData.from_prompt_token_counts((0, seq_len)))
 
     def register_dummy_data(self, factory: DummyDataFactory):
