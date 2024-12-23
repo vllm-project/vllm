@@ -1,5 +1,5 @@
 import pickle
-from typing import Any, Dict, List, Mapping, Optional, Type, Union
+from typing import Any, Dict, List, Mapping, Optional, Set, Type, Union
 
 import zmq
 from typing_extensions import TypeVar
@@ -68,6 +68,9 @@ class LLMEngine:
                                    mm_registry=mm_registry)
 
         if self.multiprocess_mode:
+            # Keep track of active requests.
+            self.running_requests: Set[str] = set()
+
             # IPC paths.
             to_detokenizer_path = get_open_zmq_ipc_path()
             to_engine_core_path = get_open_zmq_ipc_path()
@@ -160,10 +163,13 @@ class LLMEngine:
         return executor_class
 
     def get_num_unfinished_requests(self) -> int:
-        return self.detokenizer.get_num_unfinished_requests()
+        if self.multiprocess_mode:
+            return len(self.running_requests)
+        else:
+            return self.detokenizer.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.detokenizer.has_unfinished_requests()
+        return self.get_num_unfinished_requests() > 0
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -193,8 +199,10 @@ class LLMEngine:
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
-        # Add to Detokenizer and EngineCore.
+        # Add processed input to system.
         if self.multiprocess_mode:
+            assert engine_request.request_id not in self.running_requests
+            self.running_requests.add(engine_request.request_id)
             # Send to Detokenizer (which forwards to EngineCore).
             # Note: we forward the message rather than sending
             # to each process separately to avoid race conditions.
@@ -208,7 +216,14 @@ class LLMEngine:
 
         if self.multiprocess_mode:
             # Get next output from the Detokenizer.
-            return self.from_detokenizer.recv_pyobj()
+            request_outputs: List[
+                RequestOutput] = self.from_detokenizer.recv_pyobj()
+
+            # Removed finsihed requests from the state tracker.
+            for out in request_outputs:
+                if out.finished:
+                    self.running_requests.remove(out.request_id)
+
         else:
             # Step EngineCore and Detokenizer.
             engine_core_outputs = self.engine_core.step()
@@ -219,7 +234,7 @@ class LLMEngine:
             if requests_to_abort:
                 self.abort_request(requests_to_abort)
 
-            return request_outputs
+        return request_outputs
 
     def _send_to_detokenizer(self, object: Any):
         """Send object to Detokenizer with a FROM_ENGINE flag."""
