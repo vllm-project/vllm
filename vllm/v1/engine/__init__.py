@@ -19,7 +19,6 @@ class BackgroundProcHandle:
 
 @dataclass
 class EngineRequest:
-
     request_id: str
     prompt: Optional[str]
     prompt_token_ids: List[int]
@@ -34,13 +33,11 @@ class EngineRequest:
 
 @dataclass
 class EngineAbortRequest:
-
     request_ids: List[str]
 
 
 @dataclass
 class EngineProfileRequest:
-
     is_start: bool
 
 
