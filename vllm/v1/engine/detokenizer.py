@@ -5,7 +5,7 @@ import msgspec
 import signal
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger

@@ -1,6 +1,8 @@
-from typing import Dict, List, Mapping, Optional, Type, Union
-
+from typing import Any, Dict, List, Mapping, Optional, Type, Union
 from typing_extensions import TypeVar
+
+import zmq
+import pickle
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -18,10 +20,12 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
+from vllm.v1.engine import EngineRequestType
 from vllm.v1.engine.core import EngineCore, MPEngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer, MPDetokenizerClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.utils import make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -65,12 +69,21 @@ class LLMEngine:
 
         if self.multiprocess_mode:
             # IPC paths.
-            from_engine_core_path = get_open_zmq_ipc_path()
+            to_detokenizer_path = get_open_zmq_ipc_path()
             to_engine_core_path = get_open_zmq_ipc_path()
+            to_llm_engine_path = get_open_zmq_ipc_path()
+
+            # Detokenizer IPC.
+            self.ctx = zmq.Context(io_threads=2)
+            self.from_detokenizer = make_zmq_socket(
+                self.ctx, to_llm_engine_path, zmq.PULL)
+            self.to_detokenizer = make_zmq_socket(
+                self.ctx, to_detokenizer_path, zmq.PUSH)
 
             # Detokenizer (background process).
             self.detokenizer_client = MPDetokenizerClient(
-                from_engine_core_path=from_engine_core_path,
+                output_path=to_llm_engine_path,
+                input_path=to_detokenizer_path,
                 to_engine_core_path=to_engine_core_path,
                 tokenizer_name=vllm_config.model_config.tokenizer,
                 tokenizer_mode=vllm_config.model_config.tokenizer_mode,
@@ -81,7 +94,7 @@ class LLMEngine:
             # EngineCore (background process).
             self.engine_core_client = MPEngineCoreClient(
                 input_path=to_engine_core_path,
-                output_path=from_engine_core_path,
+                output_path=to_detokenizer_path,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 usage_context=usage_context,
@@ -183,7 +196,7 @@ class LLMEngine:
             # Send to Detokenizer (which forwards to EngineCore).
             # Note: we forward the message rather than sending
             # to each process separately to avoid race conditions.
-            self.detokenizer_client.input_socket.send_pyobj(engine_request)
+            self.send_to_detokenizer(engine_request)
         else:
             # Add directly to Detokenizer and EngineCore.
             self.detokenizer.add_request(engine_request)
@@ -193,7 +206,7 @@ class LLMEngine:
 
         if self.multiprocess_mode:
             # Get next output from the Detokenizer.
-            return self.detokenizer_client.output_socket.recv_pyobj()
+            return self.from_detokenizer.recv_pyobj()
         else:
             # Step EngineCore and Detokenizer.
             engine_core_outputs = self.engine_core.step()
@@ -205,6 +218,12 @@ class LLMEngine:
                 self.abort_request(requests_to_abort)
 
             return request_outputs
+
+    def send_to_detokenizer(self, object: Any):
+        """Send object to Detokenizer with a FROM_ENGINE flag."""
+
+        msg = (EngineRequestType.FROM_ENGINE.value, pickle.dumps(object))
+        self.to_detokenizer.send_multipart(msg, copy=False)
 
     def get_model_config(self):
         return self.model_config
