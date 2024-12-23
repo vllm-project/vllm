@@ -38,6 +38,8 @@ class PEFTHelper:
 
     def __post_init__(self):
         self._validate_features()
+        if self.use_rslora:
+            self.lora_alpha = self.lora_alpha * math.sqrt(self.r)
         if self.context_length:
             if self.vllm_max_position_embeddings is None:
                 self.vllm_max_position_embeddings = self.context_length
