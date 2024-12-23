@@ -14,8 +14,8 @@ try:
 except ImportError:
     pass
 
-from vllm.model_executor.guided_decoding.xgrammar_utils import (
-    convert_lark_to_gbnf, grammar_is_likely_lark)
+from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
+                                                       grammar_is_likely_lark)
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 if TYPE_CHECKING:
