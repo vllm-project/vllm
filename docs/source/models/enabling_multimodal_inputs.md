@@ -5,7 +5,7 @@
 This document walks you through the steps to extend a vLLM model so that it accepts [multi-modal inputs](#multimodal-inputs).
 
 ```{seealso}
-[adding-a-new-model](adding-a-new-model)
+[Adding a New Model](adding-a-new-model)
 ```
 
 ## 1. Update the base vLLM model
@@ -57,7 +57,7 @@ This decorator accepts a function that maps multi-modal inputs to the keyword ar
 A default mapper is available for each modality in the core vLLM library. This input mapper will be used if you do not provide your own function.
 
 ```{seealso}
-[input-processing-pipeline](#input-processing-pipeline)
+[Input Processing Pipeline](#input-processing-pipeline)
 ```
 
 ## 3. Register maximum number of multi-modal tokens
@@ -82,7 +82,7 @@ Here are some examples:
 - Image inputs (dynamic feature size): [LLaVA-NeXT Model](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_next.py)
 
 ```{seealso}
-[input-processing-pipeline](#input-processing-pipeline)
+[Input Processing Pipeline](#input-processing-pipeline)
 ```
 
 ## 4. (Optional) Register dummy data
@@ -111,7 +111,7 @@ Here are some examples:
 - Image inputs (dynamic feature size): [LLaVA-NeXT Model](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_next.py)
 
 ```{seealso}
-[input-processing-pipeline](#input-processing-pipeline)
+[Input Processing Pipeline](#input-processing-pipeline)
 ```
 
 ## 5. (Optional) Register input processor
@@ -139,5 +139,5 @@ Here are some examples:
 - Insert dynamic number of image tokens: [LLaVA-NeXT Model](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_next.py)
 
 ```{seealso}
-[input-processing-pipeline](#input-processing-pipeline)
+[Input Processing Pipeline](#input-processing-pipeline)
 ```
