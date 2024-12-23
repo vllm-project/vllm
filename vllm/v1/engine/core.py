@@ -92,8 +92,6 @@ class EngineCore:
     def add_request(self, request: EngineRequest):
         """Add request to the scheduler."""
 
-        logger.debug("Adding request: %s", request.request_id)
-
         if request.mm_hashes is not None:
             # Here, if hash exists for an image, then it will be fetched
             # from the cache, else it will be added to the cache.
@@ -104,15 +102,12 @@ class EngineCore:
             request.mm_inputs = self.mm_input_mapper_server.process_inputs(
                 request.mm_inputs, request.mm_hashes)
 
-        # TODO: instead of sending EngineRequest, should we just send
-        # around Request?
         req = Request.from_engine_core_request(request)
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
         """Abort requests from the scheduler."""
 
-        logger.debug("Aborting requests: %s", request_ids)
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
