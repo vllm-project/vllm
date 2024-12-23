@@ -310,4 +310,3 @@ class MPEngineCoreClient(MPBackgroundProcess):
                 "usage_context": usage_context,
             },
         )
-        print("STARTED ENGINE CORE")

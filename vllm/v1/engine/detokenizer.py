@@ -450,4 +450,3 @@ class MPDetokenizerClient(MPBackgroundProcess):
                 "revision": revision,
             },
         )
-        print("STARTED DETOKENIZER")
