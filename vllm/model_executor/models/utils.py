@@ -1,5 +1,4 @@
 import itertools
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
                     Protocol, Set, Tuple, Union, overload)
@@ -241,11 +240,13 @@ class AutoWeightsLoader:
 
 
 class OffloadedTensorMode(TorchDispatchMode):
+
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         tensor = func(*args, **kwargs)
 
-        if func is torch.ops.aten.empty.memory_format and tensor.device != "cpu":
+        if (func is torch.ops.aten.empty.memory_format
+                and tensor.device != "cpu"):
             global _CPU_OFFLOAD_BYTES, _CPU_OFFLOAD_MAX_BYTES
             if _CPU_OFFLOAD_BYTES < _CPU_OFFLOAD_MAX_BYTES:
                 _CPU_OFFLOAD_BYTES += tensor.numel() * tensor.element_size()
