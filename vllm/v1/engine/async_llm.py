@@ -16,6 +16,9 @@
 # Inspired by https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/tokenizer_manager.py
 
 import asyncio
+import zmq
+import zmq.asyncio
+
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -39,6 +42,7 @@ from vllm.v1.engine.core import MPEngineCoreClient
 from vllm.v1.engine.detokenizer import MPDetokenizerClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.utils import zmq_socket_ctx, make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -87,9 +91,18 @@ class AsyncLLM(EngineClient):
         # IPC paths.
         from_engine_core_path = get_open_zmq_ipc_path()
         to_engine_core_path = get_open_zmq_ipc_path()
+        self.to_detokenizer_path = get_open_zmq_ipc_path()
+        self.from_detokenizer_path = get_open_zmq_ipc_path()
+
+        # Detokenizer IPC.
+        self.ctx = zmq.asyncio.Context(io_threads=2)
+        self.to_detokenizer = make_zmq_socket(
+            self.ctx, self.to_detokenizer_path, zmq.PULL)
 
         # Detokenizer (background process).
         self.detokenizer_client = MPDetokenizerClient(
+            output_path=self.from_detokenizer_path,
+            input_path=self.to_detokenizer_path,
             from_engine_core_path=from_engine_core_path,
             to_engine_core_path=to_engine_core_path,
             tokenizer_name=vllm_config.model_config.tokenizer,
@@ -145,6 +158,9 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
 
+        if ctx := getattr(self, "ctx", None):
+            ctx.destroy(linger=0)
+        
         if output_handler := getattr(self, "output_hander", None):
             output_handler.cancel()
 
@@ -192,7 +208,7 @@ class AsyncLLM(EngineClient):
         # 3) Send to Detokenizer (which forwards to EngineCore).
         # Note: we forward the request rather than sending to each
         # process separately to avoid race conditions in Detokenizer.
-        await self.detokenizer_client.input_socket.send_pyobj(engine_request)
+        await self.to_detokenizer.send_pyobj(engine_request)
 
         return self.rid_to_queue[request_id]
 
@@ -270,18 +286,19 @@ class AsyncLLM(EngineClient):
     async def output_handler_loop(self):
         """Background loop: pulls from Detokenizer and push to Queues."""
 
-        while True:
-            # Note: use socket directly to avoid calling await multiple
-            # times, which causes too much task switching at high QPS.
-            outputs: List[RequestOutput] = []
-            outputs = await self.detokenizer_client.output_socket.recv_pyobj()
+        with zmq_socket_ctx(self.from_detokenizer_path, zmq.PULL) as socket:
+            while True:
+                # Note: use socket directly to avoid calling await multiple
+                # times, which causes too much task switching at high QPS.
+                outputs: List[RequestOutput] = []
+                outputs = await socket.recv_pyobj()
 
-            for out in outputs:
-                # Note: it is possible that a request was aborted
-                # due to client cancellation while EngineCoreOutputs
-                # are still flowing, so we just ignore.
-                if out.request_id in self.rid_to_queue:
-                    self.rid_to_queue[out.request_id].put_nowait(out)
+                for out in outputs:
+                    # Note: it is possible that a request was aborted
+                    # due to client cancellation while EngineCoreOutputs
+                    # are still flowing, so we just ignore.
+                    if out.request_id in self.rid_to_queue:
+                        self.rid_to_queue[out.request_id].put_nowait(out)
             
 
     async def abort(self, request_id: str):

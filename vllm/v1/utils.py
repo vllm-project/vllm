@@ -1,15 +1,18 @@
+import os
+import weakref
+from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
-from multiprocessing.connection import Connection
-
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import (Any, Generic, Iterator, List, Optional, TypeVar, Union,
-                    overload, Callable)
+from typing import (Any, Generic, Dict, Iterator, List, Optional, TypeVar, 
+                    Union, Callable, overload)
 
 import zmq
 import zmq.asyncio
 
 from vllm.logger import init_logger
+from vllm.utils import kill_process_tree
+from vllm.executor.multiproc_worker_utils import get_mp_context
 
 logger = init_logger(__name__)
 
@@ -127,11 +130,6 @@ def zmq_socket_ctx(
     finally:
         ctx.destroy(linger=0)
 
-from multiprocessing.process import BaseProcess
-from vllm.utils import kill_process_tree
-import os
-import weakref
-from dataclasses import dataclass
 
 @dataclass
 class BackgroundProcHandle:
@@ -157,11 +155,11 @@ class BackgroundProcHandle:
 
 
 class MPBackgroundProcess:
-    
-    def __init__(self, *args, fn: Callable, input_path: str, output_path: str, **kwargs):
-        # Start EngineCore in background process.
+
+    READY_STR = "READY"
+
+    def __init__(self):
         self.proc_handle: Optional[BackgroundProcHandle]
-        self.proc_handle = fn(*args, input_path, output_path, kwargs)
         self._finalizer = weakref.finalize(self, self.shutdown)
 
     def __del__(self):
@@ -171,3 +169,35 @@ class MPBackgroundProcess:
         if hasattr(self, "proc_handle") and self.proc_handle:
             self.proc_handle.shutdown()
             self.proc_handle = None
+
+    @staticmethod
+    def wait_for_startup(
+        input_path: str,
+        output_path: str,
+        process_name: str,
+        target_fn: Callable,
+        process_kwargs: Dict[Any, Any],
+    ) -> "MPBackgroundProcess":
+        context = get_mp_context()
+        reader, writer = context.Pipe(duplex=False)
+
+        assert ("ready_pipe" not in process_kwargs and
+                "input_path" not in process_kwargs and
+                "output_path" not in process_kwargs)
+        process_kwargs["ready_pipe"] = writer
+        process_kwargs["input_path"] = input_path
+        process_kwargs["output_path"] = output_path
+
+        # Run Detokenizer busy loop in background process.
+        proc = context.Process(target=target_fn,
+                               kwargs=process_kwargs)
+        proc.start()
+        
+        # Wait for startup.
+        if reader.recv()["status"] != "READY":
+            raise RuntimeError(
+                f"{process_name} initalization failed. "
+                "See root cause above."
+            )
+
+        return BackgroundProcHandle(proc, input_path, output_path)

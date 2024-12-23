@@ -24,8 +24,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.utils import (zmq_socket_ctx, BackgroundProcHandle, 
-                           MPBackgroundProcess)
+from vllm.v1.utils import zmq_socket_ctx, MPBackgroundProcess
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -136,6 +135,8 @@ class EngineCore:
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
+    READY_STR = "READY"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -148,10 +149,9 @@ class EngineCoreProc(EngineCore):
         super().__init__(vllm_config, executor_class, usage_context)
 
         # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ socket IO with GPU since they release the GIL,
-        # and to overlap some serialization/deserialization with the
-        # model forward pass.
-        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+        # overlap ZMQ IO with GPU since they release the GIL and 
+        # some serialization/deserialization with the model forward.
+        # Threads handle Socket <-> Queues and busy_loop uses Queues.
         self.input_queue: queue.Queue[EngineRequestUnion] = queue.Queue()
         self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
@@ -162,42 +162,8 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        ready_pipe.send({"status": "READY"})
+        ready_pipe.send({"status": EngineCoreProc.READY_STR})
 
-    @staticmethod
-    def make_engine_core_process(
-        vllm_config: VllmConfig,
-        executor_class: Type[Executor],
-        usage_context: UsageContext,
-        input_path: str,
-        output_path: str,
-    ) -> BackgroundProcHandle:
-        context = get_mp_context()
-        reader, writer = context.Pipe(duplex=False)
-
-        process_kwargs = {
-            "input_path": input_path,
-            "output_path": output_path,
-            "ready_pipe": writer,
-            "vllm_config": vllm_config,
-            "executor_class": executor_class,
-            "usage_context": usage_context,
-        }
-        
-        # Run EngineCore busy loop in background process.
-        proc = context.Process(target=EngineCoreProc.run_engine_core,
-                               kwargs=process_kwargs)
-        proc.start()
-
-        # Wait for startup.
-        if reader.recv()["status"] != "READY":
-            raise RuntimeError(
-                "EngineCore initalization failed. See root cause above."
-            )
-
-        return BackgroundProcHandle(proc=proc,
-                                    input_path=input_path,
-                                    output_path=output_path)
 
     @staticmethod
     def run_engine_core(*args, **kwargs):
@@ -331,14 +297,25 @@ class EngineCoreProc(EngineCore):
 
 
 class MPEngineCoreClient(MPBackgroundProcess):
-    """MPEngineCoreClient: client for multi-proc EngineCore."""
+    """Client for multi-proc EngineCore."""
 
-    def __init__(self, *args, input_path: str, output_path: str, **kwargs):
-        super().__init__(
-            *args,
-            fn=EngineCoreProc.make_engine_core_process,
+    def __init__(self,
+                 input_path: str,
+                 output_path: str,
+                 vllm_config: VllmConfig,
+                 executor_class: Type[Executor],
+                 usage_context: UsageContext):
+
+        super().__init__()
+
+        self.proc_handle = MPBackgroundProcess.wait_for_startup(
             input_path=input_path,
             output_path=output_path,
+            process_name="EngineCore",
+            target_fn=EngineCoreProc.run_engine_core,
+            process_kwargs={
+                "vllm_config": vllm_config,
+                "executor_class": executor_class,
+                "usage_context": usage_context,
+            },
         )
-
-    

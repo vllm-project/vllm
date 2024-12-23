@@ -4,10 +4,10 @@ import zmq.asyncio
 import msgspec
 import signal
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from typing import Dict, Iterable, List, Optional, Tuple,Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
-from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -17,10 +17,8 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         get_exception_traceback)
 from vllm.v1.engine import (EngineCoreOutputs,
-                            BackgroundProcHandle, 
                             EngineRequest, EngineAbortRequest)
-from vllm.v1.utils import (make_zmq_socket, zmq_socket_ctx, 
-                           wait_for_startup)
+from vllm.v1.utils import zmq_socket_ctx, MPBackgroundProcess
 
 logger = init_logger(__name__)
 
@@ -298,8 +296,8 @@ class DetokenizerProc(Detokenizer):
         to_engine_core_path: str,
         input_path: str,
         output_path: str,
-        write_: str,
-        **kwargs
+        ready_pipe: Connection,
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
@@ -308,50 +306,9 @@ class DetokenizerProc(Detokenizer):
         self.input_path = input_path
         self.output_path = output_path
 
-        # Send readiness signal.
-        with zmq_socket_ctx(ready_path, zmq.PUSH) as ready_socket:
-            ready_socket.send_string(DetokenizerProc.READY_STR)
+        # Send Readiness signal to DetokenizerClient.
+        ready_pipe.send({"status": DetokenizerProc.READY_STR})
 
-
-    @staticmethod
-    def make_detokenizer_process(
-        from_engine_core_path: str,
-        to_engine_core_path: str,
-        input_path: str,
-        output_path: str,
-        tokenizer_name: str,
-        tokenizer_mode: str = "auto",
-        trust_remote_code: bool = False,
-        revision: Optional[str] = None,
-    ) -> BackgroundProcHandle:
-        context = get_mp_context()
-        reader, writer = context.Pipe(duplex=False)
-
-        process_kwargs = {
-            "from_engine_core_path": from_engine_core_path,
-            "to_engine_core_path": to_engine_core_path,
-            "input_path": input_path,
-            "output_path": output_path,
-            "ready_pipe": writer,
-            "tokenizer_name": tokenizer_name,
-            "tokenizer_mode": tokenizer_mode,
-            "trust_remote_code": trust_remote_code,
-            "revision": revision,
-        }
-        # Run Detokenizer busy loop in background process.
-        proc = context.Process(target=DetokenizerProc.run_detokenizer,
-                               kwargs=process_kwargs)
-        proc.start()
-        
-        # Wait for startup.
-        if reader.recv()["status"] != "READY":
-            raise RuntimeError(
-                "Detokenizer initalization failed. See root cause above."
-            )
-
-        return BackgroundProcHandle(proc=proc,
-                                    input_path=input_path,
-                                    output_path=output_path)
     
     @staticmethod
     def run_detokenizer(*args, **kwargs):
@@ -475,44 +432,32 @@ class DetokenizerProc(Detokenizer):
                         decoder=decoder,
                     )
 
-class MPDetokenizerClient:
+class MPDetokenizerClient(MPBackgroundProcess):
+    """Client for multi-proc Detokenizer."""
     
     def __init__(self,
-                 *args,
+                 input_path: str,
+                 output_path: str,
                  from_engine_core_path: str,
                  to_engine_core_path: str,
-                 **kwargs):
-        
-        # ZMQ setup.
-        self.ctx = zmq.asyncio.Context(2)
+                 tokenizer_name: str,
+                 tokenizer_mode: str = "auto",
+                 trust_remote_code: bool = False,
+                 revision: Optional[str] = None):
 
-        # Get input (DetokenizerRequest) to Detokenizer.
-        input_path = get_open_zmq_ipc_path()
-        self.input_socket = make_zmq_socket(
-            self.ctx,
-            input_path,
-            zmq.PUSH,
-        )
+        super().__init__()
 
-        # Get output (RequestOutput) from Detokenizer.
-        output_path = get_open_zmq_ipc_path()
-        self.output_socket = make_zmq_socket(self.ctx,
-            output_path,
-            zmq.PULL,
-        )
-
-        # Start Detokenizer in background process.
-        self.proc_handle: Optional[BackgroundProcHandle]
-        self.proc_handle = DetokenizerProc.make_detokenizer_process(
-            *args,
-            from_engine_core_path=from_engine_core_path,
-            to_engine_core_path=to_engine_core_path,
+        self.proc_handle = MPBackgroundProcess.wait_for_startup(
             input_path=input_path,
             output_path=output_path,
-            **kwargs,
+            process_name="Detokenizer",
+            target_fn=DetokenizerProc.run_detokenizer,
+            process_kwargs={
+                "from_engine_core_path": from_engine_core_path,
+                "to_engine_core_path": to_engine_core_path,
+                "tokenizer_name": tokenizer_name,
+                "tokenizer_mode": tokenizer_mode,
+                "trust_remote_code": trust_remote_code,
+                "revision": revision,
+            },
         )
-    
-    def shutdown(self):
-        if hasattr(self, "proc_handle") and self.proc_handle:
-            self.proc_handle.shutdown()
-            self.proc_handle = None
