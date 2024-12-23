@@ -201,6 +201,7 @@ class IncrementalDetokenizer:
             return self.output_text[last_offset:length]
         return ""
 
+
 class Detokenizer:
 
     def __init__(self,
