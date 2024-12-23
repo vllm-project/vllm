@@ -58,7 +58,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
     ) -> None:
         assert start_engine_loop
-        
+
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
