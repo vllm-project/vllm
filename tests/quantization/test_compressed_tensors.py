@@ -88,6 +88,10 @@ def test_compressed_tensors_w8a8_logprobs(hf_runner, vllm_runner,
                                           max_tokens, num_logprobs):
     dtype = "bfloat16"
 
+    # skip language translation prompt for the static per tensor asym model
+    if model_path == "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym":  # noqa: E501
+        example_prompts = example_prompts[0:-1]
+
     with hf_runner(model_path, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
