@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_MAMBA_NUM_OF_SLOTS_MULTIPLIER: float = 1.5
 
 
 def get_default_cache_root():
@@ -466,6 +467,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+    "VLLM_MAMBA_NUM_OF_SLOTS_MULTIPLIER":
+    lambda: float(os.getenv("VLLM_MAMBA_NUM_OF_SLOTS_MULTIPLIER", "1.5")),
 }
 
 # end-env-vars-definition
