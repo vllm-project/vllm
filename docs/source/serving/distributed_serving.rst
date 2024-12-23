@@ -22,7 +22,7 @@ After adding enough GPUs and nodes to hold the model, you can run vLLM first, wh
 Details for Distributed Inference and Serving
 ----------------------------------------------
 
-vLLM supports distributed tensor-parallel inference and serving. Currently, we support `Megatron-LM's tensor parallel algorithm <https://arxiv.org/pdf/1909.08053.pdf>`_.  We also support pipeline parallel as a beta feature for online serving. We manage the distributed runtime with either `Ray <https://github.com/ray-project/ray>`_ or python native multiprocessing. Multiprocessing can be used when deploying on a single node, multi-node inferencing currently requires Ray.
+vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. Currently, we support `Megatron-LM's tensor parallel algorithm <https://arxiv.org/pdf/1909.08053.pdf>`_. We manage the distributed runtime with either `Ray <https://github.com/ray-project/ray>`_ or python native multiprocessing. Multiprocessing can be used when deploying on a single node, multi-node inferencing currently requires Ray.
 
 Multiprocessing will be used by default when not running in a Ray placement group and if there are sufficient GPUs available on the same node for the configured :code:`tensor_parallel_size`, otherwise Ray will be used. This default can be overridden via the :code:`LLM` class :code:`distributed-executor-backend` argument or :code:`--distributed-executor-backend` API server argument. Set it to :code:`mp` for multiprocessing or :code:`ray` for Ray. It's not required for Ray to be installed for the multiprocessing case.
 
@@ -49,15 +49,12 @@ You can also additionally specify :code:`--pipeline-parallel-size` to enable pip
     $     --tensor-parallel-size 4 \
     $     --pipeline-parallel-size 2
 
-.. note::
-    Pipeline parallel is a beta feature. It is only supported for online serving as well as LLaMa, GPT2, and Mixtral style models.
-
 Multi-Node Inference and Serving
 --------------------------------
 
 If a single node does not have enough GPUs to hold the model, you can run the model using multiple nodes. It is important to make sure the execution environment is the same on all nodes, including the model path, the Python environment. The recommended way is to use docker images to ensure the same environment, and hide the heterogeneity of the host machines via mapping them into the same docker configuration.
 
-The first step, is to start containers and organize them into a cluster. We have provided a helper `script <https://github.com/vllm-project/vllm/tree/main/examples/run_cluster.sh>`_ to start the cluster.
+The first step, is to start containers and organize them into a cluster. We have provided a helper `script <https://github.com/vllm-project/vllm/tree/main/examples/run_cluster.sh>`_ to start the cluster. Please note, this script launches docker without administrative privileges that would be required to access GPU performance counters when running profiling and tracing tools. For that purpose, the script can have ``CAP_SYS_ADMIN`` to the docker container by using the ``--cap-add`` option in the docker run command.
 
 Pick a node as the head node, and run the following command:
 

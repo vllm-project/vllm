@@ -16,9 +16,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.server import serve_http
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
@@ -46,6 +47,11 @@ async def generate(request: Request) -> Response:
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
     request_dict = await request.json()
+    return await _generate(request_dict, raw_request=request)
+
+
+@with_cancellation
+async def _generate(request_dict: dict, raw_request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
@@ -58,26 +64,27 @@ async def generate(request: Request) -> Response:
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
             prompt = request_output.prompt
+            assert prompt is not None
             text_outputs = [
                 prompt + output.text for output in request_output.outputs
             ]
             ret = {"text": text_outputs}
-            yield (json.dumps(ret) + "\0").encode("utf-8")
+            yield (json.dumps(ret) + "\n").encode("utf-8")
 
     if stream:
         return StreamingResponse(stream_results())
 
     # Non-streaming case
     final_output = None
-    async for request_output in results_generator:
-        if await request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await engine.abort(request_id)
-            return Response(status_code=499)
-        final_output = request_output
+    try:
+        async for request_output in results_generator:
+            final_output = request_output
+    except asyncio.CancelledError:
+        return Response(status_code=499)
 
     assert final_output is not None
     prompt = final_output.prompt
+    assert prompt is not None
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
     return JSONResponse(ret)
@@ -113,7 +120,9 @@ async def run_server(args: Namespace,
     logger.info("args: %s", args)
 
     app = await init_app(args, llm_engine)
-    await serve_http(
+    assert engine is not None
+
+    shutdown_task = await serve_http(
         app,
         host=args.host,
         port=args.port,
@@ -125,6 +134,8 @@ async def run_server(args: Namespace,
         ssl_cert_reqs=args.ssl_cert_reqs,
         **uvicorn_kwargs,
     )
+
+    await shutdown_task
 
 
 if __name__ == "__main__":

@@ -1,18 +1,45 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple, Type
 
 import openvino as ov
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
+from vllm.attention.backends.utils import CommonAttentionState
+from vllm.multimodal import MultiModalPlaceholderMap
+
+
+def copy_cache_block(src_tensor: ov.Tensor, dst_tensor: ov.Tensor,
+                     src_offset: int, dst_offset: int) -> None:
+
+    def create_roi_tensor(
+        tensor: ov.Tensor,
+        block_number: int,
+    ) -> ov.Tensor:
+        roi_begin = ov.runtime.Coordinate([0, 0, 0, 0])
+        roi_end = ov.runtime.Coordinate(tensor.get_shape())
+
+        roi_begin[0] = block_number
+        roi_end[0] = block_number + 1
+
+        if isinstance(tensor, ov.Tensor):
+            return ov.Tensor(tensor, roi_begin, roi_end)
+        else:
+            return ov.RemoteTensor(tensor, roi_begin, roi_end)
+
+    src_roi_tensor = \
+        create_roi_tensor(src_tensor, src_offset)
+    dst_roi_tensor = \
+        create_roi_tensor(dst_tensor, dst_offset)
+    src_roi_tensor.copy_to(dst_roi_tensor)
 
 
 class OpenVINOAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "openvino"
+        return "OPENVINO"
 
     @staticmethod
     def get_impl_cls():
@@ -23,6 +50,10 @@ class OpenVINOAttentionBackend(AttentionBackend):
     @staticmethod
     def make_metadata(*args, **kwargs) -> "AttentionMetadata":
         raise NotImplementedError
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def make_openvino_metadata(*args, **kwargs) -> "OpenVINOAttentionMetadata":
@@ -39,13 +70,12 @@ class OpenVINOAttentionBackend(AttentionBackend):
 
     @staticmethod
     def swap_blocks(
-        src_kv_cache: ov.Tensor,
-        dst_kv_cache: ov.Tensor,
-        src_to_dst: torch.Tensor,
+        src_tensor: ov.Tensor,
+        dst_tensor: ov.Tensor,
+        src_to_dists: List[Tuple[int, int]],
     ) -> None:
-        # OpenVINO currently supports only CPU, which does not require
-        # swap of KV cache blocks
-        raise NotImplementedError
+        for src, dst in src_to_dists:
+            copy_cache_block(src_tensor, dst_tensor, src, dst)
 
     @staticmethod
     def copy_blocks(
@@ -54,8 +84,8 @@ class OpenVINOAttentionBackend(AttentionBackend):
     ) -> None:
         for src, dst in src_to_dists:
             for key_cache, value_cache in kv_caches:
-                key_cache.data[dst, :] = key_cache.data[src, :]
-                value_cache.data[dst, :] = value_cache.data[src, :]
+                copy_cache_block(key_cache, key_cache, src, dst)
+                copy_cache_block(value_cache, value_cache, src, dst)
 
 
 @dataclass
@@ -99,3 +129,12 @@ class OpenVINOAttentionMetadata:
     # Shape: scalar
     # Type: i32
     max_context_len: torch.Tensor
+
+    # The index maps that relate multi-modal embeddings to the corresponding
+    # placeholders.
+    #
+    # N.B. These aren't really related to attention and don't belong on this
+    # type -- this is just a temporary solution to make them available to
+    # `model_executable`.
+    multi_modal_placeholder_index_maps: Optional[Dict[
+        str, MultiModalPlaceholderMap.IndexMap]]

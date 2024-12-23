@@ -4,7 +4,8 @@ import tempfile
 from unittest.mock import patch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig)
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.worker.worker import Worker
@@ -12,10 +13,11 @@ from vllm.worker.worker import Worker
 
 @patch.dict(os.environ, {"RANK": "0"})
 def test_worker_apply_lora(sql_lora_files):
-    worker = Worker(
+    vllm_config = VllmConfig(
         model_config=ModelConfig(
             "meta-llama/Llama-2-7b-hf",
-            "meta-llama/Llama-2-7b-hf",
+            task="auto",
+            tokenizer="meta-llama/Llama-2-7b-hf",
             tokenizer_mode="auto",
             trust_remote_code=False,
             seed=0,
@@ -27,16 +29,19 @@ def test_worker_apply_lora(sql_lora_files):
             load_format="dummy",
         ),
         parallel_config=ParallelConfig(1, 1, False),
-        scheduler_config=SchedulerConfig(32, 32, 32),
+        scheduler_config=SchedulerConfig("generate", 32, 32, 32),
         device_config=DeviceConfig("cuda"),
         cache_config=CacheConfig(block_size=16,
                                  gpu_memory_utilization=1.,
                                  swap_space=0,
                                  cache_dtype="auto"),
-        local_rank=0,
-        rank=0,
         lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32,
                                max_loras=32),
+    )
+    worker = Worker(
+        vllm_config=vllm_config,
+        local_rank=0,
+        rank=0,
         distributed_init_method=f"file://{tempfile.mkstemp()[1]}",
     )
     worker.init_device()

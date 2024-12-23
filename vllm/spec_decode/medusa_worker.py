@@ -4,26 +4,27 @@ from typing import List, Optional, Set, Tuple
 import torch
 
 from vllm.model_executor import SamplingMetadata
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker import Worker
+from vllm.worker.worker_base import WorkerWrapperBase
 
 
-class MedusaWorker(NonLLMProposerWorkerBase, Worker):
+class MedusaWorker(NonLLMProposerWorkerBase, WorkerWrapperBase):
     """Worker for Medusa.
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(kwargs.get("vllm_config"))
+        self.init_worker(*args, **kwargs)
 
         # Lazy initialization list.
         self._proposer: Top1Proposer
 
     def init_device(self):
-        super().init_device()
+        self.worker.init_device()
 
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
@@ -33,6 +34,9 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
         )
 
     def set_include_gpu_probs_tensor(self):
+        pass
+
+    def set_should_modify_greedy_probs_inplace(self):
         pass
 
     @torch.inference_mode()
@@ -57,9 +61,11 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
         seq_lens, query_lens = self._prepare_input_tensors(
             seq_group_metadata_list)
 
+        generators = self.model_runner.get_generators(
+            execute_model_req.finished_requests_ids)
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list, seq_lens, query_lens, self.device,
-            self.model_runner.pin_memory)
+            self.model_runner.pin_memory, generators)
 
         model_outputs = self.model_runner.model.generate_proposals(
             previous_hidden_states=execute_model_req.previous_hidden_states.

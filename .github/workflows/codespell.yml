@@ -1,0 +1,45 @@
+name: codespell
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.py"
+      - "**/*.md"
+      - "**/*.rst"
+      - pyproject.toml
+      - requirements-lint.txt
+      - .github/workflows/codespell.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "**/*.py"
+      - "**/*.md"
+      - "**/*.rst"
+      - pyproject.toml
+      - requirements-lint.txt
+      - .github/workflows/codespell.yml
+
+jobs:
+  codespell:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-lint.txt
+    - name: Spelling check with codespell
+      run: |
+        codespell --toml pyproject.toml

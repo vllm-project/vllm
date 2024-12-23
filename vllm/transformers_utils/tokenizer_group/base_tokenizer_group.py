@@ -1,10 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-from transformers import PreTrainedTokenizer
-
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 class BaseTokenizerGroup(ABC):
@@ -22,9 +21,10 @@ class BaseTokenizerGroup(ABC):
         pass
 
     @abstractmethod
-    def get_max_input_len(self,
-                          lora_request: Optional[LoRARequest] = None
-                          ) -> Optional[int]:
+    def get_max_input_len(
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> Optional[int]:
         """Get the maximum input length for the LoRA request."""
         pass
 
@@ -47,17 +47,17 @@ class BaseTokenizerGroup(ABC):
 
     @abstractmethod
     def get_lora_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
         """Get a tokenizer for a LoRA request."""
         pass
 
     @abstractmethod
     async def get_lora_tokenizer_async(
-            self,
-            lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
         """Get a tokenizer for a LoRA request."""
         pass
 

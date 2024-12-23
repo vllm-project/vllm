@@ -4,7 +4,7 @@ FP8 E5M2 KV Cache
 ==================
 
 The int8/int4 quantization scheme requires additional scale GPU memory storage, which reduces the expected GPU memory benefits.
-The FP8 data format retains 2~3 mantissa bits and can convert float/fp16/bflaot16 and fp8 to each other.
+The FP8 data format retains 2~3 mantissa bits and can convert float/fp16/bfloat16 and fp8 to each other.
 
 Here is an example of how to enable this feature:
 
@@ -31,6 +31,4 @@ Here is an example of how to enable this feature:
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
-
-Note, current prefix caching doesn't work with FP8 KV cache enabled, forward_prefix kernel should handle different KV and cache type.
 

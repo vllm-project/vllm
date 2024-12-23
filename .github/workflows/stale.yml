@@ -1,0 +1,52 @@
+name: 'Close inactive issues and PRs'
+
+on:
+  schedule:
+    # Daily at 1:30 AM UTC
+    - cron: '30 1 * * *'
+
+jobs:
+  close-issues-and-pull-requests:
+    permissions:
+      issues: write
+      pull-requests: write
+      actions: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@28ca1036281a5e5922ead5184a1bbf96e5fc984e # v9.0.0
+        with:
+          # Increasing this value ensures that changes to this workflow
+          # propagate to all issues and PRs in days rather than months
+          operations-per-run: 1000
+
+          exempt-draft-pr: true
+          exempt-issue-labels: 'keep-open'
+          exempt-pr-labels: 'keep-open'
+
+          labels-to-add-when-unstale: 'unstale'
+          labels-to-remove-when-stale: 'unstale'
+
+          days-before-issue-stale: 90
+          days-before-issue-close: 30
+          stale-issue-label: 'stale'
+          stale-issue-message: >
+            This issue has been automatically marked as stale because it has not
+            had any activity within 90 days. It will be automatically closed if no
+            further activity occurs within 30 days. Leave a comment if
+            you feel this issue should remain open. Thank you!
+          close-issue-message: >
+            This issue has been automatically closed due to inactivity. Please
+            feel free to reopen if you feel it is still relevant. Thank you!
+
+          days-before-pr-stale: 90
+          days-before-pr-close: 30
+          stale-pr-label: 'stale'
+          stale-pr-message: >
+            This pull request has been automatically marked as stale because it
+            has not had any activity within 90 days. It will be automatically
+            closed if no further activity occurs within 30 days. Leave a comment
+            if you feel this pull request should remain open. Thank you!
+          close-pr-message: >
+            This pull request has been automatically closed due to inactivity.
+            Please feel free to reopen if you intend to continue working on it.
+            Thank you!

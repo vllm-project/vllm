@@ -86,9 +86,18 @@ def test_create_single_target_seq_group_metadata(k: int):
         input_seq_id,
         target_seq_id,
         token_ids,
+        input_seq_group_metadata.sampling_params,
     )
 
     assert output.request_id == input_seq_group_metadata.request_id
+    assert output.sampling_params.repetition_penalty == \
+        input_seq_group_metadata.sampling_params.repetition_penalty
+    assert output.sampling_params.temperature == \
+        input_seq_group_metadata.sampling_params.temperature
+    assert output.sampling_params.top_p == \
+        input_seq_group_metadata.sampling_params.top_p
+    assert output.sampling_params.top_k == \
+        input_seq_group_metadata.sampling_params.top_k
     assert len(output.seq_data) == 1
     assert output.seq_data[target_seq_id].get_prompt_token_ids() == tuple(
         prompt_tokens)

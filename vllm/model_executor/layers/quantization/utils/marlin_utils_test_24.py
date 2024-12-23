@@ -6,8 +6,10 @@ from typing import List
 import numpy
 import torch
 
+from vllm.scalar_type import ScalarType
+
 from .marlin_utils_test import marlin_weights
-from .quant_utils import quantize_weights
+from .quant_utils import gptq_quantize_weights
 
 
 # This is PyTorch implementation of main part of reorder_meta()
@@ -348,13 +350,11 @@ def check_24(w, num_rows_to_sample=50, _verbose=False):
     print(f"{non_24_segments} / {total_segments} do not have 2:4 structure.")
 
 
-def compress_quantized_24_weight(q_24, size_k, size_n, num_bits):
+def compress_quantized_24_weight(q_24, size_k, size_n, wtype: ScalarType):
     assert q_24.shape == (size_k, size_n)
 
-    # Remove zp to normalize over 0
-    max_q_val = (1 << num_bits) - 1
-    zp = (max_q_val + 1) // 2
-    q_24_no_zp = q_24 - zp
+    # Remove bias to normalize over 0
+    q_24_no_zp = q_24 - wtype.bias
 
     # Compress
     q_24_no_zp = q_24_no_zp.t().contiguous()
@@ -362,8 +362,8 @@ def compress_quantized_24_weight(q_24, size_k, size_n, num_bits):
         q_24_no_zp)
     q_24_no_zp_comp = q_24_no_zp_comp.t().contiguous()
 
-    # Restore zp
-    q_24_comp = q_24_no_zp_comp + zp
+    # Restore bias
+    q_24_comp = q_24_no_zp_comp + wtype.bias
 
     # Resize meta to its actual shape (without moving any data)
     meta = meta.resize_(meta.shape[1] // 2, meta.shape[0] * 2)
@@ -427,7 +427,7 @@ def marlin_permute_scales_24(s: torch.Tensor, size_k: int, size_n: int,
 
 def marlin_24_quantize(
     w: torch.Tensor,
-    num_bits: int,
+    quant_type: ScalarType,
     group_size: int,
 ):
     size_k, size_n = w.shape
@@ -441,20 +441,18 @@ def marlin_24_quantize(
     w_24, mask_24 = inject_24(w, size_k, size_n)
 
     # Quantize
-    w_24_ref, q_w_24, s, g_idx, rand_perm = quantize_weights(w_24,
-                                                             num_bits,
-                                                             group_size,
-                                                             act_order=False)
+    w_24_ref, q_w_24, s, g_idx, rand_perm = gptq_quantize_weights(
+        w_24, quant_type, group_size, act_order=False)
 
     # Compress quantized weight
     q_w_24_comp, meta = compress_quantized_24_weight(q_w_24, size_k, size_n,
-                                                     num_bits)
+                                                     quant_type)
     size_k_comp = size_k // 2
 
     # Reformat to marlin
-    weight_perm = get_weight_perm_24(num_bits)
+    weight_perm = get_weight_perm_24(quant_type.size_bits)
     marlin_24_q_w_comp = marlin_weights(q_w_24_comp, size_k_comp, size_n,
-                                        num_bits, weight_perm)
+                                        quant_type.size_bits, weight_perm)
     marlin_24_s = marlin_permute_scales_24(s, size_k, size_n, group_size)
 
     # Create result
