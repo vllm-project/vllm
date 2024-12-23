@@ -604,7 +604,7 @@ def test_processing_cache_correctness(
 
         if "audio" in modalities:
             audios = []
-            for image_idx in range(rng.randint(3)):
+            for audio_idx in range(rng.randint(3)):
                 if rng.rand() < hit_rate:
                     audio = repeating_audio
                 else:
