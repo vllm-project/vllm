@@ -4,7 +4,7 @@ from multiprocessing.connection import Connection
 from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import (Any, Generic, Iterator, List, Optional, TypeVar, Union,
-                    overload)
+                    overload, Callable)
 
 import zmq
 import zmq.asyncio
@@ -126,4 +126,47 @@ def zmq_socket_ctx(
 
     finally:
         ctx.destroy(linger=0)
-    
+
+from multiprocessing.process import BaseProcess
+from vllm.utils import kill_process_tree
+import os
+import weakref
+from dataclasses import dataclass
+
+@dataclass
+class BackgroundProcHandle:
+    proc: BaseProcess
+    input_path: str
+    output_path: str
+
+    def shutdown(self):
+        # Shutdown the process if needed.
+        if self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join(5)
+
+            if self.proc.is_alive():
+                kill_process_tree(self.proc.pid)
+
+        # Remove zmq ipc socket files
+        ipc_sockets = [self.output_path, self.input_path]
+        for ipc_socket in ipc_sockets:
+            socket_file = ipc_socket.replace("ipc://", "")
+            if os and os.path.exists(socket_file):
+                os.remove(socket_file)
+
+
+class MPBackgroundProcess:
+    def __init__(self, *args, fn: Callable, input_path: str, output_path: str, **kwargs):
+        # Start EngineCore in background process.
+        self.proc_handle: Optional[BackgroundProcHandle]
+        self.proc_handle = fn(*args, input_path, output_path, kwargs)
+        self._finalizer = weakref.finalize(self, self.shutdown)
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        if hasattr(self, "proc_handle") and self.proc_handle:
+            self.proc_handle.shutdown()
+            self.proc_handle = None

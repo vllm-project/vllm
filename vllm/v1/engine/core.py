@@ -3,8 +3,7 @@ import queue
 import signal
 import threading
 import time
-import weakref
-from typing import List, Optional, Tuple, Type
+from typing import List, Tuple, Type
 
 import zmq
 import zmq.asyncio
@@ -26,7 +25,8 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.utils import zmq_socket_ctx
+from vllm.v1.utils import (zmq_socket_ctx, BackgroundProcHandle, 
+                           MPBackgroundProcess)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -330,31 +330,16 @@ class EngineCoreProc(EngineCore):
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)
 
-class MPEngineCoreClient:
-    """
-    MPEngineCoreClient: client for multi-proc EngineCore.
-        EngineCore runs in a background process busy loop, getting
-        new EngineRequests and returning EngineCoreOutputs
 
-        * pushes EngineRequests via input_socket
-        * pulls EngineCoreOutputs via output_socket
-    """
+class MPEngineCoreClient(MPBackgroundProcess):
+    """MPEngineCoreClient: client for multi-proc EngineCore."""
 
     def __init__(self, *args, input_path: str, output_path: str, **kwargs):
-        # Start EngineCore in background process.
-        self.proc_handle: Optional[BackgroundProcHandle]
-        self.proc_handle = EngineCoreProc.make_engine_core_process(
+        super().__init__(
             *args,
+            fn=EngineCoreProc.make_engine_core_process,
             input_path=input_path,
             output_path=output_path,
-            **kwargs,
         )
-        self._finalizer = weakref.finalize(self, self.shutdown)
 
-    def shutdown(self):
-        if hasattr(self, "proc_handle") and self.proc_handle:
-            self.proc_handle.shutdown()
-            self.proc_handle = None
-
-    def __del__(self):
-        self.shutdown()
+    

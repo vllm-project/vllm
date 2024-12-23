@@ -173,14 +173,16 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
-        # 1) Process raw inputs into the request.
+        # Process raw inputs into the request.
         engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
-        # 2) Add to Detokenizer and EngineCore.
+        # Add to Detokenizer and EngineCore.
         if self.multiprocess_mode:
             # Send to Detokenizer (which forwards to EngineCore).
+            # Note: we forward the message rather than sending
+            # to each process separately to avoid race conditions.
             self.detokenizer_client.input_socket.send_pyobj(engine_request)
         else:
             # Add directly to Detokenizer and EngineCore.
@@ -192,16 +194,13 @@ class LLMEngine:
         if self.multiprocess_mode:
             # Get next output from the Detokenizer.
             return self.detokenizer_client.output_socket.recv_pyobj()
-
         else:
-            # 1) Get EngineCoreOutput from the EngineCore.
+            # Step EngineCore and Detokenizer.
             engine_core_outputs = self.engine_core.step()
-            
-            # 2) Detokenizee the EngineCoreOutput.
             request_outputs, requests_to_abort = self.detokenizer.step(
                 engine_core_outputs)
 
-            # 3) Abort requests that finished due to stopping criteria.
+            # Abort any requests that hit a stop string.
             if requests_to_abort:
                 self.abort_request(requests_to_abort)
             
@@ -236,5 +235,8 @@ class LLMEngine:
         self.shutdown()
 
     def shutdown(self):
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+        if engine_core_client := getattr(self, "engine_core_client", None):
+            engine_core_client.shutdown()
+
+        if detokenizer_client := getattr(self, "detokenizer_client", None):
+            detokenizer_client.shutdown()

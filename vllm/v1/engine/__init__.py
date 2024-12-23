@@ -1,6 +1,4 @@
-import os
 from dataclasses import dataclass
-from multiprocessing.process import BaseProcess
 from typing import List, Optional, Union
 
 import msgspec
@@ -8,29 +6,6 @@ import msgspec
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.sampling_params import SamplingParams
-from vllm.utils import kill_process_tree
-
-@dataclass
-class BackgroundProcHandle:
-    proc: BaseProcess
-    input_path: str
-    output_path: str
-
-    def shutdown(self):
-        # Shutdown the process if needed.
-        if self.proc.is_alive():
-            self.proc.terminate()
-            self.proc.join(5)
-
-            if self.proc.is_alive():
-                kill_process_tree(self.proc.pid)
-
-        # Remove zmq ipc socket files
-        ipc_sockets = [self.output_path, self.input_path]
-        for ipc_socket in ipc_sockets:
-            socket_file = ipc_socket.replace("ipc://", "")
-            if os and os.path.exists(socket_file):
-                os.remove(socket_file)
 
 
 @dataclass

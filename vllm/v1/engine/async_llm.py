@@ -186,10 +186,12 @@ class AsyncLLM(EngineClient):
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
-        # 2) Create Queue (output_handler() pushes, generate() pulls)
+        # 2) Create Queue (output_handler() pushes, generate() pulls).
         self.rid_to_queue[request_id] = asyncio.Queue()
 
         # 3) Send to Detokenizer (which forwards to EngineCore).
+        # Note: we forward the request rather than sending to each
+        # process separately to avoid race conditions in Detokenizer.
         await self.detokenizer_client.input_socket.send_pyobj(engine_request)
 
         return self.rid_to_queue[request_id]
