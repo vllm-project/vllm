@@ -91,16 +91,16 @@ Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTor
 
 Install ROCm's Triton flash attention (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
 
-> ```console
-> $ python3 -m pip install ninja cmake wheel pybind11
-> $ pip uninstall -y triton
-> $ git clone https://github.com/OpenAI/triton.git
-> $ cd triton
-> $ git checkout e192dba
-> $ cd python
-> $ pip3 install .
-> $ cd ../..
-> ```
+```console
+$ python3 -m pip install ninja cmake wheel pybind11
+$ pip uninstall -y triton
+$ git clone https://github.com/OpenAI/triton.git
+$ cd triton
+$ git checkout e192dba
+$ cd python
+$ pip3 install .
+$ cd ../..
+```
 
 ```{note}
 - If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
@@ -111,47 +111,44 @@ Install ROCm's Triton flash attention (the default triton-mlir branch) following
 Install ROCm's flash attention (v2.5.9.post1) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention/tree/ck_tile#amd-gpurocm-support)
 Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
-For example, for ROCm 6.2, suppose your gfx arch is `gfx90a`.
-Note to get your gfx architecture, run `rocminfo |grep gfx`.
+For example, for ROCm 6.2, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
 
-> ```console
-> $ git clone https://github.com/ROCm/flash-attention.git
-> $ cd flash-attention
-> $ git checkout 3cea2fb
-> $ git submodule update --init
-> $ GPU_ARCHS="gfx90a" python3 setup.py install
-> $ cd ..
-> ```
+```console
+$ git clone https://github.com/ROCm/flash-attention.git
+$ cd flash-attention
+$ git checkout 3cea2fb
+$ git submodule update --init
+$ GPU_ARCHS="gfx90a" python3 setup.py install
+$ cd ..
+```
 
 ```{note}
 - You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 ```
 
-3. Build vLLM.
+3. Build vLLM. For example, vLLM on ROCM 6.2 can be built with the following steps:
 
-   > For example, vLLM on ROCM 6.2 can be built with the following steps:
-   >
-   > ```console
-   > $ pip install --upgrade pip
-   >
-   > $ # Install PyTorch
-   > $ pip uninstall torch -y
-   > $ pip install --no-cache-dir --pre torch==2.6.0.dev20240918 --index-url https://download.pytorch.org/whl/nightly/rocm6.2
-   >
-   > $ # Build & install AMD SMI
-   > $ pip install /opt/rocm/share/amd_smi
-   >
-   > $ # Install dependencies
-   > $ pip install --upgrade numba scipy huggingface-hub[cli]
-   > $ pip install "numpy<2"
-   > $ pip install -r requirements-rocm.txt
-   >
-   > $ # Build vLLM for MI210/MI250/MI300.
-   > $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-   > $ python3 setup.py develop
-   > ```
-   >
-   > This may take 5-10 minutes. Currently, {code}`pip install .` does not work for ROCm installation.
+```bash
+$ pip install --upgrade pip
+
+# Install PyTorch
+$ pip uninstall torch -y
+$ pip install --no-cache-dir --pre torch==2.6.0.dev20241024 --index-url https://download.pytorch.org/whl/nightly/rocm6.2
+
+# Build & install AMD SMI
+$ pip install /opt/rocm/share/amd_smi
+
+# Install dependencies
+$ pip install --upgrade numba scipy huggingface-hub[cli]
+$ pip install "numpy<2"
+$ pip install -r requirements-rocm.txt
+
+# Build vLLM for MI210/MI250/MI300.
+$ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+$ python3 setup.py develop
+```
+
+This may take 5-10 minutes. Currently, {code}`pip install .` does not work for ROCm installation.
 
 ```{tip}
 - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
