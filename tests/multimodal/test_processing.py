@@ -577,14 +577,17 @@ def test_processing_cache_correctness(
         "audio": (np.zeros((512, )), 16000),
     }
     input_factory = {
-        "image": partial(_rand_img, rng, min_wh=128, max_wh=256),
-        "video": partial(_rand_video,
-                         rng,
-                         min_frames=1,
-                         max_frames=8,
-                         min_wh=128,
-                         max_wh=256),
-        "audio": partial(_rand_audio, rng, min_len=256, max_len=512, sr=16000),
+        "image":
+        partial(_rand_img, rng, min_wh=128, max_wh=256),
+        "video":
+        partial(_rand_video,
+                rng,
+                min_frames=1,
+                max_frames=8,
+                min_wh=128,
+                max_wh=256),
+        "audio":
+        partial(_rand_audio, rng, min_len=256, max_len=512, sr=16000),
     }
     input_max_count = {
         "image": 3,

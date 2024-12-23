@@ -229,8 +229,12 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
             if k == "video":
                 # Special case since even a single item can be a list
                 multi_data[k] = (  # type: ignore[index]
-                    v if (isinstance(v, torch.Tensor)
-                          or is_list_of(v, list)) else [v]
+                    v if (
+                        isinstance(v, torch.Tensor)
+                        or is_list_of(v, list)
+                        or isinstance(v[0], (np.ndarray, torch.Tensor))
+                           and v[0].ndim == 4
+                    ) else [v]
                 )
             elif k in ("image", "audio"):
                 multi_data[k] = (  # type: ignore[index]
@@ -860,15 +864,15 @@ class BaseMultiModalProcessor(ABC):
             for modality, idxs in mm_missing_idxs.items()
         }
         mm_missing_data_items = self._get_mm_items(mm_missing_data)
+        mm_missing_counts = mm_missing_data_items.get_item_counts()
 
         # Rely on our placeholder replacement logic instead of HF
         # to insert the placeholder tokens
         prompt_ids = self._get_tokenizer().encode(prompt_text)
 
-        if mm_missing_data_items:
+        if any(count > 0 for count in mm_missing_counts.values()):
             # Some HF processors (e.g. Qwen2-VL) expect corresponding
             # multi-modal tokens to be in the prompt text
-            mm_missing_counts = mm_missing_data_items.get_item_counts()
             dummy_inputs = self._get_dummy_mm_inputs(mm_missing_counts)
 
             _, mm_missing_kwargs = self._apply_hf_processor(
@@ -911,7 +915,6 @@ class BaseMultiModalProcessor(ABC):
             mm_merged_field_items[modality] = merged_modal_items_lst
 
         if self.enable_sanity_checks:
-            mm_missing_counts = mm_missing_data_items.get_item_counts()
             assert all(
                 item_count == mm_missing_counts[modality]
                 for modality, item_count in mm_missing_next_idx.items()), dict(

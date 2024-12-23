@@ -25,6 +25,7 @@ from functools import cached_property, partial
 from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
                     Set, Tuple, Type, TypedDict, Union)
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -734,8 +735,12 @@ class Qwen2VLMultiModalDataItems(MultiModalDataItems):
             if k == "video":
                 # Special case since even a single item can be a list
                 multi_data[k] = (  # type: ignore[index]
-                    v if (isinstance(v, (dict, torch.Tensor))  # type: ignore[assignment]
-                          or is_list_of(v, list)) else [v]
+                    v if (
+                        isinstance(v, (dict, torch.Tensor))  # type: ignore[assignment]
+                        or is_list_of(v, list)
+                        or isinstance(v[0], (np.ndarray, torch.Tensor))
+                           and v[0].ndim == 4
+                    ) else [v]
                 )
             elif k in ("image", "audio"):
                 multi_data[k] = (  # type: ignore[index]
