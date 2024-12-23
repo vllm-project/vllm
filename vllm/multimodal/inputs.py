@@ -156,8 +156,8 @@ class MultiModalField(ABC):
 
 class MultiModalBatchedField(MultiModalField):
     """
-    A :class:`MultiModalField` implementation where indexing into
-    the batch dimension directly indexes into the first dimension.
+    A :class:`MultiModalField` implementation where an item is obtained by
+    directly indexing into the first dimension of the underlying data.
     """
 
     def build_items(
@@ -178,8 +178,8 @@ class MultiModalBatchedField(MultiModalField):
 
 class MultiModalFlatField(MultiModalField):
     """
-    A :class:`MultiModalField` implementation where indexing into
-    the batch dimension corresponds to a slice along the first dimension.
+    A :class:`MultiModalField` implementation where an item is obtained by
+    slicing along the first dimension of the underlying data.
     """
 
     def build_items(
@@ -243,13 +243,25 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     def from_hf_inputs(
         hf_inputs: BatchFeature,
         config_by_key: Mapping[str, MultiModalFieldConfig],
+        *,
+        enable_sanity_checks: bool = False,
     ):
         items_by_key = {
             key: config.build_items(hf_inputs[key])
             for key, config in config_by_key.items() if key in hf_inputs
         }
 
-        return MultiModalKwargs(hf_inputs, items_by_key=items_by_key)
+        if enable_sanity_checks:
+            batch_sizes = {k: len(v) for k, v in items_by_key.items()}
+            batch_size = next(iter(batch_sizes.values()), 0)
+            assert all(bs == batch_size
+                       for bs in batch_sizes.values()), batch_sizes
+
+        # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`
+        # We assume that those fields are not used in vLLM
+        data = {k: hf_inputs[k] for k in items_by_key}
+
+        return MultiModalKwargs(data, items_by_key=items_by_key)
 
     def __init__(
         self,
@@ -368,7 +380,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         items_by_modality: Mapping[str, list[Mapping[str,
                                                      MultiModalFieldItem]]],
         *,
-        enable_sanity_checks: bool = True,
+        enable_sanity_checks: bool = False,
     ) -> "MultiModalKwargs":
         """
         Construct a new :class:`MultiModalKwargs` from multiple items returned
@@ -382,10 +394,9 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         if enable_sanity_checks:
             batch_sizes = {k: len(v) for k, v in items_by_key.items()}
-            batch_size = next(iter(batch_sizes.values()), None)
-            if batch_size:
-                assert all(bs == batch_size
-                           for bs in batch_sizes.values()), batch_sizes
+            batch_size = next(iter(batch_sizes.values()), 0)
+            assert all(bs == batch_size
+                       for bs in batch_sizes.values()), batch_sizes
 
         data = {
             k: items[0].field.reduce(items).data

@@ -823,6 +823,7 @@ class BaseMultiModalProcessor(ABC):
         mm_kwargs = MultiModalKwargs.from_hf_inputs(
             processed_data,
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
+            enable_sanity_checks=self.enable_sanity_checks,
         )
 
         return prompt_ids, mm_kwargs
