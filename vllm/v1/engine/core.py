@@ -20,8 +20,7 @@ from vllm.utils import get_exception_traceback
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineAbortRequest, EngineRequest,
-                            EngineProfileRequest, EngineRequestUnion,
-                            BackgroundProcHandle)
+                            EngineProfileRequest, EngineRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus

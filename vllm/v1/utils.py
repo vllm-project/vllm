@@ -157,6 +157,7 @@ class BackgroundProcHandle:
 
 
 class MPBackgroundProcess:
+    
     def __init__(self, *args, fn: Callable, input_path: str, output_path: str, **kwargs):
         # Start EngineCore in background process.
         self.proc_handle: Optional[BackgroundProcHandle]
