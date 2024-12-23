@@ -114,8 +114,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         def __init__(self, use_mrope: bool):
             self.use_mrope = use_mrope
             self.input_tokens: List[int] = []
-            self.input_positions: Optional[
-                List[int]] = [] if not self.use_mrope else None
+            self.input_positions: Optional[List[int]] = []
             self.token_type_ids: Optional[List[int]] = []
             self.seq_lens: List[int] = []
             self.query_lens: List[int] = []
@@ -165,9 +164,12 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         input_tokens = torch.tensor(input_data.input_tokens,
                                     dtype=torch.long,
                                     device="cpu")
+        has_mrope_positions = all(
+            x for x in input_data.input_mrope_positions
+        ) if input_data.input_mrope_positions is not None else False
         input_positions = torch.tensor(
             input_data.input_positions
-            if not input_data.use_mrope else input_data.input_mrope_positions,
+            if not has_mrope_positions else input_data.input_mrope_positions,
             dtype=torch.long,
             device="cpu")
         token_type_ids = torch.tensor(input_data.token_type_ids,
