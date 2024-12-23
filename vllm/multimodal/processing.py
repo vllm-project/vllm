@@ -911,8 +911,12 @@ class BaseMultiModalProcessor(ABC):
             mm_merged_field_items[modality] = merged_modal_items_lst
 
         if self.enable_sanity_checks:
-            for modality, item_count in mm_missing_next_idx.items():
-                assert item_count == len(mm_missing_data_items[modality])
+            mm_missing_counts = mm_missing_data_items.get_item_counts()
+            assert all(
+                item_count == mm_missing_counts[modality]
+                for modality, item_count in mm_missing_next_idx.items()), dict(
+                    mm_missing_next_idx=mm_missing_next_idx,
+                    mm_missing_counts=mm_missing_counts)
 
         mm_kwargs = MultiModalKwargs.from_items_by_modality(
             mm_merged_field_items,

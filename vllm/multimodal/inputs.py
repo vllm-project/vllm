@@ -274,8 +274,8 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         if enable_sanity_checks:
             batch_sizes = {k: len(v) for k, v in items_by_key.items()}
             batch_size = next(iter(batch_sizes.values()), 0)
-            assert all(bs == batch_size
-                       for bs in batch_sizes.values()), batch_sizes
+            assert all(bs == batch_size for bs in batch_sizes.values()), dict(
+                batch_sizes=batch_sizes, items_by_key=items_by_key)
 
         # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`
         # We assume that those fields are not used in vLLM
@@ -425,8 +425,8 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         if enable_sanity_checks:
             batch_sizes = {k: len(v) for k, v in items_by_key.items()}
             batch_size = next(iter(batch_sizes.values()), 0)
-            assert all(bs == batch_size
-                       for bs in batch_sizes.values()), batch_sizes
+            assert all(bs == batch_size for bs in batch_sizes.values()), dict(
+                batch_sizes=batch_sizes, items_by_key=items_by_key)
 
         data = {
             k: items[0].field.reduce(items).data
