@@ -427,7 +427,9 @@ class DetokenizerProc(Detokenizer):
         to_llm_engine.send_pyobj(request_outputs)
 
         # Abort requests that finished due to stop strings.
-        to_engine_core.send_pyobj(EngineAbortRequest(requests_to_abort))
+        if len(requests_to_abort) > 0:
+            to_engine_core.send_pyobj(
+                EngineAbortRequest(requests_to_abort))
         
 
     def run_busy_loop(self):

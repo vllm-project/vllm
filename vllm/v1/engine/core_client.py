@@ -2,10 +2,6 @@ import os
 import weakref
 from typing import List, Optional
 
-import msgspec
-import zmq
-import zmq.asyncio
-
 from vllm.logger import init_logger
 from vllm.utils import kill_process_tree, get_open_zmq_ipc_path
 from vllm.v1.engine import (BackgroundProcHandle, EngineCoreOutput, 

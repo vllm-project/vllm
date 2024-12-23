@@ -272,7 +272,8 @@ class EngineCoreProc(EngineCore):
             outputs = self.step()
 
             # 4) Put EngineCoreOutputs into the output queue.
-            self.output_queue.put_nowait(outputs)
+            if len(outputs) > 0:
+                self.output_queue.put_nowait(outputs)
 
             self._log_stats()
 
