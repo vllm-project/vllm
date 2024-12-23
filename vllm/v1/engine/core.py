@@ -329,7 +329,6 @@ class EngineCoreProc(EngineCore):
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)
 
-
 class MPEngineCoreClient:
     """
     MPEngineCoreClient: client for multi-proc EngineCore.

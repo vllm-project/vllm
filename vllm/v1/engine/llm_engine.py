@@ -42,8 +42,8 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-
-        # TODO: Can we avoid this?
+        
+        self.mulitprocess_mode = multiprocess_mode
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -62,22 +62,32 @@ class LLMEngine:
                                    input_registry=input_registry,
                                    mm_registry=mm_registry)
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(
-            tokenizer_name=vllm_config.model_config.tokenizer,
-            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-            revision=vllm_config.model_config.tokenizer_revision,
-        )
+        if self.multiprocess_mode:
+            # IPC paths.
+            from_engine_core_path = get_open_zmq_ipc_path()
+            to_engine_core_path = get_open_zmq_ipc_path()
 
-        # EngineCore (gets EngineRequests and gives EngineCoreOutputs)
-        self.engine_core = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            usage_context,
-            multiprocess_mode=multiprocess_mode,
-            asyncio_mode=False,
-        )
+            # Detokenizer (background process).
+            self.detokenizer_client = MPDetokenizerClient(
+                from_engine_core_path=from_engine_core_path,
+                to_engine_core_path=to_engine_core_path,
+                tokenizer_name=vllm_config.model_config.tokenizer,
+                tokenizer_mode=vllm_config.model_config.tokenizer_mode,
+                trust_remote_code=vllm_config.model_config.trust_remote_code,
+                revision=vllm_config.model_config.tokenizer_revision,
+            )
+
+            # EngineCore (background process).
+            self.engine_core_client = MPEngineCoreClient(
+                input_path=to_engine_core_path,
+                output_path=from_engine_core_path,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                usage_context=usage_context,
+            )
+        
+        else:
+
 
     @classmethod
     def from_engine_args(
@@ -149,32 +159,38 @@ class LLMEngine:
     ) -> None:
 
         # 1) Process raw inputs into the request.
-        detokenizer_req, engine_core_req = self.processor.process_inputs(
+        engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
-        # 2) Add the request to Detokenizer.
-        self.detokenizer.add_request(detokenizer_req)
-
-        # 3) Add the request to EngineCore.
-        self.engine_core.add_request(engine_core_req)
+        # 2) Add to Detokenizer and EngineCore.
+        if self.multiprocess_mode:
+            # Send to Detokenizer (which forwards to EngineCore).
+            self.detokenizer.input_socket.send_pyobj(engine_request)
+        else:
+            # Add directly to Detokenizer and EngineCore.
+            self.detokenizer.add_request(engine_request)
+            self.engine_core.add_request(engine_request)
 
     def step(self) -> List[RequestOutput]:
+        
+        if self.multiprocess_mode:
+            # Get next output from the Detokenizer.
+            return self.detokenizer.output_socket.recv_pyobj()
 
-        # 1) Get EngineCoreOutput from the EngineCore.
-        engine_core_outputs = self.engine_core.get_output()
+        else:
+            # 1) Get EngineCoreOutput from the EngineCore.
+            engine_core_outputs = self.engine_core.step()
+            
+            # 2) Detokenizee the EngineCoreOutput.
+            request_outputs, request_to_abort = self.detokenizer.step(
+                engine_core_outputs)
 
-        # 2) Detokenizer the EngineCoreOutput.
-        request_outputs, requests_to_abort = self.detokenizer.step(
-            engine_core_outputs)
-
-        # 3) Abort requests that finished due to stopping criteria.
-        if requests_to_abort:
-            self.abort_request(requests_to_abort)
-
-        return request_outputs
-
-    # TODO(rob): Can we get rid of these?
+            # 3) Abort requests that finished due to stopping criteria.
+            if requests_to_abort:
+                self.abort_request(requests_to_abort)
+            
+            return request_outputs
 
     def get_model_config(self):
         return self.model_config

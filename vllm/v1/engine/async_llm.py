@@ -106,7 +106,6 @@ class AsyncLLM(EngineClient):
         )
 
         self.output_handler: Optional[asyncio.Task] = None
-        self.asyncio_tasks = set()
 
     def __del__(self):
         self.shutdown()
@@ -257,10 +256,12 @@ class AsyncLLM(EngineClient):
                 yield out
 
         # Client request cancellation is handled through calling
-        # task.cancel() on generate. So we call abort if canceled.
+        # task.cancel() on generate(). Calling self.abort() forwards the 
+        # cancellation to the EngineCore and Detokenizer.
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
+
 
     async def output_handler_loop(self):
         """Background loop: pulls from Detokenizer and push to Queues."""
@@ -268,7 +269,7 @@ class AsyncLLM(EngineClient):
         while True:
             # Note: use socket directly to avoid calling await multiple
             # times, which causes too much task switching at high QPS.
-            outputs: List[RequestOutput] = [] 
+            outputs: List[RequestOutput] = []
             outputs = await self.detokenizer.output_socket.recv_pyobj()
 
             for out in outputs:
