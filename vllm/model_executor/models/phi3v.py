@@ -315,10 +315,13 @@ def get_max_phi3v_image_tokens(
 
     processor = ctx.get_hf_processor(**hf_processor_mm_kwargs)
 
-    return processor.calc_num_image_tokens_from_image_size(
+    num_image_tokens = processor.calc_num_image_tokens_from_image_size(
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
+
+    # Include the separator (bos_token_id)
+    return num_image_tokens + 1
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
