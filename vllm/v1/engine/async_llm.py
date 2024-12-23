@@ -76,11 +76,13 @@ class AsyncLLM(EngineClient):
         self.tokenizer.ping()
 
         # Processor (converts Inputs --> EngineRequest).
-        self.processor = Processor(model_config=vllm_config.model_config,
-                                   cache_config=vllm_config.cache_config,
-                                   lora_config=vllm_config.lora_config,
-                                   tokenizer=self.tokenizer,
-                                   input_registry=input_registry)
+        self.processor = Processor(
+            model_config=vllm_config.model_config,
+            cache_config=vllm_config.cache_config,
+            lora_config=vllm_config.lora_config,
+            tokenizer=self.tokenizer,
+            input_registry=input_registry,
+        )
 
         # IPC paths.
         from_engine_core_path = get_open_zmq_ipc_path()
