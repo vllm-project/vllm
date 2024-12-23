@@ -866,10 +866,6 @@ class BaseMultiModalProcessor(ABC):
         mm_missing_data_items = self._get_mm_items(mm_missing_data)
         mm_missing_counts = mm_missing_data_items.get_item_counts()
 
-        # Rely on our placeholder replacement logic instead of HF
-        # to insert the placeholder tokens
-        prompt_ids = self._get_tokenizer().encode(prompt_text)
-
         if any(count > 0 for count in mm_missing_counts.values()):
             # Some HF processors (e.g. Qwen2-VL) expect corresponding
             # multi-modal tokens to be in the prompt text
@@ -883,6 +879,20 @@ class BaseMultiModalProcessor(ABC):
         else:
             # Avoid unnecessary tokenization of the prompt text
             mm_missing_kwargs = MultiModalKwargs({})
+
+        # NOTE: Some HF processors insert BOS/EOS while others don't.
+        # We try to maintain consistent behavior when calling only
+        # the tokenizer vs when calling its parent processor
+        empty_ids, _ = self._apply_hf_processor(
+            prompt_text="",
+            mm_items=self._get_mm_items({}),
+            hf_processor_mm_kwargs={},
+        )
+        # Rely on our placeholder replacement logic instead of HF
+        # to insert the placeholder tokens
+        prompt_ids = _encode(self._get_tokenizer(),
+                             prompt_text,
+                             add_special_tokens=len(empty_ids) > 0)
 
         mm_missing_next_idx = {
             modality: 0

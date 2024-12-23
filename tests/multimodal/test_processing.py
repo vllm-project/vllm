@@ -618,7 +618,8 @@ def _test_processing_cache_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert baseline_result == cached_result, f"Failed (idx={batch_idx})"
+        assert baseline_result == cached_result, (
+            f"Failed ({batch_idx=}, {mm_data=})")
 
 
 # yapf: disable
