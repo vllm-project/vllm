@@ -406,7 +406,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             if not cont:
                 break
 
-    def _final_process_outputs(self, model_input: StatefulModelInput,
+    def _final_process_outputs(
+            self, model_input: StatefulModelInput,
             output_proc_callback: Optional[Callable]) -> List[SamplerOutput]:
         assert model_input.frozen_model_input is not None
 
@@ -595,8 +596,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return output
 
     def _update_sampling_metadata(self, sampling_metadata: SamplingMetadata, 
-                                  num_seqs: Optional[int],
-                                  num_queries: int):
+                                  num_seqs: Optional[int], num_queries: int):
 
         assert sampling_metadata.num_prompts == 0
         assert len(sampling_metadata.seq_groups) == num_queries
@@ -851,15 +851,15 @@ def _pythonize_sampler_output(
         seq_ids = seq_group.seq_ids
         next_token_ids = sample_result
         parent_ids = [0]
+        seq_outputs: List[SequenceOutput]
 
         if cache is not None:
             completion_seq_group_output: CompletionSequenceGroupOutput = \
                 cache.cached_completion_seq_group_output.get_object()
             completion_seq_group_output.samples.clear()
-            seq_outputs: List[
-                SequenceOutput] = completion_seq_group_output.samples
+            seq_outputs = completion_seq_group_output.samples
         else:
-            seq_outputs: List[SequenceOutput] = []
+            seq_outputs = []
 
         for tdx, (parent_id,
                   next_token_id) in enumerate(zip(parent_ids, next_token_ids)):
