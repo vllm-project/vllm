@@ -414,6 +414,7 @@ def main(args: argparse.Namespace):
                            for request in requests)
     total_output_tokens = sum(request.expected_output_len
                               for request in requests)
+    total_input_tokens = total_num_tokens - total_output_tokens
     if is_multi_modal:
         print("\033[91mWARNING\033[0m: Multi-modal request detected. The "
               "following metrics are not accurate because image tokens are not"
@@ -422,7 +423,7 @@ def main(args: argparse.Namespace):
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s, "
-          f"{(total_num_tokens - total_output_tokens) / len(requests)} input tokens/req, "
+          f"{total_input_tokens / len(requests)} input tokens/req, "
           f"{(total_output_tokens) / len(requests)} output tokens/req, "
     )
 
