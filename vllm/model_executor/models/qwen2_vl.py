@@ -854,16 +854,16 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldTag]:
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
-        image_slice_idxs = [None] + image_grid_thw.prod(-1).tolist()
+        image_slice_idxs = [0] + image_grid_thw.prod(-1).cumsum_(0).tolist()
         image_slices = [
-            slice(image_slice_idxs[i], image_slice_idxs[i + i])
+            slice(image_slice_idxs[i], image_slice_idxs[i + 1])
             for i in range(len(image_grid_thw))
         ]
 
         video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_slice_idxs = [None] + video_grid_thw.prod(-1).tolist()
+        video_slice_idxs = [0] + video_grid_thw.prod(-1).cumsum_(0).tolist()
         video_slices = [
-            slice(video_slice_idxs[i], video_slice_idxs[i + i])
+            slice(video_slice_idxs[i], video_slice_idxs[i + 1])
             for i in range(len(video_grid_thw))
         ]
 
