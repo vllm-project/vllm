@@ -32,17 +32,22 @@ class EngineRequest:
     arrival_time: float
     lora_request: Optional[LoRARequest]
 
+
 @dataclass
 class EngineAbortRequest:
 
     request_ids: List[str]
+
 
 @dataclass
 class EngineProfileRequest:
 
     is_start: bool
 
-EngineRequestUnion = Union[EngineRequest, EngineAbortRequest, EngineProfileRequest]
+
+EngineRequestUnion = Union[EngineRequest, EngineAbortRequest,
+                           EngineProfileRequest]
+
 
 class EngineCoreOutput(
         msgspec.Struct,
@@ -68,6 +73,3 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
-
-
-

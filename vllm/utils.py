@@ -1621,7 +1621,8 @@ def set_ulimit(target_soft_limit=65535):
 
     if current_soft < target_soft_limit:
         try:
-            resource.setrlimit(resource_type, (target_soft_limit, current_hard))
+            resource.setrlimit(resource_type,
+                               (target_soft_limit, current_hard))
         except ValueError as e:
             logger.warning(
                 "Found ulimit of %s and failed to automatically increase"

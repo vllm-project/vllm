@@ -540,7 +540,8 @@ def build_app(args: Namespace) -> FastAPI:
 
         @app.middleware("http")
         async def add_request_id(request: Request, call_next):
-            request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+            request_id = request.headers.get(
+                "X-Request-Id") or uuid.uuid4().hex
             response = await call_next(request)
             response.headers["X-Request-Id"] = request_id
             return response

@@ -80,18 +80,15 @@ class ConstantList(Generic[T], Sequence):
         return len(self._x)
 
 
-def make_zmq_socket(
-        ctx: Union[zmq.asyncio.Context, zmq.Context],
-        path: str,
-        type: Any
-    ) -> Union[zmq.Socket, zmq.asyncio.Socket]:
+def make_zmq_socket(ctx: Union[zmq.asyncio.Context, zmq.Context], path: str,
+                    type: Any) -> Union[zmq.Socket, zmq.asyncio.Socket]:
     """Make a ZMQ socket with the proper bind/connext semantics."""
 
     import psutil
     mem = psutil.virtual_memory()
 
     socket = ctx.socket(type)
-    
+
     total_mem = mem.total / 1024**3
     available_mem = mem.available / 1024**3
     if total_mem > 32 and available_mem > 16:
@@ -111,6 +108,7 @@ def make_zmq_socket(
         raise ValueError(f"Unknown Socket Type: {type}")
 
     return socket
+
 
 @contextmanager
 def zmq_socket_ctx(
@@ -151,4 +149,3 @@ def wait_for_startup(
         except BaseException as e:
             logger.exception(e)
             raise e
-

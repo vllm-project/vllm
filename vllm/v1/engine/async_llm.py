@@ -102,12 +102,11 @@ class AsyncLLM(EngineClient):
         self.tokenizer.ping()
 
         # Processor (converts Inputs --> EngineRequest).
-        self.processor = Processor(
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            lora_config=vllm_config.lora_config,
-            tokenizer=self.tokenizer,
-            input_registry=input_registry)
+        self.processor = Processor(model_config=vllm_config.model_config,
+                                   cache_config=vllm_config.cache_config,
+                                   lora_config=vllm_config.lora_config,
+                                   tokenizer=self.tokenizer,
+                                   input_registry=input_registry)
 
         # Create output handler loop during first call to generate().
         self.to_create_loop = True
@@ -187,7 +186,7 @@ class AsyncLLM(EngineClient):
         engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
-        
+
         # 2) Create Queue (output_handler() pushes, generate() pulls)
         self.rid_to_queue[request_id] = asyncio.Queue()
 
@@ -254,14 +253,14 @@ class AsyncLLM(EngineClient):
                     break
 
                 yield out
-        
+
         # Client request cancellation is handled through calling
         # task.cancel() on generate. So if we get this error, we
         # need to abort the request.
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
-    
+
     def create_output_handler(self):
         """Creates output handler loop. Called on first generate()."""
 
@@ -275,7 +274,6 @@ class AsyncLLM(EngineClient):
         signal_handler = SignalHandler(self)
         loop.add_signal_handler(signal.SIGTERM, signal_handler.signal_handler)
         self.asyncio_tasks.add(loop.create_task(self.sigterm_watchdog()))
-
 
     async def sigterm_watchdog(self):
         """Handle shutdown from sigterm."""
@@ -294,7 +292,6 @@ class AsyncLLM(EngineClient):
                 break
         self.shutdown()
 
-
     async def output_handler(self):
         """Background loop: pulls from Detokenizer and pushes to queues."""
 
@@ -304,16 +301,17 @@ class AsyncLLM(EngineClient):
             epoch += 1
 
             # 1) Pull outputs from the Detokenizer.
-            outputs: List[RequestOutput] = await self.detokenizer.output_socket.recv_pyobj()
+            outputs: List[
+                RequestOutput] = await self.detokenizer.output_socket.recv_pyobj(
+                )
 
             # 2) Put each output into a per request Queue.
             for out in outputs:
                 if out.request_id not in self.rid_to_queue:
                     raise RuntimeError(f"{out.request_id} "
-                                        "not in RequestStates")
+                                       "not in RequestStates")
 
                 self.rid_to_queue[out.request_id].put_nowait(out)
-
 
     async def abort(self, request_id: str):
         # Remove from Detokenizer and EngineCore (Detokenizer
@@ -324,7 +322,7 @@ class AsyncLLM(EngineClient):
         # Remove from request output queues.
         if request_id in self.rid_to_queue:
             del self.rid_to_queue[request_id]
-        
+
         if self.log_requests:
             logger.info("Aborted %s.", request_id)
 
@@ -391,12 +389,15 @@ class AsyncLLM(EngineClient):
 
 
 class SignalHandler:
+
     def __init__(self, async_llm):
         self.async_llm = async_llm
 
     def signal_handler(self, signum=None, frame=None):
         logger.warning(
-                "SIGTERM received. signum=%s frame=%s. Draining "
-                "requests and shutting down...", signum, frame,
+            "SIGTERM received. signum=%s frame=%s. Draining "
+            "requests and shutting down...",
+            signum,
+            frame,
         )
         self.async_llm.gracefully_exit = True

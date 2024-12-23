@@ -118,7 +118,7 @@ async def run_server(args: Namespace,
                      **uvicorn_kwargs: Any) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
-    
+
     set_ulimit()
 
     app = await init_app(args, llm_engine)

@@ -424,8 +424,7 @@ def main(args: argparse.Namespace):
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s, "
           f"{total_input_tokens / len(requests)} input tokens/req, "
-          f"{(total_output_tokens) / len(requests)} output tokens/req, "
-    )
+          f"{(total_output_tokens) / len(requests)} output tokens/req, ")
 
     # Output JSON results if specified
     if args.output_json:

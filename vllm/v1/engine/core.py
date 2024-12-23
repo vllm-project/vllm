@@ -325,4 +325,4 @@ class EngineCoreProc(EngineCore):
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer,), copy=False)
+                socket.send_multipart((buffer, ), copy=False)
