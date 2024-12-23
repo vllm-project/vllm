@@ -80,7 +80,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
+    - :ref:`LoRA <lora-adapter>`
     - :ref:`PP <distributed-serving>`
   * - :code:`AquilaForCausalLM`
     - Aquila, Aquila2
@@ -385,7 +385,7 @@ The following table lists those that are tested in vLLM.
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
+    - :ref:`LoRA <lora-adapter>`
     - :ref:`PP <distributed-serving>`
   * - :code:`BertModel`
     - BERT-based
@@ -447,7 +447,7 @@ despite being described otherwise on its model card.
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
+    - :ref:`LoRA <lora-adapter>`
     - :ref:`PP <distributed-serving>`
   * - :code:`LlamaForCausalLM`
     - Llama-based
@@ -476,7 +476,7 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
+    - :ref:`LoRA <lora-adapter>`
     - :ref:`PP <distributed-serving>`
   * - :code:`JambaForSequenceClassification`
     - Jamba
@@ -500,7 +500,7 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
   * - Architecture
     - Models
     - Example HF Models
-    - :ref:`LoRA <lora>`
+    - :ref:`LoRA <lora-adapter>`
     - :ref:`PP <distributed-serving>`
   * - :code:`BertForSequenceClassification`
     - BERT-based
@@ -555,7 +555,7 @@ See [this page](#generative-models) for more information on how to use generativ
     - Models
     - Inputs
     - Example HF Models
-    - :ref:`LoRA <lora>`
+    - :ref:`LoRA <lora-adapter>`
     - :ref:`PP <distributed-serving>`
     - V1
   * - :code:`AriaForConditionalGeneration`
@@ -785,7 +785,7 @@ The following table lists those that are tested in vLLM.
     - Models
     - Inputs
     - Example HF Models
-    - :ref:`LoRA <lora>`
+    - :ref:`LoRA <lora-adapter>`
     - :ref:`PP <distributed-serving>`
   * - :code:`LlavaNextForConditionalGeneration`
     - LLaVA-NeXT-based

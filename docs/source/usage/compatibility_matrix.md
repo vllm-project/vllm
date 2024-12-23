@@ -33,7 +33,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
    * - Feature
      - [CP](#chunked-prefill)
      - [APC](#apc)
-     - [LoRA](#lora)
+     - [LoRA](#lora-adapter)
      - <abbr title="Prompt Adapter">prmpt adptr</abbr>
      - [SD](#spec_decode)
      - CUDA graph
@@ -81,7 +81,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - [LoRA](#lora)
+   * - [LoRA](#lora-adapter)
      - [✗](https://github.com/vllm-project/vllm/pull/9057)
      - ✅
      -
@@ -244,7 +244,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✗
      - ✗
      - ✅
-     - [✗](ttps://github.com/vllm-project/vllm/issues/8198)
+     - [✗](https://github.com/vllm-project/vllm/issues/8198)
      - ✅
      -
      -
@@ -353,7 +353,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - [LoRA](#lora)
+   * - [LoRA](#lora-adapter)
      - ✅
      - ✅
      - ✅

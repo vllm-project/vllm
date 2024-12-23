@@ -1,4 +1,4 @@
-(lora)=
+(lora-adapter)=
 
 # LoRA Adapters
 
