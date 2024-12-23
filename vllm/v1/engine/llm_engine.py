@@ -43,7 +43,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-        
+
         self.multiprocess_mode = multiprocess_mode
         self.model_config = vllm_config.model_config
 
