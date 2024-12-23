@@ -8,7 +8,6 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import inputs_equal
 from vllm.multimodal.processing import (ProcessingCache, PromptReplacement,
                                         _PlaceholderInfo, find_text_matches,
                                         find_token_matches, iter_placeholders,
@@ -528,28 +527,18 @@ def _rand_audio(
     return rng.rand(audio_len), sr
 
 
-# yapf: disable
-@pytest.mark.parametrize(("model_id", "modalities"), [
-    ("llava-hf/llava-1.5-7b-hf", {"image"}),
-    ("mistral-community/pixtral-12b", {"image"}),
-    # Ignore Phi-3V for now because of this bug:
-    # https://github.com/huggingface/transformers/issues/34307
-    # ("Phi-3-vision-128k-instruct", {"image"}),
-    ("Qwen/Qwen2-VL-2B-Instruct", {"image", "video"}),
-    ("Qwen/Qwen2-Audio-7B-Instruct", {"audio"}),
-    ("fixie-ai/ultravox-v0_3", {"audio"}),
-])
-@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
-@pytest.mark.parametrize("num_batches", [32])
-@pytest.mark.parametrize("simplify_rate", [1.0])
-# yapf: enable
-def test_processing_cache_correctness(
+def _test_processing_cache_correctness(
     model_id: str,
     modalities: set[str],
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
 ):
+    # HACK - this is an attempted workaround for the following bug
+    # https://github.com/huggingface/transformers/issues/34307
+    from transformers import AutoImageProcessor  # noqa: F401
+    from transformers import AutoProcessor  # noqa: F401
+
     model_config = ModelConfig(
         model_id,
         task="auto",
@@ -629,5 +618,63 @@ def test_processing_cache_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert inputs_equal(baseline_result, cached_result,
-                            strict=False), (f"Failed (idx={batch_idx})")
+        assert baseline_result == cached_result, f"Failed (idx={batch_idx})"
+
+
+# yapf: disable
+@pytest.mark.parametrize(("model_id", "modalities"), [
+    ("llava-hf/llava-1.5-7b-hf", {"image"}),
+    ("mistral-community/pixtral-12b", {"image"}),
+    ("Qwen/Qwen2-VL-2B-Instruct", {"image", "video"}),
+    ("Qwen/Qwen2-Audio-7B-Instruct", {"audio"}),
+    ("fixie-ai/ultravox-v0_3", {"audio"}),
+])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+# yapf: enable
+def test_processing_cache_correctness(
+    model_id: str,
+    modalities: set[str],
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_cache_correctness(
+        model_id,
+        modalities,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+    )
+
+
+# yapf: disable
+@pytest.mark.parametrize(("model_id", "modalities"), [
+    ("microsoft/Phi-3-vision-128k-instruct", {"image"}),
+])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+# yapf: enable
+def test_processing_cache_correctness_phi3v(
+    model_id: str,
+    modalities: set[str],
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    # HACK - this is an attempted workaround for the following bug
+    # https://github.com/huggingface/transformers/issues/34307
+    from transformers import AutoImageProcessor  # noqa: F401
+    from transformers import AutoProcessor  # noqa: F401
+
+    AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+    _test_processing_cache_correctness(
+        model_id,
+        modalities,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+    )
