@@ -1,3 +1,4 @@
+{{ bos_token -}}
 {{ (messages|selectattr('role', 'equalto', 'system')|list|last).content|trim if (messages|selectattr('role', 'equalto', 'system')|list) else '' }}
 
 {% for message in messages %}

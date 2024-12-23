@@ -1,3 +1,4 @@
+{{ bos_token -}}
 {% set image_count = namespace(value=0) %}{% set video_count = namespace(value=0) %}{% for message in messages %}{% if loop.first and message['role'] != 'system' %}{% raw %}<|im_start|>system
 You are a helpful assistant.<|im_end|>
 {% endraw %}{% endif %}<|im_start|>{{ message['role'] }}{% raw %}

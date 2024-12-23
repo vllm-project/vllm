@@ -1,3 +1,4 @@
+{{- bos_token -}}
 {%- if messages | length > 1 -%}
     {{ raise_exception('Embedding models should only embed one message at a time') }}
 {%- endif -%}
