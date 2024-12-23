@@ -81,7 +81,7 @@ The latest code can contain bugs and may not be stable. Please use it with cauti
 
 ### Python-only build (without compilation)
 
-If you only need to change Python code, you can build and install vLLM without compilation. Using `` pip's ` ``--editable\`\` flag \<<https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs>>\`\_, changes you make to the code will be reflected when you run vLLM:
+If you only need to change Python code, you can build and install vLLM without compilation. Using `pip`'s [`--editable` flag](https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs), changes you make to the code will be reflected when you run vLLM:
 
 ```console
 $ git clone https://github.com/vllm-project/vllm.git
