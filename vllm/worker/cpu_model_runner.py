@@ -166,7 +166,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                     device="cpu")
         input_positions = torch.tensor(
             input_data.input_positions
-            if not self.use_mrope else input_data.input_mrope_positions,
+            if not input_data.use_mrope else input_data.input_mrope_positions,
             dtype=torch.long,
             device="cpu")
         token_type_ids = torch.tensor(input_data.token_type_ids,
