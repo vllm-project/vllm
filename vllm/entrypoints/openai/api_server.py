@@ -674,12 +674,14 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     def sigterm_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
         raise KeyboardInterrupt("terminated")
+
     signal.signal(signal.SIGTERM, sigterm_handler)
 
     # The child processes will send SIGQUIT to this process when
     # any error happens. This process then clean up the whole tree.
     def sigquit_handler(signum, frame):
         kill_process_tree(os.getpid())
+
     signal.signal(signal.SIGQUIT, sigquit_handler)
 
 
