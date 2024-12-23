@@ -164,12 +164,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         input_tokens = torch.tensor(input_data.input_tokens,
                                     dtype=torch.long,
                                     device="cpu")
-        has_mrope_positions = all(
-            x for x in input_data.input_mrope_positions
-        ) if input_data.input_mrope_positions is not None else False
         input_positions = torch.tensor(
             input_data.input_positions
-            if not has_mrope_positions else input_data.input_mrope_positions,
+            if not self.use_mrope else input_data.input_mrope_positions,
             dtype=torch.long,
             device="cpu")
         token_type_ids = torch.tensor(input_data.token_type_ids,
@@ -206,6 +203,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     if seq_group_metadata.multi_modal_data:
                         self._compute_multi_modal_input(
                             seq_group_metadata, seq_data)
+                    else:
+                        # disable mrope for text-only inputs
+                        self.use_mrope = False
                 else:
                     self._compute_decode_input_tokens(self.input_data,
                                                       seq_group_metadata,
@@ -238,7 +238,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             block_table = block_table[start_block:]
 
         # For MRotaryEmbedding
-        if data.input_positions is None:
+        if data.use_mrope:
             next_pos = MRotaryEmbedding.get_next_input_positions(
                 seq_data.mrope_position_delta,
                 context_len,
@@ -311,8 +311,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             data.slot_mapping.extend(slot_mapping)
 
         # The MROPE positions are prepared in _compute_multi_modal_input
-        if data.input_positions is not None:
-            data.input_positions.extend(token_positions)
+        data.input_positions.extend(token_positions)
 
         if data.token_type_ids is not None:
             data.token_type_ids.extend(token_types if token_types else [])
