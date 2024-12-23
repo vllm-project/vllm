@@ -912,6 +912,17 @@ class BaseMultiModalProcessor(ABC):
             enable_sanity_checks=self.enable_sanity_checks,
         )
 
+        if self.enable_sanity_checks:
+            mm_item_counts = mm_items.get_item_counts()
+
+            for modality, item_count in mm_item_counts.items():
+                for item_idx in range(item_count):
+                    try:
+                        mm_kwargs.get_fields_by_modality(modality, item_idx)
+                    except Exception as e:
+                        # Make it easy to set a breakpoint in the debugger
+                        raise e
+
         return prompt_ids, mm_kwargs
 
     def _bind_prompt_replacements(
@@ -1003,14 +1014,6 @@ class BaseMultiModalProcessor(ABC):
             hf_processor_mm_kwargs,
         )
 
-        mm_item_counts = mm_items.get_item_counts()
-
-        if self.enable_sanity_checks:
-            for modality, item_count in mm_item_counts.items():
-                for item_idx in range(item_count):
-                    # Check that this can run successfully
-                    mm_kwargs.get_fields_by_modality(modality, item_idx)
-
         prompt_repls = self._get_prompt_replacements(
             mm_items,
             hf_processor_mm_kwargs,
@@ -1020,6 +1023,7 @@ class BaseMultiModalProcessor(ABC):
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
+        mm_item_counts = mm_items.get_item_counts()
         all_placeholders = self._find_placeholders(all_prompt_repls,
                                                    prompt_ids, mm_item_counts)
 
