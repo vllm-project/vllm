@@ -565,10 +565,11 @@ def test_processing_cache_correctness(
     cached_processor = processor_factory(ctx, cache=cache)
 
     rng = np.random.RandomState(0)
-
-    repeating_image = Image.new("RGB", size=(128, 128))
-    repeating_video = np.zeros((4, 128, 128, 3), dtype=np.uint8)
-    repeating_audio = np.zeros((512, )), 16000
+    const_inputs = {
+        "image": Image.new("RGB", size=(128, 128)),
+        "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
+        "audio": (np.zeros((512, )), 16000),
+    }
 
     baseline_results = []
     cached_results = []
@@ -579,7 +580,7 @@ def test_processing_cache_correctness(
             images = []
             for image_idx in range(rng.randint(3)):
                 if rng.rand() < hit_rate:
-                    image = repeating_image
+                    image = const_inputs["image"]
                 else:
                     image = _rand_img(rng, min_wh=128, max_wh=256)
 
@@ -591,7 +592,7 @@ def test_processing_cache_correctness(
             videos = []
             for video_idx in range(rng.randint(3)):
                 if rng.rand() < hit_rate:
-                    video = repeating_video
+                    video = const_inputs["video"]
                 else:
                     video = _rand_video(rng,
                                         max_frames=8,
@@ -606,7 +607,7 @@ def test_processing_cache_correctness(
             audios = []
             for audio_idx in range(rng.randint(3)):
                 if rng.rand() < hit_rate:
-                    audio = repeating_audio
+                    audio = const_inputs["audio"]
                 else:
                     audio = _rand_audio(rng,
                                         min_len=256,
