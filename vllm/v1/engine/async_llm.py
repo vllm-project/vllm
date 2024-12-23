@@ -75,7 +75,7 @@ class AsyncLLM(EngineClient):
             lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
-        # Processor (converts Inputs --> EngineRequest).
+        # Processor (in process).
         self.processor = Processor(
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
