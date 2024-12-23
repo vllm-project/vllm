@@ -256,18 +256,6 @@ class OffloadedTensorMode(TorchDispatchMode):
 
 class OffloadedTensor(torch.Tensor):
 
-    @staticmethod
-    def __new__(cls, elem, *, requires_grad=None):
-        # the wrapped tensor will have the same
-        # metadata as the original tensor
-        if elem.device != torch.device("cpu"):
-            # do not hold a strong reference to the tensor
-            elem = weak_ref_tensor(elem)
-        if requires_grad is None:
-            return super().__new__(cls, elem)
-        else:
-            return cls._make_subclass(cls, elem, requires_grad)
-
     def __init__(self, elem):
         super().__init__()
 
