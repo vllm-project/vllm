@@ -285,7 +285,7 @@ class AsyncLLM(EngineClient):
     async def abort(self, request_id: str):
         """Abort request if the client cancels the request."""
 
-        # Send abort to Detokenizer (which will fwd to EngineCore)
+        # Send abort to Detokenizer (which will fwd to EngineCore).
         await self.detokenizer_client.input_socket.send_pyobj(
             EngineAbortRequest([request_id]))
 
