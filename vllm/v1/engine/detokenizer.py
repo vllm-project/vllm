@@ -1,3 +1,4 @@
+import psutil
 import pickle
 import zmq.asyncio
 import msgspec
@@ -13,7 +14,8 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
+from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
+                        get_exception_traceback)
 from vllm.v1.engine import (EngineCoreOutputs,
                             BackgroundProcHandle, 
                             EngineRequest, EngineAbortRequest)
@@ -279,8 +281,8 @@ class DetokenizerProc(Detokenizer):
     def __init__(
         self,
         *args,
-        engine_core_outputs_path: str,
-        engine_core_inputs_path: str,
+        from_engine_core_path: str,
+        to_engine_core_path: str,
         input_path: str,
         output_path: str,
         ready_path: str,
@@ -288,8 +290,8 @@ class DetokenizerProc(Detokenizer):
     ):
         super().__init__(*args, **kwargs)
 
-        self.engine_core_outputs_path = engine_core_outputs_path
-        self.engine_core_inputs_path = engine_core_inputs_path
+        self.from_engine_core_path = from_engine_core_path
+        self.to_engine_core_path = to_engine_core_path
         self.input_path = input_path
         self.output_path = output_path
 
@@ -300,8 +302,8 @@ class DetokenizerProc(Detokenizer):
 
     @staticmethod
     def make_detokenizer_process(
-        engine_core_outputs_path: str,
-        engine_core_inputs_path: str,
+        from_engine_core_path: str,
+        to_engine_core_path: str,
         input_path: str,
         output_path: str,
         tokenizer_name: str,
@@ -313,8 +315,8 @@ class DetokenizerProc(Detokenizer):
         ready_path = get_open_zmq_ipc_path()
 
         process_kwargs = {
-            "engine_core_outputs_path": engine_core_outputs_path,
-            "engine_core_inputs_path": engine_core_inputs_path,
+            "from_engine_core_path": from_engine_core_path,
+            "to_engine_core_path": to_engine_core_path,
             "input_path": input_path,
             "output_path": output_path,
             "ready_path": ready_path,
@@ -356,6 +358,8 @@ class DetokenizerProc(Detokenizer):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        parent_process = psutil.Process().parent()
+
         detokenizer = None
         try:
             detokenizer = DetokenizerProc(*args, **kwargs)
@@ -364,9 +368,10 @@ class DetokenizerProc(Detokenizer):
         except SystemExit:
             logger.debug("Detokenizer interrupted.")
 
-        except BaseException as e:
-            logger.exception(e)
-            raise e
+        except Exception:
+            traceback = get_exception_traceback()
+            logger.error(f"Detokenizer hit an exception: {traceback}")
+            parent_process.send_signal(signal.SIGQUIT)
 
         finally:
             if detokenizer is not None:
@@ -437,8 +442,8 @@ class DetokenizerProc(Detokenizer):
 
         decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
-        with (zmq_socket_ctx(self.engine_core_outputs_path, zmq.PULL) as from_engine_core, 
-              zmq_socket_ctx(self.engine_core_inputs_path, zmq.PUSH) as to_engine_core,
+        with (zmq_socket_ctx(self.from_engine_core_path, zmq.PULL) as from_engine_core, 
+              zmq_socket_ctx(self.to_engine_core_path, zmq.PUSH) as to_engine_core,
               zmq_socket_ctx(self.input_path, zmq.PULL) as from_llm_engine,
               zmq_socket_ctx(self.output_path, zmq.PUSH) as to_llm_engine):
 
@@ -474,8 +479,8 @@ class DetokenizerClient:
     
     def __init__(self,
                  *args,
-                 engine_core_outputs_path: str,
-                 engine_core_inputs_path: str,
+                 from_engine_core_path: str,
+                 to_engine_core_path: str,
                  **kwargs):
         
         # ZMQ setup.
@@ -500,8 +505,8 @@ class DetokenizerClient:
         self.proc_handle: Optional[BackgroundProcHandle]
         self.proc_handle = DetokenizerProc.make_detokenizer_process(
             *args,
-            engine_core_outputs_path=engine_core_outputs_path,
-            engine_core_inputs_path=engine_core_inputs_path,
+            from_engine_core_path=from_engine_core_path,
+            to_engine_core_path=to_engine_core_path,
             input_path=input_path,
             output_path=output_path,
             **kwargs,

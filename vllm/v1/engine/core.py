@@ -1,4 +1,4 @@
-import pickle
+import psutil
 import queue
 import signal
 import threading
@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_open_zmq_ipc_path
+from vllm.utils import get_open_zmq_ipc_path, get_exception_traceback
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineAbortRequest, EngineRequest,
@@ -24,7 +24,6 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import PickleEncoder
 from vllm.v1.utils import zmq_socket_ctx, wait_for_startup
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -219,6 +218,8 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        parent_process = psutil.Process().parent()
+
         engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
@@ -227,9 +228,10 @@ class EngineCoreProc(EngineCore):
         except SystemExit:
             logger.debug("EngineCore interrupted.")
 
-        except BaseException as e:
-            logger.exception(e)
-            raise e
+        except Exception:
+            traceback = get_exception_traceback()
+            logger.error(f"EngineCore hit an exception: {traceback}")
+            parent_process.send_signal(signal.SIGQUIT)
 
         finally:
             if engine_core is not None:

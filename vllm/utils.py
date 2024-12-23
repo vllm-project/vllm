@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import traceback
 import threading
 import time
 import uuid
@@ -1614,7 +1615,6 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     return getattr(module, obj_name)
 
 
-# Taken from https://github.com/sgl-project/sglang/blob/23e5e50fd5fba7f315e04294f55060a8171fcc69/python/sglang/srt/utils.py#L630 # noqa: E501
 def set_ulimit(target_soft_limit=65535):
     resource_type = resource.RLIMIT_NOFILE
     current_soft, current_hard = resource.getrlimit(resource_type)
@@ -1629,6 +1629,12 @@ def set_ulimit(target_soft_limit=65535):
                 "with error %s. This can cause fd limit errors like"
                 "`OSError: [Errno 24] Too many open files`. Consider "
                 "increasing with ulimit -n", current_soft, e)
+
+
+def get_exception_traceback():
+    etype, value, tb = sys.exc_info()
+    err_str = "".join(traceback.format_exception(etype, value, tb))
+    return err_str
 
 
 def kill_process_tree(pid: int):

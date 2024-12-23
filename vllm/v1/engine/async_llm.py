@@ -15,6 +15,7 @@
 
 # Inspired by https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/tokenizer_manager.py
 
+import os
 import asyncio
 import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
@@ -34,7 +35,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_open_zmq_ipc_path
+from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
 from vllm.v1.engine import EngineAbortRequest
 from vllm.v1.engine.core_client import MultiprocessEngineCore
 from vllm.v1.engine.detokenizer import DetokenizerClient
@@ -65,6 +66,13 @@ class AsyncLLM(EngineClient):
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
+        # Register the signal handler.
+        # The child processes will send SIGQUIT to this process when
+        # any error happens. This process then clean up the whole tree.
+        def sigquit_handler(signum, frame):
+            kill_process_tree(os.getpid())
+        signal.signal(signal.SIGQUIT, sigquit_handler)
+
         # RequestId -> OutputQueue.
         self.rid_to_queue: Dict[str, asyncio.Queue[RequestOutput]] = {}
 
@@ -84,23 +92,23 @@ class AsyncLLM(EngineClient):
                                    input_registry=input_registry)
 
         # IPC paths.
-        engine_core_outputs_path = get_open_zmq_ipc_path()
-        engine_core_inputs_path = get_open_zmq_ipc_path()
+        from_engine_core_path = get_open_zmq_ipc_path()
+        to_engine_core_path = get_open_zmq_ipc_path()
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
+        # Detokenizer (background process).
         self.detokenizer = DetokenizerClient(
-            engine_core_outputs_path=engine_core_outputs_path,
-            engine_core_inputs_path=engine_core_inputs_path,
+            from_engine_core_path=from_engine_core_path,
+            to_engine_core_path=to_engine_core_path,
             tokenizer_name=vllm_config.model_config.tokenizer,
             tokenizer_mode=vllm_config.model_config.tokenizer_mode,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
             revision=vllm_config.model_config.tokenizer_revision,
         )
 
-        # EngineCore (starts the engine in background process).
+        # EngineCore (background process).
         self.engine_core = MultiprocessEngineCore(
-            input_path=engine_core_inputs_path,
-            output_path=engine_core_outputs_path,
+            input_path=to_engine_core_path,
+            output_path=from_engine_core_path,
             vllm_config=vllm_config,
             executor_class=executor_class,
             usage_context=usage_context,
