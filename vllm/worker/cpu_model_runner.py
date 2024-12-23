@@ -196,6 +196,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
     def _build_input_data(self):
         for seq_group_metadata in self.seq_group_metadata_list:
             for seq_id, seq_data in seq_group_metadata.seq_data.items():
+                if not seq_group_metadata.multi_modal_data:
+                    self.input_data.use_mrope = False
                 if seq_group_metadata.is_prompt:
                     self._compute_prompt_input_tokens(self.input_data,
                                                       seq_group_metadata,
@@ -203,9 +205,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     if seq_group_metadata.multi_modal_data:
                         self._compute_multi_modal_input(
                             seq_group_metadata, seq_data)
-                    else:
-                        # disable mrope for text-only inputs
-                        self.input_data.use_mrope = False
                 else:
                     self._compute_decode_input_tokens(self.input_data,
                                                       seq_group_metadata,
