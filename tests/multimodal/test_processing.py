@@ -589,7 +589,7 @@ def test_processing_cache_correctness(
 
         if "video" in modalities:
             videos = []
-            for video_idx in range(rng.randint(1)):
+            for video_idx in range(rng.randint(3)):
                 if rng.rand() < hit_rate:
                     video = repeating_video
                 else:
