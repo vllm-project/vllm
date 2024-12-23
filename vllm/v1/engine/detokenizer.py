@@ -396,7 +396,6 @@ class DetokenizerProc(Detokenizer):
             input_socket = make_zmq_socket(ctx, self.input_path, zmq.PULL)
             to_llm_engine = make_zmq_socket(ctx, self.output_path, zmq.PUSH)
             to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path, zmq.PUSH)
-            epoch = 0
             while True:
                 (msg_type, msg_bytes) = input_socket.recv_multipart()
 
@@ -406,7 +405,6 @@ class DetokenizerProc(Detokenizer):
 
                 # Handle message from EngineCore (EngineCoreOutputs).
                 elif msg_type == EngineRequestType.FROM_ENGINE_CORE.value:
-                    epoch += 1
                     self._handle_from_engine_core(
                         output_bytes=msg_bytes,
                         to_engine_core=to_engine_core,

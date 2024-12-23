@@ -288,10 +288,7 @@ class AsyncLLM(EngineClient):
     async def output_handler_loop(self):
         """Background loop: pulls from Detokenizer and push to Queues."""
 
-        epoch = 0
         while True:
-            logger.info(f"EPOCH: {epoch}")
-            epoch+=1
             # Note: use socket directly to avoid calling await multiple
             # times, which causes too much task switching at high QPS.
             outputs: List[RequestOutput] = []

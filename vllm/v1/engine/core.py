@@ -212,13 +212,7 @@ class EngineCoreProc(EngineCore):
         """Core busy loop of the EngineCore."""
 
         # Loop until process is sent a SIGINT or SIGTERM
-        epoch = 0
         while True:
-            logger.info(f"EPOCH: {epoch}")
-            epoch += 1
-            # if epoch == 10:
-            #     raise ValueError("Died")
-
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
@@ -227,7 +221,6 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
-                        logger.info(f"EPOCH: {epoch}")
                         self._log_stats()
                         logger.debug("EngineCore busy loop waiting.")
                     except BaseException:
