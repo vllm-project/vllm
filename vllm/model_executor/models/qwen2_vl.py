@@ -880,7 +880,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_images = mm_counts["image"]
+        num_images = mm_counts.get("image", 0)
         hf_processor = self._get_hf_processor()
         image_token: str = hf_processor.image_token
         image_processor = _get_image_processor(hf_processor)

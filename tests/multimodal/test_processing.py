@@ -504,11 +504,12 @@ def _rand_img(rng: np.random.RandomState, min_wh: int, max_wh: int):
 
 def _rand_video(
     rng: np.random.RandomState,
+    min_frames: int,
     max_frames: int,
     min_wh: int,
     max_wh: int,
 ):
-    num_frames = rng.randint(max_frames)
+    num_frames = rng.randint(min_frames, max_frames)
     w, h = rng.randint(min_wh, max_wh, size=(2, ))
     return rng.randint(0, 255, size=(num_frames, w, h, 3), dtype=np.uint8)
 
@@ -527,7 +528,9 @@ def _rand_audio(
 @pytest.mark.parametrize(("model_id", "modalities"), [
     ("llava-hf/llava-1.5-7b-hf", {"image"}),
     ("mistral-community/pixtral-12b", {"image"}),
-    ("Phi-3-vision-128k-instruct", {"image"}),
+    # Ignore Phi-3V for now because of this bug:
+    # https://github.com/huggingface/transformers/issues/34307
+    # ("Phi-3-vision-128k-instruct", {"image"}),
     ("Qwen/Qwen2-VL-2B-Instruct", {"image", "video"}),
     ("Qwen/Qwen2-Audio-7B-Instruct", {"audio"}),
     ("fixie-ai/ultravox-v0_3", {"audio"}),
@@ -577,6 +580,7 @@ def test_processing_cache_correctness(
         "image": partial(_rand_img, rng, min_wh=128, max_wh=256),
         "video": partial(_rand_video,
                          rng,
+                         min_frames=1,
                          max_frames=8,
                          min_wh=128,
                          max_wh=256),

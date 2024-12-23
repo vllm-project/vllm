@@ -396,7 +396,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_images = mm_counts["image"]
+        num_images = mm_counts.get("image", 0)
 
         data = dummy_image_for_clip(
             CLIP_VIT_LARGE_PATCH14_336_CONFIG,

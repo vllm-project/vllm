@@ -218,7 +218,7 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
     ) -> ProcessorInputs:
         hf_config = self.ctx.get_hf_config(LlavaConfig)
         vision_config = hf_config.vision_config
-        num_images = mm_counts["image"]
+        num_images = mm_counts.get("image", 0)
 
         if isinstance(vision_config, CLIPVisionConfig):
             data = dummy_image_for_clip(vision_config, num_images)

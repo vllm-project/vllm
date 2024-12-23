@@ -192,7 +192,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
 
-        audio_count = mm_counts["audio"]
+        audio_count = mm_counts.get("audio", 0)
         audio = np.zeros(audio_len)
         data = {"audio": [audio] * audio_count}
 
