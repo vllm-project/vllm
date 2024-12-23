@@ -256,6 +256,9 @@ def copy_subranges(
     tgt_matrix: torch.Tensor,
     num_subranges: int,
 ) -> None:
+    # NOTE(woosuk): We use `torch.ops._C.copy_subranges.default` instead of
+    # `torch.ops._C.copy_subranges` to avoid unnecessary CPU overheads from
+    # the dispatcher.
     torch.ops._C.copy_subranges.default(src_matrix, diff_matrix, tgt_matrix,
                                         num_subranges)
 
