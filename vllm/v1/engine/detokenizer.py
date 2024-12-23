@@ -237,13 +237,13 @@ class Detokenizer:
         for request_id in request_ids:
             self.request_states.pop(request_id, None)
 
-    def add_request(	
-        self,	
-        request: EngineRequest,	
-    ):	
+    def add_request(
+        self,
+        request: EngineRequest,
+    ):
         """Add new request to the Detokenizer."""
 
-        assert (request.request_id not in self.request_states)	
+        assert (request.request_id not in self.request_states)
 
         request_state = IncrementalDetokenizer.from_new_request(
             self.tokenizer, request)
@@ -400,25 +400,10 @@ class DetokenizerProc(Detokenizer):
         pickled_req = from_llm_engine.recv()
         req = pickle.loads(pickled_req)
 
-        # Request added by client, add to RequestStates.
         if isinstance(req, EngineRequest):
-            if req.request_id in self.request_states:
-                raise ValueError(
-                    f"{req.request_id} already in Request States!")
-
-            # Add to RequestStates.
-            request_state = IncrementalDetokenizer.from_new_request(
-                self.tokenizer, req)
-            self.request_states[req.request_id] = request_state
-
-        # Request aborted by client, delete from RequestStates.
+            self.add_request(req)
         elif isinstance(req, EngineAbortRequest):
-            if req.request_id not in self.request_states:
-                # If not found, the request is already completed
-                # and we can safely ignore.
-                pass
-            del self.request_states[req.request_id]
-            
+            self.abort_requests(req.request_ids)
         else:
             raise ValueError(f"Unknown type: {req}")
 
