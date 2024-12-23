@@ -1,5 +1,5 @@
 import time
-from typing import Mapping, Optional, Tuple, Union
+from typing import Mapping, Optional, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
