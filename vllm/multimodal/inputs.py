@@ -1,16 +1,19 @@
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
-from typing import (Any, Literal, NamedTuple, Optional, TypedDict, TypeVar,
-                    Union, cast, final)
+from dataclasses import dataclass
+from functools import partial
+from typing import (Any, Literal, Optional, TypedDict, TypeVar, Union, cast,
+                    final)
 
 import numpy as np
 import torch
 import torch.types
 from PIL.Image import Image
-from typing_extensions import NotRequired, TypeAlias
+from transformers import BatchFeature
+from typing_extensions import NotRequired, TypeAlias, assert_never
 
-from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
+from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
 _T = TypeVar("_T")
 
@@ -112,38 +115,59 @@ A dictionary containing nested tensors which have been batched via
 """
 
 
-class MultiModalFieldTag(ABC):
-    """Metadata for a field in :class:`MultiModalKwargs`."""
+@dataclass(frozen=True)
+class MultiModalFieldItem:
+    """Represents an item in :class:`MultiModalKwargs`."""
+    field: "MultiModalField"
+    modality: str
+    data: NestedTensors
 
-    def __init__(self, modality: str) -> None:
-        super().__init__()
 
-        self.modality = modality
+class MultiModalField(ABC):
+    """Represents a field in :class:`MultiModalKwargs`."""
 
     @abstractmethod
-    def get(self, data: NestedTensors, item_index: int) -> NestedTensors:
+    def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         raise NotImplementedError
 
-    @classmethod
-    def reduce(cls, batch: list[NestedTensors]) -> NestedTensors:
-        """Merge elements returned by multiple calls of :meth:`get`."""
-        raise NotImplementedError
+    def _build_item(
+        self,
+        modality: str,
+        data: NestedTensors,
+    ) -> MultiModalFieldItem:
+        return MultiModalFieldItem(self, modality, data)
 
-    def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r})")
+    def reduce(self, batch: list[MultiModalFieldItem]) -> MultiModalFieldItem:
+        """Merge multiple instances of :class:`MultiModalFieldItem` together."""
+        field_types = [type(item.field) for item in batch]
+        if len(set(field_types)) > 1:
+            raise ValueError(
+                f"Cannot merge different fields together: {field_types}")
+
+        modalities = [item.modality for item in batch]
+        if len(set(modalities)) > 1:
+            raise ValueError(
+                f"Cannot merge different modalities together: {modalities}")
+
+        data = self._reduce_data([item.data for item in batch])
+
+        return self._build_item(modalities[0], data)
 
 
-class MultiModalIndexedFieldTag(MultiModalFieldTag):
+class MultiModalBatchedField(MultiModalField):
     """
-    A :class:`MultiModalFieldTag` implementation where indexing into
+    A :class:`MultiModalField` implementation where indexing into
     the batch dimension directly indexes into the first dimension.
     """
 
-    def get(self, data: NestedTensors, item_index: int) -> NestedTensors:
-        return data[item_index]
+    def build_items(
+        self,
+        batch: NestedTensors,
+        modality: str,
+    ) -> list[MultiModalFieldItem]:
+        return [self._build_item(modality, item) for item in batch]
 
-    @classmethod
-    def reduce(cls, batch: list[NestedTensors]) -> NestedTensors:
+    def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             first_shape = batch[0].shape
             if all(item.shape == first_shape for item in batch):
@@ -152,26 +176,21 @@ class MultiModalIndexedFieldTag(MultiModalFieldTag):
         return batch
 
 
-class MultiModalFlatFieldTag(MultiModalFieldTag):
+class MultiModalFlatField(MultiModalField):
     """
-    A :class:`MultiModalFieldTag` implementation where indexing into
+    A :class:`MultiModalField` implementation where indexing into
     the batch dimension corresponds to a slice along the first dimension.
     """
 
-    def __init__(self, modality: str, slices: Sequence[slice]) -> None:
-        super().__init__(modality)
+    def build_items(
+        self,
+        batch: NestedTensors,
+        modality: str,
+        slices: Sequence[slice],
+    ) -> list[MultiModalFieldItem]:
+        return [self._build_item(modality, batch[slice_]) for slice_ in slices]
 
-        self.slices = slices
-
-    def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r}, "
-                f"slices={self.slices})")
-
-    def get(self, data: NestedTensors, item_index: int) -> NestedTensors:
-        return data[self.slices[item_index]]
-
-    @classmethod
-    def reduce(cls, batch: list[NestedTensors]) -> NestedTensors:
+    def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             first_shape = batch[0].shape
             if all(item.shape[1:] == first_shape[1:] for item in batch):
@@ -180,18 +199,35 @@ class MultiModalFlatFieldTag(MultiModalFieldTag):
         return [elem for item in batch for elem in item]
 
 
-class MultiModalFieldTags:
-    """
-    Convenience class containing factory methods for
-    :class:`MultiModalFieldTag`.
-    """
-    indexed = MultiModalIndexedFieldTag
-    flat = MultiModalFlatFieldTag
+class MultiModalFieldConfig:
 
+    @staticmethod
+    def batched(modality: str):
+        return MultiModalFieldConfig("batched", modality=modality)
 
-class MultiModalField(NamedTuple):
-    tag: MultiModalFieldTag
-    data: NestedTensors
+    @staticmethod
+    def flat(modality: str, slices: Sequence[slice]):
+        return MultiModalFieldConfig("flat", modality=modality, slices=slices)
+
+    def __init__(
+        self,
+        field_type: Literal["batched", "flat"],
+        **field_config: Any,
+    ) -> None:
+        super().__init__()
+
+        field: Any
+        if field_type == "batched":
+            field = MultiModalBatchedField()
+        elif field_type == "flat":
+            field = MultiModalFlatField()
+        else:
+            assert_never(field_type)
+
+        self._factory = partial(field.build_items, **field_config)
+
+    def build_items(self, items: NestedTensors) -> list[MultiModalFieldItem]:
+        return self._factory(items)
 
 
 class MultiModalKwargs(UserDict[str, NestedTensors]):
@@ -203,20 +239,38 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     obtain individual items by modality.
     """
 
+    @staticmethod
+    def from_hf_inputs(
+        hf_inputs: BatchFeature,
+        config_by_key: Mapping[str, MultiModalFieldConfig],
+    ):
+        items_by_key = {
+            key: config.build_items(hf_inputs[key])
+            for key, config in config_by_key.items() if key in hf_inputs
+        }
+
+        return MultiModalKwargs(hf_inputs, items_by_key=items_by_key)
+
     def __init__(
         self,
         data: Mapping[str, NestedTensors],
         *,
-        tags: Optional[Mapping[str, MultiModalFieldTag]] = None,
+        items_by_key: Optional[Mapping[str, list[MultiModalFieldItem]]] = None,
     ) -> None:
-        if tags is None:
-            tags = {}
+        if items_by_key is None:
+            items_by_key = {}
 
         super().__init__(data)
 
-        self._tags = tags
-        self._tags_by_modality = dict(
-            full_groupby(tags.items(), key=lambda x: x[1].modality))
+        # Shallow copy to avoid footgun in case a defaultdict is passed in
+        self._items_by_key = dict(items_by_key)
+
+        keys_by_modality = defaultdict[str, set[str]](set)
+        for key, items in items_by_key.items():
+            for item in items:
+                keys_by_modality[item.modality].add(key)
+
+        self._keys_by_modality = dict(keys_by_modality)
 
     @staticmethod
     def _try_stack(nested_tensors: NestedTensors) -> NestedTensors:
@@ -290,34 +344,29 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         return cast(BatchedTensorInputs, json_mapped)
 
-    def get_tag(self, key: str) -> MultiModalFieldTag:
-        return self._tags[key]
+    def get_item(self, key: str, item_index: int) -> MultiModalFieldItem:
+        return self._items_by_key[key][item_index]
 
-    def get_field(self, key: str, item_index: int) -> MultiModalField:
-        tag = self.get_tag(key)
-        data = self[key]
-
-        return MultiModalField(tag, tag.get(data, item_index))
-
-    def get_fields_by_modality(
+    def get_items_by_modality(
         self,
         modality: str,
         item_index: int,
-    ) -> Mapping[str, MultiModalField]:
+    ) -> Mapping[str, MultiModalFieldItem]:
         """
         Get the keyword arguments corresponding to an item identified by
         its modality and index.
         """
-        tags_to_gather = self._tags_by_modality[modality]
+        keys_to_gather = self._keys_by_modality[modality]
 
         return {
-            key: self.get_field(key, item_index)
-            for key, _ in tags_to_gather if key in self
+            key: self.get_item(key, item_index)
+            for key in keys_to_gather if key in self
         }
 
     @staticmethod
-    def from_fields_by_modality(
-        fields_by_modality: Mapping[str, list[Mapping[str, MultiModalField]]],
+    def from_items_by_modality(
+        items_by_modality: Mapping[str, list[Mapping[str,
+                                                     MultiModalFieldItem]]],
         *,
         enable_sanity_checks: bool = True,
     ) -> "MultiModalKwargs":
@@ -325,24 +374,25 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         Construct a new :class:`MultiModalKwargs` from multiple items returned
         by :meth:`get_fields_by_modality`.
         """
-        tag_per_key = defaultdict[str, MultiModalFieldTag]()
-        data_per_key = defaultdict[str, list[NestedTensors]](list)
-        for fields in fields_by_modality.values():
+        items_by_key = defaultdict[str, list[MultiModalFieldItem]](list)
+        for fields in items_by_modality.values():
             for field in fields:
                 for k, v in field.items():
-                    tag_per_key[k] = v.tag
-                    data_per_key[k].append(v.data)
+                    items_by_key[k].append(v)
 
         if enable_sanity_checks:
-            batch_sizes = {k: len(v) for k, v in data_per_key.items()}
+            batch_sizes = {k: len(v) for k, v in items_by_key.items()}
             batch_size = next(iter(batch_sizes.values()), None)
             if batch_size:
                 assert all(bs == batch_size
                            for bs in batch_sizes.values()), batch_sizes
 
-        data = {k: tag_per_key[k].reduce(vs) for k, vs in data_per_key.items()}
+        data = {
+            k: items[0].field.reduce(items).data
+            for k, items in items_by_key.items()
+        }
 
-        return MultiModalKwargs(data, tags=tag_per_key)
+        return MultiModalKwargs(data, items_by_key=items_by_key)
 
 
 MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]

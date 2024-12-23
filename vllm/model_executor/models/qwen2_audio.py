@@ -38,8 +38,8 @@ from vllm.inputs import InputContext
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldTag, MultiModalFieldTags,
-                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -139,14 +139,14 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
 
         return processed_outputs
 
-    def _get_mm_field_tags(
+    def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldTag]:
+    ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
-            input_features=MultiModalFieldTags.indexed("audio"),
-            feature_attention_mask=MultiModalFieldTags.indexed("audio"),
+            input_features=MultiModalFieldConfig.batched("audio"),
+            feature_attention_mask=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_replacements(

@@ -5,16 +5,14 @@ import pytest
 from PIL import Image
 
 from vllm.config import ModelConfig
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.multimodal.processing import (InputProcessingContext,
-                                        ProcessingCache, PromptReplacement,
+from vllm.inputs import InputProcessingContext
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing import (ProcessingCache, PromptReplacement,
                                         _PlaceholderInfo, find_text_matches,
                                         find_token_matches, iter_placeholders,
                                         iter_token_matches,
                                         replace_text_matches,
                                         replace_token_matches)
-# yapf: enable
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import full_groupby
@@ -466,6 +464,7 @@ def test_find_replace_tokens(
         ),
     ]
 )
+# yapf: enable
 def test_iter_placeholders(
     repl_by_key,
     prompt,
@@ -484,8 +483,9 @@ def test_iter_placeholders(
             prompt_repls,
             prompt,
             # Effectively match all occurrences in the prompt
-            {key: 3 for key in repl_by_key},
-         ))
+            {key: 3
+             for key in repl_by_key},
+        ))
 
     # Only displayed on error
     print("result:", result)
@@ -495,9 +495,10 @@ def test_iter_placeholders(
 
 
 def _rand_img(rng: np.random.RandomState, min_wh: int, max_wh: int):
-    w, h = rng.randint(min_wh, max_wh, size=(2,))
+    w, h = rng.randint(min_wh, max_wh, size=(2, ))
     arr = rng.randint(0, 255, size=(w, h, 3), dtype=np.uint8)
     return Image.fromarray(arr)
+
 
 def _rand_video(
     rng: np.random.RandomState,
@@ -506,85 +507,126 @@ def _rand_video(
     max_wh: int,
 ):
     num_frames = rng.randint(max_frames)
-    w, h = rng.randint(min_wh, max_wh, size=(2,))
+    w, h = rng.randint(min_wh, max_wh, size=(2, ))
     return rng.randint(0, 255, size=(num_frames, w, h, 3), dtype=np.uint8)
 
 
+def _rand_audio(
+    rng: np.random.RandomState,
+    min_len: int,
+    max_len: int,
+    sr: int,
+):
+    audio_len = rng.randint(min_len, max_len)
+    return rng.randint(0, 255, size=(audio_len, ), dtype=np.uint8), sr
 
-@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
+
+# yapf: disable
+@pytest.mark.parametrize(("model_id", "modalities"), [
+    ("llava-hf/llava-1.5-7b-hf", {"image"}),
+    ("mistral-community/pixtral-12b", {"image"}),
+    ("Phi-3-vision-128k-instruct", {"image"}),
+    ("Qwen/Qwen2-VL-2B-Instruct", {"image", "video"}),
+    ("Qwen/Qwen2-Audio-7B-Instruct", {"audio"}),
+    ("fixie-ai/ultravox-v0_3", {"audio"}),
+])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
-def test_processing_cache_correctness_mixed_modality(model_id, hit_rate):
-    from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalProcessor
+@pytest.mark.parametrize("num_batches", [10])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+# yapf: enable
+def test_processing_cache_correctness_mixed_modality(
+    model_id: str,
+    modalities: set[str],
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        seed=0,
+        dtype="float16",
+        revision=None,
+    )
+    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
-    model_config = ModelConfig(model_id,
-                               task="auto",
-                               tokenizer=model_id,
-                               tokenizer_mode="auto",
-                               trust_remote_code=False,
-                               seed=0,
-                               dtype="float16",
-                               revision=None)
-
+    processor_factory = MULTIMODAL_REGISTRY._processor_factories[model_cls]
     ctx = InputProcessingContext(
         model_config,
-        cached_get_tokenizer(model_config.tokenizer),
+        tokenizer=cached_get_tokenizer(model_config.tokenizer),
     )
-    baseline_processor = Qwen2VLMultiModalProcessor(
-        ctx,
-        cache=None,
-        enable_sanity_checks=True,
-    )
-    cached_processor = Qwen2VLMultiModalProcessor(
-        ctx,
-        # Ensure that the cache capacity is sufficient to contain all inputs
-        cache=ProcessingCache(1 << 30),
-        enable_sanity_checks=True,
-    )
+    # Ensure that it can fit all of the data
+    cache = ProcessingCache(capacity=1 << 30)
+
+    baseline_processor = processor_factory(ctx, cache=None)
+    cached_processor = processor_factory(ctx, cache=cache)
 
     rng = np.random.RandomState(0)
 
-    hf_processor =  baseline_processor._get_hf_processor()
-    image_token = hf_processor.image_token
-    video_token = hf_processor.video_token
     repeating_image = Image.new("RGB", size=(128, 128))
     repeating_video = [repeating_image] * 8
+    repeating_audio = np.zeros((512, )), 16000
 
     baseline_results = []
     cached_results = []
-    for batch_idx in range(10):
-        images = []
-        for image_idx in range(rng.randint(3)):
-            if rng.rand() < hit_rate:
-                image = repeating_image
-            else:
-                image = _rand_img(rng, min_wh=128, max_wh=256)
+    for batch_idx in range(num_batches):
+        mm_data = {}
 
-            images.append(image)
+        if "image" in modalities:
+            images = []
+            for image_idx in range(rng.randint(3)):
+                if rng.rand() < hit_rate:
+                    image = repeating_image
+                else:
+                    image = _rand_img(rng, min_wh=128, max_wh=256)
 
-        videos = []
-        for video_idx in range(rng.randint(1)):
-            if rng.rand() < hit_rate:
-                video = repeating_video
-            else:
-                video = _rand_video(rng, max_frames=8, min_wh=128, max_wh=256)
+                images.append(image)
 
-            videos.append(video)
+            mm_data["image"] = images
 
-        prompt = "".join(["Images: ", image_token * len(images),
-                          "\nVideos: ", video_token * len(videos)])
-        mm_data = {"image": images, "video": videos}
+        if "video" in modalities:
+            videos = []
+            for video_idx in range(rng.randint(1)):
+                if rng.rand() < hit_rate:
+                    video = repeating_video
+                else:
+                    video = _rand_video(rng,
+                                        max_frames=8,
+                                        min_wh=128,
+                                        max_wh=256)
+
+                videos.append(video)
+
+            mm_data["video"] = videos
+
+        if "audio" in modalities:
+            audios = []
+            for image_idx in range(rng.randint(3)):
+                if rng.rand() < hit_rate:
+                    audio = repeating_audio
+                else:
+                    audio = _rand_audio(rng,
+                                        min_len=256,
+                                        max_len=512,
+                                        sr=16000)
+
+                audios.append(audio)
+
+            mm_data["audio"] = audios
+
+        mm_counts = {k: len(vs) for k, vs in mm_data.items()}
+        prompt = baseline_processor._get_dummy_mm_inputs(mm_counts).prompt_text
 
         # Drop unnecessary keys and test single -> multi conversion
-        if rng.rand() < 1:
-            if not images:
-                del mm_data["image"]
-            elif len(images) == 1:
-                mm_data["image"] = mm_data["image"][0]
-
-            if not videos:
-                del mm_data["video"]
-            elif len(videos) == 1:
-                mm_data["video"] = mm_data["video"][0]
+        if rng.rand() < simplify_rate:
+            for k in list(mm_data.keys()):
+                if not mm_data[k]:
+                    del mm_data[k]
+                elif len(mm_data[k]) == 1:
+                    mm_data[k] = mm_data[k][0]
 
         baseline_result = baseline_processor.apply(
             prompt,

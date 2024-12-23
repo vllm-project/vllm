@@ -333,15 +333,18 @@ class MultiModalRegistry:
 
         return wrapper
 
-    def has_processor(self, model_config: "ModelConfig") -> bool:
-        """
-        Test whether a multi-modal processor is defined for a specific model.
-        """
+    def _get_model_cls(self, model_config: "ModelConfig"):
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        return model_cls in self._processor_factories
+        return model_cls
+
+    def has_processor(self, model_config: "ModelConfig") -> bool:
+        """
+        Test whether a multi-modal processor is defined for a specific model.
+        """
+        return self._get_model_cls(model_config) in self._processor_factories
 
     def create_processor(
         self,
@@ -351,11 +354,7 @@ class MultiModalRegistry:
         """
         Create a multi-modal processor for a specific model and tokenizer.
         """
-
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
-
-        model_cls, _ = get_model_architecture(model_config)
+        model_cls = self._get_model_cls(model_config)
         processor_factory = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)

@@ -32,8 +32,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldTag, MultiModalFieldTags,
-                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -351,15 +351,15 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
 
         return processed_outputs
 
-    def _get_mm_field_tags(
+    def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldTag]:
+    ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
-            pixel_values=MultiModalFieldTags.indexed("image"),
-            image_sizes=MultiModalFieldTags.indexed("image"),
-            image_embeds=MultiModalFieldTags.indexed("image"),
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_replacements(
