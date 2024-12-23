@@ -1,3 +1,4 @@
+from functools import partial
 from typing import cast
 
 import numpy as np
@@ -565,58 +566,36 @@ def test_processing_cache_correctness(
     cached_processor = processor_factory(ctx, cache=cache)
 
     rng = np.random.RandomState(0)
-    const_inputs = {
+
+    input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
         "audio": (np.zeros((512, )), 16000),
     }
+    input_factory = {
+        "image": partial(_rand_img, rng, min_wh=128, max_wh=256),
+        "video": partial(_rand_video,
+                         rng,
+                         max_frames=8,
+                         min_wh=128,
+                         max_wh=256),
+        "audio": partial(_rand_audio, rng, min_len=256, max_len=512, sr=16000),
+    }
+    input_max_count = {
+        "image": 3,
+        "video": 3,
+        "audio": 3,
+    }
 
     baseline_results = []
     cached_results = []
-    for batch_idx in range(num_batches):
-        mm_data = {}
-
-        if "image" in modalities:
-            images = []
-            for image_idx in range(rng.randint(3)):
-                if rng.rand() < hit_rate:
-                    image = const_inputs["image"]
-                else:
-                    image = _rand_img(rng, min_wh=128, max_wh=256)
-
-                images.append(image)
-
-            mm_data["image"] = images
-
-        if "video" in modalities:
-            videos = []
-            for video_idx in range(rng.randint(3)):
-                if rng.rand() < hit_rate:
-                    video = const_inputs["video"]
-                else:
-                    video = _rand_video(rng,
-                                        max_frames=8,
-                                        min_wh=128,
-                                        max_wh=256)
-
-                videos.append(video)
-
-            mm_data["video"] = videos
-
-        if "audio" in modalities:
-            audios = []
-            for audio_idx in range(rng.randint(3)):
-                if rng.rand() < hit_rate:
-                    audio = const_inputs["audio"]
-                else:
-                    audio = _rand_audio(rng,
-                                        min_len=256,
-                                        max_len=512,
-                                        sr=16000)
-
-                audios.append(audio)
-
-            mm_data["audio"] = audios
+    for _ in range(num_batches):
+        mm_data = {
+            k:
+            [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
+             for _ in range(rng.randint(input_max_count[k]))]
+            for k in modalities
+        }
 
         mm_counts = {k: len(vs) for k, vs in mm_data.items()}
         prompt = baseline_processor._get_dummy_mm_inputs(mm_counts).prompt_text
