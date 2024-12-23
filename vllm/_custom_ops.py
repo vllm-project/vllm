@@ -256,8 +256,8 @@ def copy_subranges(
     tgt_matrix: torch.Tensor,
     num_subranges: int,
 ) -> None:
-    torch.ops._C.copy_subranges(src_matrix, diff_matrix, tgt_matrix,
-                                num_subranges)
+    torch.ops._C.copy_subranges.default(src_matrix, diff_matrix, tgt_matrix,
+                                        num_subranges)
 
 
 # fused quant layer norm ops
