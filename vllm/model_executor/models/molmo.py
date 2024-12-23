@@ -1122,17 +1122,18 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_molmo)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
 class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    packed_modules_mapping = {
+        "att_proj": ["att_proj"],
+        "attn_out": ["attn_out"],
+        "ff_proj": ["ff_proj"],
+        "ff_out": ["ff_out"],
+    }
     supported_lora_modules = [
-        "transformer.blocks.22.att_proj",
-        "transformer.blocks.22.ff_proj",
-        "transformer.blocks.23.att_proj",
-        "transformer.blocks.23.ff_proj",
-        "transformer.blocks.16.att_proj",
-        "transformer.blocks.16.ff_proj",
-        "transformer.blocks.8.att_proj",
-        "transformer.blocks.8.ff_proj",
-        "transformer.blocks.20.att_proj",
+        "att_proj",
+        "ff_proj",
     ]
+    embedding_modules = {}
+    embedding_padding_modules = {}
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", lora_config: Optional[LoRAConfig] = None):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1164,6 +1165,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             self.model.make_empty_intermediate_tensors)
         
         self.lora_config = lora_config
+        
 
     def _parse_and_validate_image_input(
         self,
