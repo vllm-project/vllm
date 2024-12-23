@@ -110,6 +110,9 @@ class EngineCore:
     def abort_requests(self, request_ids: List[str]):
         """Abort requests from the scheduler."""
 
+        # TODO: The scheduler doesn't really need to know the	
+        # specific finish reason, TBD whether we propagate that	
+        # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
