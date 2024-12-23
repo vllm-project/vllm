@@ -240,9 +240,6 @@ class Worker(LocalOrDistributedWorkerBase):
 
         logger.info(msg)
 
-        # Final cleanup
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
         gc.collect()
 
         return num_gpu_blocks, num_cpu_blocks
