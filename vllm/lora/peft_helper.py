@@ -27,8 +27,6 @@ class PEFTHelper:
 
         if self.modules_to_save:
             error_msg.append("vLLM only supports modules_to_save being None.")
-        if self.use_rslora:
-            error_msg.append("vLLM does not yet support RSLoRA.")
 
         if self.use_dora:
             error_msg.append("vLLM does not yet support DoRA.")
