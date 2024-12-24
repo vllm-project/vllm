@@ -96,12 +96,17 @@ def make_zmq_socket(
 
     socket = ctx.socket(type)
 
+    # Calculate buffer size based on system memory
     total_mem = mem.total / 1024**3
     available_mem = mem.available / 1024**3
+    # For systems with substantial memory (>32GB total, >16GB available):
+    # - Set a large 0.5GB buffer to improve throughput
+    # For systems with less memory:
+    # - Use system default (-1) to avoid excessive memory consumption
     if total_mem > 32 and available_mem > 16:
-        buf_size = int(0.5 * 1024**3)
+        buf_size = int(0.5 * 1024**3)  # 0.5GB in bytes
     else:
-        buf_size = -1
+        buf_size = -1  # Use system default buffer size
 
     if type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
