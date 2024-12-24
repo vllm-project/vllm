@@ -75,9 +75,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         # check for variable/dynamic config
         if self.dynamic and len(self.dynamic) > 0 and prefix:
             bits = self.dynamic_get(prefix, "bits", bits)
-            group_size = self.dynamic_get(prefix, "group_size", self.group_size)
-            assert group_size is not None
-            self.group_size = group_size
+            self.group_size = self.dynamic_get(prefix, "group_size",
+                                               self.group_size)
             self.desc_act = self.dynamic_get(prefix, "desc_act", self.desc_act)
             self.is_sym = self.dynamic_get(prefix, "sym", self.is_sym)
 
@@ -144,7 +143,8 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def dynamic_get(self, layer_name: str, key: Optional[str] = None, default_value: Union[int, bool, None] = None
+    def dynamic_get(self, layer_name: str, key: Optional[str] = None,
+                    default_value: Union[int, bool, None] = None
                     ) -> Union[Dict, int, bool]:
         for pattern, pattern_dict in self.dynamic.items():
             if pattern.startswith("-:"):
