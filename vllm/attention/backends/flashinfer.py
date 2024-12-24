@@ -318,7 +318,8 @@ class FlashInferMetadata(AttentionMetadata):
     data_type: torch.dtype = None
     # The data type of the query
     q_data_type: torch.dtype = None
-    device: torch.device = torch.device("cuda")
+    # FlashInfer 0.2 encourages passing host tensors
+    device: torch.device = torch.device("cpu")
     is_profile_run: bool = False
 
     def __post_init__(self):
@@ -356,14 +357,17 @@ class FlashInferMetadata(AttentionMetadata):
                 self.block_table_bound = self.block_table_bound.to(self.device)
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
                 self.paged_kv_indices = self.paged_kv_indices.to(self.device)
-                self.prefill_wrapper.end_forward()
-                self.prefill_wrapper.begin_forward(
+                self.prefill_wrapper.plan(
                     self.query_start_loc,
                     self.paged_kv_indptr[:self.num_prefills + 1],
                     self.paged_kv_indices,
                     self.paged_kv_last_page_len[:self.num_prefills],
-                    self.num_qo_heads, self.num_kv_heads, self.head_dim,
-                    self.page_size)
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.page_size,
+                    q_data_type=self.q_data_type,
+                    kv_data_type=self.data_type)
         if self.num_decode_tokens > 0:
             assert self.paged_kv_indices is not None
             assert self.paged_kv_indptr is not None
@@ -379,8 +383,7 @@ class FlashInferMetadata(AttentionMetadata):
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
 
             assert self.decode_wrapper is not None
-            self.decode_wrapper.end_forward()
-            self.decode_wrapper.begin_forward(
+            self.decode_wrapper.plan(
                 self.paged_kv_indptr[self.num_prefills:],
                 self.paged_kv_indices,
                 self.paged_kv_last_page_len[self.num_prefills:],
@@ -391,7 +394,7 @@ class FlashInferMetadata(AttentionMetadata):
                 # Disable flashinfer's pos encoding and use vllm's rope.
                 pos_encoding_mode="NONE",
                 # kv-cache data type.
-                data_type=self.data_type,
+                kv_data_type=self.data_type,
                 # query data type.
                 q_data_type=self.q_data_type)
 
@@ -863,25 +866,29 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert prefill_meta is not None
                 assert prefill_meta.prefill_wrapper is not None
-                prefill_output = prefill_meta.prefill_wrapper.forward(
+                # [TODO] avoid setting private variables in prefill_wrapper
+                prefill_meta.prefill_wrapper._causal = True
+                prefill_meta.prefill_wrapper._window_left = window_left
+                prefill_meta.prefill_wrapper._logits_soft_cap = logits_soft_cap
+                prefill_output = prefill_meta.prefill_wrapper.run(
                     query,
                     kv_cache,
-                    logits_soft_cap=logits_soft_cap,
-                    causal=True,
                     k_scale=k_scale,
                     v_scale=v_scale,
-                    window_left=window_left)
+                )
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
             assert decode_meta.decode_wrapper is not None
-            decode_output = decode_meta.decode_wrapper.forward(
+            # [TODO] avoid setting private variables in decode_wrapper
+            decode_meta.decode_wrapper._window_left = window_left
+            decode_meta.decode_wrapper._logits_soft_cap = logits_soft_cap
+            decode_meta.decode_wrapper._sm_scale = softmax_scale
+            decode_output = decode_meta.decode_wrapper.run(
                 decode_query,
                 kv_cache,
-                sm_scale=softmax_scale,
-                logits_soft_cap=logits_soft_cap,
                 k_scale=k_scale,
                 v_scale=v_scale,
-                window_left=window_left)
+            )
 
         if prefill_output is None and decode_output is not None:
             # Decode only batch.
