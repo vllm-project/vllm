@@ -65,14 +65,22 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
 
     def update_config(self, prefix: str):
-        bits: Optional[int] = self.weight_bits
+        bits = self.weight_bits
         # check for variable/dynamic config
         if self.dynamic and len(self.dynamic) > 0 and prefix:
-            bits = self.dynamic_get(prefix, "bits", bits)
-            self.group_size = self.dynamic_get(prefix, "group_size",
-                                               self.group_size)
-            self.desc_act = self.dynamic_get(prefix, "desc_act", self.desc_act)
-            self.is_sym = self.dynamic_get(prefix, "sym", self.is_sym)
+            b = self.dynamic_get(prefix, "bits", bits)
+            if isinstance(b, int):
+                bits = b
+            group_size = self.dynamic_get(prefix, "group_size",
+                                          self.group_size)
+            if isinstance(group_size, int):
+                self.group_size = group_size
+            desc_act = self.dynamic_get(prefix, "desc_act", self.desc_act)
+            if isinstance(desc_act, bool):
+                self.desc_act = desc_act
+            is_sym = self.dynamic_get(prefix, "sym", self.is_sym)
+            if isinstance(is_sym, bool):
+                self.is_sym = is_sym
 
         self.pack_factor = 32 // bits  # packed into int32
         if (bits, self.is_sym) not in self.TYPE_MAP:
@@ -141,8 +149,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         self,
         layer_name: str,
         key: Optional[str] = None,
-        default_value: Union[int, bool,
-                             None] = None) -> Union[Dict, int, bool]:
+        default_value: Union[int, bool, None] = None
+    ) -> Union[Dict, int, bool, None]:
         for pattern, pattern_dict in self.dynamic.items():
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
@@ -156,11 +164,14 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod"]]:
+    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod",
+                        UnquantizedLinearMethod]]:
         if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
                                              and self.lm_head_quantized):
-            if self.dynamic and not self.dynamic_get(layer_name=prefix):
-                return UnquantizedLinearMethod()
+            if self.dynamic:
+                result = self.dynamic_get(layer_name=prefix)
+                if result is not None and not result:
+                    return UnquantizedLinearMethod()
 
             return GPTQMarlinLinearMethod(self, prefix=prefix)
         elif isinstance(layer, FusedMoE):
