@@ -192,7 +192,7 @@ class SequenceData(msgspec.Struct,
             (array_full(token_id, count) for token_id, count in token_counts),
         )
 
-        return SequenceData(prompt_token_ids_arr)
+        return SequenceData(prompt_token_ids_arr.tolist())
 
     @staticmethod
     def from_seqs(

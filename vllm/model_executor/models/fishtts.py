@@ -171,17 +171,12 @@ class FishTtsLlm(nn.Module, SupportsLoRA, SupportsMultiModal):
             start_token = torch.stack(code_emb, 1).sum(1).to(emb.dtype)
 
             # find the index of the audio BOS token
-            indices = (input_ids == self.audio_start_token_id).nonzero(as_tuple=True)
-            if indices[0].size(0) != 0:
-                emb.index_put_(indices, start_token)
+            emb[-1] = start_token
 
             # batch size = 2
             # inpudId 7004 7004  XXXX 7004 7001  1 2 34 | 7003 7004 7004  XXXX 7004 7001  1 2 34 7003
             # speaker ref [16*2, 1536]
-            indices = (input_ids == self.audio_ref_token_id).nonzero(as_tuple=True)
-            if indices[0].size(0) != 0:
-                for idx, audio_ref_start in enumerate(indices[0]):
-                    emb[audio_ref_start:audio_ref_start+16] = audio_ref[idx].to(emb.dtype)
+            emb[0:16] = audio_ref[0].to(emb.dtype)
 
         else:
             code_emb = [

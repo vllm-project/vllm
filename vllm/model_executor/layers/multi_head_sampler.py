@@ -74,7 +74,7 @@ class MultiheadSampler(nn.Module):
         )
         
         sampled_token_ids_tensor = maybe_sampled_tokens_tensor.reshape(-1, num_heads)
-        id_next = sampled_token_ids_tensor.tolist()
+        id_next = sampled_token_ids_tensor.cpu().numpy()
 
         if self.include_gpu_probs_tensor:
             # Since we will defer sampler result Pythonization,
@@ -273,7 +273,7 @@ class MultiheadSampler(nn.Module):
                 seq_outputs: List[SequenceOutput] = []
                 log_prob = { sample_result[0]: Logprob(logprob=inf, rank=None, decoded_token=None) }
                 seq_output = SequenceOutput(seq_ids[parent_id], sample_result[0], log_prob)
-                seq_output.output_tokens = sample_result
+                seq_output.output_tokens = sample_result.tolist()
                 seq_outputs.append(seq_output)
                 sampler_output.append(CompletionSequenceGroupOutput(seq_outputs, prompt_logprobs=None))
         
