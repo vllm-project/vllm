@@ -119,6 +119,80 @@ spec:
           periodSeconds: 5
 ```
 
+- **AMD ROCm GPU**
+  
+For AMD ROCm GPU, you refer the deployment.yaml as bellow
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mistral-7b
+  namespace: default
+  labels:
+    app: mistral-7b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mistral-7b
+  template:
+    metadata:
+      labels:
+        app: mistral-7b
+    spec:
+      volumes:
+      # PVC
+      - name: cache-volume
+        persistentVolumeClaim:
+          claimName: mistral-7b
+      # vLLM needs to access the host's shared memory for tensor parallel inference.
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "8Gi"
+      hostNetwork: true
+      hostIPC: true
+      containers:
+      - name: mistral-7b
+        image: rocm/vllm:rocm6.2_mi300_ubuntu20.04_py3.9_vllm_0.6.4
+        securityContext:
+          seccompProfile:
+            type: Unconfined
+          runAsGroup: 44
+          capabilities:
+            add:
+            - SYS_PTRACE
+        command: ["/bin/sh", "-c"]
+        args: [
+          "vllm serve mistralai/Mistral-7B-v0.3 --port 8888 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
+        ]
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: token
+        ports:
+        - containerPort: 8888
+        resources:
+          limits:
+            cpu: "10"
+            memory: 20G
+            amd.com/gpu: "1"
+          requests:
+            cpu: "6"
+            memory: 6G
+            amd.com/gpu: "1"
+        volumeMounts:
+        - name: cache-volume
+          mountPath: /root/.cache/huggingface
+        - name: shm
+          mountPath: /dev/shm
+```
+Get the full example of using AMD ROCm GPU with vLLM and K8S from https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve 
+
+
 2. **Create a Kubernetes Service for vLLM**
 
 Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
