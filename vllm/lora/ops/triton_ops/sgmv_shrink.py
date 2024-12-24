@@ -165,7 +165,6 @@ def _sgmv_shrink(
         SPLIT_K,
         batches,
     )
-
     _sgmv_shrink_kernel[grid](
         inputs,
         lora_a_weights,

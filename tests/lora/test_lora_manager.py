@@ -28,12 +28,9 @@ EMBEDDING_MODULES = {
 
 EMBEDDING_PADDING_MODULES = ["lm_head"]
 
-CUDA_DEVICES = [
+DEVICES = ([
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
-CPU_DEVICES = ["cpu"]
-
-DEVICES = CUDA_DEVICES if current_platform.is_cuda_alike() else CPU_DEVICES
+] if current_platform.is_cuda_alike() else ["cpu"])
 
 
 def test_peft_helper(sql_lora_files):

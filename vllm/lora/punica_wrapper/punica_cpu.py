@@ -1,15 +1,16 @@
-from typing import Callable, Optional, Tuple, Union, final
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 
-from vllm.lora.ops.torch_ops.lora_ops import (bgmv_expand, bgmv_expand_slice,
-                                              bgmv_shrink, sgmv_expand,
-                                              sgmv_expand_slice, sgmv_shrink)
+from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
+                                     bgmv_shrink, sgmv_expand,
+                                     sgmv_expand_slice, sgmv_shrink)
 
 from .punica_base import PunicaWrapperBase
 
 
-@final
+# The platforms that are compatible with the PyTorch-native implementation can
+# inherit this class
 class PunicaWrapperCPU(PunicaWrapperBase):
     """
     PunicaWrapperCPU is designed to manage and provide metadata for the punica 
@@ -286,8 +287,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default ,refer to:
-            # https://github.com/triton-lang/triton/issues/1387
+            # We set the buffer to be float32 by default, consistent with the
+            # triton op
             buffer = tuple(
                 torch.zeros(
                     (x.size(0), r), dtype=torch.float32, device=x.device)
@@ -330,8 +331,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
         if buffer is None:
-            # We set the buffer to be float32 by default ,refer to:
-            # https://github.com/triton-lang/triton/issues/1387
+            # We set the buffer to be float32 by default, consistent with the
+            # triton op
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,
                                  device=x.device)

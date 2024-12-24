@@ -53,13 +53,9 @@ pytestmark = pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_cpu()),
     reason="Backend not supported")
 
-CUDA_DEVICES = [
+DEVICES = ([
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
-
-CPU_DEVICES = ["cpu"]
-
-DEVICES = CUDA_DEVICES if current_platform.is_cuda_alike() else CPU_DEVICES
+] if current_platform.is_cuda_alike() else ["cpu"])
 
 #For GPU, we will launch different triton kernels between the prefill and decode
 # stages, so we need to verify this. prefill stage(True) or decode stage(False)
