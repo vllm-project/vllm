@@ -9,7 +9,8 @@ from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
 if TYPE_CHECKING:
     from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
                                  MultiModalPlaceholderDict)
-    from vllm.multimodal.inputs import MultiModalInputsV2
+    from vllm.multimodal.inputs import (MultiModalEncDecInputs,
+                                        MultiModalInputsV2)
 
 
 class TextPrompt(TypedDict):
@@ -229,7 +230,8 @@ class EncoderDecoderInputs(TypedDict):
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, "MultiModalInputsV2"]
+SingletonInputs = Union[TokenInputs, "MultiModalInputsV2",
+                        "MultiModalEncDecInputs"]
 """
 A processed :class:`SingletonPrompt` which can be passed to
 :class:`vllm.sequence.Sequence`.

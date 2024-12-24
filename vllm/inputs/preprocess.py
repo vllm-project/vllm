@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Mapping, Optional, Union
+from typing import List, Mapping, Optional, Union, cast
 
 from typing_extensions import assert_never
 
@@ -7,7 +7,9 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.processing import MultiModalDataDict, MultiModalInputsV2
+from vllm.multimodal.processing import (MultiModalDataDict,
+                                        MultiModalEncDecInputs,
+                                        MultiModalInputsV2)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_info_once, print_warning_once
@@ -512,12 +514,29 @@ class InputPreprocessor:
                     request_id=request_id,
                 )
         else:
-            encoder_inputs = self._prompt_to_llm_inputs(
+            inputs = self._prompt_to_llm_inputs(
                 prompt,
                 request_id=request_id,
             )
+            if inputs["type"] == "multimodal":
+                assert ("encoder_prompt" in inputs
+                        and "encoder_prompt_token_ids" in inputs)
+                inputs = cast(MultiModalEncDecInputs, inputs)
+                encoder_inputs = token_inputs(
+                    prompt=inputs["encoder_prompt"],
+                    prompt_token_ids=inputs["encoder_prompt_token_ids"],
+                )
+                decoder_inputs = MultiModalInputsV2(
+                    type="multimodal",
+                    prompt=inputs["prompt"],
+                    prompt_token_ids=inputs["prompt_token_ids"],
+                    mm_kwargs=inputs["mm_kwargs"],
+                    mm_placeholders=inputs["mm_placeholders"],
+                )
+            else:
+                encoder_inputs = inputs
 
-            decoder_inputs = None
+                decoder_inputs = None
 
         return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 
