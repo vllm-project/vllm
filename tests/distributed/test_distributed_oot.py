@@ -1,5 +1,4 @@
-from ..entrypoints.openai.test_oot_registration import (
-    run_and_test_dummy_opt_api_server)
+from ..plugins.test_model_plugin import run_and_test_dummy_opt_api_server
 
 
 def test_distributed_oot(dummy_opt_path: str):

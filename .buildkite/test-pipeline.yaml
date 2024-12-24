@@ -106,27 +106,31 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
-  - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
+  - pytest -v -s entrypoints/openai
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
-# platform plugin test need a single pipeline, since it needs to install a new fake platform plugin
-- label: Platform Plugin Test # < 1min
+# Plugin test need a single pipeline, since it will install a new fake platform plugin.
+- label: Generic Plugin Test
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
+  - tests/models
   commands:
+  # test model plugin first since it needs to install a new fake platform when platform plugin is installed.
+  - pip install -e ./plugins/vllm_add_dummy_model
+  - VLLM_PLUGINS='' pytest -v -s plugins/test_model_plugin_disabled.py
+  - pytest -v -s plugins/test_model_plugin.py
+  # test platform plugin second.
   - pip install -e ./plugins/vllm_add_dummy_platform
-  - pytest -v -s platform/test_platform_plugin.py
+  - pytest -v -s plugins/test_platform_plugin.py
 
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
@@ -344,8 +348,6 @@ steps:
   - vllm/
   - tests/models
   commands:
-    - pip install -e ./plugins/vllm_add_dummy_model
-    - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_initialization.py
 
@@ -480,6 +482,7 @@ steps:
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
+  # distributed test need to be run on 2 gpus, move this test to plugins test once the plugin test runs on 2 gpus.
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py

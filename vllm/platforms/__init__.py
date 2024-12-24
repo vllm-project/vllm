@@ -36,6 +36,10 @@ class CurrentPlatform(Platform):
 
     def __getattribute__(self, name: str) -> Any:
         """If the attribute is not found, go pass to the current platform."""
+        # Use __getattribute__ to here to get the attribute from the current
+        # platform. It doesn't work to use __getattr__ because it will be called
+        # only when the attribute is not found. Since CurrentPlatform inherits
+        # from Platform, __getattr__ will not be called.
         global _current_platform
         # Go pass to the current platform.
         return _current_platform.__getattribute__(name)
