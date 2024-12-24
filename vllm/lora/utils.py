@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 from typing import List, Optional, Set, Tuple, Type, Union
@@ -31,6 +32,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import WeightsMapper
+from vllm.utils import print_info_once
 
 logger = init_logger(__name__)
 
@@ -109,14 +111,25 @@ def parse_fine_tuned_lora_name(
             is_lora_a whether the tensor is lora_a or lora_b.
             is_bias whether the tensor is lora bias.
     """
-    # TODO: Currently only supports mapping for prefix, mapping for substr and
-    # subfix will be supported in the future.
-    if weights_mapper is not None:
-        weights_mapper.orig_to_new_substr = {}
-        weights_mapper.orig_to_new_suffix = {}
 
-    mapper = (lambda name: weights_mapper._map_name(name)
-              if weights_mapper is not None else name)
+    w_mapper = None
+    if weights_mapper:
+        w_mapper = copy.deepcopy(weights_mapper)
+        # TODO: Currently only supports mapping for prefix, mapping for
+        # substr and subfix will be supported in the future.
+        for attr, mapping in [
+            ("orig_to_new_substr", w_mapper.orig_to_new_substr),
+            ("orig_to_new_suffix", w_mapper.orig_to_new_suffix),
+        ]:
+            if mapping:
+                print_info_once(
+                    f"vLLM does not support mapping of LoRA weights for "
+                    f"{mapping}")
+                # 
+                setattr(w_mapper, attr, {})
+
+    mapper = (lambda name: w_mapper._map_name(name)
+              if w_mapper is not None else name)
     parts = name.split(".")
     if parts[-1] == "weight" and (parts[-2] == "lora_A"
                                   or parts[-2] == "lora_B"):
