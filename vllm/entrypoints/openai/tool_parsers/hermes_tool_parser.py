@@ -1,9 +1,9 @@
 import json
 import re
-from json_repair import json_repair
 from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
+from json_repair import json_repair
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
