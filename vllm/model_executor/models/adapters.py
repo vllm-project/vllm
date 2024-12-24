@@ -11,13 +11,21 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T", bound=type[nn.Module])
 
+_GENERATE_SUFFIXES = [
+    "ForCausalLM",
+    "ForConditionalGeneration",
+    "ChatModel",
+    "LMHeadModel",
+]
+
 
 def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
-    return orig_model_name \
-        .removesuffix("ForCausalLM") \
-        .removesuffix("ForConditionalGeneration") \
-        .removesuffix("ChatModel") \
-        .removesuffix("LMHeadModel") + pooling_suffix
+    model_name = orig_model_name
+
+    for generate_suffix in _GENERATE_SUFFIXES:
+        model_name = model_name.removesuffix(generate_suffix)
+
+    return model_name + pooling_suffix
 
 
 def _create_pooling_model_cls(
