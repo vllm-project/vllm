@@ -44,6 +44,6 @@ def test_gptq_with_dynamic_cfg(vllm_runner, model_id: str):
             assert isinstance(submodule, UnquantizedLinearMethod)
 
     print(
-        vllm_model.generate_greedy(prompts=["Hello my name is"],
+        vllm_model.generate_greedy(prompts=[PROMPT],
                                    max_tokens=10)[0][1])
     del vllm_model
