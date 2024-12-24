@@ -534,11 +534,6 @@ def _test_processing_cache_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    # HACK - this is an attempted workaround for the following bug
-    # https://github.com/huggingface/transformers/issues/34307
-    from transformers import AutoImageProcessor  # noqa: F401
-    from transformers import AutoProcessor  # noqa: F401
-
     if model_id == "TIGER-Lab/Mantis-8B-siglip-llama3":
         hf_overrides = {"architectures": ["MantisForConditionalGeneration"]}
     else:
