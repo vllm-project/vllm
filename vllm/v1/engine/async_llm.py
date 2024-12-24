@@ -232,7 +232,7 @@ class AsyncLLM(EngineClient):
         """
         Main function called by the API server to kick off a request
             * 1) Make an output queue for the Request.
-            # 2) Processing the Input (e.g. Tokenizer).
+            * 2) Processing the Input (e.g. Tokenizer, MM).
             * 3) Adding the Request to Detokenizer + EngineCore.
 
         The output_handler() loop runs in a background task, pulling
