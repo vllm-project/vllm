@@ -412,8 +412,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        quant_group: Optional[int],
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
         attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -458,8 +459,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                k_scale,
-                v_scale,
+                quant_group,
+                k_scales,
+                v_scales,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -567,8 +569,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window[0],
-                    k_scale,
-                    v_scale,
+                    quant_group,
+                    k_scales,
+                    v_scales,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -613,8 +616,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    quant_group,
+                    k_scales,
+                    v_scales,
                 )
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
@@ -628,8 +632,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
-                    k_scale,
-                    v_scale,
+                    quant_group,
+                    k_scales,
+                    v_scales,
                 )
 
         # Reshape the output tensor.

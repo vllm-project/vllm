@@ -69,8 +69,9 @@ class PagedAttention:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        k_scale: float,
-        v_scale: float,
+        quant_group: Optional[int],
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
     ) -> None:
         ops.reshape_and_cache(
             key,
@@ -79,8 +80,9 @@ class PagedAttention:
             value_cache,
             slot_mapping.flatten(),
             kv_cache_dtype,
-            k_scale,
-            v_scale,
+            quant_group,
+            k_scales,
+            v_scales,
         )
 
     @staticmethod
@@ -95,8 +97,9 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        k_scale: float,
-        v_scale: float,
+        quant_group: Optional[int],
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -141,8 +144,9 @@ class PagedAttention:
                 max_seq_len,
                 alibi_slopes,
                 kv_cache_dtype,
-                k_scale,
-                v_scale,
+                quant_group,
+                k_scales,
+                v_scales,
                 tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
@@ -179,8 +183,9 @@ class PagedAttention:
                 max_seq_len,
                 alibi_slopes,
                 kv_cache_dtype,
-                k_scale,
-                v_scale,
+                quant_group,
+                k_scales,
+                v_scales,
                 tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
@@ -204,8 +209,9 @@ class PagedAttention:
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
         sliding_window: Optional[int],
-        k_scale: float,
-        v_scale: float,
+        quant_group: Optional[int],
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         context_attention_fwd(
@@ -222,8 +228,9 @@ class PagedAttention:
             seq_lens_tensor,
             context_lens,
             max_query_len,
-            k_scale,
-            v_scale,
+            quant_group,
+            k_scales,
+            v_scales,
             alibi_slopes,
             sliding_window,
         )
