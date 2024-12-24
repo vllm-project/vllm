@@ -1,6 +1,13 @@
 import json
 import re
 from typing import Dict, List, Sequence, Union
+try:
+    from json_repair import json_repair
+except ImportError:
+    # might remove codes below by adding json_repair in requirement.txt
+    import subprocess
+    subprocess.check_call(["pip", "install", "json_repair"])
+    from json_repair import json_repair
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -82,7 +89,8 @@ class Hermes2ProToolParser(ToolParser):
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
                 raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
+                    # Using json_repair can improve the robustness of parsing the JSON output
+                    json_repair.loads(match[0] if match[0] else match[1])
                     for match in function_call_tuples
                 ]
                 tool_calls = [
