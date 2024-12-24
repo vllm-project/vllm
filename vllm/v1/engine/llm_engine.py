@@ -199,8 +199,6 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
-        logger.info("Added request.")
-
         # Process raw inputs into the request.
         engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
