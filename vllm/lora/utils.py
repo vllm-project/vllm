@@ -32,7 +32,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.utils import print_info_once
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -122,7 +122,7 @@ def parse_fine_tuned_lora_name(
             ("orig_to_new_suffix", w_mapper.orig_to_new_suffix),
         ]:
             if mapping:
-                print_info_once(
+                print_warning_once(
                     f"vLLM currently does not support mapping of LoRA weights "
                     f"for {mapping}.")
                 setattr(w_mapper, attr, {})
