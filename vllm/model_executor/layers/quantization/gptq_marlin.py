@@ -158,9 +158,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         default_value: Union[int, bool, None] = None
     ) -> Union[Dict, int, bool, None]:
         for pattern, pattern_dict in self.dynamic_cfg.items():
+            # negative match: matched modules are excluded from quantization
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
                     return False
+            # positive match: matched modules have quant properties overriding base quant config
             elif re.match(pattern.removeprefix("+:"), layer_name):
                 if key is None:
                     return pattern_dict
