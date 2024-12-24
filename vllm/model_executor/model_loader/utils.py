@@ -7,7 +7,9 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.adapters import as_embedding_model
+from vllm.model_executor.models.adapters import (as_classification_model,
+                                                 as_embedding_model,
+                                                 as_reward_model)
 
 
 @contextlib.contextmanager
@@ -35,8 +37,12 @@ def get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
-    if model_config.runner_type == "pooling":
+    if model_config.task == "embed":
         model_cls = as_embedding_model(model_cls)
+    elif model_config.task == "classify":
+        model_cls = as_classification_model(model_cls)
+    elif model_config.task == "reward":
+        model_cls = as_reward_model(model_cls)
 
     return model_cls, arch
 
