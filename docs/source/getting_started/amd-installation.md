@@ -83,7 +83,7 @@ Where the `<path/to/model>` is the location where the model is stored, for examp
 - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
 - [PyTorch](https://pytorch.org/)
 
-For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.3_ubuntu20.04_py3.9_pytorch_release_2.3.0`, `rocm/pytorch-nightly`.
+For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.3_ubuntu20.04_py3.9_pytorch_release_2.4.0`, `rocm/pytorch-nightly`.
 
 Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/)
 
