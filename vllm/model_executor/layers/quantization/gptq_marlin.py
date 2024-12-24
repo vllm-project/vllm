@@ -73,18 +73,17 @@ class GPTQMarlinConfig(QuantizationConfig):
     def update_config(self, prefix: str):
         bits = self.weight_bits
 
-        b = self.gptqmodel_dynamic_config(prefix, "bits", bits)
+        b = self.get_dynamic_config(prefix, "bits", bits)
         if isinstance(b, int):
             bits = b
-        group_size = self.gptqmodel_dynamic_config(prefix, "group_size",
-                                                   self.group_size)
+        group_size = self.get_dynamic_config(prefix, "group_size",
+                                             self.group_size)
         if isinstance(group_size, int):
             self.group_size = group_size
-        desc_act = self.gptqmodel_dynamic_config(prefix, "desc_act",
-                                                 self.desc_act)
+        desc_act = self.get_dynamic_config(prefix, "desc_act", self.desc_act)
         if isinstance(desc_act, bool):
             self.desc_act = desc_act
-        is_sym = self.gptqmodel_dynamic_config(prefix, "sym", self.is_sym)
+        is_sym = self.get_dynamic_config(prefix, "sym", self.is_sym)
         if isinstance(is_sym, bool):
             self.is_sym = is_sym
 
@@ -162,7 +161,8 @@ class GPTQMarlinConfig(QuantizationConfig):
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
                     return False
-            # positive match: matched modules have quant properties overriding base quant config
+            # positive match: matched modules have quant properties overriding
+            # base quant config
             elif re.match(pattern.removeprefix("+:"), layer_name):
                 if key is None:
                     return pattern_dict
@@ -177,7 +177,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
                                              and self.lm_head_quantized):
             if self.dynamic_cfg:
-                result = self.gptqmodel_dynamic_config(layer_name=prefix)
+                result = self.get_dynamic_config(layer_name=prefix)
                 if result is not None and not result:
                     return UnquantizedLinearMethod()
 
