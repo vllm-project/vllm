@@ -402,10 +402,8 @@ class DetokenizerProc(Detokenizer):
                                             zmq.constants.PUSH)
             to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path,
                                              zmq.constants.PUSH)
-            i = 0
+
             while True:
-                print(f"EPOCH: {i}")
-                i += 1
                 (msg_type, msg_bytes) = input_socket.recv_multipart()
 
                 # Handle message from LLMEngine (Abort or New Request).

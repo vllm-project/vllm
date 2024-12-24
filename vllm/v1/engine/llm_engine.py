@@ -220,8 +220,6 @@ class LLMEngine:
             self.engine_core.add_request(engine_request)
 
     def step(self) -> List[RequestOutput]:
-
-        logger.info("Called step.")
         if self.multiprocess_mode:
             # Get next output from the Detokenizer.
             request_outputs: List[

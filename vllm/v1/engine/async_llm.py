@@ -210,7 +210,7 @@ class AsyncLLM(EngineClient):
         # 3) Send to Detokenizer (which forwards to EngineCore).
         # Note: we forward the request rather than sending to each
         # process separately to avoid race conditions in Detokenizer).
-        await self.send_to_detokenizer(engine_request)
+        await self._send_to_detokenizer(engine_request)
 
         return self.rid_to_queue[request_id]
 
@@ -304,7 +304,7 @@ class AsyncLLM(EngineClient):
         """Abort request if the client cancels the request."""
 
         # Send abort to Detokenizer (which will fwd to EngineCore).
-        await self.send_to_detokenizer(EngineAbortRequest([request_id]))
+        await self._send_to_detokenizer(EngineAbortRequest([request_id]))
 
         # Remove from request output queues.
         if request_id in self.rid_to_queue:
@@ -317,7 +317,7 @@ class AsyncLLM(EngineClient):
         """Send object to Detokenizer with a FROM_ENGINE flag."""
 
         msg = (EngineRequestType.FROM_ENGINE.value, pickle.dumps(object))
-        self.to_detokenizer.send_multipart(msg, copy=False)
+        await self.to_detokenizer.send_multipart(msg, copy=False)
 
     def encode(
         self,
