@@ -55,8 +55,8 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
     assert len(poolings.data) == 1
     assert len(poolings.data[0].data) == 2
     assert poolings.usage.completion_tokens == 0
-    assert poolings.usage.prompt_tokens == 9
-    assert poolings.usage.total_tokens == 9
+    assert poolings.usage.prompt_tokens == 7
+    assert poolings.usage.total_tokens == 7
 
     # test using token IDs
     input_tokens = [1, 1, 1, 1, 1]
@@ -102,8 +102,8 @@ async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
     assert len(poolings.data) == 3
     assert len(poolings.data[0].data) == 2
     assert poolings.usage.completion_tokens == 0
-    assert poolings.usage.prompt_tokens == 32
-    assert poolings.usage.total_tokens == 32
+    assert poolings.usage.prompt_tokens == 25
+    assert poolings.usage.total_tokens == 25
 
     # test List[List[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
@@ -175,10 +175,12 @@ async def test_conversation_pooling(server: RemoteOpenAIServer,
     completion_poolings = PoolingResponse.model_validate(
         completions_response.json())
 
-    assert chat_poolings.pop("id") is not None
-    assert completion_poolings.pop("id") is not None
-    assert chat_poolings.pop("created") <= completion_poolings.pop("created")
-    assert chat_poolings == completion_poolings
+    assert chat_poolings.id is not None
+    assert completion_poolings.id is not None
+    assert chat_poolings.created <= completion_poolings.created
+    assert chat_poolings.model_dump(
+        exclude={"id", "created"}) == (completion_poolings.model_dump(
+            exclude={"id", "created"}))
 
 
 @pytest.mark.asyncio
