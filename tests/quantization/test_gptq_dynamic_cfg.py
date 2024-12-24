@@ -12,6 +12,9 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 
 PROMPT = "On the surface of Mars, we found"
 
+# The first layer is quantized using bits=4, group_size=128
+# The second layer is quantized using bits=8, group_size=32
+# All other layers (layer index >= 2) are not quantized
 MODELS_QUANT = ["ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bits-dynamic-cfg"]
 
 
