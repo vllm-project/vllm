@@ -1,7 +1,4 @@
-"""Compare the outputs of HF and vLLM when using greedy sampling.
-
-This test only tests small models. Big models such as 7B should be tested from
-test_big_models.py because it could use a larger instance to run tests.
+"""Compare the classification outputs of HF and vLLM models.
 
 Run `pytest tests/models/test_cls_models.py`.
 """
@@ -13,6 +10,8 @@ from transformers import AutoModelForSequenceClassification
 @pytest.mark.parametrize(
     "model",
     [
+        pytest.param("ai21labs/Jamba-tiny-reward-dev",
+                     marks=[pytest.mark.core_model]),
         pytest.param("jason9693/Qwen2.5-1.5B-apeach",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
     ],
