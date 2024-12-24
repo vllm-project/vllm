@@ -176,7 +176,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                         UnquantizedLinearMethod]]:
         if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
                                              and self.lm_head_quantized):
-            if self.dynamic_cfg:
+            if len(self.dynamic_cfg) > 0:
                 result = self.get_dynamic_config(layer_name=prefix)
                 if result is not None and not result:
                     return UnquantizedLinearMethod()
