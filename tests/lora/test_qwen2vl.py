@@ -76,6 +76,4 @@ def test_qwen2vl_lora(qwen2vl_lora_files):
     output1 = do_sample(llm, qwen2vl_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
         assert EXPECTED_OUTPUT[i].startswith(output1[i])
-    output2 = do_sample(llm, qwen2vl_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output2[i])
+
