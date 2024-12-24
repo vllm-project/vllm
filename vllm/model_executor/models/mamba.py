@@ -38,10 +38,12 @@ class MambaDecoderLayer(nn.Module):
     def __init__(self,
                  config: MambaConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 is_lora_enabled: Optional[bool] = False) -> None:
         super().__init__()
         self.config = config
         self.is_falcon_mamba = config.model_type == "falcon_mamba"
+        self.is_lora_enabled = is_lora_enabled
         mixer_rms_eps = config.mixer_rms_eps if self.is_falcon_mamba else None
         self.mixer = MambaMixer(hidden_size=config.hidden_size,
                                 ssm_state_size=config.state_size,
@@ -53,7 +55,8 @@ class MambaDecoderLayer(nn.Module):
                                 use_rms_norm=self.is_falcon_mamba,
                                 rms_norm_has_weight=not self.is_falcon_mamba,
                                 rms_norm_eps=mixer_rms_eps,
-                                activation=config.hidden_act)
+                                activation=config.hidden_act,
+                                is_lora_enabled=self.is_lora_enabled)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
@@ -85,6 +88,7 @@ class MambaModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        is_lora_enabled = bool(lora_config)
 
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -101,8 +105,10 @@ class MambaModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: MambaDecoderLayer(
-                config, cache_config=cache_config, quant_config=quant_config),
+            lambda prefix: MambaDecoderLayer(config,
+                                             cache_config=cache_config,
+                                             quant_config=quant_config,
+                                             is_lora_enabled=is_lora_enabled),
             prefix=f"{prefix}.layers")
 
         self.norm_f = RMSNorm(config.hidden_size,
@@ -288,9 +294,34 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
             if is_pp_missing_parameter(name, self):
                 continue
 
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+            if "in_proj" in name:
+                #  To support LoRA, in_proj weight needs to be split to
+                #  two separate tensors, and here we load it manually
+                #  manually splits in_proj_lin and in_proj_gate
+                name_lin = name.replace("in_proj", "in_proj_lin")
+                name_gate = name.replace("in_proj", "in_proj_gate")
+
+                #   need to split the loaded weight of in_proj
+                param = params_dict[name_lin]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+
+                weight_loader(param, loaded_weight[:loaded_weight.shape[0] //
+                                                   2, :])  # the lin split
+
+                loaded_params.add(name_lin)
+                param = params_dict[name_gate]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+
+                weight_loader(param, loaded_weight[loaded_weight.shape[0] //
+                                                   2:, :])  # the lin split
+                loaded_params.add(name_gate)
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            if "in_proj" not in name:
+                loaded_params.add(name)
         return loaded_params
