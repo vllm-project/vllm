@@ -660,7 +660,7 @@ See [this page](#generative-models) for more information on how to use generativ
     - Molmo
     - T + I
     - :code:`allenai/Molmo-7B-D-0924`, :code:`allenai/Molmo-72B-0924`, etc.
-    -
+    - ✅︎
     - ✅︎
     - ✅︎
   * - :code:`NVLM_D_Model`

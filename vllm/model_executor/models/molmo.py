@@ -1134,7 +1134,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     ]
     embedding_modules = {}
     embedding_padding_modules = {}
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", lora_config: Optional[LoRAConfig] = None):
+    def __init__(
+            self, *,
+            vllm_config: VllmConfig,
+            prefix: str = "",
+            lora_config: Optional[LoRAConfig] = None):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
