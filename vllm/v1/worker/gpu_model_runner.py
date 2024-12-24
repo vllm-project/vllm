@@ -162,6 +162,9 @@ class GPUModelRunner:
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
+        # Clean up diffs.
+        self.input_batch.block_table.clear_diff()
+
         # Remove stopped requests from the cached states.
         # Keep the states of the pre-empted requests.
         for req_id in scheduler_output.finished_req_ids:
@@ -203,10 +206,9 @@ class GPUModelRunner:
             if num_new_blocks == 0:
                 continue
             start_index = len(req_state.block_ids)
-            end_index = start_index + num_new_blocks
             req_state.block_ids.extend(req_data.new_block_ids)
-            self.input_batch.block_table_cpu[
-                req_index, start_index:end_index] = req_data.new_block_ids
+            self.input_batch.block_table.append_row(req_index, start_index,
+                                                    req_data.new_block_ids)
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -267,9 +269,7 @@ class GPUModelRunner:
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table[:num_reqs].copy_(
-            self.input_batch.block_table_cpu_tensor[:num_reqs],
-            non_blocking=True)
+        self.input_batch.block_table.apply_diff(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -325,7 +325,7 @@ class GPUModelRunner:
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
+        block_numbers = (self.input_batch.block_table.cpu().flatten()
                          [block_table_indices].numpy())
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
@@ -360,7 +360,7 @@ class GPUModelRunner:
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_start_loc=seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
+            block_table=self.input_batch.block_table.cuda()[:num_reqs],
             slot_mapping=slot_mapping,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial

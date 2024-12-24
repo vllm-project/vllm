@@ -220,6 +220,20 @@ def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
         block_table_bound)
 
 
+# copy subrange op. Used for input preparation in the vLLM V1 GPU backend.
+def copy_subranges(
+    src_matrix: torch.Tensor,
+    diff_matrix: torch.Tensor,
+    tgt_matrix: torch.Tensor,
+    num_subranges: int,
+) -> None:
+    # NOTE(woosuk): We use `torch.ops._C.copy_subranges.default` instead of
+    # `torch.ops._C.copy_subranges` to avoid unnecessary CPU overheads from
+    # the dispatcher.
+    torch.ops._C.copy_subranges.default(src_matrix, diff_matrix, tgt_matrix,
+                                        num_subranges)
+
+
 # fused quant layer norm ops
 def rms_norm_dynamic_per_token_quant(
     input: torch.Tensor,

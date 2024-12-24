@@ -21,6 +21,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
+  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+  ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
+           &get_cuda_view_from_cpu_tensor);
+
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
@@ -97,6 +101,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor! block_table_bounds"
       ") -> ()");
   ops.impl("advance_step_flashinfer", torch::kCUDA, &advance_step_flashinfer);
+
+  ops.def(
+      "copy_subranges(Tensor matrix_src, Tensor matrix_diff, Tensor! "
+      "matrix_tgt, int n) -> ()");
+  ops.impl("copy_subranges", torch::kCUDA, &copy_subranges);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
