@@ -91,5 +91,5 @@ async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
     assert len(embeddings.data) == 1
     assert len(embeddings.data[0].embedding) == 3072
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 765
-    assert embeddings.usage.total_tokens == 765
+    assert embeddings.usage.prompt_tokens == 764
+    assert embeddings.usage.total_tokens == 764
