@@ -41,6 +41,7 @@ class RayExecutor(Executor):
                           **ray_remote_kwargs):
         # A list of workers to run a model.
         self.workers: List[RayWorkerWrapper] = []
+        self.tp_pp_workers: List[List[RayWorkerWrapper]] = []
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
@@ -171,6 +172,18 @@ class RayExecutor(Executor):
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
         self._run_workers("initialize")
         self._run_workers("load_model")
+
+        for pp_rank in range(self.parallel_config.pipeline_parallel_size):
+            self.tp_pp_workers.append([])
+            for tp_rank in range(
+                    self.parallel_config.tensor_parallel_size):
+                # PP=2, TP=4
+                # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
+                rank = (pp_rank * self.parallel_config.tensor_parallel_size
+                        ) + tp_rank
+                assert len(self.tp_pp_workers[pp_rank]) == tp_rank
+                assert pp_rank < len(self.tp_pp_workers)
+                self.tp_pp_workers[pp_rank].append(self.workers[rank])
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
@@ -325,12 +338,46 @@ class RayExecutor(Executor):
         assert self.parallel_config.use_ray
         self._check_ray_compiled_graph_installation()
         from ray.dag import InputNode, MultiOutputNode
+        from ray.experimental.channel.torch_tensor_type import TorchTensorType
 
-        with InputNode() as input_batches:
-            outputs = [
-                worker.execute_model.bind(  # type: ignore[attr-defined]
-                    input_batches) for worker in self.workers
-            ]
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
+
+        with InputNode() as input_data:
+            # Example DAG: PP=2, TP=4
+            # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
+            #                         -> 1 -> (ExecuteModelReq, IntermediateOutput) -> 5 -> SamplerOutput   # noqa: E501
+            #                         -> 2 -> (ExecuteModelReq, IntermediateOutput) -> 6 -> SamplerOutput   # noqa: E501
+            #                         -> 3 -> (ExecuteModelReq, IntermediateOutput) -> 7 -> SamplerOutput   # noqa: E501
+
+            # All workers in the first TP group will take in the
+            # ExecuteModelRequest as input.
+            outputs = [input_data for _ in self.pp_tp_workers[0]]
+            for pp_rank, tp_group in enumerate(self.pp_tp_workers):
+                # Each PP worker takes in the output of the previous PP worker,
+                # and the TP group executes in SPMD fashion.
+                outputs = [
+                    worker.execute_model_spmd.
+                    bind(  # type: ignore[attr-defined]
+                        outputs[i]) for i, worker in enumerate(tp_group)
+                ]
+
+                last_pp_rank = len(self.pp_tp_workers) - 1
+                if pp_rank < last_pp_rank:
+                    # Specify how intermediate tensors should be passed
+                    # between pp stages, no need to specify for the last
+                    # pp stage.
+                    transport = "nccl" \
+                        if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL \
+                        else "auto"
+                    outputs = [
+                        output.with_type_hint(
+                            TorchTensorType(transport=transport))
+                        for output in outputs
+                    ]
+
             forward_dag = MultiOutputNode(outputs)
 
         return forward_dag.experimental_compile()

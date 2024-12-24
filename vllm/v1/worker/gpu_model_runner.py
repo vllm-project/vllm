@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
+from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -599,12 +600,30 @@ class GPUModelRunner:
         else:
             input_ids = self.input_ids[:num_tokens]
             inputs_embeds = None
+
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        # TODO: adjust batch size for multimodal models
+        batch_size = 0
+        for group_id in range(max_num_seqs):
+            seq_len = (max_num_batched_tokens // max_num_seqs +
+                       (group_id < max_num_batched_tokens % max_num_seqs))
+            batch_size += seq_len
+
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=num_tokens,
+                dtype=self.model_config.dtype,
+                device=self.device)
+
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=self.positions[:num_tokens],
                 kv_caches=kv_caches,
                 attn_metadata=None,
+                intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
         return hidden_states

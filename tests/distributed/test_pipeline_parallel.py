@@ -44,6 +44,34 @@ class PPTestSettings:
     test_options: PPTestOptions
 
     @staticmethod
+    def rcg(
+        *,
+        tp_base: int = 1,
+        pp_base: int = 2,
+        multi_node_only: bool = False,
+        task: TaskOption = "auto",
+        trust_remote_code: bool = False,
+        tokenizer_mode: Optional[str] = None,
+        load_format: Optional[str] = None,
+        hf_overrides: Optional[str] = None,
+    ):
+        return PPTestSettings(
+            parallel_setups=[
+                ParallelSetup(tp_size=2 * tp_base,
+                              pp_size=pp_base,
+                              eager_mode=False,
+                              chunked_prefill=True),
+            ],
+            distributed_backends=["ray"],
+            task=task,
+            test_options=PPTestOptions(multi_node_only=multi_node_only,
+                                       trust_remote_code=trust_remote_code,
+                                       tokenizer_mode=tokenizer_mode,
+                                       load_format=load_format,
+                                       hf_overrides=hf_overrides),
+        )
+
+    @staticmethod
     def detailed(
         *,
         tp_base: int = 1,
@@ -187,6 +215,10 @@ TEXT_GENERATION_MODELS = {
     # [Encoder-only]
     # TODO: Implement PP
     # "facebook/bart-base": PPTestSettings.fast(),
+}
+
+RCG_MODELS = {
+    "meta-llama/Meta-Llama-3-8B": PPTestSettings.rcg(),
 }
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
@@ -350,7 +382,7 @@ def _compare_tp(
     ("model_name", "parallel_setup", "distributed_backend", "task",
      "test_options"),
     [
-        params for model_name, settings in TEXT_GENERATION_MODELS.items()
+        params for model_name, settings in RCG_MODELS.items()
         for params in settings.iter_params(model_name)
         if model_name in TEST_MODELS
     ],

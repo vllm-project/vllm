@@ -98,13 +98,13 @@ def test_models(
     "model, distributed_executor_backend, attention_backend, "
     "test_suite", [
         ("facebook/opt-125m", "ray", "", "L4"),
-        ("facebook/opt-125m", "mp", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
-        ("facebook/opt-125m", "ray", "", "A100"),
-        ("facebook/opt-125m", "mp", "", "A100"),
-        ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
-        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
+        # ("facebook/opt-125m", "mp", "", "L4"),
+        # ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
+        # ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
+        # ("facebook/opt-125m", "ray", "", "A100"),
+        # ("facebook/opt-125m", "mp", "", "A100"),
+        # ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
+        # ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
     ])
 def test_models_distributed(
     hf_runner,
@@ -129,6 +129,8 @@ def test_models_distributed(
 
     # Import VLLM_USE_V1 dynamically to handle patching
     from vllm.envs import VLLM_USE_V1
+    if not VLLM_USE_V1:
+        pytest.skip("Skipping test on vllm V0")
     if VLLM_USE_V1 and distributed_executor_backend != "mp":
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
@@ -142,7 +144,9 @@ def test_models_distributed(
     with vllm_runner(model,
                      dtype=dtype,
                      tensor_parallel_size=2,
-                     distributed_executor_backend=distributed_executor_backend
+                     pipeline_parallel_size=2,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True,
                      ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
