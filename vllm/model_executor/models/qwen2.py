@@ -545,8 +545,8 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         self.model = Qwen2Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
 
-        # TODO: Replace this model class with for_embedding(Qwen2ForCausalLM),
-        # after changing the default pooling method
+        # TODO: Replace this model class with as_embedding_model(
+        # Qwen2ForCausalLM) after changing the default pooling method
         if pooler_config.pooling_type is None:
             logger.warning(
                 "This embedding model will default to last-token pooling in "
