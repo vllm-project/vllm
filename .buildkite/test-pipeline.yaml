@@ -203,6 +203,14 @@ steps:
     - python3 offline_inference_scoring.py
     - python3 offline_profile.py --model facebook/opt-125m run_num_steps --num-steps 2
 
+- label: Examples Unit Test
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/examples/
+  - examples/
+  commands:
+    - pytest -v -s examples
+
 - label: Prefix Caching Test # 9min
   mirror_hardwares: [amd]
   source_file_dependencies:
