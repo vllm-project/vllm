@@ -43,7 +43,5 @@ def test_gptq_with_dynamic_cfg(vllm_runner, model_id: str):
             # All other layers (layer index >= 2) are not quantized
             assert isinstance(submodule, UnquantizedLinearMethod)
 
-    print(
-        vllm_model.generate_greedy(prompts=[PROMPT],
-                                   max_tokens=10)[0][1])
+    print(vllm_model.generate_greedy(prompts=[PROMPT], max_tokens=10)[0][1])
     del vllm_model
