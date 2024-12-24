@@ -760,6 +760,12 @@ class Qwen2VLMultiModalDataItems(MultiModalDataItems):
             for m, items in self.items()
         }
 
+    def has_embedding_inputs(self) -> bool:
+        return any(
+            isinstance(items, dict) or any(
+                isinstance(item, torch.Tensor) for item in items)
+            for items in self.values())
+
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 

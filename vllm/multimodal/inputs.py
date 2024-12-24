@@ -164,17 +164,22 @@ class MultiModalField(ABC):
     ) -> MultiModalFieldItem:
         return MultiModalFieldItem(self, modality, data)
 
-    def reduce(self, batch: list[MultiModalFieldItem]) -> MultiModalFieldItem:
+    def reduce(
+        self,
+        batch: list[MultiModalFieldItem],
+        *,
+        field_key: Optional[str] = None,
+    ) -> MultiModalFieldItem:
         """Merge multiple instances of :class:`MultiModalFieldItem` together."""
         field_types = [type(item.field) for item in batch]
         if len(set(field_types)) > 1:
             raise ValueError(
-                f"Cannot merge different fields together: {field_types}")
+                f"Cannot merge different {field_types=} for {field_key=}")
 
         modalities = [item.modality for item in batch]
         if len(set(modalities)) > 1:
             raise ValueError(
-                f"Cannot merge different modalities together: {modalities}")
+                f"Cannot merge different {modalities=} for {field_key=}")
 
         data = self._reduce_data([item.data for item in batch])
 
@@ -292,8 +297,8 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         enable_sanity_checks: bool = False,
     ) -> "MultiModalKwargs":
         data = {
-            k: items[0].field.reduce(items).data
-            for k, items in items_by_key.items()
+            key: items[0].field.reduce(items, field_key=key).data
+            for key, items in items_by_key.items()
         }
 
         return MultiModalKwargs(data,

@@ -265,6 +265,11 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
     def get_item_counts(self) -> Mapping[str, int]:
         return {m: len(items) for m, items in self.items()}
 
+    def has_embedding_inputs(self) -> bool:
+        return any(
+            any(isinstance(item, torch.Tensor) for item in items)
+            for items in self.values())
+
     def get_image_size(self, item_idx: int) -> ImageSize:
         image = self.images[item_idx]
 
@@ -882,7 +887,7 @@ class BaseMultiModalProcessor(ABC):
         """
         cache = self.cache
 
-        if cache is None:
+        if cache is None or mm_data_items.has_embedding_inputs():
             return self._apply_hf_processor(
                 prompt_text=prompt_text,
                 mm_items=mm_data_items,
