@@ -10,8 +10,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               set_weight_attrs,
-                                               UnquantizedLinearMethod)
+                                               UnquantizedLinearMethod,
+                                               set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kernels import (
@@ -41,15 +41,9 @@ class GPTQMarlinConfig(QuantizationConfig):
         (8, True): scalar_types.uint8b128,
     }
 
-    def __init__(
-        self,
-        weight_bits: int,
-        group_size: int,
-        desc_act: bool,
-        is_sym: bool,
-        lm_head_quantized: bool,
-        dynamic: Dict[str, Dict[str, Union[int, bool]]]
-    ) -> None:
+    def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
+                 is_sym: bool, lm_head_quantized: bool,
+                 dynamic: Dict[str, Dict[str, Union[int, bool]]]) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
@@ -143,9 +137,12 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def dynamic_get(self, layer_name: str, key: Optional[str] = None,
-                    default_value: Union[int, bool, None] = None
-                    ) -> Union[Dict, int, bool]:
+    def dynamic_get(
+        self,
+        layer_name: str,
+        key: Optional[str] = None,
+        default_value: Union[int, bool,
+                             None] = None) -> Union[Dict, int, bool]:
         for pattern, pattern_dict in self.dynamic.items():
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
@@ -157,13 +154,12 @@ class GPTQMarlinConfig(QuantizationConfig):
                     return pattern_dict.get(key, default_value)
         return default_value
 
-
     def get_quant_method(
-            self, layer: torch.nn.Module, prefix: str
+        self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod"]]:
         if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
                                              and self.lm_head_quantized):
-            if self.dynamic and self.dynamic_get(layer_name=prefix) == False:  # noqa: E712
+            if self.dynamic and not self.dynamic_get(layer_name=prefix):
                 return UnquantizedLinearMethod()
 
             return GPTQMarlinLinearMethod(self, prefix=prefix)
