@@ -232,7 +232,7 @@ async def main(args):
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if model_config.runner_type == "pooling" else None
+    ) if model_config.task == "embed" else None
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
