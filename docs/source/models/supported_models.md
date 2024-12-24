@@ -28,7 +28,7 @@ llm = LLM(model=..., task="generate")  # Name or path of your model
 output = llm.generate("Hello, my name is")
 print(output)
 
-# For pooling models (task={embed,classify,reward}) only
+# For pooling models (task={embed,classify,reward,score}) only
 llm = LLM(model=..., task="embed")  # Name or path of your model
 output = llm.encode("Hello, my name is")
 print(output)
@@ -59,7 +59,7 @@ llm = LLM(model=..., revision=..., task=..., trust_remote_code=True)
 output = llm.generate("Hello, my name is")
 print(output)
 
-# For pooling models (task={embed,classify,reward}) only
+# For pooling models (task={embed,classify,reward,score}) only
 output = llm.encode("Hello, my name is")
 print(output)
 ```
@@ -369,14 +369,6 @@ you should explicitly specify the task type to ensure that the model is used in 
 
 #### Text Embedding (`--task embed`)
 
-Any text generation model can be converted into an embedding model by passing {code}`--task embed`.
-
-```{note}
-To get the best results, you should use pooling models that are specifically trained as such.
-```
-
-The following table lists those that are tested in vLLM.
-
 ```{eval-rst}
 .. list-table::
   :widths: 25 25 50 5 5
@@ -437,6 +429,10 @@ On the other hand, its 1.5B variant ({code}`Alibaba-NLP/gte-Qwen2-1.5B-instruct`
 despite being described otherwise on its model card.
 ```
 
+If your model is not in the above list, we will try to automatically convert the model using
+:func:`vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
+of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
+
 #### Reward Modeling (`--task reward`)
 
 ```{eval-rst}
@@ -460,6 +456,9 @@ despite being described otherwise on its model card.
     - ✅︎
     - ✅︎
 ```
+
+If your model is not in the above list, we will try to automatically convert the model using
+:func:`vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
 
 ```{important}
 For process-supervised reward models such as {code}`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
@@ -489,6 +488,9 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
     - ✅︎
     - ✅︎
 ```
+
+If your model is not in the above list, we will try to automatically convert the model using
+:func:`vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
 #### Sentence Pair Scoring (`--task score`)
 
