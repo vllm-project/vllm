@@ -31,6 +31,19 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
 
 class TeleChat2Model(LlamaModel):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "transformer.": "model.",
+        },
+        orig_to_new_substr={
+            ".h.": ".layers.",
+            ".self_attention.": ".self_attn.",
+            ".word_embeddings.": ".embed_tokens.",
+            ".dense.": ".o_proj.",
+            ".ln_f.": ".norm.",
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # 1. Initialize the LlamaModel with bias
         vllm_config.model_config.hf_config.bias = True
@@ -111,21 +124,9 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
 
-        hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                "transformer.": "model.",
-            },
-            orig_to_new_substr={
-                ".h.": ".layers.",
-                ".self_attention.": ".self_attn.",
-                ".word_embeddings.": ".embed_tokens.",
-                ".dense.": ".o_proj.",
-                ".ln_f.": ".norm.",
-            },
-        )
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

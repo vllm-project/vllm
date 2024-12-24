@@ -302,6 +302,9 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -494,9 +497,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["audio_tower."])
-        return loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
