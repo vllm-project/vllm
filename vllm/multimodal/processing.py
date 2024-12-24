@@ -860,18 +860,8 @@ class BaseMultiModalProcessor(ABC):
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
-        total_placeholders_by_modality = dict[str, int]()
-        for modality, placeholders in placeholders_by_modality.items():
-            num_placeholders = sum(item["length"] for item in placeholders)
-            max_tokens = mm_max_tokens[modality]
-
-            if num_placeholders != max_tokens:
-                logger.warning(
-                    "The processed dummy data has a total of %d placeholder "
-                    "tokens for the '%s' modality, which is not the expected "
-                    "%d tokens.", num_placeholders, modality, max_tokens)
-
-            total_placeholders_by_modality[modality] = num_placeholders
+        total_placeholders_by_modality = self._get_total_placeholder(
+            mm_inputs, mm_max_tokens)
 
         total_len = len(prompt_token_ids)
         if total_len > seq_len:
@@ -892,6 +882,26 @@ class BaseMultiModalProcessor(ABC):
             multi_modal_data=mm_inputs["mm_kwargs"],
             multi_modal_placeholders=placeholders_by_modality,
         )
+
+    def _get_total_placeholder(
+        self,
+        placeholders_by_modality: MultiModalDataDict,
+        mm_max_tokens: Mapping[str, int],
+    ):
+        """Get total placeholder for each modality."""
+        total_placeholders_by_modality = dict[str, int]()
+        for modality, placeholders in placeholders_by_modality.items():
+            num_placeholders = sum(item["length"] for item in placeholders)
+            max_tokens = mm_max_tokens[modality]
+
+            if num_placeholders != max_tokens:
+                logger.warning(
+                    "The processed dummy data has a total of %d placeholder "
+                    "tokens for the '%s' modality, which is not the expected "
+                    "%d tokens.", num_placeholders, modality, max_tokens)
+
+            total_placeholders_by_modality[modality] = num_placeholders
+        return total_placeholders_by_modality
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor):
@@ -961,22 +971,12 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
             prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
             placeholders_by_modality = mm_inputs["mm_placeholders"]
 
-            total_placeholders_by_modality = dict[str, int]()
-            for modality, placeholders in placeholders_by_modality.items():
-                num_placeholders = sum(item["length"] for item in placeholders)
-                max_tokens = mm_max_tokens[modality]
-
-                if num_placeholders != max_tokens:
-                    logger.warning(
-                        "The processed dummy data has a total of %d "
-                        "placeholder tokens for the '%s' modality, which is "
-                        "not the expected %d tokens.", num_placeholders,
-                        modality, max_tokens)
-
-                total_placeholders_by_modality[modality] = num_placeholders
+            total_placeholders_by_modality = self._get_total_placeholder(
+                placeholders_by_modality, mm_max_tokens)
         else:
             tokenizer = self._get_tokenizer()
             prompt_token_ids = _encode(tokenizer, processor_inputs.prompt_text)
+            total_placeholders_by_modality = dict[str, int]()
 
         total_len = len(prompt_token_ids)
         if total_len > seq_len:
@@ -988,7 +988,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
                 "inputs to fail during inference, even when the input text is "
                 "short. To avoid this, you should increase `max_model_len`, "
                 "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
-                total_len)
+                total_len, total_placeholders_by_modality)
 
         if is_encoder_data:
             return DummyData(
