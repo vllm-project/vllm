@@ -586,7 +586,10 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
         processor = MLlavaProcessor.from_pretrained(
             self.ctx.model_config.tokenizer)
-        assert isinstance(processor, ProcessorMixin)
+        assert isinstance(processor, MLlavaProcessor)
+
+        processor.image_token = "<image>"  # type: ignore
+
         return processor
 
 

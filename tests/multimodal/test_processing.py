@@ -539,6 +539,11 @@ def _test_processing_cache_correctness(
     from transformers import AutoImageProcessor  # noqa: F401
     from transformers import AutoProcessor  # noqa: F401
 
+    if model_id == "TIGER-Lab/Mantis-8B-siglip-llama3":
+        hf_overrides = {"architectures": ["MantisForConditionalGeneration"]}
+    else:
+        hf_overrides = {}
+
     model_config = ModelConfig(
         model_id,
         task="auto",
@@ -548,6 +553,7 @@ def _test_processing_cache_correctness(
         seed=0,
         dtype="float16",
         revision=None,
+        hf_overrides=hf_overrides,
     )
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
@@ -625,6 +631,7 @@ def _test_processing_cache_correctness(
 # yapf: disable
 @pytest.mark.parametrize(("model_id", "modalities"), [
     ("llava-hf/llava-1.5-7b-hf", {"image"}),
+    ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image"}),
     ("mistral-community/pixtral-12b", {"image"}),
     ("Qwen/Qwen2-VL-2B-Instruct", {"image", "video"}),
     ("Qwen/Qwen2-Audio-7B-Instruct", {"audio"}),
