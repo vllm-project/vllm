@@ -199,7 +199,7 @@ class AsyncLLM(EngineClient):
     ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
-        # 1) Convert Input --> EngineRequest.
+        # 1) Convert Input --> EngineRequest (Tokenize, MM, etc).
         engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
