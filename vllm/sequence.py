@@ -1366,9 +1366,9 @@ class SequenceGroupBase:
 class ParallelSampleSequenceGroup(SequenceGroupBase):
 
     @staticmethod
-    def add_request(request_id: str, engine, params, **kwargs):
+    def add_request(request_id: str, engine, params: Union[SamplingParams, PoolingParams], **kwargs):
         original_params = params
-        params = copy.deepcopy(original_params)
+        params = original_params.clone()
         params.n = 1
         group = ParallelSampleSequenceGroup(request_id)
         seqs = []

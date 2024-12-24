@@ -1,6 +1,7 @@
 # noqa: UP007
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -238,7 +239,6 @@ class XGrammarLogitsProcessor:
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
     matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
     batch_size: int = field(default=1)
-    prefilled: bool = field(default=False)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}
@@ -250,7 +250,6 @@ class XGrammarLogitsProcessor:
         self.matchers = []
         self.batch_size = 1
         self.token_bitmask = None  # type: ignore[assignment]
-        self.prefilled = False
 
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
@@ -278,10 +277,7 @@ class XGrammarLogitsProcessor:
             self.token_bitmask = xgr.allocate_token_bitmask(
                 self.batch_size, self.config.vocab_size)
 
-        if not self.prefilled:
-            # Have not sampled a token yet
-            self.prefilled = True
-        else:
+        if len(input_ids) > 0:
             for i, matcher in enumerate(self.matchers):
                 if not matcher.is_terminated():
                     sampled_token = input_ids[-1]
@@ -309,3 +305,7 @@ class XGrammarLogitsProcessor:
             scores = scores.to(device_type).squeeze()
 
         return scores
+
+    def clone(self) -> XGrammarLogitsProcessor:
+        """Deepcopy due to per-sequence state in the matchers"""
+        return copy.deepcopy(self)
