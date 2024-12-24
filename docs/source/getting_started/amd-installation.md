@@ -8,7 +8,7 @@ vLLM supports AMD GPUs with ROCm 6.3.
 
 - OS: Linux
 - Python: 3.9 -- 3.12
-- GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
+- GPU: MI200s (gfx90a), MI300 (gfx942), Radeon Pro, Radeon RX 7900 series (gfx1100)
 - ROCm 6.3
 
 Installation options:
@@ -83,7 +83,7 @@ Where the `<path/to/model>` is the location where the model is stored, for examp
 - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
 - [PyTorch](https://pytorch.org/)
 
-For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.3_ubuntu20.04_py3.9_pytorch_release_2.4.0`, `rocm/pytorch-nightly`.
+For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.3_ubuntu24.04_py3.12_pytorch_release_2.4.0`, `rocm/pytorch-nightly`.
 
 Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/)
 
@@ -94,9 +94,9 @@ Install ROCm's Triton flash attention (the default triton-mlir branch) following
 ```console
 $ python3 -m pip install ninja cmake wheel pybind11
 $ pip uninstall -y triton
-$ git clone https://github.com/OpenAI/triton.git
+$ git clone https://github.com/triton-lang/triton
 $ cd triton
-$ git checkout e192dba
+$ git checkout release/3.2.x
 $ cd python
 $ pip3 install .
 $ cd ../..
@@ -116,7 +116,6 @@ For example, for ROCm 6.3, suppose your gfx arch is `gfx90a`. To get your gfx ar
 ```console
 $ git clone https://github.com/ROCm/flash-attention.git
 $ cd flash-attention
-$ git checkout 3cea2fb
 $ git submodule update --init
 $ GPU_ARCHS="gfx90a" python3 setup.py install
 $ cd ..
