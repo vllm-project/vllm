@@ -121,9 +121,9 @@ spec:
 
 - **AMD ROCm GPU**
   
-For AMD ROCm GPU, you refer the deployment.yaml as bellow
+For AMD ROCm GPU, you refer the deployment.yaml as below
 
-```
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
