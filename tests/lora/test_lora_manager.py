@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from typing import Dict, List
 
@@ -50,6 +51,18 @@ def test_peft_helper(sql_lora_files):
         "embed_tokens",
         "lm_head",
     ]
+    scaling = peft_helper.lora_alpha / peft_helper.r
+    assert abs(peft_helper.vllm_lora_scaling_factor - scaling) < 1e-3
+
+    # test RSLoRA
+    config = dict(r=8,
+                  lora_alpha=16,
+                  target_modules=["gate_proj"],
+                  use_rslora=True)
+    peft_helper = PEFTHelper.from_dict(config)
+
+    scaling = peft_helper.lora_alpha / math.sqrt(peft_helper.r)
+    assert abs(peft_helper.vllm_lora_scaling_factor - scaling) < 1e-3
 
     expected_error = "vLLM only supports modules_to_save being None."
     with pytest.raises(ValueError, match=expected_error):
@@ -59,13 +72,6 @@ def test_peft_helper(sql_lora_files):
             target_modules=["gate_proj"],
             modules_to_save=["lm_head"],
         )
-        PEFTHelper.from_dict(config)
-    expected_error = "vLLM does not yet support RSLoRA."
-    with pytest.raises(ValueError, match=expected_error):
-        config = dict(r=8,
-                      lora_alpha=16,
-                      target_modules=["gate_proj"],
-                      use_rslora=True)
         PEFTHelper.from_dict(config)
 
     expected_error = "vLLM does not yet support DoRA."
