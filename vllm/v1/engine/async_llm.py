@@ -316,7 +316,7 @@ class AsyncLLM(EngineClient):
     async def _send_to_detokenizer(self, obj: Any):
         """Send object to Detokenizer with a FROM_ENGINE flag."""
 
-        msg = (EngineRequestType.FROM_ENGINE.value, pickle.dumps(object))
+        msg = (EngineRequestType.FROM_ENGINE.value, pickle.dumps(obj))
         await self.to_detokenizer.send_multipart(msg, copy=False)
 
     def encode(
