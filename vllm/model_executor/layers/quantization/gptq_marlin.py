@@ -232,7 +232,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        # Depending on prefix and dynamic, some arguments may be modified.
+        # gptqmodel per module/layer dynamic config my override/change base model quant config
         self.quant_config.update_config(prefix=self.prefix)
 
         output_size_per_partition = sum(output_partition_sizes)
