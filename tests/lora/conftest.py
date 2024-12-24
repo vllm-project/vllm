@@ -153,6 +153,12 @@ def sql_lora_files(sql_lora_huggingface_id):
 
 
 @pytest.fixture(scope="session")
+def llama3_1_8b_chess_lora():
+    return snapshot_download(
+        repo_id="mkopecki/chess-lora-adapter-llama-3.1-8b")
+
+
+@pytest.fixture(scope="session")
 def lora_bias_files():
     return snapshot_download(repo_id="followumesh/granite-3b-lora8-bias")
 
