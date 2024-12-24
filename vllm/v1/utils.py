@@ -89,7 +89,7 @@ def make_zmq_socket(
     path: str,
     type: Any,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
-    """Make a ZMQ socket with the proper bind/connext semantics."""
+    """Make a ZMQ socket with the proper bind/connect semantics."""
 
     import psutil
     mem = psutil.virtual_memory()
