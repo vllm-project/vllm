@@ -95,6 +95,9 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor):
         processor_data: Mapping[str, object],
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        # The MllamaProcessor calling drop `num_tiles` from image_processor,
+        # while `num_tiles` is essential for forwarding in vLLM implementation.
+        # Therefore, we use image_processor calling to keep `num_tiles`.
         image_processor = hf_processor.image_processor
         image_features = image_processor(**processor_data)
 

@@ -902,6 +902,14 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> MultiModalEncDecInputs:
+        """
+        Process multi-modal inputs to be used in vLLM.
+
+        The main processing steps are modified to fit encoder-decoder model:
+        1. Create encoder prompt from input prompt text.
+        2. Apply the HF processor on encoder prompt.
+        3. Copy the input prompt text as decoder prompt inputs.
+        """
         encoder_prompt_text = self._create_encoder_prompt(prompt_text)
         encoder_inputs = super().apply(
             prompt_text=encoder_prompt_text,
@@ -909,6 +917,8 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
+        # We assumed the decoder prompt text is copied from
+        # the original encoder prompt without extra process
         tokenizer = self._get_tokenizer()
         decoder_prompt_ids = _encode(tokenizer, prompt_text)
 
@@ -922,72 +932,51 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
         })
         return mm_inputs
 
+    @abstractmethod
     def _create_encoder_prompt(
         self,
         prompt: str,
     ) -> str:
-        """Create prompt for the encoder."""
+        """Create input prompt for the encoder."""
         raise NotImplementedError
-
-    def get_dummy_encoder_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_max_tokens: Mapping[str, int],
-    ) -> DummyData:
-        # Avoid circular import
-        from vllm.sequence import SequenceData
-
-        processor_inputs = self._get_dummy_mm_inputs(mm_counts)
-
-        mm_inputs = self.apply(*processor_inputs)
-
-        prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
-        placeholders_by_modality = mm_inputs["mm_placeholders"]
-
-        total_placeholders_by_modality = dict[str, int]()
-        for modality, placeholders in placeholders_by_modality.items():
-            num_placeholders = sum(item["length"] for item in placeholders)
-            max_tokens = mm_max_tokens[modality]
-
-            if num_placeholders != max_tokens:
-                logger.warning(
-                    "The processed dummy data has a total of %d placeholder "
-                    "tokens for the '%s' modality, which is not the expected "
-                    "%d tokens.", num_placeholders, modality, max_tokens)
-
-            total_placeholders_by_modality[modality] = num_placeholders
-
-        total_len = len(prompt_token_ids)
-        if total_len > seq_len:
-            logger.warning(
-                "The context length (%d) of the model is too short "
-                "to hold the multi-modal embeddings in the worst case "
-                "(%d tokens in total, out of which %s are reserved for "
-                "multi-modal embeddings). This may cause certain multi-modal "
-                "inputs to fail during inference, even when the input text is "
-                "short. To avoid this, you should increase `max_model_len`, "
-                "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
-                total_len, total_placeholders_by_modality)
-
-        return DummyData(
-            seq_data=SequenceData.from_seqs(prompt_token_ids),
-            multi_modal_data=mm_inputs["mm_kwargs"],
-            multi_modal_placeholders=placeholders_by_modality,
-        )
 
     def get_dummy_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_max_tokens: Mapping[str, int],
+        is_encoder_data: bool = False,
     ) -> DummyData:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
         processor_inputs = self._get_dummy_mm_inputs(mm_counts)
-        tokenizer = self._get_tokenizer()
-        prompt_token_ids = tokenizer.encode(processor_inputs.prompt_text)
+
+        # Only process multi-modal data in encoder inputs
+        if is_encoder_data:
+            # TODO(Isotr0py): This part is similar to `get_dummy_data` in 
+            # `BaseMultiModalProcessor`, perhaps we can reuse it.
+            mm_inputs = self.apply(*processor_inputs)
+
+            prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
+            placeholders_by_modality = mm_inputs["mm_placeholders"]
+
+            total_placeholders_by_modality = dict[str, int]()
+            for modality, placeholders in placeholders_by_modality.items():
+                num_placeholders = sum(item["length"] for item in placeholders)
+                max_tokens = mm_max_tokens[modality]
+
+                if num_placeholders != max_tokens:
+                    logger.warning(
+                        "The processed dummy data has a total of %d "
+                        "placeholder tokens for the '%s' modality, which is "
+                        "not the expected %d tokens.", num_placeholders,
+                        modality, max_tokens)
+
+                total_placeholders_by_modality[modality] = num_placeholders
+        else:
+            tokenizer = self._get_tokenizer()
+            prompt_token_ids = _encode(tokenizer, processor_inputs.prompt_text)
 
         total_len = len(prompt_token_ids)
         if total_len > seq_len:
@@ -1001,6 +990,13 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
                 "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
                 total_len)
 
-        prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
-
-        return DummyData(seq_data=SequenceData.from_seqs(prompt_token_ids), )
+        if is_encoder_data:
+            return DummyData(
+                seq_data=SequenceData.from_seqs(prompt_token_ids),
+                multi_modal_data=mm_inputs["mm_kwargs"],
+                multi_modal_placeholders=placeholders_by_modality,
+            )
+        else:
+            prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
+            return DummyData(
+                seq_data=SequenceData.from_seqs(prompt_token_ids), )

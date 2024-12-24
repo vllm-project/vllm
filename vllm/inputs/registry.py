@@ -338,8 +338,11 @@ class InputRegistry:
                 model_config)
             if is_encoder_data:
                 assert isinstance(processor, EncDecMultiModalProcessor)
-                dummy_data = processor.get_dummy_encoder_data(
-                    seq_len, mm_counts, mm_max_tokens)
+                dummy_data = processor.get_dummy_data(
+                    seq_len,
+                    mm_counts,
+                    mm_max_tokens,
+                    is_encoder_data=is_encoder_data)
             else:
                 dummy_data = processor.get_dummy_data(seq_len, mm_counts,
                                                       mm_max_tokens)
