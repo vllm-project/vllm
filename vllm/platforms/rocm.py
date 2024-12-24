@@ -41,7 +41,7 @@ class RocmPlatform(Platform):
     dispatch_key: str = "CUDA"
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-        "fbgemm_fp8", "gguf"
+        "fbgemm_fp8", "gguf", "quark"
     ]
 
     @classmethod
