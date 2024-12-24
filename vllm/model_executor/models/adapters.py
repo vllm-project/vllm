@@ -230,8 +230,8 @@ def as_reward_model(cls: _T) -> _T:
     ModelForReward = _create_pooling_model_cls(
         cls,
         default_pooling_type=PoolingType.ALL,
-        default_normalize=True,
-        default_softmax=True,
+        default_normalize=False,
+        default_softmax=False,
     )
 
     ModelForReward.__name__ = \
