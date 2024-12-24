@@ -4,16 +4,14 @@ import torch
 
 from vllm.platforms import current_platform
 
+from .blocksparse_attention_kernel import blocksparse_flash_attn_varlen_fwd
 from .utils import (dense_to_crow_col, get_head_sliding_step,
                     get_sparse_attn_mask)
 
-IS_COMPUTE_8_OR_ABOVE = current_platform.has_device_capability(80)
-
-if IS_COMPUTE_8_OR_ABOVE:
-    from .blocksparse_attention_kernel import blocksparse_flash_attn_varlen_fwd
-
 
 class LocalStridedBlockSparseAttn(torch.nn.Module):
+
+    IS_COMPUTE_8_OR_ABOVE = current_platform.has_device_capability(80)
 
     def __init__(
         self,
@@ -33,12 +31,12 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         if use_spda is None:
             use_spda = current_platform.is_rocm() or \
                         current_platform.is_cpu() or not \
-                        IS_COMPUTE_8_OR_ABOVE
+                        self.IS_COMPUTE_8_OR_ABOVE
         device = device or (torch.cuda.current_device()
                             if current_platform.is_cuda_alike() else "cpu")
         device = torch.device(device)
         # NOTE: vllm CPU backend support BF16 instead of FP16.
-        dtype = dtype or (torch.bfloat16 if IS_COMPUTE_8_OR_ABOVE
+        dtype = dtype or (torch.bfloat16 if self.IS_COMPUTE_8_OR_ABOVE
                           or device.type == "cpu" else torch.half)
 
         self.n_heads = n_heads
@@ -122,7 +120,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         return: tensor of shape as q.
         """
         assert (
-            IS_COMPUTE_8_OR_ABOVE
+            self.IS_COMPUTE_8_OR_ABOVE
         ), "Requires compute capability of 8 or above (Ampere or newer) to use \
             Triton kernel."
 

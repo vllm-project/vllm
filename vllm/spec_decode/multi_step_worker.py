@@ -8,10 +8,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
                            SequenceGroupMetadata)
-
-if current_platform.is_cuda_alike():
-    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
-
+from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase

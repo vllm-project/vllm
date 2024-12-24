@@ -14,14 +14,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
-if current_platform.is_cuda_alike():
-    from .fused_moe import fused_experts
-else:
-    fused_experts = None  # type: ignore
-if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
-else:
-    fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
 
 
@@ -115,6 +107,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function)
 
+        if current_platform.is_cuda_alike():
+            from .fused_moe import fused_experts
+        else:
+            fused_experts = None  # type: ignore
+
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w2=layer.w2_weight,
@@ -142,6 +139,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert num_expert_group is None
         assert topk_group is None
         assert custom_routing_function is None
+
+        if current_platform.is_tpu():
+            from .moe_pallas import fused_moe as fused_moe_pallas
+        else:
+            fused_moe_pallas = None  # type: ignore
+
         return fused_moe_pallas(hidden_states=x,
                                 w1=layer.w13_weight,
                                 w2=layer.w2_weight,
