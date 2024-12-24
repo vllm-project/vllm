@@ -95,6 +95,7 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
+        attn_bias: Optional[torch.Tensor],
         k_scale: float,
         v_scale: float,
         tp_rank: int = 0,
@@ -140,6 +141,7 @@ class PagedAttention:
                 block_size,
                 max_seq_len,
                 alibi_slopes,
+                attn_bias,
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
@@ -178,6 +180,7 @@ class PagedAttention:
                 block_size,
                 max_seq_len,
                 alibi_slopes,
+                attn_bias,
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
@@ -203,11 +206,13 @@ class PagedAttention:
         context_lens: torch.Tensor,
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
+        attn_bias: Optional[torch.Tensor],
         sliding_window: Optional[int],
         k_scale: float,
         v_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
+        assert attn_bias is None, "Bias for prefix not yet enabled"
         context_attention_fwd(
             query,
             key,

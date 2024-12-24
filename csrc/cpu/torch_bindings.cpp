@@ -24,12 +24,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Attention ops
   // Compute the attention between an input query and the cached keys/values
   // using PagedAttention.
+  // TODO attn_bias on cpu
   ops.def(
       "paged_attention_v1("
       "    Tensor! out, Tensor query, Tensor key_cache,"
       "    Tensor value_cache, int num_kv_heads, float scale,"
       "    Tensor block_tables, Tensor seq_lens, int block_size,"
-      "    int max_seq_len, Tensor? alibi_slopes,"
+      "    int max_seq_len, Tensor? alibi_slopes, Tensor? attn_bias,"
       "    str kv_cache_dtype, float k_scale, float v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
@@ -43,7 +44,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor! tmp_out, Tensor query, Tensor key_cache,"
       "    Tensor value_cache, int num_kv_heads, float scale,"
       "    Tensor block_tables, Tensor seq_lens, int block_size,"
-      "    int max_seq_len, Tensor? alibi_slopes,"
+      "    int max_seq_len, Tensor? alibi_slopes, Tensor? attn_bias,"
       "    str kv_cache_dtype, float k_scale, float v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
