@@ -42,6 +42,8 @@ In addition, we have the following custom APIs:
 
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
   - Applicable to any model with a tokenizer.
+- [Pooling API](#pooling-api) (`/pooling`)
+  - Applicable to all [pooling models](../models/pooling_models.md).
 - [Score API](#score-api) (`/score`)
   - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
 
@@ -179,7 +181,12 @@ The order of priorities is `command line > config file values > defaults`.
 (completions-api)=
 ### Completions API
 
-Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/completions) for more details.
+Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+#### Code example
+
+See [examples/openai_completion_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py).
 
 #### Extra parameters
 
@@ -200,14 +207,19 @@ The following extra parameters are supported:
 ```
 
 (chat-api)=
-### Chat Completions API
+### Chat API
 
-Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/chat) for more details.
+Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
 see our [Multimodal Inputs](../usage/multimodal_inputs.md) guide for more information.
 - *Note: `image_url.detail` parameter is not supported.*
+
+#### Code example
+
+See [examples/openai_chat_completion_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client.py).
 
 #### Extra parameters
 
@@ -230,14 +242,19 @@ The following extra parameters are supported:
 (embeddings-api)=
 ### Embeddings API
 
-Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/embeddings) for more details.
+Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat Completions API](#chat-api))
+If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
 which will be treated as a single prompt to the model.
 
 ```{tip}
-This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.md) for details.
+This enables multi-modal inputs to be passed to embedding models, see [this page](#multimodal-inputs) for details.
 ```
+
+#### Code example
+
+See [examples/openai_embedding_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_embedding_client.py).
 
 #### Extra parameters
 
@@ -268,19 +285,34 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 (tokenizer-api)=
 ### Tokenizer API
 
-The Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
+Our Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
 It consists of two endpoints:
 
 - `/tokenize` corresponds to calling `tokenizer.encode()`.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
+(pooling-api)=
+### Pooling API
+
+Our Pooling API encodes input prompts using a [pooling model](../models/pooling_models.md) and returns the corresponding hidden states.
+
+The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
+
+#### Code example
+
+See [examples/openai_pooling_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_pooling_client.py).
+
 (score-api)=
 ### Score API
 
-The Score API applies a cross-encoder model to predict scores for sentence pairs.
+Our Score API applies a cross-encoder model to predict scores for sentence pairs.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
 You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+
+#### Code example
+
+See [examples/openai_cross_encoder_score.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_cross_encoder_score.py).
 
 #### Single inference
 
