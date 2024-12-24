@@ -83,7 +83,7 @@ class Hermes2ProToolParser(ToolParser):
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
                 raw_function_calls = [
-                    # Using json_repair can improve the robustness of parsing the JSON output
+                    # To improve the robustness of parsing the JSON output
                     json_repair.loads(match[0] if match[0] else match[1])
                     for match in function_call_tuples
                 ]
