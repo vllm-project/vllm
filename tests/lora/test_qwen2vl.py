@@ -10,9 +10,10 @@ from vllm.platforms import current_platform
 MODEL_PATH = "Qwen/Qwen2-VL-7B-Instruct"
 
 PROMPT_TEMPLATE = (
-    "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
-    "(<image>./</image>)\nWhat is in the image?<|eot_id|>"
-    "<|start_header_id|>assistant<|end_header_id|>\n\n")
+    "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
+    "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+    "What is in the image?<|im_end|>\n"
+    "<|im_start|>assistant\n")
 
 IMAGE_ASSETS = [
     ImageAsset("stop_sign"),
@@ -21,8 +22,8 @@ IMAGE_ASSETS = [
 
 # After fine-tuning with LoRA, all generated content should start begin `A`.
 EXPECTED_OUTPUT = [
-    "A red and white stop sign with a Chinese archway in the background featuring red lanterns and gold accents.",  # noqa: E501
-    "A pink cherry blossom tree with a blue sky in the background.",
+    "A stop sign stands prominently in the foreground, with a traditional Chinese gate and a black SUV in the background, illustrating a blend of modern and cultural elements.",  # noqa: E501
+    "A majestic skyscraper stands tall, partially obscured by a vibrant canopy of cherry blossoms, against a clear blue sky.",  # noqa: E501
 ]
 
 
@@ -30,7 +31,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     sampling_params = vllm.SamplingParams(
         temperature=0,
         max_tokens=5,
-        stop_token_ids=[128001, 128009],  # eos_id, eot_id
     )
 
     inputs = [{
@@ -56,18 +56,22 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="MiniCPM-V dependency xformers incompatible with ROCm")
+@pytest.mark.xfail(current_platform.is_rocm(),
+                   reason="Qwen2-VL dependency xformers incompatible with ROCm"
+                   )
 def test_qwen2vl_lora(qwen2vl_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
         max_num_seqs=2,
         enable_lora=True,
-        max_loras=4,
-        max_lora_rank=64,
+        max_loras=2,
+        max_lora_rank=16,
         trust_remote_code=True,
-        enable_chunked_prefill=True,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+        },
+        max_model_len=4096,
     )
     output1 = do_sample(llm, qwen2vl_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
