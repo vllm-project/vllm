@@ -115,7 +115,7 @@ class LLM:
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
-            :ref:`engine_args`)
+            :ref:`engine-args`)
 
     Note:
         This class is intended to be used for offline inference. For online
@@ -258,6 +258,13 @@ class LLM:
             tokenizer_group.tokenizer = tokenizer
         else:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+
+    def get_default_sampling_params(self) -> SamplingParams:
+        diff_sampling_param = (
+            self.llm_engine.model_config.get_diff_sampling_param())
+        if diff_sampling_param:
+            return SamplingParams.from_optional(**diff_sampling_param)
+        return SamplingParams()
 
     @overload
     def generate(
@@ -442,7 +449,7 @@ class LLM:
 
         if sampling_params is None:
             # Use default sampling params.
-            sampling_params = SamplingParams()
+            sampling_params = self.get_default_sampling_params()
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,

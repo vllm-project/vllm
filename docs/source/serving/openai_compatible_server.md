@@ -2,7 +2,7 @@
 
 vLLM provides an HTTP server that implements OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API, and more!
 
-You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](deploying_with_docker.rst):
+You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](deploying_with_docker.md):
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
@@ -30,25 +30,20 @@ print(completion.choices[0].message)
 We currently support the following OpenAI APIs:
 
 - [Completions API](#completions-api) (`/v1/completions`)
-  - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`).
+  - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`).
   - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
-  - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`) with a [chat template](#chat-template).
-  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Multimodal Inputs](../usage/multimodal_inputs.rst).
-    - *Note: `image_url.detail` parameter is not supported.*
-  - We also support `audio_url` content type for audio files.
-    - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
-    - *TODO: Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
+  - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`) with a [chat template](#chat-template).
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
-  - Only applicable to [embedding models](../models/pooling_models.rst) (`--task embed`).
+  - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
 
 In addition, we have the following custom APIs:
 
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
   - Applicable to any model with a tokenizer.
 - [Score API](#score-api) (`/score`)
-  - Only applicable to [cross-encoder models](../models/pooling_models.rst) (`--task score`).
+  - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
 
 (chat-template)=
 ## Chat Template
@@ -188,7 +183,7 @@ Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference
 
 #### Extra parameters
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -209,9 +204,14 @@ The following extra parameters are supported:
 
 Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/chat) for more details.
 
+We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
+[Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
+see our [Multimodal Inputs](../usage/multimodal_inputs.md) guide for more information.
+- *Note: `image_url.detail` parameter is not supported.*
+
 #### Extra parameters
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -236,12 +236,12 @@ If the model has a [chat template](#chat-template), you can replace `inputs` wit
 which will be treated as a single prompt to the model.
 
 ```{tip}
-This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
+This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.md) for details.
 ```
 
 #### Extra parameters
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -418,7 +418,7 @@ Response:
 
 #### Extra parameters
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python

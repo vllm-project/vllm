@@ -76,7 +76,7 @@ class MultiModalRegistry:
         Register a multi-modal plugin so it can be recognized by vLLM.
 
         See also:
-            :ref:`adding_multimodal_plugin`
+            :ref:`adding-multimodal-plugin`
         """
         data_type_key = plugin.get_data_key()
 
@@ -200,6 +200,23 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
+    def get_max_tokens_per_item_by_modality(
+        self,
+        model_config: "ModelConfig",
+    ) -> Mapping[str, int]:
+        """
+        Get the maximum number of tokens per data item from each modality
+        for profiling the memory usage of a model.
+
+        Note:
+            This is currently directly used only in V1.
+        """
+
+        return {
+            key: plugin.get_max_multimodal_tokens(model_config)
+            for key, plugin in self._plugins.items()
+        }
+
     def get_max_tokens_by_modality(
         self,
         model_config: "ModelConfig",
@@ -216,9 +233,9 @@ class MultiModalRegistry:
         limits_per_plugin = self._limits_by_model[model_config]
 
         return {
-            key: (limits_per_plugin[key] *
-                  plugin.get_max_multimodal_tokens(model_config))
-            for key, plugin in self._plugins.items()
+            key: limits_per_plugin[key] * max_tokens_per_mm_item
+            for key, max_tokens_per_mm_item in
+            self.get_max_tokens_per_item_by_modality(model_config).items()
         }
 
     def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
@@ -294,8 +311,8 @@ class MultiModalRegistry:
         invoked to transform the data into a dictionary of model inputs.
 
         See also:
-            - :ref:`input_processing_pipeline`
-            - :ref:`enabling_multimodal_inputs`
+            - :ref:`input-processing-pipeline`
+            - :ref:`enabling-multimodal-inputs`
         """
 
         def wrapper(model_cls: N) -> N:

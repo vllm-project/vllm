@@ -466,7 +466,7 @@ def get_vllm_version() -> str:
             version += f"{sep}empty"
     elif _is_cuda():
         if envs.VLLM_USE_PRECOMPILED:
-            version += ".precompiled"
+            version += f"{sep}precompiled"
         else:
             cuda_version = str(get_nvcc_cuda_version())
             if cuda_version != MAIN_CUDA_VERSION:
@@ -630,6 +630,7 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
         "video": ["decord"]  # Required for video processing
     },
