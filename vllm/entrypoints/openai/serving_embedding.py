@@ -40,36 +40,6 @@ def _get_embedding(
     assert_never(encoding_format)
 
 
-def request_output_to_embedding_response(
-        final_res_batch: List[PoolingRequestOutput], request_id: str,
-        created_time: int, model_name: str,
-        encoding_format: Literal["float", "base64"]) -> EmbeddingResponse:
-    data: List[EmbeddingResponseData] = []
-    num_prompt_tokens = 0
-    for idx, final_res in enumerate(final_res_batch):
-        embedding_res = EmbeddingRequestOutput.from_base(final_res)
-        prompt_token_ids = final_res.prompt_token_ids
-
-        embedding = _get_embedding(embedding_res.outputs, encoding_format)
-        embedding_data = EmbeddingResponseData(index=idx, embedding=embedding)
-        data.append(embedding_data)
-
-        num_prompt_tokens += len(prompt_token_ids)
-
-    usage = UsageInfo(
-        prompt_tokens=num_prompt_tokens,
-        total_tokens=num_prompt_tokens,
-    )
-
-    return EmbeddingResponse(
-        id=request_id,
-        created=created_time,
-        model=model_name,
-        data=data,
-        usage=usage,
-    )
-
-
 class OpenAIServingEmbedding(OpenAIServing):
 
     def __init__(
@@ -114,7 +84,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         model_name = request.model
         request_id = f"embd-{self._base_request_id(raw_request)}"
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
 
         truncate_prompt_tokens = None
 
@@ -218,9 +188,13 @@ class OpenAIServingEmbedding(OpenAIServing):
             final_res_batch_checked = cast(List[PoolingRequestOutput],
                                            final_res_batch)
 
-            response = request_output_to_embedding_response(
-                final_res_batch_checked, request_id, created_time, model_name,
-                encoding_format)
+            response = self.request_output_to_embedding_response(
+                final_res_batch_checked,
+                request_id,
+                created_time,
+                model_name,
+                encoding_format,
+            )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
@@ -228,3 +202,40 @@ class OpenAIServingEmbedding(OpenAIServing):
             return self.create_error_response(str(e))
 
         return response
+
+    def request_output_to_embedding_response(
+        self,
+        final_res_batch: List[PoolingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+        encoding_format: Literal["float", "base64"],
+    ) -> EmbeddingResponse:
+        items: List[EmbeddingResponseData] = []
+        num_prompt_tokens = 0
+
+        for idx, final_res in enumerate(final_res_batch):
+            embedding_res = EmbeddingRequestOutput.from_base(final_res)
+
+            item = EmbeddingResponseData(
+                index=idx,
+                embedding=_get_embedding(embedding_res.outputs,
+                                         encoding_format),
+            )
+            prompt_token_ids = final_res.prompt_token_ids
+
+            items.append(item)
+            num_prompt_tokens += len(prompt_token_ids)
+
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            total_tokens=num_prompt_tokens,
+        )
+
+        return EmbeddingResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            data=items,
+            usage=usage,
+        )

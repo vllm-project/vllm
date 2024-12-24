@@ -120,19 +120,7 @@ outputs = llm.chat(conversation, chat_template=custom_template)
 
 ## Online Inference
 
-Our [OpenAI Compatible Server](../serving/openai_compatible_server) can be used for online inference.
-Please click on the above link for more details on how to launch the server.
+Our [OpenAI Compatible Server](../serving/openai_compatible_server) provides endpoints that correspond to the offline APIs:
 
-### Completions API
-
-Our Completions API is similar to `LLM.generate` but only accepts text.
-It is compatible with [OpenAI Completions API](https://platform.openai.com/docs/api-reference/completions)
-so that you can use OpenAI client to interact with it.
-A code example can be found in [examples/openai_completion_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py).
-
-### Chat API
-
-Our Chat API is similar to `LLM.chat`, accepting both text and [multi-modal inputs](#multimodal-inputs).
-It is compatible with [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
-so that you can use OpenAI client to interact with it.
-A code example can be found in [examples/openai_chat_completion_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client.py).
+- [Completions API](#completions-api) is similar to `LLM.generate` but only accepts text.
+- [Chat API](#chat-api)  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](#multimodal-inputs) for models with a chat template.
