@@ -25,8 +25,8 @@ from vllm.v1.engine.core import EngineCore, MPEngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer, MPDetokenizerClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.utils import make_zmq_socket
 from vllm.v1.executor.ray_utils import initialize_ray_cluster
+from vllm.v1.utils import make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -199,6 +199,8 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
+        logger.info("Added request.")
+
         # Process raw inputs into the request.
         engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
@@ -219,6 +221,7 @@ class LLMEngine:
 
     def step(self) -> List[RequestOutput]:
 
+        logger.info("Called step.")
         if self.multiprocess_mode:
             # Get next output from the Detokenizer.
             request_outputs: List[
