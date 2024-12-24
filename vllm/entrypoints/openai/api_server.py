@@ -45,7 +45,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest,
-                                              EmbeddingResponse, ErrorResponse,
+                                              EmbeddingResponse,
+                                              EmbeddingResponseData,
+                                              ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               PoolingRequest, PoolingResponse,
                                               ScoreRequest, ScoreResponse,
@@ -401,18 +403,36 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
-        if base(raw_request).model_config.runner_type == "pooling":
-            logger.warning(
-                "Embeddings API will become exclusive to embedding models "
-                "in a future release. To return the hidden states directly, "
-                "use the Pooling API (`/pooling`) instead.")
+        fallback_handler = pooling(raw_request)
+        if fallback_handler is None:
+            return base(raw_request).create_error_response(
+                message="The model does not support Embeddings API")
 
-            return await create_pooling(request, raw_request)
+        logger.warning(
+            "Embeddings API will become exclusive to embedding models "
+            "in a future release. To return the hidden states directly, "
+            "use the Pooling API (`/pooling`) instead.")
 
-        return base(raw_request).create_error_response(
-            message="The model does not support Embeddings API")
+        res = await fallback_handler.create_pooling(request, raw_request)
+        if isinstance(res, PoolingResponse):
+            generator = EmbeddingResponse(
+                id=res.id,
+                object=res.object,
+                created=res.created,
+                model=res.model,
+                data=[
+                    EmbeddingResponseData(
+                        index=d.index,
+                        embedding=d.data,  # type: ignore
+                    ) for d in res.data
+                ],
+                usage=res.usage,
+            )
+        else:
+            generator = res
+    else:
+        generator = await handler.create_embedding(request, raw_request)
 
-    generator = await handler.create_embedding(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
