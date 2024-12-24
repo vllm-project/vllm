@@ -237,6 +237,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
+        # gptqmodel per module/layer dynamic config my override/change base model quant config
+        self.quant_config.update_config(prefix=self.prefix)
+
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
         weight_loader = extra_weight_attrs.get("weight_loader")
