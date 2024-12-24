@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 import requests
 
+from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
@@ -17,6 +18,8 @@ DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' +
 @pytest.fixture(scope="module")
 def server():
     args = [
+        "--task",
+        "embed",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -124,14 +127,16 @@ async def test_conversation_embedding(server: RemoteOpenAIServer,
         "content": "Stars twinkle brightly in the night sky.",
     }]
 
-    chat_response = requests.post(server.url_for("v1/embeddings"),
-                                  json={
-                                      "model": model_name,
-                                      "messages": messages,
-                                      "encoding_format": "float",
-                                  })
+    chat_response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "encoding_format": "float",
+        },
+    )
     chat_response.raise_for_status()
-    chat_embeddings = chat_response.json()
+    chat_embeddings = EmbeddingResponse.model_validate(chat_response.json())
 
     tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
     prompt = tokenizer.apply_chat_template(
