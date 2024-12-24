@@ -237,7 +237,11 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         appended to.
         """
         # TODO: Add proper implementation which runs profiling on TT devices
-        max_tokens_all_users = 131072  # Note: includes num vision tokens for multi-modal
+        if ("meta-llama/Meta-Llama-3.1-8B" in self.model_config.model and 
+            len(self.device_config.device.get_devices()) == 1):  # Llama8B on N150
+            max_tokens_all_users = 65536
+        else:
+            max_tokens_all_users = 131072  # Note: includes num vision tokens for multi-modal
         num_tt_blocks = math.ceil(max_tokens_all_users / self.cache_config.block_size)
         num_tt_blocks = int(num_tt_blocks * 1.01)  # Add 1% to account for vLLM's watermark_blocks
         num_cpu_blocks = 0
@@ -411,7 +415,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def _open_mesh_device(self):
         num_devices_available = len(ttnn.get_device_ids())
         
-        mesh_grid_dict = {"N150": (1, 1), "N300": (1, 2), "T3K_LINE": (1, 8), "T3K_RING": (2, 4)}
+        mesh_grid_dict = {"N150": (1, 1), "N300": (1, 2), "T3K_LINE": (1, 8), "T3K_RING": (2, 4), "TG": (8, 4)}
         mesh_device = os.environ.get("MESH_DEVICE")
         if mesh_device is not None:
             assert mesh_device in mesh_grid_dict, f"Invalid MESH_DEVICE: {mesh_device}"
@@ -425,7 +429,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             assert f"Requested mesh grid shape {mesh_grid} is larger than number of available devices {num_devices_available}"
         
         if self.trace_mode:
-            device_params = {"trace_region_size": 14227456}  # TODO: make this configurable
+            device_params = {"trace_region_size": 23887872}  # TODO: make this configurable
         else:
             device_params = {}
         mesh_device = ttnn.open_mesh_device(
