@@ -3,21 +3,28 @@ from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
+
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase, UnquantizedLinearMethod, set_weight_attrs
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.quantization.kernels import MPLinearLayerConfig, choose_mp_linear_kernel
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               set_weight_attrs, UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.layers.quantization.kernels import (
+    MPLinearLayerConfig, choose_mp_linear_kernel)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (check_marlin_supported,
-                                                                        marlin_moe_permute_scales,
-                                                                        marlin_repeat_scales_on_all_ranks,
-                                                                        verify_marlin_supported)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_marlin_supported, marlin_moe_permute_scales,
+    marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter, GroupQuantScaleParameter,
-                                           PackedColumnParameter, PackedvLLMParameter, RowvLLMParameter)
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           GroupQuantScaleParameter,
+                                           PackedColumnParameter,
+                                           PackedvLLMParameter,
+                                           RowvLLMParameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -146,9 +153,10 @@ class GPTQMarlinConfig(QuantizationConfig):
                     return pattern_dict.get(key, default_value)
         return default_value
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str
-                         ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod", UnquantizedLinearMethod]]:
+
+    def get_quant_method(
+            self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod", UnquantizedLinearMethod]]:
         if self.dynamic and self.dynamic_get(layer_name=prefix) == False:  # noqa: E712
             return UnquantizedLinearMethod()
 

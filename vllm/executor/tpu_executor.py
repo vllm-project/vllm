@@ -5,7 +5,8 @@ import torch
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 
@@ -43,16 +44,10 @@ class TPUExecutor(ExecutorBase):
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
         return dict(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            load_config=self.load_config,
+            vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            multimodal_config=self.multimodal_config,
             is_driver_worker=rank == 0,
         )
 
@@ -62,11 +57,17 @@ class TPUExecutor(ExecutorBase):
         rank: int = 0,
         distributed_init_method: Optional[str] = None,
     ):
-        from vllm.worker.tpu_worker import TPUWorker
+        if self.scheduler_config.is_multi_step:
+            from vllm.worker.multi_step_tpu_worker import MultiStepTPUWorker
+            worker = MultiStepTPUWorker(**self._get_worker_kwargs(
+                local_rank, rank, distributed_init_method))
+            return worker
+        else:
+            from vllm.worker.tpu_worker import TPUWorker
 
-        worker = TPUWorker(**self._get_worker_kwargs(local_rank, rank,
-                                                     distributed_init_method))
-        return worker
+            worker = TPUWorker(**self._get_worker_kwargs(
+                local_rank, rank, distributed_init_method))
+            return worker
 
     def initialize_cache(
         self,

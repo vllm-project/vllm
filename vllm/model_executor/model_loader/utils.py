@@ -7,6 +7,7 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.adapters import as_embedding_model
 
 
 @contextlib.contextmanager
@@ -21,20 +22,23 @@ def set_default_torch_dtype(dtype: torch.dtype):
 def get_model_architecture(
         model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
+
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
+    mixtral_supported = [
+        "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin"
+    ]
+
     if (model_config.quantization is not None
-            and model_config.quantization != "fp8"
+            and model_config.quantization not in mixtral_supported
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
 
-    for arch in architectures:
-        model_cls = ModelRegistry.load_model_cls(arch)
-        if model_cls is not None:
-            return (model_cls, arch)
-    raise ValueError(
-        f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {ModelRegistry.get_supported_archs()}")
+    model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
+    if model_config.runner_type == "pooling":
+        model_cls = as_embedding_model(model_cls)
+
+    return model_cls, arch
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:

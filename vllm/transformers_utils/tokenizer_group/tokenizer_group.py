@@ -2,12 +2,13 @@ from typing import List, Optional
 
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer import (get_lora_tokenizer,
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               get_lora_tokenizer,
                                                get_lora_tokenizer_async,
                                                get_tokenizer)
 from vllm.utils import LRUCache
 
-from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
+from .base_tokenizer_group import BaseTokenizerGroup
 
 
 class TokenizerGroup(BaseTokenizerGroup):
@@ -20,8 +21,9 @@ class TokenizerGroup(BaseTokenizerGroup):
         self.enable_lora = enable_lora
         self.max_input_length = max_input_length
         self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
-        self.lora_tokenizers = LRUCache[AnyTokenizer](
-            capacity=max_num_seqs if enable_lora else 0)
+        max_loras = tokenizer_config.get("max_loras", 0)
+        self.lora_tokenizers = LRUCache[int, AnyTokenizer](
+            capacity=max(max_loras, max_num_seqs) if enable_lora else 0)
 
     @classmethod
     def from_config(cls, tokenizer_pool_config: Optional[TokenizerPoolConfig],

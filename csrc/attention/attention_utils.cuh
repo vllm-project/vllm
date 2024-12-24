@@ -34,7 +34,7 @@ inline __device__ float qk_dot_(const Vec (&q)[N], const Vec (&k)[N]) {
   A_vec qk_vec = mul<A_vec, Vec, Vec>(q[0], k[0]);
 #pragma unroll
   for (int ii = 1; ii < N; ++ii) {
-    qk_vec = fma(q[ii], k[ii], qk_vec);
+    qk_vec = vllm::fma(q[ii], k[ii], qk_vec);
   }
 
   // Finalize the reduction across lanes.

@@ -16,15 +16,11 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         self,
         posterior_threshold: float,
         posterior_alpha: float,
-        disable_bonus_tokens: bool = False,
         strict_mode: bool = False,
     ):
         """Create a Typical Acceptance Sampler.
 
         Args:
-            disable_bonus_tokens: Whether or not to disable the bonus token.
-            Require when bonus tokens will cause corrupt KV cache for
-            proposal methods that require KV cache.
             strict_mode: Whether or not to perform shape/device/dtype checks
             during sampling. This catches correctness issues but adds
             nontrivial latency.
@@ -36,12 +32,11 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         """
         self._posterior_threshold = posterior_threshold
         self._posterior_alpha = posterior_alpha
-        super().__init__(disable_bonus_tokens=disable_bonus_tokens,
-                         strict_mode=strict_mode)
+        super().__init__(strict_mode=strict_mode)
 
     def forward(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
@@ -54,7 +49,7 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         one token will be emitted.
 
         In the case where all draft tokens are accepted, the bonus token will be
-        accepted conditioned on self._disable_bonus_tokens being false.
+        accepted.
 
         Args:
             target_probs: The probability distribution over token ids given
@@ -80,11 +75,12 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
         if self._strict_mode:
-            self._raise_if_incorrect_input(target_probs, draft_token_ids,
-                                           bonus_token_ids)
+            self._raise_if_incorrect_input(target_with_bonus_probs,
+                                           draft_token_ids, bonus_token_ids)
+        target_probs = target_with_bonus_probs[:, :-1]
         accepted = self._evaluate_accepted_tokens(target_probs,
                                                   draft_token_ids)
-        recovered_token_ids = self._replacement_token_ids(target_probs)
+        recovered_token_ids = self._get_recovered_token_ids(target_probs)
         output_token_ids = self._create_output(accepted, recovered_token_ids,
                                                draft_token_ids,
                                                bonus_token_ids)
@@ -152,16 +148,10 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         accepted_mask = candidates_prob > threshold
         return accepted_mask
 
-    def _replacement_token_ids(self, target_probs):
+    def _get_recovered_token_ids(self, target_probs):
         """
-        Generate one replacement token ID for each sequence based on target
-        probabilities. The replacement token is used as the fallback option
-        if typical acceptance sampling does not accept any draft tokens for
-        that particular sequence. 
-
-        This method computes the token IDs to be replaced by selecting the
-        token with the highest probability for each sequence in the first 
-        position. The rest of the output is filled with -1. 
+        The recovered token ids will fill the first unmatched token
+        by the target token.
 
         Parameters
         ----------
@@ -172,13 +162,9 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         Returns
         -------
         torch.Tensor
-            A tensor of shape (batch_size, k) with the replacement 
-            token IDs. Only the first column is set, and the rest of the
-            columns are filled with -1.
+            A tensor of shape (batch_size, k) with the recovered token
+            ids which are selected from target probs.
         """
-        max_indices = torch.argmax(target_probs[:, 0, :], dim=1)
-        output = -torch.ones((target_probs.shape[0], target_probs.shape[1]),
-                             dtype=self.token_id_dtype,
-                             device=target_probs.device)
-        output[:, 0] = max_indices
-        return output
+        max_indices = torch.argmax(target_probs, dim=-1)
+
+        return max_indices

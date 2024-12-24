@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copied from
 # https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py
 """A HuggingFace-style model configuration."""
@@ -117,10 +116,10 @@ class MPTConfig(PretrainedConfig):
                                                      init_config_defaults)
         if self.d_model % self.n_heads != 0:
             raise ValueError('d_model must be divisible by n_heads')
-        if any((
+        if any(
                 prob < 0 or prob > 1 for prob in
-            [self.attn_config['attn_pdrop'], self.resid_pdrop, self.emb_pdrop]
-        )):
+            [self.attn_config['attn_pdrop'], self.resid_pdrop, self.emb_pdrop
+             ]):
             raise ValueError(
                 "self.attn_config['attn_pdrop'], resid_pdrop, emb_pdrop are "
                 "probabilities and must be between 0 and 1")

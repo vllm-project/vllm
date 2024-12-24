@@ -10,7 +10,9 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -131,13 +133,13 @@ class VocabParallelEmbeddingShardIndices:
         assert self.num_added_elements <= self.num_added_elements_padded
 
 
-@torch.jit.script
+@torch.compile(dynamic=True)
 def get_masked_input_and_mask(
         input_: torch.Tensor, org_vocab_start_index: int,
         org_vocab_end_index: int, num_org_vocab_padding: int,
         added_vocab_start_index: int,
         added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    # torch.jit.script will fuse all of the pointwise ops below
+    # torch.compile will fuse all of the pointwise ops below
     # into a single kernel, making it very fast
     org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ <
                                                           org_vocab_end_index)
@@ -351,7 +353,10 @@ class VocabParallelEmbedding(torch.nn.Module):
             param.weight_type = loaded_weight.item()
             return
         elif isinstance(param, UninitializedParameter):
-            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
+            shape = list(loaded_weight.shape)
+            if output_dim is not None:
+                shape[output_dim] = shape[output_dim] // self.tp_size
+            param.materialize(tuple(shape), dtype=loaded_weight.dtype)
 
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
@@ -367,17 +372,31 @@ class VocabParallelEmbedding(torch.nn.Module):
         # If param packed on the same dim we are sharding on, then
         # need to adjust offsets of loaded weight by pack_factor.
         if packed_dim is not None and packed_dim == output_dim:
+            packed_factor = param.packed_factor if isinstance(
+                param, BasevLLMParameter) else param.pack_factor
             assert loaded_weight.shape[output_dim] == (self.org_vocab_size //
-                                                       param.pack_factor)
-            start_idx = start_idx // param.pack_factor
-            shard_size = shard_size // param.pack_factor
+                                                       param.packed_factor)
+            start_idx = start_idx // packed_factor
+            shard_size = shard_size // packed_factor
         else:
             assert loaded_weight.shape[output_dim] == self.org_vocab_size
 
         # Copy the data.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-        param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
-        param[loaded_weight.shape[0]:].data.fill_(0)
+
+        if current_platform.is_hpu():
+            # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here,
+            # so we're using a workaround. Remove this when fixed in
+            # HPU PT bridge.
+            padded_weight = torch.cat([
+                loaded_weight,
+                torch.zeros(param.shape[0] - loaded_weight.shape[0],
+                            *loaded_weight.shape[1:])
+            ])
+            param.data.copy_(padded_weight)
+        else:
+            param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
+            param[loaded_weight.shape[0]:].data.fill_(0)
 
     def forward(self, input_):
         if self.tp_size > 1:
@@ -437,7 +456,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
                          org_num_embeddings, padding_size, quant_config,
                          prefix)
-
+        self.quant_config = quant_config
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,
@@ -448,6 +467,15 @@ class ParallelLMHead(VocabParallelEmbedding):
             })
         else:
             self.register_parameter("bias", None)
+
+    def tie_weights(self, embed_tokens: VocabParallelEmbedding):
+        """Tie the weights with word embeddings."""
+        # GGUF quantized embed_tokens.
+        if self.quant_config and self.quant_config.get_name() == "gguf":
+            return embed_tokens
+        else:
+            self.weight = embed_tokens.weight
+            return self
 
     def forward(self, input_):
         del input_

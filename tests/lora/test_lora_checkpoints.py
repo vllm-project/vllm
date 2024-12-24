@@ -5,7 +5,9 @@ import pytest
 from vllm.lora.models import LoRAModel
 from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
 
-lora_lst = ["baichuan7B", "baichuan7B-zero", "chatglm3-6b"]
+lora_lst = [
+    "baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"
+]
 
 
 @pytest.mark.parametrize("lora_name", lora_lst)
@@ -13,6 +15,7 @@ def test_load_checkpoints(
     lora_name,
     baichuan_lora_files,
     baichuan_zero_lora_files,
+    baichuan_regex_lora_files,
     chatglm3_lora_files,
 ):
     supported_lora_modules = BaiChuanBaseForCausalLM.supported_lora_modules
@@ -36,11 +39,21 @@ def test_load_checkpoints(
             embedding_modules=embedding_modules,
             embedding_padding_modules=embed_padding_modules)
     elif lora_name == "baichuan7B-zero":
-        #Test that the target_modules contain prefix
+        # Test that the target_modules contain prefix
         # such as "model.layers.0.self_atten.W_pack", and
         # the test should pass.
         LoRAModel.from_local_checkpoint(
             baichuan_zero_lora_files,
+            expected_lora_modules,
+            lora_model_id=1,
+            device="cpu",
+            embedding_modules=embedding_modules,
+            embedding_padding_modules=embed_padding_modules)
+    elif lora_name == "baichuan7B-zero-regex":
+        # Test that the `target_modules` in the form of regular expressions,
+        # such as `model\\..*(W_pack|o_proj)`, and the test should pass.
+        LoRAModel.from_local_checkpoint(
+            baichuan_regex_lora_files,
             expected_lora_modules,
             lora_model_id=1,
             device="cpu",

@@ -5,6 +5,7 @@ Run `pytest tests/kernels/marlin/test_marlin_gemm.py`.
 import pytest
 import torch
 
+from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
@@ -28,16 +29,19 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test_qqq import 
     marlin_qqq_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     awq_pack, gptq_pack, gptq_quantize_weights, quantize_weights, sort_weights)
+from vllm.scalar_type import scalar_types
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 USE_FP32_REDUCE_OPTS = [False, True]
 
 MARLIN_K_CHUNKS = [128]
-MARLIN_N_CHUNKS = [64, 128, 256]
+MARLIN_N_CHUNKS = [64, 256]
 
 MARLIN_24_K_CHUNKS = [128]
 MARLIN_24_N_CHUNKS = [512]
+
+HQQ_SUPPORTED_GROUP_SIZES = [64]
 
 MNK_FACTORS = [
     (1, 1, 1),
@@ -46,6 +50,8 @@ MNK_FACTORS = [
     (13, 17, 67),
     (26, 37, 13),
     (67, 13, 11),
+    (257, 13, 11),
+    (658, 13, 11),
 ]
 
 DTYPES = [torch.float16, torch.bfloat16]
@@ -73,11 +79,8 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
                             act_order, mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
-    size_m = m_factor
     size_k = k_chunk * k_factor
     size_n = n_chunk * n_factor
-
-    print(f"MNK = {size_m} {size_n} {size_k}")
 
     # Filter act_order
     if act_order:
@@ -112,6 +115,9 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
     marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
                                   weight_perm)
 
+    opcheck(torch.ops._C.gptq_marlin_repack,
+            (q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits))
+
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.gptq_marlin_repack(
         q_w_gptq,
@@ -122,7 +128,7 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
     )
     torch.cuda.synchronize()
 
-    assert torch.allclose(marlin_q_w_1, marlin_q_w_2)
+    torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
@@ -137,11 +143,8 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
                            mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
-    size_m = m_factor
     size_k = k_chunk * k_factor
     size_n = n_chunk * n_factor
-
-    print(f"MNK = {size_m} {size_n} {size_k}")
 
     # Normalize group_size
     if group_size == -1:
@@ -165,6 +168,9 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
     marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
                                   weight_perm)
 
+    opcheck(torch.ops._C.awq_marlin_repack,
+            (q_w_awq, size_k, size_n, quant_type.size_bits))
+
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.awq_marlin_repack(
         q_w_awq,
@@ -174,7 +180,7 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
     )
     torch.cuda.synchronize()
 
-    assert torch.allclose(marlin_q_w_1, marlin_q_w_2)
+    torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
@@ -204,9 +210,6 @@ def test_gptq_marlin_gemm(
     size_k = k_chunk * k_factor
     size_n = n_chunk * n_factor
 
-    print(f"MNK = {size_m} {size_n} {size_k}")
-    print(f"groupsize = {group_size}")
-
     if act_order:
         if group_size == -1:
             return
@@ -224,6 +227,13 @@ def test_gptq_marlin_gemm(
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
 
+    opcheck(
+        torch.ops._C.gptq_marlin_gemm,
+        (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
+         workspace.scratch, quant_type.id, a_input.shape[0], b_weight.shape[1],
+         a_input.shape[1], is_k_full, False, use_fp32_reduce, False),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS)
+
     output = ops.gptq_marlin_gemm(
         a_input,
         marlin_q_w,
@@ -239,15 +249,25 @@ def test_gptq_marlin_gemm(
         is_k_full=is_k_full,
         has_zp=False,
         use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=False,
     )
     output_ref = torch.matmul(a_input, w_ref)
 
     torch.cuda.synchronize()
 
     max_diff = compute_max_diff(output, output_ref)
-    print("max_diff = {}".format(max_diff))
 
     assert max_diff < 0.04
+
+
+# TODO: find better way to test this?
+@torch.compile(fullgraph=True)
+def marlin_24_gemm_tester(a_input, marlin_24_q_w_comp, marlin_24_meta,
+                          marlin_24_s, scratch, quant_type, size_m, size_n,
+                          size_k):
+    return ops.gptq_marlin_24_gemm(a_input, marlin_24_q_w_comp, marlin_24_meta,
+                                   marlin_24_s, scratch, quant_type, size_m,
+                                   size_n, size_k)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
@@ -265,9 +285,6 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size,
     size_k = k_chunk * k_factor
     size_n = n_chunk * n_factor
 
-    print(f"MNK = {size_m} {size_n} {size_k}")
-    print(f"groupsize = {group_size}")
-
     a_input = rand_data((size_m, size_k))
     b_weight = rand_data((size_k, size_n))
 
@@ -279,7 +296,13 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size,
 
     output_ref = torch.matmul(a_input, w_24_ref)
 
-    output = ops.gptq_marlin_24_gemm(
+    opcheck(torch.ops._C.gptq_marlin_24_gemm,
+            (a_input, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s,
+             workspace_24.scratch, quant_type.id, a_input.shape[0],
+             b_weight.shape[1], a_input.shape[1]),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS)
+
+    output = marlin_24_gemm_tester(
         a_input,
         marlin_24_q_w_comp,
         marlin_24_meta,
@@ -294,7 +317,6 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size,
     torch.cuda.synchronize()
 
     max_diff = compute_max_diff(output, output_ref)
-    print("max_diff = {}".format(max_diff))
 
     assert max_diff < 0.04
 
@@ -320,9 +342,6 @@ def test_fp8_marlin_gemm(
     size_m = m_factor
     size_k = k_chunk * k_factor
     size_n = n_chunk * n_factor
-
-    print(f"MNK = {size_m} {size_n} {size_k}")
-    print(f"groupsize = {group_size}")
 
     a_input = rand_data((size_m, size_k), dtype=dtype)
     b_weight = rand_data((size_k, size_n), dtype=dtype)
@@ -353,6 +372,10 @@ def test_fp8_marlin_gemm(
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
 
+    opcheck(torch.ops._C.fp8_marlin_gemm,
+            (a_input, marlin_qweight, marlin_scales, workspace.scratch,
+             num_bits, a_input.shape[0], b_weight.shape[1], a_input.shape[1]))
+
     output = ops.fp8_marlin_gemm(
         a=a_input,
         b_q_weight=marlin_qweight,
@@ -368,7 +391,6 @@ def test_fp8_marlin_gemm(
     torch.cuda.synchronize()
 
     max_diff = compute_max_diff(output, output_ref)
-    print("max_diff = {}".format(max_diff))
 
     assert max_diff < 0.04
 
@@ -395,9 +417,6 @@ def test_awq_marlin_gemm(
     size_m = m_factor
     size_k = k_chunk * k_factor
     size_n = n_chunk * n_factor
-
-    print(f"MNK = {size_m} {size_n} {size_k}")
-    print(f"groupsize = {group_size}")
 
     a_input = rand_data((size_m, size_k))
     b_weight = rand_data((size_k, size_n))
@@ -428,13 +447,94 @@ def test_awq_marlin_gemm(
         is_k_full=is_k_full,
         has_zp=has_zp,
         use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=False,
     )
     output_ref = torch.matmul(a_input, w_ref)
 
     torch.cuda.synchronize()
 
     max_diff = compute_max_diff(output, output_ref)
-    print("max_diff = {}".format(max_diff))
+
+    assert max_diff < 0.04
+
+
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
+                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
+@pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
+@pytest.mark.parametrize("group_size", HQQ_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
+@pytest.mark.parametrize("use_fp32_reduce", USE_FP32_REDUCE_OPTS)
+def test_hqq_marlin_gemm(
+    k_chunk,
+    n_chunk,
+    group_size,
+    mnk_factors,
+    use_fp32_reduce,
+):
+    m_factor, n_factor, k_factor = mnk_factors
+
+    size_m = m_factor
+    size_k = k_chunk * k_factor
+    size_n = n_chunk * n_factor
+
+    quant_type = scalar_types.uint4
+
+    a_input = rand_data((size_m, size_k))
+    dev = a_input.device
+
+    b_weight = torch.randint(0,
+                             10, (size_n, size_k),
+                             dtype=torch.uint8,
+                             device=dev)
+    scale = rand_data((size_n, size_k // group_size))
+    zero = rand_data((size_n, size_k // group_size))
+
+    gptq_w_q = gptq_pack(b_weight.transpose(1, 0), 4, size_k, size_n)
+
+    sort_indices = torch.empty(0, dtype=torch.int, device=dev)
+    marlin_w_q = ops.gptq_marlin_repack(gptq_w_q, sort_indices, size_k, size_n,
+                                        4).to(dev)
+    marlin_s = marlin_permute_scales(scale.transpose(1, 0), size_k, size_n,
+                                     group_size).to(dev)
+    marlin_zp = marlin_permute_scales(zero.transpose(1, 0), size_k, size_n,
+                                      group_size).to(dev)
+
+    g_idx = marlin_make_empty_g_idx(dev)
+    g_idx_sort_indices = marlin_make_empty_g_idx(dev)
+
+    workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
+                                GPTQ_MARLIN_MAX_PARALLEL)
+
+    output = ops.gptq_marlin_gemm(
+        a_input,
+        marlin_w_q,
+        marlin_s,
+        marlin_zp,
+        g_idx,
+        g_idx_sort_indices,
+        workspace.scratch,
+        quant_type,
+        a_input.shape[0],
+        b_weight.shape[0],
+        a_input.shape[1],
+        is_k_full=True,
+        has_zp=True,
+        use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=True,
+    )
+
+    b_flat = b_weight.reshape(-1, group_size)
+    zp_flat = zero.reshape(-1, 1)
+    s_flat = scale.reshape(-1, 1)
+    dequant = (b_flat - zp_flat) * s_flat
+
+    output_ref = torch.matmul(a_input,
+                              dequant.reshape(b_weight.shape).transpose(1, 0))
+
+    torch.cuda.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
 
     assert max_diff < 0.04
 
@@ -460,9 +560,6 @@ def test_marlin_qqq_gemm(
     size_k = k_chunk * k_factor
     size_n = n_chunk * n_factor
 
-    print(f"MNK = {size_m} {size_n} {size_k}")
-    print(f"groupsize = {group_size}")
-
     a_input = rand_data((size_m, size_k))
     b_weight = rand_data((size_k, size_n))
 
@@ -478,6 +575,11 @@ def test_marlin_qqq_gemm(
 
     workspace = MarlinWorkspace(size_n, MARLIN_QQQ_MIN_THREAD_N,
                                 MARLIN_QQQ_MAX_PARALLEL)
+
+    opcheck(torch.ops._C.marlin_qqq_gemm,
+            (q_a, marlin_qqq_q_w, s_a, marlin_qqq_s_channel,
+             marlin_qqq_s_group, workspace.scratch, a_input.shape[0],
+             b_weight.shape[1], a_input.shape[1]))
 
     output = ops.marlin_qqq_gemm(
         q_a,
@@ -495,6 +597,20 @@ def test_marlin_qqq_gemm(
     torch.cuda.synchronize()
 
     max_diff = compute_max_diff(output, output_ref)
-    print("max_diff = {}".format(max_diff))
 
     assert max_diff < 0.04
+
+
+def test_marlin_gemm_opcheck():
+    size_m = 2048
+    size_n = 4096
+    size_k = 4096
+    a = torch.rand((size_m, size_n), device='cuda', dtype=torch.float16)
+    w = torch.randint(-5, 5, (256, 8192), device='cuda', dtype=torch.int32)
+    s = torch.full((32, size_k), 0.125, device='cuda', dtype=torch.float16)
+    wk = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
+                         GPTQ_MARLIN_MAX_PARALLEL).scratch
+    x = torch.ops._C.marlin_gemm(a, w, s, wk, size_m, size_n, size_k)
+    y = torch.ops._C.marlin_gemm(a, w, s, wk, size_m, size_n, size_k)
+    torch.testing.assert_close(x, y)
+    opcheck(torch.ops._C.marlin_gemm, (a, w, s, wk, size_m, size_n, size_k))

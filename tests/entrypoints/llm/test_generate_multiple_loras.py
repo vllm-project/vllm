@@ -5,9 +5,8 @@ import pytest
 from huggingface_hub import snapshot_download
 
 from vllm import LLM
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
-
-from ...conftest import cleanup
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
@@ -39,7 +38,7 @@ def llm():
 
         del llm
 
-    cleanup()
+    cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +49,7 @@ def zephyr_lora_files():
 @pytest.mark.skip_global_cleanup
 def test_multiple_lora_requests(llm: LLM, zephyr_lora_files):
     lora_request = [
-        LoRARequest(LORA_NAME, idx + 1, zephyr_lora_files)
+        LoRARequest(LORA_NAME + str(idx), idx + 1, zephyr_lora_files)
         for idx in range(len(PROMPTS))
     ]
     # Multiple SamplingParams should be matched with each prompt

@@ -5,11 +5,11 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Dict, Optional
-
 import torch
 import triton
 import triton.language as tl
+
+from vllm.utils import direct_register_custom_op
 
 from .utils import get_lora_op_configs
 
@@ -80,7 +80,13 @@ def _bgmv_expand_slice_kernel(
         )  # [BLOCK_N,BLOCK_K]
 
         if ADD_INPUTS:
-            tiled_out = tl.load(c_ptr + current_n * cn_stride, mask=c_mask)
+            # explicitly pass in other=None to tell triton that masked values
+            # can be uninitialized. This is OK because the later tl.store
+            # operation uses the same mask, eliminating the risk of garbage
+            # values propagating
+            tiled_out = tl.load(c_ptr + current_n * cn_stride,
+                                mask=c_mask,
+                                other=None)
             accumulator = tl.sum(tiled_a * tiled_b, 1) + tiled_out
         else:
             accumulator = tl.sum(tiled_a * tiled_b, 1)
@@ -89,7 +95,7 @@ def _bgmv_expand_slice_kernel(
 
 
 @torch.inference_mode()
-def bgmv_expand_slice(
+def _bgmv_expand_slice(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
@@ -97,8 +103,7 @@ def bgmv_expand_slice(
     slice_offset: int,
     slice_size: int,
     add_inputs: bool = True,
-    override_config: Optional[Dict[str, int]] = None,
-):
+) -> None:
     """
     Args:
         inputs (torch.Tensor): input tensor
@@ -107,14 +112,11 @@ def bgmv_expand_slice(
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch, An index of -1 means no lora should be
             applied.
-        slice_offst (int): output_tensor's offst
+        slice_offset (int): output_tensor's offset
         slice_size (int): current output_tensor's size
         batches (int): batch size
         add_inputs (bool, optional): Defaults to False.
-        override_config (Optional[Dict[str, int]], optional): Defaults to None.
-            Triton grid config
     """
-
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     assert lora_b_weights.dtype in [
         torch.float16,
@@ -149,10 +151,7 @@ def bgmv_expand_slice(
 
     batches = lora_indices_tensor.size(0)
 
-    if override_config:
-        config = override_config
-    else:
-        config = get_lora_op_configs("expand", batches, N)
+    config = get_lora_op_configs("expand", batches, N)
 
     grid = lambda META: (
         META["SPLIT_N"],
@@ -180,3 +179,28 @@ def bgmv_expand_slice(
         **config,
     )
     return
+
+
+def bgmv_expand_slice_fake(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool = True,
+) -> None:
+    return
+
+
+try:
+    direct_register_custom_op(
+        op_name="bgmv_expand_slice",
+        op_func=_bgmv_expand_slice,
+        mutates_args=["output_tensor"],
+        fake_impl=bgmv_expand_slice_fake,
+    )
+    bgmv_expand_slice = torch.ops.vllm.bgmv_expand_slice
+
+except AttributeError:
+    bgmv_expand_slice = _bgmv_expand_slice

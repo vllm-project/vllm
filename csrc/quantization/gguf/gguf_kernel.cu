@@ -4,6 +4,8 @@
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include "cuda_compat.h"
+
 #include "ggml-common.h"
 #include "vecdotq.cuh"
 #include "dequantize.cuh"
@@ -32,8 +34,8 @@ static __global__ void quantize_q8_1(const half* __restrict__ x,
 
 #pragma unroll
   for (int mask = 16; mask > 0; mask >>= 1) {
-    amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, mask, 32));
-    sum += __shfl_xor_sync(0xffffffff, sum, mask, 32);
+    amax = fmaxf(amax, VLLM_SHFL_XOR_SYNC_WIDTH(amax, mask, 32));
+    sum += VLLM_SHFL_XOR_SYNC_WIDTH(sum, mask, 32);
   }
 
   const float d = amax / 127;
@@ -60,7 +62,7 @@ static void quantize_row_q8_1_cuda(const half* x, void* vy, const int kx,
 }
 
 torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
-                              int8_t type, int64_t m, int64_t n) {
+                              int64_t type, int64_t m, int64_t n) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(W));
   auto options =
       torch::TensorOptions().dtype(torch::kFloat16).device(W.device());
@@ -73,7 +75,7 @@ torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
 
 torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
                                   torch::Tensor X,  // input
-                                  int8_t type, int64_t row) {
+                                  int64_t type, int64_t row) {
   int col = X.sizes()[1];
   const int padded = (col + 512 - 1) / 512 * 512;
   const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
@@ -166,13 +168,18 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
                                    (void*)quant_X.data_ptr(),
                                    (half*)Y.data_ptr(), col, row, stream);
       break;
+    case 29:
+      mul_mat_vec_iq1_m_q8_1_cuda((void*)W.data_ptr(),
+                                  (void*)quant_X.data_ptr(),
+                                  (half*)Y.data_ptr(), col, row, stream);
+      break;
   }
   return Y;
 }
 
 torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
                               torch::Tensor X,  // input
-                              int8_t type, int64_t row) {
+                              int64_t type, int64_t row) {
   int col = X.sizes()[1];
   int padded = (col + 512 - 1) / 512 * 512;
   int batch = X.sizes()[0];

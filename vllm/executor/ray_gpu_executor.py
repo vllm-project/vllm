@@ -4,15 +4,18 @@ from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+import msgspec
+
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
+from vllm.executor.msgspec_utils import encode_hook
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
-                        get_ip, get_open_port, get_vllm_instance_id,
-                        make_async)
+                        get_ip, get_open_port, make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -28,7 +31,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
     uses_ray: bool = True
 
     def _init_executor(self) -> None:
-        self.forward_dag: Optional["ray.dag.CompiledDAG"] = None
+        self.forward_dag: Optional[ray.dag.CompiledDAG] = None
         # If the env var is set, it uses the Ray's compiled DAG API
         # which optimizes the control plane overhead.
         # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
@@ -60,6 +63,18 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
+        self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
+        self.output_decoder = msgspec.msgpack.Decoder(
+            Optional[List[SamplerOutput]])
+
+    def shutdown(self) -> None:
+        if hasattr(self, "forward_dag") and self.forward_dag is not None:
+            self.forward_dag.teardown()
+            import ray
+            for worker in self.workers:
+                ray.kill(worker)
+            self.forward_dag = None
+
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
         # If nsight profiling is enabled, we need to set the profiling
@@ -75,19 +90,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         return ray_remote_kwargs
 
-    def _get_worker_wrapper_args(self) -> Dict[str, Any]:
-        if self.speculative_config is not None:
-            worker_module_name = "vllm.spec_decode.spec_decode_worker"
-            worker_class_name = "create_spec_worker"
-        else:
-            worker_module_name = "vllm.worker.worker"
-            worker_class_name = "Worker"
-
-        return dict(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-            trust_remote_code=self.model_config.trust_remote_code,
-        )
+    # child class could overwrite this to return actual env vars.
+    def _get_env_vars_to_be_updated(self):
+        return self._env_vars_for_all_workers
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -115,10 +120,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 ray_remote_kwargs)
 
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
+
         # Create the workers.
         driver_ip = get_ip()
-        logger.info("driver_ip: %s", driver_ip)
-        worker_wrapper_kwargs = self._get_worker_wrapper_args()
+        workers = []
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -133,21 +138,31 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
+            workers.append(worker)
 
-            if self.use_ray_spmd_worker:
-                self.workers.append(worker)
-            else:
-                worker_ip = ray.get(worker.get_node_ip.remote())
-                if worker_ip == driver_ip and self.driver_dummy_worker is None:
+        worker_ip_refs = [
+            worker.get_node_ip.remote()  # type: ignore[attr-defined]
+            for worker in workers
+        ]
+        worker_ips = ray.get(worker_ip_refs)
+
+        if not self.use_ray_spmd_worker:
+            for i in range(len(workers)):
+                worker = workers[i]
+                worker_ip = worker_ips[i]
+                if self.driver_dummy_worker is None and worker_ip == driver_ip:
                     # If the worker is on the same node as the driver, we use it
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
-                        **worker_wrapper_kwargs)
-                else:
-                    # Else, added to the list of workers.
-                    self.workers.append(worker)
+                        vllm_config=self.vllm_config)
+                    workers.pop(i)
+                    worker_ips.pop(i)
+                    self.workers = workers
+                    break
+        else:
+            self.workers = workers
 
         logger.debug("workers: %s", self.workers)
         logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
@@ -157,13 +172,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 "adjusting the Ray placement group or running the driver on a "
                 "GPU node.")
 
-        worker_ips = [
-            ray.get(worker.get_node_ip.remote())  # type: ignore[attr-defined]
-            for worker in self.workers
-        ]
         ip_counts: Dict[str, int] = {}
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
+
+        worker_to_ip = dict(zip(self.workers, worker_ips))
 
         def sort_by_driver_then_worker_ip(worker):
             """
@@ -175,7 +188,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             3. Finally, if the work is on a node with smaller IP address, it
                 should be placed first.
             """
-            ip = ray.get(worker.get_node_ip.remote())
+            ip = worker_to_ip[worker]
             return (ip != driver_ip, ip_counts[ip], ip)
 
         # After sorting, the workers on the same node will be
@@ -184,8 +197,14 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.workers = sorted(self.workers, key=sort_by_driver_then_worker_ip)
 
         # Get the set of GPU IDs used on each node.
-        worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
-                                                    use_dummy_driver=True)
+        worker_node_and_gpu_ids = []
+        for worker in [self.driver_dummy_worker] + self.workers:
+            if worker is None:
+                # driver_dummy_worker can be None when using ray spmd worker.
+                continue
+            worker_node_and_gpu_ids.append(
+                ray.get(worker.get_node_and_gpu_ids.remote()) \
+            ) # type: ignore
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
         node_gpus = defaultdict(list)  # node id -> list of gpu ids
@@ -202,19 +221,35 @@ class RayGPUExecutor(DistributedGPUExecutor):
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
-        VLLM_INSTANCE_ID = get_vllm_instance_id()
+        all_ips = set(worker_ips + [driver_ip])
+        n_ips = len(all_ips)
+        n_nodes = len(node_workers)
+
+        if n_nodes != n_ips:
+            raise RuntimeError(
+                f"Every node should have a unique IP address. Got {n_nodes}"
+                f" nodes with node ids {list(node_workers.keys())} and "
+                f"{n_ips} unique IP addresses {all_ips}. Please check your"
+                " network configuration. If you set `VLLM_HOST_IP`"
+                " environment variable, make sure it is unique for"
+                " each node.")
 
         # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = [({
             "CUDA_VISIBLE_DEVICES":
             ",".join(map(str, node_gpus[node_id])),
-            "VLLM_INSTANCE_ID":
-            VLLM_INSTANCE_ID,
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
+            **({
+                "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
+            } if envs.VLLM_ATTENTION_BACKEND is not None else {})
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
+
+        self._env_vars_for_all_workers = (
+            all_args_to_update_environment_variables)
+
         self._run_workers("update_environment_variables",
-                          all_args=all_args_to_update_environment_variables)
+                          all_args=self._get_env_vars_to_be_updated())
 
         if len(node_gpus) == 1:
             # in single node case, we don't need to get the IP address.
@@ -297,8 +332,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        outputs = ray.get(self.forward_dag.execute(execute_model_req))
-        return outputs[0]
+        serialized_data = self.input_encoder.encode(execute_model_req)
+        outputs = ray.get(self.forward_dag.execute(serialized_data))
+        output = self.output_decoder.decode(outputs[0])
+        return output
 
     def _run_workers(
         self,
@@ -307,7 +344,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
         async_run_tensor_parallel_workers_only: bool = False,
         all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
-        use_dummy_driver: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
@@ -367,18 +403,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
             driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
 
             # Start the driver worker after all the ray workers.
-            if not use_dummy_driver:
-                driver_worker_output = [
-                    self.driver_worker.execute_method(method, *driver_args,
-                                                      **driver_kwargs)
-                ]
-            else:
-                assert self.driver_dummy_worker is not None
-                driver_worker_output = [
-                    ray.get(
-                        self.driver_dummy_worker.execute_method.remote(
-                            method, *driver_args, **driver_kwargs))
-                ]
+            driver_worker_output = [
+                self.driver_worker.execute_method(method, *driver_args,
+                                                  **driver_kwargs)
+            ]
 
         # Get the results of the ray workers.
         if self.workers:
@@ -391,23 +419,41 @@ class RayGPUExecutor(DistributedGPUExecutor):
         async_run_remote_workers_only to complete."""
         ray.get(parallel_worker_tasks)
 
-    def _compiled_ray_dag(self, enable_asyncio: bool):
+    def _check_ray_adag_installation(self):
         import pkg_resources
         from packaging import version
 
-        required_version = version.parse("2.32")
+        required_version = version.parse("2.40")
         current_version = version.parse(
             pkg_resources.get_distribution("ray").version)
         if current_version < required_version:
-            raise ValueError(f"Ray version {required_version} or greater is "
+            raise ValueError(f"Ray version {required_version} is "
                              f"required, but found {current_version}")
 
+        import importlib.util
+        adag_spec = importlib.util.find_spec(
+            "ray.experimental.compiled_dag_ref")
+        if adag_spec is None:
+            raise ValueError("Ray accelerated DAG is not installed. "
+                             "Run `pip install ray[adag]` to install it.")
+
+        cupy_spec = importlib.util.find_spec("cupy")
+        if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
+            raise ValueError(
+                "cupy is not installed but required since "
+                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set."
+                "Run `pip install ray[adag]` and check cupy installation.")
+
+    def _compiled_ray_dag(self, enable_asyncio: bool):
         assert self.parallel_config.use_ray
+        self._check_ray_adag_installation()
         from ray.dag import InputNode, MultiOutputNode
         from ray.experimental.channel.torch_tensor_type import TorchTensorType
 
         logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
             # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
@@ -443,14 +489,13 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
             forward_dag = MultiOutputNode(outputs)
 
-        return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
+        return forward_dag.experimental_compile(
+            enable_asyncio=enable_asyncio,
+            _overlap_gpu_communication=envs.
+            VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
 
     def __del__(self):
-        if self.forward_dag is not None:
-            self.forward_dag.teardown()
-            import ray
-            for worker in self.workers:
-                ray.kill(worker)
+        self.shutdown()
 
 
 class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
@@ -472,9 +517,10 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
 
-        dag_future = await self.forward_dag.execute_async(execute_model_req)
-        outputs = await dag_future
-        return outputs[0]
+        serialized_data = self.input_encoder.encode(execute_model_req)
+        dag_future = await self.forward_dag.execute_async(serialized_data)
+        output = await dag_future[0]
+        return self.output_decoder.decode(output)
 
     async def _driver_execute_model_async(
         self,
@@ -523,8 +569,4 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         return await asyncio.gather(*coros)
 
     def __del__(self):
-        if self.forward_dag is not None:
-            self.forward_dag.teardown()
-            import ray
-            for worker in self.workers:
-                ray.kill(worker)
+        self.shutdown()

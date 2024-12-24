@@ -9,10 +9,9 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.triton_utils import libentry
+from vllm.utils import direct_register_custom_op
 
 
-@libentry()
 @triton.jit
 def _sgmv_shrink_kernel(
     input_ptr,
@@ -101,7 +100,7 @@ def _sgmv_shrink_kernel(
 
 
 @torch.inference_mode()
-def sgmv_shrink(
+def _sgmv_shrink(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,
     output_tensor: torch.Tensor,
@@ -110,8 +109,9 @@ def sgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     batches: int,
     max_seq_length: int,
+    token_nums: int,
     scaling: float,
-):
+) -> None:
     """
 
     Args:
@@ -120,17 +120,19 @@ def sgmv_shrink(
         output_tensor (torch.Tensor): output tensor
         b_seq_start_loc (torch.Tensor): (batch_size,). The cumulative
             sequence lengths of the sequences in the batch, used to index
-            into sequence. E.g.,if the sequence length is [4, 6], it is
+            into sequence. E.g., if the sequence length is [4, 6], it is
             [0, 4].
-        seq_len_tensor (torch.Tensor): (batch_size,). record the sequence
-            length of the sequences  in the batch
+        seq_len_tensor (torch.Tensor): (batch_size,). Record the sequence
+            length of the sequences in the batch.
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch. An index of -1 means no lora should be
             applied.
         batches (int): batch size
-        max_seq_length (int):  The max sequence lengths of the sequences
-            in the batch
-        scaling (float):  Scaling factor.
+        max_seq_length (int): The max sequence lengths of the sequences in the 
+            batch.
+        token_nums (int): The token numbers in the batch. Used to verify if the 
+            token numbers in the inputs matches the one in the metadata.
+        scaling (float): Scaling factor.
     """
     assert inputs.dtype == lora_a_weights.dtype
     assert inputs.dtype in [torch.float16, torch.bfloat16]
@@ -138,6 +140,7 @@ def sgmv_shrink(
         torch.float16,
         torch.bfloat16,
     ]
+    assert inputs.size(0) == token_nums
     assert inputs.size(1) == lora_a_weights.size(-1)
     assert b_seq_start_loc.size(0) == batches
     assert lora_indices_tensor.size(0) == batches
@@ -187,3 +190,31 @@ def sgmv_shrink(
         SPLIT_K,
     )
     return
+
+
+def sgmv_shrink_fake(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    scaling: float,
+) -> None:
+    return
+
+
+try:
+    direct_register_custom_op(
+        op_name="sgmv_shrink",
+        op_func=_sgmv_shrink,
+        mutates_args=["output_tensor"],
+        fake_impl=sgmv_shrink_fake,
+    )
+    sgmv_shrink = torch.ops.vllm.sgmv_shrink
+
+except AttributeError:
+    sgmv_shrink = _sgmv_shrink

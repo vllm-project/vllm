@@ -5,11 +5,11 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Dict, Optional
-
 import torch
 import triton
 import triton.language as tl
+
+from vllm.utils import direct_register_custom_op
 
 from .utils import get_lora_op_configs
 
@@ -77,7 +77,9 @@ def _bgmv_expand_kernel(
             other=0.0,
         )  # [BLOCK_N,BLOCK_K]
         if ADD_INPUTS:
-            tiled_out = tl.load(c_ptr + current_n * cn_stride, mask=c_mask)
+            tiled_out = tl.load(c_ptr + current_n * cn_stride,
+                                mask=c_mask,
+                                other=0.0)
             accumulator = tl.sum(tiled_a * tiled_b, 1) + tiled_out
         else:
             accumulator = tl.sum(tiled_a * tiled_b, 1)
@@ -86,14 +88,13 @@ def _bgmv_expand_kernel(
 
 
 @torch.inference_mode()
-def bgmv_expand(
+def _bgmv_expand(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
-    override_config: Optional[Dict[str, int]] = None,
-):
+) -> None:
     """
     Args:
         inputs (torch.Tensor): input tensor
@@ -103,12 +104,9 @@ def bgmv_expand(
             corresponding to each batch, An index of -1 means no lora should be
             applied.
         batches (int): batch size
-        add_inputs (bool, optional):  Defaults to False. adds the final lora 
+        add_inputs (bool, optional):  Defaults to False, adds the final lora 
             results to the output.
-        override_config (Optional[Dict[str, int]], optional): Defaults to None. 
-            Triton grid config
     """
-
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     assert lora_b_weights.dtype in [
         torch.float16,
@@ -138,10 +136,7 @@ def bgmv_expand(
     ]:
         CAST_TYPE = True
     batches = lora_indices_tensor.size(0)
-    if override_config:
-        config = override_config
-    else:
-        config = get_lora_op_configs("expand", batches, N)
+    config = get_lora_op_configs("expand", batches, N)
     grid = lambda META: (
         META["SPLIT_N"],
         batches,
@@ -167,3 +162,26 @@ def bgmv_expand(
         **config,
     )
     return
+
+
+def bgmv_expand_fake(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    add_inputs: bool = True,
+) -> None:
+    return
+
+
+try:
+    direct_register_custom_op(
+        op_name="bgmv_expand",
+        op_func=_bgmv_expand,
+        mutates_args=["output_tensor"],
+        fake_impl=bgmv_expand_fake,
+    )
+    bgmv_expand = torch.ops.vllm.bgmv_expand
+
+except AttributeError:
+    bgmv_expand = _bgmv_expand

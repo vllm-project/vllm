@@ -1,6 +1,11 @@
-from .data import (LLMInputs, ParsedText, ParsedTokens, PromptInputs,
-                   TextPrompt, TokensPrompt, parse_and_batch_prompt)
-from .registry import InputContext, InputRegistry
+from .data import (DecoderOnlyInputs, EncoderDecoderInputs,
+                   ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
+                   SingletonInputs, SingletonInputsAdapter, SingletonPrompt,
+                   TextPrompt, TokenInputs, TokensPrompt,
+                   build_explicit_enc_dec_prompt, to_enc_dec_tuple_list,
+                   token_inputs, zip_enc_dec_prompts)
+from .registry import (DummyData, InputContext, InputProcessingContext,
+                       InputRegistry)
 
 INPUT_REGISTRY = InputRegistry()
 """
@@ -8,11 +13,28 @@ The global :class:`~InputRegistry` which is used by :class:`~vllm.LLMEngine`
 to dispatch data processing according to the target model.
 
 See also:
-    :ref:`input_processing_pipeline`
+    :ref:`input-processing-pipeline`
 """
 
 __all__ = [
-    "ParsedText", "ParsedTokens", "parse_and_batch_prompt", "TextPrompt",
-    "TokensPrompt", "PromptInputs", "LLMInputs", "INPUT_REGISTRY",
-    "InputContext", "InputRegistry"
+    "TextPrompt",
+    "TokensPrompt",
+    "PromptType",
+    "SingletonPrompt",
+    "ExplicitEncoderDecoderPrompt",
+    "TokenInputs",
+    "token_inputs",
+    "DecoderOnlyInputs",
+    "EncoderDecoderInputs",
+    "ProcessorInputs",
+    "SingletonInputs",
+    "SingletonInputsAdapter",
+    "build_explicit_enc_dec_prompt",
+    "to_enc_dec_tuple_list",
+    "zip_enc_dec_prompts",
+    "INPUT_REGISTRY",
+    "DummyData",
+    "InputContext",
+    "InputProcessingContext",
+    "InputRegistry",
 ]

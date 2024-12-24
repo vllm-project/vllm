@@ -1,3 +1,0 @@
-# Dependencies for Ray accelerated DAG
-cupy-cuda12x
-ray >= 2.32

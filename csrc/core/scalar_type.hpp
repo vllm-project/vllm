@@ -1,6 +1,7 @@
 #pragma once
 
-#include <torch/custom_class.h>
+// For TORCH_CHECK
+#include <torch/library.h>
 
 namespace vllm {
 
@@ -9,18 +10,13 @@ namespace vllm {
 //  in particular it can be used to represent sub-byte data types (something
 //  that torch.dtype currently does not support).
 //
-//  ScalarTypeTorch is a subclass of ScalarType that is compatible with
-//  TORCH_LIBRARY, making it accessible from Python as well meaning this class
-//  can be used as a argument for custom operators, helping to simplify these
-//  interfaces.
-//
-//  The type definitions on the Python side can be found in: vllm/_core_ext.pyi
+//  The type definitions on the Python side can be found in: vllm/scalar_type.py
 //  these type definitions should be kept up to date with any Python API changes
 //  here.
 //
 class ScalarType {
  public:
-  enum NanRepr : int64_t {
+  enum NanRepr : uint8_t {
     NAN_NONE = 0,                // nans are not supported
     NAN_IEEE_754 = 1,            // nans are: exp all 1s, mantissa not all 0s
     NAN_EXTD_RANGE_MAX_MIN = 2,  // nans are: exp all 1s, mantissa all 1s
@@ -28,33 +24,33 @@ class ScalarType {
     NAN_REPR_ID_MAX
   };
 
-  constexpr ScalarType(bool signed_, int64_t exponent, int64_t mantissa,
-                       int64_t bias, bool finite_values_only = false,
+  constexpr ScalarType(uint8_t exponent, uint8_t mantissa, bool signed_,
+                       int32_t bias, bool finite_values_only = false,
                        NanRepr nan_repr = NAN_IEEE_754)
       : exponent(exponent),
         mantissa(mantissa),
-        bias(bias),
         signed_(signed_),
+        bias(bias),
         finite_values_only(finite_values_only),
         nan_repr(nan_repr){};
 
-  static constexpr ScalarType int_(int64_t size_bits, int64_t bias = 0) {
-    return ScalarType(true, 0, size_bits - 1, bias);
+  static constexpr ScalarType int_(uint8_t size_bits, int32_t bias = 0) {
+    return ScalarType(0, size_bits - 1, true, bias);
   }
 
-  static constexpr ScalarType uint(int64_t size_bits, int64_t bias = 0) {
-    return ScalarType(false, 0, size_bits, bias);
+  static constexpr ScalarType uint(uint8_t size_bits, int32_t bias = 0) {
+    return ScalarType(0, size_bits, false, bias);
   }
 
   // IEEE 754 compliant floating point type
-  static constexpr ScalarType float_IEEE754(int64_t exponent,
-                                            int64_t mantissa) {
+  static constexpr ScalarType float_IEEE754(uint8_t exponent,
+                                            uint8_t mantissa) {
     TORCH_CHECK(mantissa > 0 && exponent > 0);
-    return ScalarType(true, exponent, mantissa, 0, false, NAN_IEEE_754);
+    return ScalarType(exponent, mantissa, true, 0, false, NAN_IEEE_754);
   }
 
   // IEEE 754 non-compliant floating point type
-  static constexpr ScalarType float_(int64_t exponent, int64_t mantissa,
+  static constexpr ScalarType float_(uint8_t exponent, uint8_t mantissa,
                                      bool finite_values_only,
                                      NanRepr nan_repr) {
     TORCH_CHECK(nan_repr < NAN_REPR_ID_MAX, "Invalid NanRepr");
@@ -62,36 +58,121 @@ class ScalarType {
     TORCH_CHECK(nan_repr != NAN_IEEE_754,
                 "use `float_IEEE754` constructor for floating point types that "
                 "follow IEEE 754 conventions");
-    return ScalarType(true, exponent, mantissa, 0, finite_values_only,
+    return ScalarType(exponent, mantissa, true, 0, finite_values_only,
                       nan_repr);
   }
 
-  int64_t const exponent;  // size of the exponent field (0 for integer types)
-  int64_t const mantissa;  // size of the mantissa field (size of the integer
+  uint8_t const exponent;  // size of the exponent field (0 for integer types)
+  uint8_t const mantissa;  // size of the mantissa field (size of the integer
                            // excluding the sign bit for integer types)
-  int64_t const bias;      // stored values equal value + bias,
-                           // used for quantized type
   bool const signed_;  // flag if the type supports negative numbers (i.e. has a
                        // sign bit)
+  int32_t const bias;  // stored values equal value + bias,
+                       // used for quantized type
 
   // Extra Floating point info
   bool const finite_values_only;  // i.e. no +/-inf if true
   NanRepr const nan_repr;         // how NaNs are represented
                                   // (not applicable for integer types)
 
-  int64_t size_bits() const { return mantissa + exponent + is_signed(); }
-  bool is_signed() const { return signed_; }
-  bool is_integer() const { return exponent == 0; }
-  bool is_floating_point() const { return exponent > 0; }
-  bool is_ieee_754() const {
+  using Id = int64_t;
+
+ private:
+  // Field size in id
+  template <typename T_>
+  static constexpr size_t member_id_field_width() {
+    using T = std::decay_t<T_>;
+    return std::is_same_v<T, bool> ? 1 : sizeof(T) * 8;
+  }
+
+  template <typename Fn, typename Init, typename Member, typename... Rest>
+  static constexpr auto reduce_members_helper(Fn f, Init val, Member member,
+                                              Rest... rest) {
+    auto new_val = f(val, member);
+    if constexpr (sizeof...(rest) > 0) {
+      return reduce_members_helper(f, new_val, rest...);
+    } else {
+      return new_val;
+    };
+  }
+
+  template <typename Fn, typename Init>
+  constexpr auto reduce_members(Fn f, Init init) const {
+    // Should be in constructor order for `from_id`
+    return reduce_members_helper(f, init, exponent, mantissa, signed_, bias,
+                                 finite_values_only, nan_repr);
+  };
+
+  template <typename Fn, typename Init>
+  static constexpr auto reduce_member_types(Fn f, Init init) {
+    constexpr auto dummy_type = ScalarType(0, 0, false, 0, false, NAN_NONE);
+    return dummy_type.reduce_members(f, init);
+  };
+
+  static constexpr auto id_size_bits() {
+    return reduce_member_types(
+        [](int acc, auto member) -> int {
+          return acc + member_id_field_width<decltype(member)>();
+        },
+        0);
+  }
+
+ public:
+  // unique id for this scalar type that can be computed at compile time for
+  //  c++17 template specialization this is not needed once we migrate to
+  //  c++20 and can pass literal classes as template parameters
+  constexpr Id id() const {
+    static_assert(id_size_bits() <= sizeof(Id) * 8,
+                  "ScalarType id is too large to be stored");
+
+    auto or_and_advance = [](std::pair<Id, uint32_t> result,
+                             auto member) -> std::pair<Id, uint32_t> {
+      auto [id, bit_offset] = result;
+      auto constexpr bits = member_id_field_width<decltype(member)>();
+      return {id | (int64_t(member) & ((uint64_t(1) << bits) - 1))
+                       << bit_offset,
+              bit_offset + bits};
+    };
+    return reduce_members(or_and_advance, std::pair<Id, uint32_t>{}).first;
+  }
+
+  // create a ScalarType from an id, for c++17 template specialization,
+  //  this is not needed once we migrate to c++20 and can pass literal
+  //  classes as template parameters
+  static constexpr ScalarType from_id(Id id) {
+    auto extract_and_advance = [id](auto result, auto member) {
+      using T = decltype(member);
+      auto [tuple, bit_offset] = result;
+      auto constexpr bits = member_id_field_width<T>();
+      auto extracted_val = static_cast<T>((int64_t(id) >> bit_offset) &
+                                          ((uint64_t(1) << bits) - 1));
+      auto new_tuple = std::tuple_cat(tuple, std::make_tuple(extracted_val));
+      return std::pair<decltype(new_tuple), int>{new_tuple, bit_offset + bits};
+    };
+
+    auto [tuple_args, _] = reduce_member_types(extract_and_advance,
+                                               std::pair<std::tuple<>, int>{});
+    return std::apply([](auto... args) { return ScalarType(args...); },
+                      tuple_args);
+  }
+
+  constexpr int64_t size_bits() const {
+    return mantissa + exponent + is_signed();
+  }
+  constexpr bool is_signed() const { return signed_; }
+  constexpr bool is_integer() const { return exponent == 0; }
+  constexpr bool is_floating_point() const { return exponent > 0; }
+  constexpr bool is_ieee_754() const {
     return is_floating_point() && finite_values_only == false &&
            nan_repr == NAN_IEEE_754;
   }
-  bool has_nans() const { return is_floating_point() && nan_repr != NAN_NONE; }
-  bool has_infs() const {
+  constexpr bool has_nans() const {
+    return is_floating_point() && nan_repr != NAN_NONE;
+  }
+  constexpr bool has_infs() const {
     return is_floating_point() && finite_values_only == false;
   }
-  bool has_bias() const { return bias != 0; }
+  constexpr bool has_bias() const { return bias != 0; }
 
  private:
   double _floating_point_max() const {
@@ -131,7 +212,7 @@ class ScalarType {
     return *reinterpret_cast<double*>(&double_raw);
   }
 
-  std::variant<int64_t, double> _raw_max() const {
+  constexpr std::variant<int64_t, double> _raw_max() const {
     if (is_floating_point()) {
       return {_floating_point_max()};
     } else {
@@ -141,7 +222,7 @@ class ScalarType {
     }
   }
 
-  std::variant<int64_t, double> _raw_min() const {
+  constexpr std::variant<int64_t, double> _raw_min() const {
     if (is_floating_point()) {
       TORCH_CHECK(is_signed(),
                   "We currently assume all floating point types are signed");
@@ -168,7 +249,7 @@ class ScalarType {
  public:
   // Max representable value for this scalar type.
   // (accounting for bias if there is one)
-  std::variant<int64_t, double> max() const {
+  constexpr std::variant<int64_t, double> max() const {
     return std::visit(
         [this](auto x) -> std::variant<int64_t, double> { return {x - bias}; },
         _raw_max());
@@ -176,7 +257,7 @@ class ScalarType {
 
   // Min representable value for this scalar type.
   // (accounting for bias if there is one)
-  std::variant<int64_t, double> min() const {
+  constexpr std::variant<int64_t, double> min() const {
     return std::visit(
         [this](auto x) -> std::variant<int64_t, double> { return {x - bias}; },
         _raw_min());
@@ -215,7 +296,7 @@ class ScalarType {
     }
   }
 
-  bool operator==(ScalarType const& other) const {
+  constexpr bool operator==(ScalarType const& other) const {
     return mantissa == other.mantissa && exponent == other.exponent &&
            bias == other.bias && signed_ == other.signed_ &&
            finite_values_only == other.finite_values_only &&
@@ -223,124 +304,7 @@ class ScalarType {
   }
 };
 
-// Create a TORCH_LIBRARY compatible version of ScalarType (i.e. inherit from
-//  torch::CustomClassHolder), we use multiple inheritance here since we cannot
-//  have ScalarType inherit from torch::CustomClassHolder and have a constexpr
-//  constructor at the same time (torch::CustomClassHolder does not have a
-//  constexpr destructor)
-class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
- public:
-  ScalarTypeTorch(int64_t exponent, int64_t mantissa, int64_t bias,
-                  bool _signed)
-      : ScalarType(exponent, mantissa, bias, _signed){};
-
-  ScalarTypeTorch(ScalarType type) : ScalarType(type){};
-
-  using Base = ScalarType;
-  using Self = ScalarTypeTorch;
-  using SelfPtr = c10::intrusive_ptr<Self>;
-
-  static SelfPtr int_(int64_t size_bits, c10::optional<int64_t> bias) {
-    return c10::make_intrusive<Self>(
-        ScalarType::int_(size_bits, bias.value_or(0)));
-  }
-
-  static SelfPtr uint(int64_t size_bits, c10::optional<int64_t> bias) {
-    return c10::make_intrusive<Self>(
-        ScalarType::uint(size_bits, bias.value_or(0)));
-  }
-
-  static SelfPtr float_IEEE754(int64_t exponent, int64_t mantissa) {
-    return c10::make_intrusive<Self>(
-        ScalarType::float_IEEE754(exponent, mantissa));
-  }
-
-  static SelfPtr float_(int64_t exponent, int64_t mantissa,
-                        bool finite_values_only, int64_t nan_repr) {
-    return c10::make_intrusive<Self>(ScalarType::float_(
-        exponent, mantissa, finite_values_only, NanRepr(nan_repr)));
-  }
-
-  template <typename T>
-  static void bind_readonly_property(torch::class_<Self>& cls,
-                                     std::string const& name, T Base::*field) {
-    auto getter_func = [field = std::move(field)](SelfPtr const& self) {
-      if constexpr (std::is_member_function_pointer_v<decltype(field)>) {
-        return (self.get()->*field)();
-      } else {
-        return self.get()->*field;
-      }
-    };
-
-    cls.def_property(name, getter_func);
-  }
-
-  template <typename MemberFunc, typename Cls>
-  static void bind_function(torch::class_<Self>& cls, const std::string& name,
-                            MemberFunc Cls::*member) {
-    cls.def(name, [member = std::move(member)](SelfPtr const& self) {
-      return (self.get()->*member)();
-    });
-  }
-
-  template <typename Func>
-  static void bind_function(torch::class_<Self>& cls, const std::string& name,
-                            Func func) {
-    cls.def(name, func);
-  }
-
-  template <typename Func>
-  static void bind_static_function(torch::class_<Self>& cls,
-                                   const std::string& name, Func func) {
-    cls.def_static(name, func);
-  }
-
-  static void bind_class(torch::Library& lib) {
-    auto cls = lib.class_<ScalarTypeTorch>("ScalarType")
-                   .def(torch::init<int64_t, int64_t, int64_t, bool>());
-
-    // Bind Properties
-    bind_readonly_property(cls, "mantissa", &Base::mantissa);
-    bind_readonly_property(cls, "exponent", &Base::exponent);
-    bind_readonly_property(cls, "bias", &Base::bias);
-    bind_readonly_property(cls, "signed", &Base::is_signed);
-    bind_readonly_property(cls, "size_bits", &Base::size_bits);
-
-    // Bind member functions
-    bind_function(cls, "is_signed", &Base::is_signed);
-    bind_function(cls, "is_integer", &Base::is_integer);
-    bind_function(cls, "is_floating_point", &Base::is_floating_point);
-    bind_function(cls, "is_ieee_754", &Base::is_ieee_754);
-    bind_function(cls, "has_nans", &Base::has_nans);
-    bind_function(cls, "has_infs", &Base::has_infs);
-    bind_function(cls, "has_bias", &Base::has_bias);
-
-    bind_function(cls, "max", [](SelfPtr const& self) {
-      return std::visit([](auto arg) { return c10::IValue(arg); },
-                        self.get()->max());
-    });
-    bind_function(cls, "min", [](SelfPtr const& self) {
-      return std::visit([](auto arg) { return c10::IValue(arg); },
-                        self.get()->min());
-    });
-
-    bind_function(cls, "__str__", &Base::str);
-    bind_function(cls, "__eq__", [](SelfPtr const& self, SelfPtr const& other) {
-      return *self == *other;
-    });
-    bind_function(cls, "__repr__", [](SelfPtr const& self) {
-      return "ScalarType." + self.get()->str();
-    });
-
-    // Bind static functions (convenience constructors)
-    bind_static_function(cls, "int_", &ScalarTypeTorch::int_);
-    bind_static_function(cls, "uint", &ScalarTypeTorch::uint);
-    bind_static_function(cls, "float_IEEE754", &ScalarTypeTorch::float_IEEE754);
-    bind_static_function(cls, "float_", &ScalarTypeTorch::float_);
-  }
-};
-
-using ScalarTypeTorchPtr = c10::intrusive_ptr<ScalarTypeTorch>;
+using ScalarTypeId = ScalarType::Id;
 
 // "rust style" names generally following:
 //   https://github.com/pytorch/pytorch/blob/6d9f74f0af54751311f0dd71f7e5c01a93260ab3/torch/csrc/api/include/torch/types.h#L60-L70
@@ -379,4 +343,5 @@ static inline constexpr auto kHalf = kFE5M10;
 static inline constexpr auto kFloat16 = kHalf;
 static inline constexpr auto kBFloat16 = kFE8M7;
 
+static inline constexpr auto kFloat16Id = kFloat16.id();
 };  // namespace vllm

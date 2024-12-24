@@ -9,10 +9,9 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.triton_utils import libentry
+from vllm.utils import direct_register_custom_op
 
 
-@libentry()
 @triton.jit
 def _sgmv_expand_slice_kernel(
     input_ptr,
@@ -97,13 +96,16 @@ def _sgmv_expand_slice_kernel(
     c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (offset_cn[None, :] <
                                                            (slice_offset + N))
     if ADD_INPUTS:
-        tiled_out = tl.load(c_ptr, mask=c_mask)
+        # explicitly pass in other=None to tell triton that masked values
+        # can be uninitialized. This is OK because the later tl.store operation
+        # uses the same mask, eliminating the risk of garbage values propagating
+        tiled_out = tl.load(c_ptr, mask=c_mask, other=None)
         tiled_c += tiled_out
     tl.store(c_ptr, tiled_c, mask=c_mask)
 
 
 @torch.inference_mode()
-def sgmv_expand_slice(
+def _sgmv_expand_slice(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
@@ -112,10 +114,11 @@ def sgmv_expand_slice(
     lora_indices_tensor: torch.Tensor,
     batches: int,
     max_seq_length: int,
+    token_nums: int,
     slice_offset: int,
     slice_size: int,
     add_inputs: bool = False,
-):
+) -> None:
     """_summary_
 
     Args:
@@ -124,20 +127,22 @@ def sgmv_expand_slice(
         output_tensor (torch.Tensor): output tensor
         b_seq_start_loc (torch.Tensor): (batch_size,). The cumulative
             sequence lengths of the sequences in the batch, used to index
-            into sequence. E.g.,if the sequence length is [4, 6], it is
+            into sequence. E.g., if the sequence length is [4, 6], it is
             [0, 4, 10].
-        seq_len_tensor (torch.Tensor): (batch_size,). record the sequence
-            length of the sequences  in the batch
+        seq_len_tensor (torch.Tensor): (batch_size,). Record the sequence
+            length of the sequences in the batch
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch. An index of -1 means no lora should be
             applied.
         batches (int): batch size
-        max_seq_length (int):  The max sequence lengths of the sequences
+        max_seq_length (int): The max sequence lengths of the sequences
             in the batch
-        slice_offst (int): output_tensor's offst
+        token_nums (int): The token numbers in the batch. Used to verify if the 
+            token numbers in the inputs matches the one in the metadata.
+        slice_offset (int): output_tensor's offset
         slice_size (int): current output_tensor's size
-        add_inputs (bool, optional):  Defaults to False. adds the final lora 
-            results to the output..
+        add_inputs (bool, optional): Defaults to False, adds the final lora 
+            results to the output.
     """
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
@@ -145,6 +150,7 @@ def sgmv_expand_slice(
         torch.float16,
         torch.bfloat16,
     ]
+    assert inputs.size(0) == token_nums
     assert inputs.size(1) == lora_b_weights.size(-1)
     assert b_seq_start_loc.size(0) == batches
     assert lora_indices_tensor.size(0) == batches
@@ -203,3 +209,33 @@ def sgmv_expand_slice(
         CAST_TYPE,
     )
     return
+
+
+def sgmv_expand_slice_fake(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool = False,
+) -> None:
+    return
+
+
+try:
+    direct_register_custom_op(
+        op_name="sgmv_expand_slice",
+        op_func=_sgmv_expand_slice,
+        mutates_args=["output_tensor"],
+        fake_impl=sgmv_expand_slice_fake,
+    )
+    sgmv_expand_slice = torch.ops.vllm.sgmv_expand_slice
+
+except AttributeError:
+    sgmv_expand_slice = _sgmv_expand_slice
