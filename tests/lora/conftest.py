@@ -201,6 +201,11 @@ def minicpmv_lora_files():
 
 
 @pytest.fixture(scope="session")
+def qwen2vl_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen2-vl-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
