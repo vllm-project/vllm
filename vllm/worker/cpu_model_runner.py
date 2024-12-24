@@ -129,7 +129,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.multi_modal_placeholder_maps: Dict[
                 str, MultiModalPlaceholderMap] = defaultdict(
                     MultiModalPlaceholderMap)
-            self.input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
+            self.input_mrope_positions: List[List[int]] = [[]
+                                                           for _ in range(3)]
 
     def __init__(self,
                  runner: "CPUModelRunner",
