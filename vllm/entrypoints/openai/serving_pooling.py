@@ -66,10 +66,8 @@ class OpenAIServingPooling(OpenAIServing):
         raw_request: Optional[Request] = None,
     ) -> Union[PoolingResponse, ErrorResponse]:
         """
-        Pooling API similar to OpenAI's API.
-
-        See https://platform.openai.com/docs/api-reference/poolings/create
-        for the API specification. This API mimics the OpenAI Pooling API.
+        See https://platform.openai.com/docs/api-reference/embeddings/create
+        for the API specification. This API mimics the OpenAI Embedding API.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
