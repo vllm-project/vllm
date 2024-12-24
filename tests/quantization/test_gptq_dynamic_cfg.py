@@ -12,10 +12,10 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 
 PROMPT = "On the surface of Mars, we found"
 
-MODELS_QUANT = ["ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bits-dynamic-cfg"]
+MODEL_QUANT = ["ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bits-dynamic-cfg"]
 
 
-@pytest.mark.parametrize("model_id", MODELS_QUANT)
+@pytest.mark.parametrize("model_id", MODEL_QUANT)
 def test_gptq_with_dynamic_cfg(vllm_runner, model_id: str):
     vllm_model = vllm_runner(model_id, dtype=torch.float16, max_model_len=2048)
 
