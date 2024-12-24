@@ -153,9 +153,8 @@ class SequenceData(msgspec.Struct,
     """
     # NOTE: we cannot use Union[List, array] because msgspec cannot support
     # union of 2 list types.
-    _prompt_token_ids: array
-    _output_token_ids: array = msgspec.field(
-        default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
+    _prompt_token_ids: list
+    _output_token_ids: list = msgspec.field(default_factory=list)
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
@@ -193,7 +192,7 @@ class SequenceData(msgspec.Struct,
             (array_full(token_id, count) for token_id, count in token_counts),
         )
 
-        return SequenceData(prompt_token_ids_arr)
+        return SequenceData(prompt_token_ids_arr.tolist())
 
     @staticmethod
     def from_seqs(
@@ -204,30 +203,26 @@ class SequenceData(msgspec.Struct,
         Construct a :class:`SequenceData` instance from prompt and output
         token sequences.
         """
-        prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                     prompt_token_ids)
+        # prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+        #                              prompt_token_ids)
 
         if output_token_ids is None:
-            return SequenceData(prompt_token_ids_arr)
+            return SequenceData(prompt_token_ids)
 
-        output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                     output_token_ids)
+        # output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+        #                              output_token_ids)
 
-        return SequenceData(prompt_token_ids_arr,
-                            _output_token_ids=output_token_ids_arr)
+        return SequenceData(prompt_token_ids,
+                            _output_token_ids=output_token_ids)
 
     def __post_init__(self) -> None:
-        assert self._prompt_token_ids.typecode == "l"
-        assert self._output_token_ids.typecode == "l"
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
             self._prompt_token_ids)
         self._update_cached_all_tokens()
 
     def _update_cached_all_tokens(self):
-        assert isinstance(self._prompt_token_ids, array)
-        assert isinstance(self._output_token_ids, array)
-        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids +
-                                                     self._output_token_ids)
+        self._cached_all_token_ids: List[int] = (self._prompt_token_ids +
+                                                 self._output_token_ids)
 
     @property
     def cumulative_logprob(self) -> float:
@@ -255,20 +250,18 @@ class SequenceData(msgspec.Struct,
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
-    def output_token_ids(self,
-                         new_output_token_ids: GenericSequence[int]) -> None:
-        self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                       new_output_token_ids)
+    def output_token_ids(self, new_output_token_ids) -> None:
+        self._output_token_ids = list(new_output_token_ids)
         self._update_cached_all_tokens()
 
     @property
-    def output_token_ids_array(self) -> array:
+    def output_token_ids_array(self) -> list:
         """Return the prompt token ids in array type.
 
         Note that the array is in "I" type, and it is not compatible
         with torch.long (2 bytes vs 4 bytes). So beware of the usage.
         """
-        assert isinstance(self._output_token_ids, array)
+        assert isinstance(self._output_token_ids, list)
         return self._output_token_ids
 
     @property
@@ -418,6 +411,7 @@ class Sequence:
 
         self.data = SequenceData.from_seqs(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
+        self.output_hiddens: List[torch.Tensor] = []
         self.output_text = ""
 
         self.status = SequenceStatus.WAITING
@@ -549,9 +543,19 @@ class Sequence:
 
     def append_token_id(self, token_id: int, logprobs: Dict[int,
                                                             Logprob]) -> None:
-        assert token_id in logprobs
         self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id].logprob)
+        if isinstance(token_id, List):
+            self.data.append_token_id(token_id, logprobs[token_id[0]].logprob)
+        else:
+            assert token_id in logprobs
+            self.data.append_token_id(token_id, logprobs[token_id].logprob)
+
+    def append_token_ids(
+        self,
+        token_ids: List[int],
+        logprobs: Dict[int, Logprob],
+    ) -> None:
+        pass
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -1014,6 +1018,7 @@ class SequenceOutput(
     parent_seq_id: int
     output_token: int
     logprobs: Dict[int, Logprob]
+    output_tokens: List[int] = None
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
@@ -1027,7 +1032,6 @@ class SequenceOutput(
                  and self.output_token == other.output_token)
         log_probs_equal = other.logprobs == self.logprobs
         return equal and log_probs_equal
-
 
 class SequenceGroupOutput(ABC):
     """The base class for model outputs associated with a sequence group."""
@@ -1050,6 +1054,7 @@ class CompletionSequenceGroupOutput(
     samples: List[SequenceOutput]
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
+    hidden_state: Optional[torch.Tensor] = None
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "

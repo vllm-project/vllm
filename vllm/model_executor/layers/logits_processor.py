@@ -1,6 +1,6 @@
 """A layer that compute logits from hidden_stats."""
 import inspect
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -78,12 +78,9 @@ class LogitsProcessor(nn.Module):
 
         return logits
 
-    def _get_logits(
-        self,
-        hidden_states: torch.Tensor,
-        lm_head: VocabParallelEmbedding,
-        embedding_bias: Optional[torch.Tensor],
-    ) -> Optional[torch.Tensor]:
+    def _get_logits(self, hidden_states: torch.Tensor,
+                    lm_head: Union[VocabParallelEmbedding, nn.Linear],
+                    embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
         # Get the logits for the next tokens.
         logits = lm_head.linear_method.apply(lm_head,
                                              hidden_states,

@@ -480,8 +480,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # if CPU is ahead.
         if self.is_driver_worker and get_pp_group().is_last_rank:
             if self.pinned_sampled_token_ids is None:
+                num_output_heads = 1
+                if hasattr(self.model_config.hf_config, "num_output_head"):
+                    num_output_heads = self.model_config.hf_config.num_output_head
                 self.pinned_sampled_token_ids = torch.zeros(
-                    (self.scheduler_config.max_num_seqs, 1),
+                    (self.scheduler_config.max_num_seqs, num_output_heads),
                     dtype=torch.long,
                     device="cpu",
                     pin_memory=True)
@@ -850,6 +853,9 @@ def _pythonize_sampler_output(
 
         seq_ids = seq_group.seq_ids
         next_token_ids = sample_result
+        num_output_heads = sampled_token_ids.shape[1]
+        if num_output_heads > 1:
+            next_token_ids = [next_token_ids]
         parent_ids = [0]
         seq_outputs: List[SequenceOutput]
 
@@ -867,7 +873,11 @@ def _pythonize_sampler_output(
                 seq_output: SequenceOutput = cache.cached_seq_output.get_object(
                 )
                 seq_output.parent_seq_id = seq_ids[parent_id]
-                seq_output.output_token = next_token_id
+                if num_output_heads > 1:
+                    seq_output.output_token = next_token_id[0]
+                    seq_output.output_tokens = next_token_id
+                else:
+                    seq_output.output_token = next_token_id
 
                 if any_logprobs_are_requested:
                     seq_output.logprobs = group_sample_logprobs[tdx]
@@ -878,8 +888,10 @@ def _pythonize_sampler_output(
                     logprobs.logprob = float('inf')
                     logprobs.rank = None
                     logprobs.decoded_token = None
-
-                    seq_output.logprobs[next_token_id] = logprobs
+                    if num_output_heads > 1:
+                        seq_output.logprobs[next_token_id[0]] = logprobs
+                    else:
+                        seq_output.logprobs[next_token_id] = logprobs
 
                 seq_outputs.append(seq_output)
 

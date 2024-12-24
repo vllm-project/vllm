@@ -506,11 +506,21 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
-        inter_data.input_tokens[seq_idx].extend(tokens)
         inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
         inter_data.token_types[seq_idx].extend(
             token_types if token_types else [])
         inter_data.query_lens[seq_idx] = seq_len - context_len
+
+        if hasattr(self.runner.model_config.hf_config, "num_output_head"):
+            if inter_data.is_prompt:
+                inter_data.input_tokens[seq_idx].extend(tokens)
+            else:
+                inter_data.input_tokens[seq_idx].extend(tokens)
+        else:
+            if isinstance(tokens, list):
+                inter_data.input_tokens[seq_idx].extend(tokens)
+            else:
+                inter_data.input_tokens[seq_idx].extend(tokens)
 
         if seq_data.mrope_position_delta is not None:
             if inter_data.mrope_input_positions is None:
@@ -884,7 +894,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Tokens and positions.
         if cuda_graph_pad_size:
-            input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
+            if hasattr(self.runner.model_config.hf_config, "num_output_head"):
+                num_head = self.runner.model_config.hf_config.num_output_head
+                input_tokens.extend(itertools.repeat([0] * num_head, cuda_graph_pad_size))
+            else:
+                input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
         assert self.runner.device is not None
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
@@ -998,7 +1012,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        return_hidden_states: bool = False,
+        return_hidden_states: bool = True,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
@@ -1426,6 +1440,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = self.max_batchsize_to_capture
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        if hasattr(self.model_config.hf_config, "num_output_head"):
+            input_tokens = torch.zeros(max_batch_size, self.model_config.hf_config.num_output_head, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         if self.model_config.uses_mrope:
             input_positions = torch.tile(input_positions, (3, 1))
@@ -1694,6 +1710,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     kv_caches=kv_caches,
                     attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
+                    is_prompt=model_input.is_prompt,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
                     **seqlen_agnostic_kwargs)
@@ -1779,6 +1796,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states
 
             output.hidden_states = hidden_states
+            for i, o in enumerate(output):
+                o.hidden_state = hidden_states[i]
 
         return [output]
 

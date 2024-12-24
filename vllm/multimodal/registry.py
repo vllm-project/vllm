@@ -8,6 +8,7 @@ from typing_extensions import TypeAlias
 
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
+from vllm.multimodal.speech import SpeechPlugin
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import ClassRegistry
 
@@ -55,7 +56,7 @@ class MultiModalRegistry:
     :class:`~vllm.multimodal.MultiModalPlugin` for each modality.
     """
 
-    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin())
+    DEFAULT_PLUGINS = (ImagePlugin(), SpeechPlugin(), AudioPlugin(), VideoPlugin())
 
     def __init__(
             self,
@@ -118,6 +119,17 @@ class MultiModalRegistry:
         See :meth:`MultiModalPlugin.register_input_mapper` for more details.
         """
         return self.register_input_mapper("image", mapper)
+    
+    def register_speech_input_mapper(
+        self,
+        mapper: Optional[MultiModalInputMapper] = None,
+    ):
+        """
+        Register an input mapper for speech data to a model class.
+
+        See :meth:`MultiModalPlugin.register_input_mapper` for more details.
+        """
+        return self.register_input_mapper("audio", mapper)
 
     def map_input(
         self,
@@ -199,6 +211,16 @@ class MultiModalRegistry:
         image, that are passed to the language model for a model class.
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
+    
+    def register_max_speech_tokens(
+        self,
+        max_mm_tokens: Optional[MultiModalTokensCalc] = None,
+    ):
+        """
+        Register the maximum number of speech tokens, corresponding to a single
+        speech, that are passed to the language model for a model class.
+        """
+        return self.register_max_multimodal_tokens("audio", max_mm_tokens)
 
     def get_max_tokens_per_item_by_modality(
         self,
@@ -283,7 +305,7 @@ class MultiModalRegistry:
                 key: config_limits_per_plugin.get(key, 1)
                 for key in self._plugins
             }
-
+        limits_per_plugin['audio'] = 1
         self._limits_by_model[model_config] = limits_per_plugin
 
     def get_mm_limits_per_prompt(

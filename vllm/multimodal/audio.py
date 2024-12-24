@@ -11,7 +11,7 @@ class AudioPlugin(MultiModalPlugin):
     """Plugin for audio data."""
 
     def get_data_key(self) -> str:
-        return "audio"
+        return "audio1"
 
     def _default_input_mapper(
         self,

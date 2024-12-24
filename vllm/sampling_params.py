@@ -173,6 +173,7 @@ class SamplingParams(
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
+    repetition_window: int = 16
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1
@@ -216,6 +217,7 @@ class SamplingParams(
         presence_penalty: Optional[float] = 0.0,
         frequency_penalty: Optional[float] = 0.0,
         repetition_penalty: Optional[float] = 1.0,
+        repetition_window: int = 16,
         temperature: Optional[float] = 1.0,
         top_p: Optional[float] = 1.0,
         top_k: int = -1,
@@ -256,6 +258,8 @@ class SamplingParams(
             if frequency_penalty is None else frequency_penalty,
             repetition_penalty=1.0
             if repetition_penalty is None else repetition_penalty,
+            repetition_window=repetition_window
+            if repetition_window is not None else 16,
             temperature=1.0 if temperature is None else temperature,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,

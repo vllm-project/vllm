@@ -38,9 +38,11 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
+    hiddens: Optional[torch.Tensor] = None
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    hidden_states: Optional[List[torch.Tensor]] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -263,6 +265,7 @@ class RequestOutput:
                 output.finish_reason = SequenceStatus.get_finished_reason(
                     seq.status)
                 output.stop_reason = seq.stop_reason
+                output.hidden_states = seq.output_hiddens
 
             else:
                 output = CompletionOutput(
@@ -271,7 +274,8 @@ class RequestOutput:
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
                     SequenceStatus.get_finished_reason(seq.status),
-                    seq.stop_reason)
+                    seq.stop_reason,
+                    hidden_states=seq.output_hiddens)
 
             outputs.append(output)
 
