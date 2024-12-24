@@ -32,8 +32,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputsV2, MultiModalKwargs,
+                                    NestedTensors, PlaceholderRange)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement,
@@ -315,13 +316,10 @@ def get_max_phi3v_image_tokens(
 
     processor = ctx.get_hf_processor(**hf_processor_mm_kwargs)
 
-    num_image_tokens = processor.calc_num_image_tokens_from_image_size(
+    return processor.calc_num_image_tokens_from_image_size(
         width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
-
-    # Include the separator (bos_token_id)
-    return num_image_tokens + 1
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
@@ -442,6 +440,26 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
             prompt_text="".join(image_tokens[:num_images]),
             mm_data=data,
         )
+
+    def apply(
+        self,
+        prompt_text: str,
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalInputsV2:
+        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
+
+        # Only <|image|> tokens should be considered as placeholders,
+        # so we ignore the trailing bos_token_id
+        result["mm_placeholders"] = {
+            k: [
+                PlaceholderRange(offset=p["offset"], length=p["length"] - 1)
+                for p in ps
+            ]
+            for k, ps in result["mm_placeholders"].items()
+        }
+
+        return result
 
 
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
