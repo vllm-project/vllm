@@ -18,11 +18,16 @@ from vllm.inputs.data import TokensPrompt
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.model_executor.models.mllama import MLLAMA_IMAGE_TOKEN, MLLAMA_IMAGE_TOKEN_ID
 
-# Import and register models from tt-metal
-from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM
-from models.demos.llama3.tt.generator_vllm import TtMllamaForConditionalGeneration
-ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaForCausalLM)
-ModelRegistry.register_model("TTMllamaForConditionalGeneration", TtMllamaForConditionalGeneration)
+def register_tt_models():
+    from models.demos.llama3.tt.generator_vllm import TtLlamaForCausalLM
+    # To use old version of llama70b tt-metal model, use the import below
+    # from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM
+    ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaForCausalLM)
+    
+    from models.demos.llama3.tt.generator_vllm import TtMllamaForConditionalGeneration
+    ModelRegistry.register_model("TTMllamaForConditionalGeneration", TtMllamaForConditionalGeneration)
+
+register_tt_models()  # Import and register models from tt-metal
 
 
 def get_sample_multi_modal_llama_inputs():
@@ -46,7 +51,22 @@ def get_sample_multi_modal_llama_inputs():
     return inputs
 
 
+def check_tt_model_supported(model):
+    supported_models = [
+        "meta-llama/Meta-Llama-3.1-70B",
+        "meta-llama/Meta-Llama-3.1-70B-Instruct",
+        "meta-llama/Meta-Llama-3.1-8B",
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "meta-llama/Llama-3.2-1B",
+        "meta-llama/Llama-3.2-1B-Instruct",
+        "meta-llama/Llama-3.2-3B",
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "meta-llama/Llama-3.2-11B-Vision-Instruct",
+    ]
+    assert model in supported_models, f"Invalid model: {model}"
+
 def run_inference(
+    model,
     prompts_json,
     max_tokens=128,
     max_seqs_in_batch=32,
@@ -59,15 +79,7 @@ def run_inference(
     disable_async_output_proc=False,
     multi_modal=False,
 ):
-    if multi_modal:
-        model = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-        if os.environ.get("MESH_DEVICE") is None:
-            os.environ["MESH_DEVICE"] = "N300"
-        else:
-            assert os.environ["MESH_DEVICE"] in ["N300", "T3K_LINE"], "Invalid MESH_DEVICE for multi-modal inference"
-    else:
-        model = "meta-llama/Meta-Llama-3.1-70B"
-        os.environ["MESH_DEVICE"] = "T3K_RING"
+    check_tt_model_supported(model)
     
     # LLM args
     engine_kw_args = {
@@ -216,6 +228,7 @@ async def generate_tokens_async(llm : MQLLMEngineClient, prompts, sampling_param
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default="meta-llama/Meta-Llama-3.1-70B", help="Model name")
     parser.add_argument("--prompts_json", type=str, default="tt_metal/prompts.json", help="Path to JSON file containing prompts")
     parser.add_argument("--measure_perf", action="store_true", help="Measure performance")
     parser.add_argument("--perf_prompt_len", type=int, default=128, help="Length of dummy prompts for performance measurement")
@@ -230,6 +243,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_inference(
+        args.model,
         args.prompts_json,
         measure_perf=args.measure_perf,
         perf_prompt_len=args.perf_prompt_len,
