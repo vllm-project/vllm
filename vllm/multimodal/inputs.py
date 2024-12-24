@@ -270,8 +270,9 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`
         # We assume that those fields are not used in vLLM
         items_by_key = {
-            key: config.build_items(key, hf_inputs[key])
-            for key, config in config_by_key.items() if key in hf_inputs
+            key: config.build_items(key, batch)
+            for key, config in config_by_key.items()
+            if (batch := hf_inputs.get(key)) is not None
         }
 
         return MultiModalKwargs.from_items_by_key(

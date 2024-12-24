@@ -1063,18 +1063,18 @@ class BaseMultiModalProcessor(ABC):
             hf_processor_mm_kwargs,
         )
 
-        prompt_repls = self._get_prompt_replacements(
+        unbound_prompt_repls = self._get_prompt_replacements(
             mm_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        all_prompt_repls = self._bind_prompt_replacements(prompt_repls)
+        prompt_repls = self._bind_prompt_replacements(unbound_prompt_repls)
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
         mm_item_counts = mm_items.get_item_counts()
-        all_placeholders = self._find_placeholders(all_prompt_repls,
-                                                   prompt_ids, mm_item_counts)
+        all_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
+                                                   mm_item_counts)
 
         if all_placeholders:
             tokenizer = self._get_tokenizer()
@@ -1086,7 +1086,7 @@ class BaseMultiModalProcessor(ABC):
                 all_placeholders,
             ) = self._apply_prompt_replacements(
                 prompt_ids,
-                all_prompt_repls,
+                prompt_repls,
                 mm_item_counts,
             )
 

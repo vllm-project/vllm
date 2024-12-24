@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
                           PixtralVisionConfig, PretrainedConfig,
-                          ProcessorMixin, SiglipVisionConfig)
+                          SiglipVisionConfig)
 from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
@@ -20,11 +20,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement)
+                                        PromptReplacement,
+                                        full_groupby_modality)
 from vllm.sequence import IntermediateTensors
 
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
@@ -131,11 +133,11 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs=mm_kwargs,
         )
 
-        if "pixel_values" in processed_outputs:
+        # NOTE: pixel_values=None for MLlavaProcessor
+        pixel_values = processed_outputs.get("pixel_values")
+        if pixel_values is not None:
             images = mm_data["images"]
             assert isinstance(images, list)
-
-            pixel_values = processed_outputs["pixel_values"]
 
             if isinstance(self._get_hf_processor(), PixtralProcessor):
                 # Original output: (1, num_images, C, H, W)
@@ -575,22 +577,71 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
 class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
-    def _get_hf_processor(self) -> ProcessorMixin:
-        try:
-            from mantis.models.mllava import MLlavaProcessor
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "You need to `pip install "
-                "git+https://github.com/TIGER-AI-Lab/Mantis.git` "
-                "to use this model") from exc
+    def _get_hf_processor(self):
+        return self.ctx.get_hf_processor(LlavaProcessor)
 
-        processor = MLlavaProcessor.from_pretrained(
-            self.ctx.model_config.tokenizer)
-        assert isinstance(processor, MLlavaProcessor)
+    def apply(
+        self,
+        prompt_text: str,
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalInputsV2:
+        hf_config = self.ctx.get_hf_config(LlavaConfig)
+        image_token_id = hf_config.image_token_index
+        max_image_tokens = get_max_llava_image_tokens(self.ctx)
 
-        processor.image_token = "<image>"  # type: ignore
+        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
 
-        return processor
+        mm_items = self._get_mm_items(mm_data)
+        mm_item_counts = mm_items.get_item_counts()
+        mm_kwargs = result["mm_kwargs"]
+
+        # We reimplement the functionality of MLlavaProcessor from
+        # https://github.com/TIGER-AI-Lab/Mantis.git
+        def get_replacement_mantis(item_idx: int):
+            return "".join([
+                f"(image {item_idx+1}: <Image>",  # 7 tokens
+                "<image>" * max_image_tokens,
+                "</Image>)",  # 3 tokens
+            ])
+
+        mantis_repls = self._bind_prompt_replacements([
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id] * max_image_tokens,
+                replacement=get_replacement_mantis,
+            )
+        ])
+
+        prompt_ids, prompt_text, _ = self._apply_prompt_replacements(
+            result["prompt_token_ids"],
+            mantis_repls,
+            mm_item_counts,
+        )
+
+        unbound_orig_repls = self._get_prompt_replacements(
+            mm_items,
+            hf_processor_mm_kwargs,
+            mm_kwargs,
+        )
+        orig_repls = self._bind_prompt_replacements(unbound_orig_repls)
+
+        all_placeholders = self._find_placeholders(orig_repls, prompt_ids,
+                                                   mm_item_counts)
+        assert len(all_placeholders) == mm_item_counts.get("image", 0)
+
+        mm_placeholders = {
+            modality: [item.to_range() for item in items]
+            for modality, items in full_groupby_modality(all_placeholders)
+        }
+
+        return MultiModalInputsV2(
+            type="multimodal",
+            prompt=prompt_text,
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=mm_kwargs,
+            mm_placeholders=mm_placeholders,
+        )
 
 
 # To use this model, please use

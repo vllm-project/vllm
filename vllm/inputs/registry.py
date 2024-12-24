@@ -99,6 +99,9 @@ class InputContext:
 
         merged_kwargs = {**base_kwargs, **kwargs}
 
+        if isinstance(typ, type):
+            merged_kwargs["processor_cls"] = typ
+
         hf_processor = cached_get_processor(
             self.model_config.model,
             trust_remote_code=self.model_config.trust_remote_code,

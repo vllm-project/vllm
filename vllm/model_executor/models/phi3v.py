@@ -452,11 +452,11 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         # Only <|image|> tokens should be considered as placeholders,
         # so we ignore the trailing bos_token_id
         result["mm_placeholders"] = {
-            k: [
+            modality: [
                 PlaceholderRange(offset=p["offset"], length=p["length"] - 1)
                 for p in ps
             ]
-            for k, ps in result["mm_placeholders"].items()
+            for modality, ps in result["mm_placeholders"].items()
         }
 
         return result
