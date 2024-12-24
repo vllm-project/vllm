@@ -680,23 +680,15 @@ class DeviceMemoryProfiler:
     def __init__(self, device: Optional[torch.types.Device] = None):
         self.device = device
 
-    def current_memory_usage(self) -> float:
-        # Return the memory usage in bytes.
-        if current_platform.is_cuda_alike():
-            torch.cuda.reset_peak_memory_stats(self.device)
-            mem = torch.cuda.max_memory_allocated(self.device)
-        elif current_platform.is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
-            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
-        return mem
-
     def __enter__(self):
-        self.initial_memory = self.current_memory_usage()
+        self.initial_memory = current_platform.get_current_memory_usage(
+            self.device)
         # This allows us to call methods of the context manager if needed
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.final_memory = self.current_memory_usage()
+        self.final_memory = current_platform.get_current_memory_usage(
+            self.device)
         self.consumed_memory = self.final_memory - self.initial_memory
 
         # Force garbage collection

@@ -141,6 +141,13 @@ class CudaPlatformBase(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
+    @classmethod
+    def get_current_memory_usage(cls,
+                                 device: Optional[torch.types.Device] = None
+                                 ) -> float:
+        torch.cuda.reset_peak_memory_stats(device)
+        return torch.cuda.max_memory_allocated(device)
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
