@@ -123,9 +123,8 @@ def parse_fine_tuned_lora_name(
         ]:
             if mapping:
                 print_info_once(
-                    f"vLLM does not support mapping of LoRA weights for "
-                    f"{mapping}")
-                # 
+                    f"vLLM currently does not support mapping of LoRA weights "
+                    f"for {mapping}.")
                 setattr(w_mapper, attr, {})
 
     mapper = (lambda name: w_mapper._map_name(name)
