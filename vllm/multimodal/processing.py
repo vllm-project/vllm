@@ -964,8 +964,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor):
 
         # Only process multi-modal data in encoder inputs
         if is_encoder_data:
-            # TODO(Isotr0py): This part is similar to `get_dummy_data` in
-            # `BaseMultiModalProcessor`, perhaps we can reuse it.
             mm_inputs = self.apply(*processor_inputs)
 
             prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
