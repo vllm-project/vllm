@@ -11,11 +11,10 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (PoolingChatRequest,
-                                              PoolingRequest,
-                                              PoolingResponse,
-                                              PoolingResponseData,
-                                              ErrorResponse, UsageInfo)
+from vllm.entrypoints.openai.protocol import (ErrorResponse,
+                                              PoolingChatRequest,
+                                              PoolingRequest, PoolingResponse,
+                                              PoolingResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
