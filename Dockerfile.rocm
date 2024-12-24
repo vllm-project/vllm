@@ -1,5 +1,5 @@
-# Default ROCm 6.2 base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0"
+# Default ROCm 6.3 base image
+ARG BASE_IMAGE="rocm/pytorch:rocm6.3_ubuntu24.04_py3.9_pytorch_release_2.5.0"
 
 # Default ROCm ARCHes to build vLLM for.
 ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
@@ -48,13 +48,13 @@ RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(whic
 # Install torch == 2.6.0 on ROCm
 RUN --mount=type=cache,target=/root/.cache/pip \
     case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-6.2"*) \
+        *"rocm-6.3"*) \
             python3 -m pip uninstall -y torch torchvision \
             && python3 -m pip install --pre \
-                torch==2.6.0.dev20241113+rocm6.2 \
+                torch==2.6.0.dev20241224+rocm6.3 \
                 'setuptools-scm>=8' \
-                torchvision==0.20.0.dev20241113+rocm6.2 \
-                --extra-index-url https://download.pytorch.org/whl/nightly/rocm6.2;; \
+                torchvision==0.20.0.dev20241224+rocm6.3 \
+                --extra-index-url https://download.pytorch.org/whl/nightly/rocm6.3;; \
         *) ;; esac
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
