@@ -71,11 +71,13 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
 
     def update_config(self, prefix: str):
-        bits = self.weight_bits
+        bits: Optional[int] = self.weight_bits
         # check for variable/dynamic config
         if self.dynamic and len(self.dynamic) > 0 and prefix:
             bits = self.dynamic_get(prefix, "bits", bits)
-            self.group_size = self.dynamic_get(prefix, "group_size", self.group_size)
+            group_size = self.dynamic_get(prefix, "group_size", self.group_size)
+            assert group_size is not None
+            self.group_size = group_size
             self.desc_act = self.dynamic_get(prefix, "desc_act", self.desc_act)
             self.is_sym = self.dynamic_get(prefix, "sym", self.is_sym)
 
@@ -158,7 +160,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(
             self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod", UnquantizedLinearMethod]]:
+    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod"]]:
         if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
                                              and self.lm_head_quantized):
             if self.dynamic and self.dynamic_get(layer_name=prefix) == False:  # noqa: E712
