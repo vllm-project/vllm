@@ -41,9 +41,15 @@ class GPTQMarlinConfig(QuantizationConfig):
         (8, True): scalar_types.uint8b128,
     }
 
-    def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
-                 is_sym: bool, lm_head_quantized: bool,
-                 dynamic_cfg: Dict[str, Dict[str, Union[int, bool]]]) -> None:
+    def __init__(
+        self,
+        weight_bits: int,
+        group_size: int,
+        desc_act: bool,
+        is_sym: bool,
+        lm_head_quantized: bool,
+        dynamic_cfg: Dict[str, Dict[str, Union[int, bool]]],
+    ) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
@@ -145,7 +151,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def gptqmodel_dynamic_config(
+    def get_dynamic_config(
         self,
         layer_name: str,
         key: Optional[str] = None,
@@ -219,7 +225,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         self.prefix = prefix
 
         if len(self.quant_config.dynamic_cfg) > 0 and self.prefix:
-            # gptqmodel per module/layer dynamic config my override/change base
+            # gptqmodel per module/layer dynamic_cfg my override/change base
             # model quant config
             self.quant_config.update_config(prefix=self.prefix)
 
@@ -237,9 +243,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        # gptqmodel per module/layer dynamic config my override/change base model quant config
-        self.quant_config.update_config(prefix=self.prefix)
-
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
         weight_loader = extra_weight_attrs.get("weight_loader")
