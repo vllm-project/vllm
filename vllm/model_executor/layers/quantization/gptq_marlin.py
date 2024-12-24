@@ -10,7 +10,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               set_weight_attrs, UnquantizedLinearMethod)
+                                               set_weight_attrs,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kernels import (
@@ -141,7 +142,8 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
+    def dynamic_get(self, layer_name: str, key: Optional[str] = None, default_value: Union[int, bool, None] = None
+                    ) -> Union[Dict, int, bool]:
         for pattern, pattern_dict in self.dynamic.items():
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
@@ -161,7 +163,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                                              and self.lm_head_quantized):
             if self.dynamic and self.dynamic_get(layer_name=prefix) == False:  # noqa: E712
                 return UnquantizedLinearMethod()
-            
+
             return GPTQMarlinLinearMethod(self, prefix=prefix)
         elif isinstance(layer, FusedMoE):
             return GPTQMarlinMoEMethod(self)
