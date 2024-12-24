@@ -20,11 +20,10 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-from .adapters import as_embedding_model
 from .interfaces import (has_inner_state, is_attention_free, is_hybrid,
                          supports_cross_encoding, supports_multimodal,
                          supports_pp)
-from .interfaces_base import is_pooling_model, is_text_generation_model
+from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
 
@@ -226,19 +225,10 @@ class _ModelInfo:
 
     @staticmethod
     def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
-        is_pooling_model_ = is_pooling_model(model)
-        if not is_pooling_model_:
-            try:
-                as_embedding_model(model)
-            except Exception:
-                pass
-            else:
-                is_pooling_model_ = True
-
         return _ModelInfo(
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
-            is_pooling_model=is_pooling_model_,
+            is_pooling_model=True,  # Can convert any model into a pooling model
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_pp=supports_pp(model),
