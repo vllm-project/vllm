@@ -6,9 +6,9 @@ Run `pytest tests/quantization/test_gptq_dynamic_cfg.py --forked`.
 import pytest
 import torch
 
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinLinearMethod)
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 PROMPT = "On the surface of Mars, we found"
 
