@@ -129,9 +129,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.multi_modal_placeholder_maps: Dict[
                 str, MultiModalPlaceholderMap] = defaultdict(
                     MultiModalPlaceholderMap)
-            self.input_mrope_positions: Optional[List[List[int]]] = [
-                [] for _ in range(3)
-            ] if self.use_mrope else None
+            self.input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
 
     def __init__(self,
                  runner: "CPUModelRunner",
@@ -166,7 +164,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                     device="cpu")
         input_positions = torch.tensor(
             input_data.input_positions
-            if not input_data.use_mrope else input_data.input_mrope_positions,
+            if not any(input_data.input_mrope_positions) else
+            input_data.input_mrope_positions,
             dtype=torch.long,
             device="cpu")
         token_type_ids = torch.tensor(input_data.token_type_ids,
@@ -196,8 +195,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
     def _build_input_data(self):
         for seq_group_metadata in self.seq_group_metadata_list:
             for seq_id, seq_data in seq_group_metadata.seq_data.items():
-                if not seq_group_metadata.multi_modal_data:
-                    self.input_data.use_mrope = False
                 if seq_group_metadata.is_prompt:
                     self._compute_prompt_input_tokens(self.input_data,
                                                       seq_group_metadata,
@@ -237,7 +234,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             block_table = block_table[start_block:]
 
         # For MRotaryEmbedding
-        if data.use_mrope:
+        if seq_data.mrope_position_delta is not None:
             next_pos = MRotaryEmbedding.get_next_input_positions(
                 seq_data.mrope_position_delta,
                 context_len,
