@@ -231,8 +231,7 @@ def _sgmv_expand_fake(
     batches: int,
     max_seq_length: int,
     token_nums: int,
-    slice_offset: int,
-    slice_size: int,
+    offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:
     return
