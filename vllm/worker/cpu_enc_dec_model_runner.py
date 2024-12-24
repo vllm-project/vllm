@@ -280,6 +280,7 @@ class CPUEncoderDecoderModelRunner(
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
@@ -305,7 +306,8 @@ class CPUEncoderDecoderModelRunner(
             intermediate_tensors,
         }
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+        with set_forward_context({"attn_metadata": model_input.attn_metadata},
+                                 self.vllm_config):
             hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.

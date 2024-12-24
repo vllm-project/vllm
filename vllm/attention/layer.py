@@ -130,15 +130,32 @@ class Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
 
+        forward_context: ForwardContext = get_forward_context()
+        cache_engine = None
+        worker_input = None
+        if forward_context.dynamic_forward_context is not None:
+            cache_engine = \
+                forward_context.dynamic_forward_context.get("cache_engine")
+            worker_input= \
+                forward_context.dynamic_forward_context.get("worker_input")
+
         if self.use_direct_call:
-            return self.impl.forward(query,
-                                     key,
-                                     value,
-                                     kv_cache,
-                                     attn_metadata,
-                                     self._k_scale,
-                                     self._v_scale,
-                                     attn_type=attn_type)
+            if (cache_engine is not None):
+                assert (worker_input is not None)
+                cache_engine.swap_in_sync(worker_input.running_sequence_ids)
+            ret = self.impl.forward(query,
+                                    key,
+                                    value,
+                                    kv_cache,
+                                    attn_metadata,
+                                    self._k_scale,
+                                    self._v_scale,
+                                    attn_type=attn_type)
+            if (cache_engine is not None):
+                assert (worker_input is not None)
+                cache_engine.issue_swap_out(
+                    worker_input.blocks_to_offload_swap_out)
+            return ret
         elif self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -151,14 +168,28 @@ class Attention(nn.Module):
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size)
+            if (cache_engine is not None):
+                assert (worker_input is not None)
+                cache_engine.swap_in_sync(worker_input.running_sequence_ids)
             torch.ops.vllm.unified_attention_with_output(
                 query, key, value, output, kv_cache, attn_type,
                 self.layer_name)
+            if (cache_engine is not None):
+                assert (worker_input is not None)
+                cache_engine.issue_swap_out(
+                    worker_input.blocks_to_offload_swap_out)
             return output.view(-1, hidden_size)
         else:
-            return torch.ops.vllm.unified_attention(query, key, value,
-                                                    kv_cache, attn_type,
-                                                    self.layer_name)
+            if (cache_engine is not None):
+                assert (worker_input is not None)
+                cache_engine.swap_in_sync(worker_input.running_sequence_ids)
+            ret = torch.ops.vllm.unified_attention(query, key, value, kv_cache,
+                                                   attn_type, self.layer_name)
+            if (cache_engine is not None):
+                assert (worker_input is not None)
+                cache_engine.issue_swap_out(
+                    worker_input.blocks_to_offload_swap_out)
+            return ret
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -241,7 +272,10 @@ def unified_attention(
     layer_name: str,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.dynamic_forward_context
+    attn_metadata = None
+    if forward_context.dynamic_forward_context is not None:
+        attn_metadata = \
+            forward_context.dynamic_forward_context.get("attn_metadata")
     self = forward_context.static_forward_context[layer_name]
     return self.impl.forward(query,
                              key,
@@ -283,7 +317,10 @@ def unified_attention_with_output(
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.dynamic_forward_context
+    attn_metadata = None
+    if forward_context.dynamic_forward_context is not None:
+        attn_metadata = \
+            forward_context.dynamic_forward_context.get("attn_metadata")
     self = forward_context.static_forward_context[layer_name]
     self.impl.forward(query,
                       key,

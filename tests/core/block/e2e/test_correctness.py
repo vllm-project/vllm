@@ -76,6 +76,8 @@ def test_block_manager_with_preemption(baseline_llm_generator,
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
+    # XXX: This comparison is not very meaningful,
+    # as the token ids can be slightly different due to float precision.
     for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
                                                     test_token_ids):
         assert expected_token_ids == actual_token_ids

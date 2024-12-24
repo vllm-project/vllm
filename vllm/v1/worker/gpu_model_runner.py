@@ -511,7 +511,8 @@ class GPUModelRunner:
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context({"attn_metadata": attn_metadata},
+                                 self.vllm_config):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],

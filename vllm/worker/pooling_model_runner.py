@@ -49,6 +49,7 @@ class PoolingModelRunner(
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> Optional[Union[List[PoolerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
@@ -105,7 +106,8 @@ class PoolingModelRunner(
         if model_input.token_types is not None:
             cross_enc_kwargs["token_type_ids"] = model_input.token_types
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+        with set_forward_context({"attn_metadata": model_input.attn_metadata},
+                                 self.vllm_config):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,

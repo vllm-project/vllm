@@ -462,6 +462,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """ 
         Execute the model for a single step and update multi-step

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import torch
 
@@ -173,6 +173,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs: Any,
     ) -> Optional[List[SamplerOutput]]:
         """Executes num_steps forward passes with advacement of input tensors 
         on the GPU. Look at supports_gpu_multi_step(..) for pre-conditions.
@@ -273,8 +274,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 if previous_hidden_states is not None else {}
 
             # Run model
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config):
+            with set_forward_context(
+                {"attn_metadata": model_input.attn_metadata},
+                    self.vllm_config):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,

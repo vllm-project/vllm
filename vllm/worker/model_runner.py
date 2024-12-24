@@ -60,6 +60,8 @@ from vllm.worker.model_runner_base import (
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
+    from vllm.worker.cache_engine import CacheEngine
+    from vllm.worker.worker_base import WorkerInput
 
 logger = init_logger(__name__)
 
@@ -1521,7 +1523,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
-                    with set_forward_context(attn_metadata, self.vllm_config):
+                    with set_forward_context({"attn_metadata": attn_metadata},
+                                             self.vllm_config):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
@@ -1615,13 +1618,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    virtual_engine=virtual_engine)
 
     @torch.inference_mode()
-    @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
+    @dump_input_when_exception(exclude_args=[0],
+                               exclude_kwargs=["self", "cache_engine"])
     def execute_model(
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        cache_engine: Optional["CacheEngine"] = None,
+        worker_input: Optional["WorkerInput"] = None,
+        **kwargs: Any,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1686,8 +1693,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config):
+            with set_forward_context(
+                {
+                    "attn_metadata": model_input.attn_metadata,
+                    "cache_engine": cache_engine,
+                    "worker_input": worker_input,
+                }, self.vllm_config):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,

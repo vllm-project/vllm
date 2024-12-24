@@ -2,7 +2,8 @@ import dataclasses
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
+                    Union)
 
 import torch
 
@@ -18,6 +19,9 @@ from vllm.utils import (enable_trace_function_call_for_thread,
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
+
+if TYPE_CHECKING:
+    from vllm.worker.cache_engine import CacheEngine
 
 logger = init_logger(__name__)
 
@@ -144,8 +148,13 @@ class WorkerInput:
 
     num_seq_groups: Optional[int] = None
     blocks_to_swap_in: Optional[torch.Tensor] = None
+    blocks_to_offload_swap_in: Optional[torch.Tensor] = None
+    offload_swap_in_offsets: Optional[torch.Tensor] = None
+    offload_swap_in_sequence_ids: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
+    blocks_to_offload_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
+    running_sequence_ids: Optional[torch.Tensor] = None
     virtual_engine: int = 0
     num_steps: int = 1
 
@@ -161,10 +170,18 @@ class WorkerInput:
         return cls(
             num_seq_groups=tensor_dict.pop("num_seq_groups"),
             blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
+            blocks_to_offload_swap_in= \
+                    tensor_dict.pop("blocks_to_offload_swap_in"),
+            offload_swap_in_offsets=tensor_dict.pop("offload_swap_in_offsets"),
+            offload_swap_in_sequence_ids= \
+                tensor_dict.pop("offload_swap_in_sequence_ids"),
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
+            blocks_to_offload_swap_out= \
+                    tensor_dict.pop("blocks_to_offload_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
             num_steps=tensor_dict.pop("num_steps"),
+            running_sequence_ids=tensor_dict.pop("running_sequence_ids"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -175,10 +192,15 @@ class WorkerInput:
         tensor_dict = {
             "num_seq_groups": self.num_seq_groups,
             "blocks_to_swap_in": self.blocks_to_swap_in,
+            "blocks_to_offload_swap_in": self.blocks_to_offload_swap_in,
+            "offload_swap_in_offsets": self.offload_swap_in_offsets,
+            "offload_swap_in_sequence_ids": self.offload_swap_in_sequence_ids,
             "blocks_to_swap_out": self.blocks_to_swap_out,
+            "blocks_to_offload_swap_out": self.blocks_to_offload_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
             "num_steps": self.num_steps,
+            "running_sequence_ids": self.running_sequence_ids,
         }
 
         return tensor_dict
@@ -236,6 +258,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         Process an execution request.
         """
         raise NotImplementedError
+
+    def get_cache_engine(self, worker_input: WorkerInput) \
+        -> Optional["CacheEngine"]:
+        """
+        Get the cache engine for the worker.
+        """
+        return None
 
     def _get_worker_input_from_broadcast(
         self
@@ -346,8 +375,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             if self.kv_cache is not None else None,
             intermediate_tensors=intermediate_tensors,
             num_steps=num_steps,
+            cache_engine=self.get_cache_engine(worker_input),
+            worker_input=worker_input,
             **kwargs,
         )
+        if (self.get_cache_engine(worker_input) is not None):
+            self.get_cache_engine(worker_input).swap_out_sync()  # type: ignore
 
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
