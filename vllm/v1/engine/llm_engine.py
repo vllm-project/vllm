@@ -26,6 +26,7 @@ from vllm.v1.engine.detokenizer import Detokenizer, MPDetokenizerClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import make_zmq_socket
+from vllm.v1.executor.ray_utils import initialize_ray_cluster
 
 logger = init_logger(__name__)
 
@@ -152,7 +153,11 @@ class LLMEngine:
         executor_class: Type[Executor]
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
+        if distributed_executor_backend == "ray":
+            initialize_ray_cluster(vllm_config.parallel_config)
+            from vllm.v1.executor.ray_executor import RayExecutor
+            executor_class = RayExecutor
+        elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
         else:

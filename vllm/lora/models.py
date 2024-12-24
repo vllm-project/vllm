@@ -28,7 +28,7 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -113,13 +113,14 @@ class LoRAModel(AdapterModel):
         target_embedding_padding: Optional[int] = None,
         embedding_modules: Optional[Dict[str, str]] = None,
         embedding_padding_modules: Optional[List[str]] = None,
+        weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
-                tensor_name)
+                tensor_name, weights_mapper)
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
@@ -187,6 +188,7 @@ class LoRAModel(AdapterModel):
         target_embedding_padding: Optional[int] = None,
         embedding_modules: Optional[Dict[str, str]] = None,
         embedding_padding_modules: Optional[List[str]] = None,
+        weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
         
@@ -289,7 +291,8 @@ class LoRAModel(AdapterModel):
             embeddings=embeddings,
             target_embedding_padding=target_embedding_padding,
             embedding_modules=embedding_modules,
-            embedding_padding_modules=embedding_padding_modules)
+            embedding_padding_modules=embedding_padding_modules,
+            weights_mapper=weights_mapper)
 
 
 class LoRAModelManager(AdapterModelManager):

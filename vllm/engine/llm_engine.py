@@ -133,7 +133,7 @@ class LLMEngine:
     and the :class:`AsyncLLMEngine` class wraps this class for online serving.
 
     The config arguments are derived from :class:`~vllm.EngineArgs`. (See
-    :ref:`engine_args`)
+    :ref:`engine-args`)
 
     Args:
         model_config: The configuration related to the LLM model.
