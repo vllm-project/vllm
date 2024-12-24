@@ -10,7 +10,7 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import EngineCoreClient
 
@@ -24,8 +24,8 @@ PROMPT = "Hello my name is Robert and I love quantization kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 
-def make_request(params: SamplingParams) -> EngineCoreRequest:
-    return EngineCoreRequest(
+def make_request(params: SamplingParams) -> EngineRequest:
+    return EngineRequest(
         request_id=str(uuid.uuid4()),
         prompt=PROMPT,
         prompt_token_ids=PROMPT_TOKENS,

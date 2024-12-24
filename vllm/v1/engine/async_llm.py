@@ -1,5 +1,27 @@
+# Copyright 2033-2024 The vLLM team.
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+# Inspired by https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/tokenizer_manager.py
+
 import asyncio
-from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
+import pickle
+from typing import (Any, AsyncGenerator, Dict, List, Mapping, Optional, Type,
+                    Union)
+
+import zmq
+import zmq.asyncio
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -9,18 +31,20 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.async_stream import AsyncStream
-from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.utils import get_open_zmq_ipc_path
+from vllm.v1.engine import EngineAbortRequest, EngineRequestType
+from vllm.v1.engine.core import MPEngineCoreClient
+from vllm.v1.engine.detokenizer import MPDetokenizerClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.utils import make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -46,6 +70,9 @@ class AsyncLLM(EngineClient):
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
+        # RequestId -> OutputQueue.
+        self.rid_to_queue: Dict[str, asyncio.Queue[RequestOutput]] = {}
+
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
@@ -54,12 +81,7 @@ class AsyncLLM(EngineClient):
             lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
-        # Request streams (map of request_id -> AsyncStream).
-        self.request_streams: Dict[str, AsyncStream] = {}
-        # List of cancelled request ids to be aborted.
-        self.client_aborted_requests: List[str] = []
-
-        # Processor (converts Inputs --> EngineCoreRequests).
+        # Processor (in process).
         self.processor = Processor(
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
@@ -68,21 +90,36 @@ class AsyncLLM(EngineClient):
             input_registry=input_registry,
         )
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
-        self.detokenizer = Detokenizer(
+        # IPC paths.
+        to_detokenizer_path = get_open_zmq_ipc_path()
+        to_engine_core_path = get_open_zmq_ipc_path()
+        to_llm_engine_path = get_open_zmq_ipc_path()
+
+        # Detokenizer IPC.
+        self.ctx = zmq.asyncio.Context(io_threads=2)
+        self.from_detokenizer = make_zmq_socket(self.ctx, to_llm_engine_path,
+                                                zmq.constants.PULL)
+        self.to_detokenizer = make_zmq_socket(self.ctx, to_detokenizer_path,
+                                              zmq.constants.PUSH)
+
+        # Detokenizer (background process).
+        self.detokenizer_client = MPDetokenizerClient(
+            output_path=to_llm_engine_path,
+            input_path=to_detokenizer_path,
+            to_engine_core_path=to_engine_core_path,
             tokenizer_name=vllm_config.model_config.tokenizer,
             tokenizer_mode=vllm_config.model_config.tokenizer_mode,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
             revision=vllm_config.model_config.tokenizer_revision,
         )
 
-        # EngineCore (starts the engine in background process).
-        self.engine_core = EngineCoreClient.make_client(
+        # EngineCore (background process).
+        self.engine_core_client = MPEngineCoreClient(
+            input_path=to_engine_core_path,
+            output_path=to_detokenizer_path,
             vllm_config=vllm_config,
             executor_class=executor_class,
             usage_context=usage_context,
-            multiprocess_mode=True,
-            asyncio_mode=True,
         )
 
         self.output_handler: Optional[asyncio.Task] = None
@@ -123,11 +160,17 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
 
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+        if ctx := getattr(self, "ctx", None):
+            ctx.destroy(linger=0)
 
-        if handler := getattr(self, "output_handler", None):
-            handler.cancel()
+        if output_handler := getattr(self, "output_hander", None):
+            output_handler.cancel()
+
+        if engine_core_client := getattr(self, "engine_core_client", None):
+            engine_core_client.shutdown()
+
+        if detokenizer_client := getattr(self, "detokenizer_client", None):
+            detokenizer_client.shutdown()
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
@@ -153,28 +196,23 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
+    ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
-        if self.detokenizer.is_request_active(request_id):
-            raise ValueError(f"Request {request_id} already exists.")
-
-        # 1) Create a new AsyncStream for the request.
-        stream = self._add_request_to_streams(request_id)
-
-        # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
-        detokenizer_req, engine_core_req = self.processor.process_inputs(
+        # 1) Convert Input --> EngineRequest (Tokenize, MM, etc).
+        engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
-        # 3) Add the request to Detokenizer (this process).
-        self.detokenizer.add_request(detokenizer_req)
+        # 2) Create Queue (output_handler() pushes, generate() pulls).
+        self.rid_to_queue[request_id] = asyncio.Queue()
 
-        # 4) Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(engine_core_req)
+        # 3) Send to Detokenizer (which forwards to EngineCore).
+        # Note: we forward the request rather than sending to each
+        # process separately to avoid race conditions in Detokenizer).
+        await self._send_to_detokenizer(engine_request)
 
-        # 5) Return the generator.
-        return stream.generator()
+        return self.rid_to_queue[request_id]
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -193,27 +231,27 @@ class AsyncLLM(EngineClient):
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
-            * 1) Making an AsyncStream corresponding to the Request.
-            # 2) Processing the Input.
-            * 3) Adding the Request to the Detokenizer.
-            * 4) Adding the Request to the EngineCore (separate process).
+            * 1) Make an output queue for the Request.
+            * 2) Processing the Input (e.g. Tokenizer, MM).
+            * 3) Adding the Request to Detokenizer + EngineCore.
 
-        A separate output_handler loop runs in a background AsyncIO task, 
-        pulling outputs from EngineCore and putting them into the 
-        per-request AsyncStream.
+        The output_handler() loop runs in a background task, pulling
+        from Detokenizer and pushing to the per request queue.
 
-        The caller of generate() iterates the returned AsyncGenerator,
-        returning the RequestOutput back to the caller.
+        The generate() pulls from the per request queue and yields
+        to the caller which iterates the AsyncGenerator.
         """
 
-        # We start the output_handler on the first call to generate() so that
-        # we can call __init__ before the event loop starts, which enables us
-        # to handle startup failure gracefully in the OpenAI server.
-        if self.output_handler is None:
-            self.output_handler = asyncio.create_task(
-                self._run_output_handler())
+        try:
+            # Start output_handler on first request.
+            if not self.output_handler:
+                loop = asyncio.get_event_loop()
+                self.output_handler = loop.create_task(
+                    self.output_handler_loop())
 
-        async for output in await self.add_request(
+            # Add to Detokenizer and EngineCore and makes queue
+            # to which the output_handler will push RequestOutputs.
+            q = await self.add_request(
                 request_id,
                 prompt,
                 sampling_params,
@@ -221,109 +259,65 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
-        ):
-            yield output
+            )
 
-    def _finish_stream(self, request_id: str):
-        stream = self.request_streams.pop(request_id, None)
-        if stream is not None:
-            stream.finish()
+            # The output_handler task pushes items into the queue.
+            # This task pulls from the queue and yields to caller.
+            while True:
+                # Note: drain queue without await if possible (avoids
+                # task switching under load which helps performance).
+                out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
-    def _add_request_to_streams(
-        self,
-        request_id: str,
-    ) -> AsyncStream:
+                # Note: both Detokenizer and EngineCore handle their
+                # own request cleanup based on finished.
+                if out.finished:
+                    del self.rid_to_queue[request_id]
+                    yield out
+                    break
 
-        if request_id in self.request_streams:
-            raise ValueError(f"Request id {request_id} already running.")
+                yield out
 
-        # Avoid streams having circular ref to parent AsyncLLM object.
-        aborted_reqs = self.client_aborted_requests
-        stream = AsyncStream(request_id, aborted_reqs.append)
-        self.request_streams[request_id] = stream
+        # Client request cancellation is handled through calling
+        # task.cancel() on generate(). Calling self.abort() forwards the
+        # cancellation to the EngineCore and Detokenizer.
+        except asyncio.CancelledError:
+            await self.abort(request_id)
+            raise
+
+    async def output_handler_loop(self):
+        """Background loop: pulls from Detokenizer and push to Queues."""
+
+        while True:
+            # Note: use socket directly to avoid calling await multiple
+            # times, which causes too much task switching at high QPS.
+            outputs: List[RequestOutput] = []
+            outputs = await self.from_detokenizer.recv_pyobj()
+
+            for out in outputs:
+                # Note: it is possible that a request was aborted
+                # due to client cancellation while EngineCoreOutputs
+                # are still flowing, so we just ignore.
+                if out.request_id in self.rid_to_queue:
+                    self.rid_to_queue[out.request_id].put_nowait(out)
+
+    async def abort(self, request_id: str):
+        """Abort request if the client cancels the request."""
+
+        # Send abort to Detokenizer (which will fwd to EngineCore).
+        await self._send_to_detokenizer(EngineAbortRequest([request_id]))
+
+        # Remove from request output queues.
+        if request_id in self.rid_to_queue:
+            del self.rid_to_queue[request_id]
 
         if self.log_requests:
-            logger.info("Added request %s.", request_id)
+            logger.info("Aborted %s.", request_id)
 
-        return stream
+    async def _send_to_detokenizer(self, obj: Any):
+        """Send object to Detokenizer with a FROM_ENGINE flag."""
 
-    async def _process_cancellations(self) -> None:
-        """
-        Process requests cancelled from user disconnecting.
-
-        When a client disconnects, AsyncStream._cancel() is called.
-        We passed a callback to AsyncStream(), which appends to 
-        self.client_aborted_requests.
-
-        As a result, if any requests are canceled from the user side
-        the request_id will show up in self.client_aborted_requests.
-        """
-
-        # Avoid streams having circular ref to parent AsyncLLM object.
-        if not self.client_aborted_requests:
-            return
-        reqs_to_abort = self.client_aborted_requests.copy()
-        self.client_aborted_requests.clear()
-
-        # Remove from Detokenizer.
-        self.detokenizer.abort_requests(reqs_to_abort)
-
-        # Remove from RequestStreams.
-        for request_id in reqs_to_abort:
-            if self.log_requests:
-                logger.info("User-cancelled request %s.", request_id)
-            self._finish_stream(request_id)
-
-        # Remove from EngineCore.
-        await self.engine_core.abort_requests_async(reqs_to_abort)
-
-    def _process_request_outputs(self, request_outputs: List[RequestOutput]):
-        """Process outputs by putting them into per-request AsyncStreams."""
-
-        for request_output in request_outputs:
-            request_id = request_output.request_id
-            assert request_id in self.request_streams
-
-            # Each request in the API server pulls from the per-request stream.
-            stream = self.request_streams.get(request_id)
-            if stream is not None:
-                stream.put(request_output)
-
-                # If finished, remove from the tracker.
-                if request_output.finished:
-                    if self.log_requests:
-                        logger.info("Finished request %s.", request_id)
-                    self._finish_stream(request_id)
-
-    async def _run_output_handler(self):
-        """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
-
-        try:
-            while True:
-                # 1) Pull EngineCoreOutput from the EngineCore.
-                outputs = await self.engine_core.get_output_async()
-
-                # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
-
-                # 3) Put the RequestOutputs into the per-request AsyncStreams.
-                self._process_request_outputs(request_outputs)
-
-                # 4) Abort any requests that finished due to stop strings.
-                await self.engine_core.abort_requests_async(reqs_to_abort)
-
-                # 5) Abort any requests due to client cancellations.
-                await self._process_cancellations()
-
-        except BaseException as e:
-            logger.error(e)
-            raise e
-
-    # TODO: can we eliminate these?
-
-    async def abort(self, request_id: str) -> None:
-        # Note: Who Calls this? I dont think this is actually used.
-        raise ValueError("Not Supported on V1 yet.")
+        msg = (EngineRequestType.FROM_ENGINE.value, pickle.dumps(obj))
+        await self.to_detokenizer.send_multipart(msg, copy=False)
 
     def encode(
         self,
@@ -349,8 +343,7 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        assert lora_request is None
-        return self.detokenizer.tokenizer
+        return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
         return False
@@ -366,10 +359,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        await self.engine_core.profile_async(True)
+        await self.engine_core_client.profile_async(True)
 
     async def stop_profile(self) -> None:
-        await self.engine_core.profile_async(False)
+        await self.engine_core_client.profile_async(False)
 
     @property
     def is_running(self) -> bool:

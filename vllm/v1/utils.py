@@ -1,11 +1,18 @@
+import os
+import weakref
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import (Any, Generic, Iterator, List, Optional, TypeVar, Union,
-                    overload)
+from dataclasses import dataclass
+from multiprocessing.process import BaseProcess
+from typing import (Any, Callable, Dict, Generic, Iterator, List, Optional,
+                    TypeVar, Union, overload)
 
 import zmq
+import zmq.asyncio
 
+from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
+from vllm.utils import kill_process_tree
 
 logger = init_logger(__name__)
 
@@ -77,27 +84,123 @@ class ConstantList(Generic[T], Sequence):
         return len(self._x)
 
 
-@contextmanager
 def make_zmq_socket(
+    ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
+    path: str,
+    type: Any,
+) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
+    """Make a ZMQ socket with the proper bind/connect semantics."""
+
+    import psutil
+    mem = psutil.virtual_memory()
+
+    socket = ctx.socket(type)
+
+    # Calculate buffer size based on system memory
+    total_mem = mem.total / 1024**3
+    available_mem = mem.available / 1024**3
+    # For systems with substantial memory (>32GB total, >16GB available):
+    # - Set a large 0.5GB buffer to improve throughput
+    # For systems with less memory:
+    # - Use system default (-1) to avoid excessive memory consumption
+    if total_mem > 32 and available_mem > 16:
+        buf_size = int(0.5 * 1024**3)  # 0.5GB in bytes
+    else:
+        buf_size = -1  # Use system default buffer size
+
+    if type == zmq.constants.PULL:
+        socket.setsockopt(zmq.constants.RCVHWM, 0)
+        socket.setsockopt(zmq.constants.RCVBUF, buf_size)
+        socket.bind(path)
+    elif type == zmq.constants.PUSH:
+        socket.setsockopt(zmq.constants.SNDHWM, 0)
+        socket.setsockopt(zmq.constants.SNDBUF, buf_size)
+        socket.connect(path)
+    else:
+        raise ValueError(f"Unknown Socket Type: {type}")
+
+    return socket
+
+
+@contextmanager
+def zmq_socket_ctx(
         path: str,
         type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
-    ctx = zmq.Context()  # type: ignore[attr-defined]
+    ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
     try:
-        socket = ctx.socket(type)
-
-        if type == zmq.constants.PULL:
-            socket.connect(path)
-        elif type == zmq.constants.PUSH:
-            socket.bind(path)
-        else:
-            raise ValueError(f"Unknown Socket Type: {type}")
-
-        yield socket
+        yield make_zmq_socket(ctx, path, type)
 
     except KeyboardInterrupt:
-        logger.debug("Worker had Keyboard Interrupt.")
+        logger.debug("Got Keyboard Interrupt.")
 
     finally:
         ctx.destroy(linger=0)
+
+
+@dataclass
+class BackgroundProcHandle:
+    proc: BaseProcess
+    input_path: str
+    output_path: str
+
+    def shutdown(self):
+        # Shutdown the process if needed.
+        if self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join(5)
+
+            if self.proc.is_alive():
+                kill_process_tree(self.proc.pid)
+
+        # Remove zmq ipc socket files
+        ipc_sockets = [self.output_path, self.input_path]
+        for ipc_socket in ipc_sockets:
+            socket_file = ipc_socket.replace("ipc://", "")
+            if os and os.path.exists(socket_file):
+                os.remove(socket_file)
+
+
+class MPBackgroundProcess:
+
+    def __init__(self):
+        self.proc_handle: Optional[BackgroundProcHandle]
+        self._finalizer = weakref.finalize(self, self.shutdown)
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        if hasattr(self, "proc_handle") and self.proc_handle:
+            self.proc_handle.shutdown()
+            self.proc_handle = None
+
+    @staticmethod
+    def wait_for_startup(
+        input_path: str,
+        output_path: str,
+        process_name: str,
+        target_fn: Callable,
+        process_kwargs: Dict[Any, Any],
+    ) -> BackgroundProcHandle:
+        context = get_mp_context()
+        reader, writer = context.Pipe(duplex=False)
+
+        assert ("ready_pipe" not in process_kwargs
+                and "input_path" not in process_kwargs
+                and "output_path" not in process_kwargs)
+        process_kwargs["ready_pipe"] = writer
+        process_kwargs["input_path"] = input_path
+        process_kwargs["output_path"] = output_path
+
+        # Run Detokenizer busy loop in background process.
+        proc = context.Process(target=target_fn, kwargs=process_kwargs)
+        proc.start()
+
+        # Wait for startup.
+        if reader.recv()["status"] != "READY":
+            raise RuntimeError(f"{process_name} initialization failed. "
+                               "See root cause above.")
+
+        return BackgroundProcHandle(proc, input_path, output_path)

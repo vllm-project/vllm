@@ -1,5 +1,7 @@
-from typing import Dict, List, Mapping, Optional, Type, Union
+import pickle
+from typing import Any, Dict, List, Mapping, Optional, Set, Type, Union
 
+import zmq
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
@@ -17,11 +19,14 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.utils import get_open_zmq_ipc_path
+from vllm.v1.engine import EngineRequestType
+from vllm.v1.engine.core import EngineCore, MPEngineCoreClient
+from vllm.v1.engine.detokenizer import Detokenizer, MPDetokenizerClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import initialize_ray_cluster
+from vllm.v1.utils import make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -44,7 +49,7 @@ class LLMEngine:
         multiprocess_mode: bool = False,
     ) -> None:
 
-        # TODO: Can we avoid this?
+        self.multiprocess_mode = multiprocess_mode
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -63,22 +68,59 @@ class LLMEngine:
                                    input_registry=input_registry,
                                    mm_registry=mm_registry)
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(
-            tokenizer_name=vllm_config.model_config.tokenizer,
-            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-            revision=vllm_config.model_config.tokenizer_revision,
-        )
+        if self.multiprocess_mode:
+            # Keep track of active requests.
+            self.running_requests: Set[str] = set()
 
-        # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
-        self.engine_core = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            usage_context,
-            multiprocess_mode=multiprocess_mode,
-            asyncio_mode=False,
-        )
+            # IPC paths.
+            to_detokenizer_path = get_open_zmq_ipc_path()
+            to_engine_core_path = get_open_zmq_ipc_path()
+            to_llm_engine_path = get_open_zmq_ipc_path()
+
+            # Detokenizer IPC.
+            self.ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+            self.from_detokenizer = make_zmq_socket(self.ctx,
+                                                    to_llm_engine_path,
+                                                    zmq.constants.PULL)
+            self.to_detokenizer = make_zmq_socket(self.ctx,
+                                                  to_detokenizer_path,
+                                                  zmq.constants.PUSH)
+
+            # Detokenizer (background process).
+            self.detokenizer_client = MPDetokenizerClient(
+                output_path=to_llm_engine_path,
+                input_path=to_detokenizer_path,
+                to_engine_core_path=to_engine_core_path,
+                tokenizer_name=vllm_config.model_config.tokenizer,
+                tokenizer_mode=vllm_config.model_config.tokenizer_mode,
+                trust_remote_code=vllm_config.model_config.trust_remote_code,
+                revision=vllm_config.model_config.tokenizer_revision,
+            )
+
+            # EngineCore (background process).
+            self.engine_core_client = MPEngineCoreClient(
+                input_path=to_engine_core_path,
+                output_path=to_detokenizer_path,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                usage_context=usage_context,
+            )
+
+        else:
+            # Detokenizer (in process).
+            self.detokenizer = Detokenizer(
+                tokenizer_name=vllm_config.model_config.tokenizer,
+                tokenizer_mode=vllm_config.model_config.tokenizer_mode,
+                trust_remote_code=vllm_config.model_config.trust_remote_code,
+                revision=vllm_config.model_config.tokenizer_revision,
+            )
+
+            # EngineCore (in process).
+            self.engine_core = EngineCore(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                usage_context=usage_context,
+            )
 
     @classmethod
     def from_engine_args(
@@ -126,10 +168,13 @@ class LLMEngine:
         return executor_class
 
     def get_num_unfinished_requests(self) -> int:
-        return self.detokenizer.get_num_unfinished_requests()
+        if self.multiprocess_mode:
+            return len(self.running_requests)
+        else:
+            return self.detokenizer.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.detokenizer.has_unfinished_requests()
+        return self.get_num_unfinished_requests() > 0
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -138,6 +183,7 @@ class LLMEngine:
     def abort_request(self, request_ids: List[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
+        assert not self.multiprocess_mode
         self.engine_core.abort_requests(request_ids)
         self.detokenizer.abort_requests(request_ids)
 
@@ -153,33 +199,52 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
-        # 1) Process raw inputs into the request.
-        detokenizer_req, engine_core_req = self.processor.process_inputs(
+        # Process raw inputs into the request.
+        engine_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
-        # 2) Add the request to Detokenizer.
-        self.detokenizer.add_request(detokenizer_req)
-
-        # 3) Add the request to EngineCore.
-        self.engine_core.add_request(engine_core_req)
+        # Add processed input to system.
+        if self.multiprocess_mode:
+            assert engine_request.request_id not in self.running_requests
+            self.running_requests.add(engine_request.request_id)
+            # Send to Detokenizer (which forwards to EngineCore).
+            # Note: we forward the message rather than sending
+            # to each process separately to avoid race conditions.
+            self._send_to_detokenizer(engine_request)
+        else:
+            # Add directly to Detokenizer and EngineCore.
+            self.detokenizer.add_request(engine_request)
+            self.engine_core.add_request(engine_request)
 
     def step(self) -> List[RequestOutput]:
+        if self.multiprocess_mode:
+            # Get next output from the Detokenizer.
+            request_outputs: List[
+                RequestOutput] = self.from_detokenizer.recv_pyobj()
 
-        # 1) Get EngineCoreOutput from the EngineCore.
-        engine_core_outputs = self.engine_core.get_output()
+            # Removed finished requests from the state tracker.
+            for out in request_outputs:
+                if out.finished:
+                    self.running_requests.remove(out.request_id)
 
-        # 2) Detokenizer the EngineCoreOutput.
-        request_outputs, requests_to_abort = self.detokenizer.step(
-            engine_core_outputs)
+        else:
+            # Step EngineCore and Detokenizer.
+            engine_core_outputs = self.engine_core.step()
+            request_outputs, requests_to_abort = self.detokenizer.step(
+                engine_core_outputs)
 
-        # 3) Abort requests that finished due to stopping criteria.
-        if requests_to_abort:
-            self.abort_request(requests_to_abort)
+            # Abort any requests that hit a stop string.
+            if requests_to_abort:
+                self.abort_request(requests_to_abort)
 
         return request_outputs
 
-    # TODO(rob): Can we get rid of these?
+    def _send_to_detokenizer(self, object: Any):
+        """Send object to Detokenizer with a FROM_ENGINE flag."""
+
+        msg = (EngineRequestType.FROM_ENGINE.value, pickle.dumps(object))
+        self.to_detokenizer.send_multipart(msg, copy=False)
 
     def get_model_config(self):
         return self.model_config
@@ -210,5 +275,8 @@ class LLMEngine:
         self.shutdown()
 
     def shutdown(self):
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+        if engine_core_client := getattr(self, "engine_core_client", None):
+            engine_core_client.shutdown()
+
+        if detokenizer_client := getattr(self, "detokenizer_client", None):
+            detokenizer_client.shutdown()

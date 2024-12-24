@@ -6,7 +6,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -67,7 +67,7 @@ class Request:
         self._kv_block_hashes: List[BlockHashType] = []
 
     @classmethod
-    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+    def from_engine_core_request(cls, request: EngineRequest) -> "Request":
         return cls(
             request_id=request.request_id,
             inputs=token_inputs(

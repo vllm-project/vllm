@@ -1,5 +1,12 @@
+import pickle
+import signal
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from typing import Dict, Iterable, List, Optional, Tuple, Union
+
+import msgspec
+import psutil
+import zmq
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -8,9 +15,15 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
+from vllm.utils import get_exception_traceback
+from vllm.v1.engine import (EngineAbortRequest, EngineCoreOutput,
+                            EngineCoreOutputs, EngineRequest,
+                            EngineRequestType)
+from vllm.v1.utils import MPBackgroundProcess, make_zmq_socket
 
 logger = init_logger(__name__)
+
+POLLING_TIMEOUT_MS = 5000
 
 
 @dataclass
@@ -55,19 +68,20 @@ class IncrementalDetokenizer:
     def from_new_request(
         cls,
         tokenizer: AnyTokenizer,
-        request: DetokenizerRequest,
+        request: EngineRequest,
     ) -> "IncrementalDetokenizer":
 
+        sampling_params = request.sampling_params
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,
             prompt_ids=request.prompt_token_ids,
-            skip_special_tokens=request.skip_special_tokens,
+            skip_special_tokens=sampling_params.skip_special_tokens,
         )
 
-        stops = request.stop
+        stops = request.sampling_params.stop
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        if stops and not request.include_stop_str_in_output:
+        if stops and not sampling_params.include_stop_str_in_output:
             stop_buffer_length = max(len(s) for s in stops) - 1
         else:
             stop_buffer_length = 0
@@ -79,13 +93,14 @@ class IncrementalDetokenizer:
             # NOTE(Nick): could we take ownership of it though?
             token_ids=request.prompt_token_ids.copy(),
             stop=stops,
-            include_stop_str_in_output=request.include_stop_str_in_output,
+            include_stop_str_in_output=sampling_params.
+            include_stop_str_in_output,
             prefix_offset=prefix_offset,
             read_offset=read_offset,
-            skip_special_tokens=request.skip_special_tokens,
-            spaces_between_special_tokens=request.
+            skip_special_tokens=sampling_params.skip_special_tokens,
+            spaces_between_special_tokens=sampling_params.
             spaces_between_special_tokens,
-            output_kind=request.output_kind,
+            output_kind=sampling_params.output_kind,
             request_id=request.request_id,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
@@ -144,8 +159,6 @@ class IncrementalDetokenizer:
                     self.output_text = self.output_text[:truncate_to]
                 finish_reason = "stop"  # TODO: use constant
                 stop_reason = stop_str
-
-        # TODO: handle stop_token_ids here too?
 
         # 3) Update the RequestOutput object with the new text.
         finished = bool(finish_reason)
@@ -227,7 +240,7 @@ class Detokenizer:
 
     def add_request(
         self,
-        request: DetokenizerRequest,
+        request: EngineRequest,
     ):
         """Add new request to the Detokenizer."""
 
@@ -238,9 +251,10 @@ class Detokenizer:
         self.request_states[request.request_id] = request_state
 
     def step(
-        self, encore_core_outputs: List[EngineCoreOutput]
+        self,
+        encore_core_outputs: List[EngineCoreOutput],
     ) -> Tuple[List[RequestOutput], List[str]]:
-        """Update state and request the RequestOutputs to the LLMEngine."""
+        """Update state and make RequestOutputs for the LLMEngine."""
 
         request_outputs: List[RequestOutput] = []
         requests_to_abort: List[str] = []
@@ -265,8 +279,179 @@ class Detokenizer:
                 # Free completed requests.
                 if request_output.finished:
                     self.request_states.pop(request_id)
+                    # If Request finished but EngineCore not finished,
+                    # this was caused by a stop string + we need to send
+                    # an abort signal to the EngineCore.
                     if not engine_core_output.finished:
                         requests_to_abort.append(request_id)
 
         # Return to EngineClient.
         return request_outputs, requests_to_abort
+
+
+class DetokenizerProc(Detokenizer):
+    """ZMQ-wrapper for running Detokenizer in background process."""
+
+    def __init__(
+        self,
+        *args,
+        input_path: str,
+        output_path: str,
+        to_engine_core_path: str,
+        ready_pipe: Connection,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.input_path = input_path
+        self.output_path = output_path
+        self.to_engine_core_path = to_engine_core_path
+
+        # Send Readiness signal to DetokenizerClient.
+        ready_pipe.send({"status": "READY"})
+
+    @staticmethod
+    def run_detokenizer(*args, **kwargs):
+        """Launch Detokenizer busy loop in background process."""
+
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
+
+        def signal_handler(signum, frame):
+            nonlocal shutdown_requested
+            if not shutdown_requested:
+                shutdown_requested = True
+                raise SystemExit()
+
+        # Either SIGTERM or SIGINT will terminate the engine_core
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        parent_process = psutil.Process().parent()
+
+        detokenizer = None
+        try:
+            detokenizer = DetokenizerProc(*args, **kwargs)
+            detokenizer.run_busy_loop()
+
+        except SystemExit:
+            logger.debug("Detokenizer interrupted.")
+
+        except Exception:
+            traceback = get_exception_traceback()
+            logger.error("Detokenizer hit an exception: %s", traceback)
+            parent_process.send_signal(signal.SIGQUIT)
+
+        finally:
+            if detokenizer is not None:
+                detokenizer = None
+
+    def _handle_from_llm_engine(
+            self,
+            request_bytes: bytes,
+            to_engine_core: zmq.Socket,  # type: ignore[name-defined]
+    ) -> None:
+        """Handle EngineRequest from the LLMEngine."""
+
+        req = pickle.loads(request_bytes)
+
+        if isinstance(req, EngineRequest):
+            self.add_request(req)
+        elif isinstance(req, EngineAbortRequest):
+            self.abort_requests(req.request_ids)
+        else:
+            raise ValueError(f"Unknown type: {req}")
+
+        # Forward to EngineCore.
+        to_engine_core.send(request_bytes)
+
+    def _handle_from_engine_core(
+        self,
+        output_bytes: bytes,
+        to_engine_core: zmq.Socket,  # type: ignore[name-defined]
+        to_llm_engine: zmq.Socket,  # type: ignore[name-defined]
+        decoder: msgspec.msgpack.Decoder,
+    ) -> None:
+        """Handle Outputs from the EngineCore."""
+
+        # Deserialize the EngineOutput (use msgpack for performance).
+        outputs: List[EngineCoreOutput] = decoder.decode(output_bytes).outputs
+
+        # Detokenize.
+        request_outputs, requests_to_abort = self.step(outputs)
+
+        # Send request outputs back to LLMEngine.
+        to_llm_engine.send_pyobj(request_outputs)
+
+        # Abort requests that finished due to stop strings.
+        if len(requests_to_abort) > 0:
+            to_engine_core.send_pyobj(EngineAbortRequest(requests_to_abort))
+
+    def run_busy_loop(self):
+        """Core busy loop of the Detokenizer."""
+
+        decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+
+        ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+        try:
+            input_socket = make_zmq_socket(ctx, self.input_path,
+                                           zmq.constants.PULL)
+            to_llm_engine = make_zmq_socket(ctx, self.output_path,
+                                            zmq.constants.PUSH)
+            to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path,
+                                             zmq.constants.PUSH)
+
+            while True:
+                (msg_type, msg_bytes) = input_socket.recv_multipart()
+
+                # Handle message from LLMEngine (Abort or New Request).
+                if msg_type == EngineRequestType.FROM_ENGINE.value:
+                    self._handle_from_llm_engine(msg_bytes, to_engine_core)
+
+                # Handle message from EngineCore (EngineCoreOutputs).
+                elif msg_type == EngineRequestType.FROM_ENGINE_CORE.value:
+                    self._handle_from_engine_core(
+                        output_bytes=msg_bytes,
+                        to_engine_core=to_engine_core,
+                        to_llm_engine=to_llm_engine,
+                        decoder=decoder,
+                    )
+                else:
+                    raise ValueError(f"Unknown Message Type: {msg_type}")
+
+        except KeyboardInterrupt:
+            logger.debug("Got Keyboard Interrupt.")
+
+        finally:
+            ctx.destroy(linger=0)
+
+
+class MPDetokenizerClient(MPBackgroundProcess):
+    """Client for multi-proc Detokenizer."""
+
+    def __init__(self,
+                 input_path: str,
+                 output_path: str,
+                 to_engine_core_path: str,
+                 tokenizer_name: str,
+                 tokenizer_mode: str = "auto",
+                 trust_remote_code: bool = False,
+                 revision: Optional[str] = None):
+
+        super().__init__()
+
+        self.proc_handle = MPBackgroundProcess.wait_for_startup(
+            input_path=input_path,
+            output_path=output_path,
+            process_name="Detokenizer",
+            target_fn=DetokenizerProc.run_detokenizer,
+            process_kwargs={
+                "to_engine_core_path": to_engine_core_path,
+                "tokenizer_name": tokenizer_name,
+                "tokenizer_mode": tokenizer_mode,
+                "trust_remote_code": trust_remote_code,
+                "revision": revision,
+            },
+        )

@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 import ipaddress
 import os
+import resource
 import signal
 import socket
 import subprocess
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 import warnings
 import weakref
@@ -1611,6 +1613,28 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
+
+
+def set_ulimit(target_soft_limit=65535):
+    resource_type = resource.RLIMIT_NOFILE
+    current_soft, current_hard = resource.getrlimit(resource_type)
+
+    if current_soft < target_soft_limit:
+        try:
+            resource.setrlimit(resource_type,
+                               (target_soft_limit, current_hard))
+        except ValueError as e:
+            logger.warning(
+                "Found ulimit of %s and failed to automatically increase"
+                "with error %s. This can cause fd limit errors like"
+                "`OSError: [Errno 24] Too many open files`. Consider "
+                "increasing with ulimit -n", current_soft, e)
+
+
+def get_exception_traceback():
+    etype, value, tb = sys.exc_info()
+    err_str = "".join(traceback.format_exception(etype, value, tb))
+    return err_str
 
 
 def kill_process_tree(pid: int):

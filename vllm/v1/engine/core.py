@@ -1,38 +1,37 @@
-import pickle
 import queue
 import signal
 import threading
 import time
-from dataclasses import dataclass
-from multiprocessing.process import BaseProcess
+from multiprocessing.connection import Connection
 from typing import List, Tuple, Type
 
+import psutil
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import get_exception_traceback
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion)
+from vllm.v1.engine import (EngineAbortRequest, EngineCoreOutput,
+                            EngineCoreOutputs, EngineProfileRequest,
+                            EngineRequest, EngineRequestType,
+                            EngineRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import PickleEncoder
-from vllm.v1.utils import make_zmq_socket
+from vllm.v1.utils import MPBackgroundProcess, zmq_socket_ctx
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
-LOGGING_TIME_S = 5000
+LOGGING_TIME_S = 5
 
 
 class EngineCore:
@@ -89,7 +88,7 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks
 
-    def add_request(self, request: EngineCoreRequest):
+    def add_request(self, request: EngineRequest):
         """Add request to the scheduler."""
 
         if request.mm_hashes is not None:
@@ -103,7 +102,6 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
-
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
@@ -134,14 +132,6 @@ class EngineCore:
         self.model_executor.profile(is_start)
 
 
-@dataclass
-class EngineCoreProcHandle:
-    proc: BaseProcess
-    ready_path: str
-    input_path: str
-    output_path: str
-
-
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -154,16 +144,15 @@ class EngineCoreProc(EngineCore):
         usage_context: UsageContext,
         input_path: str,
         output_path: str,
-        ready_path: str,
+        ready_pipe: Connection,
     ):
         super().__init__(vllm_config, executor_class, usage_context)
 
         # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ socket IO with GPU since they release the GIL,
-        # and to overlap some serialization/deserialization with the
-        # model forward pass.
-        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[EngineCoreRequestUnion] = queue.Queue()
+        # overlap ZMQ IO with GPU since they release the GIL and
+        # some serialization/deserialization with the model forward.
+        # Threads handle Socket <-> Queues and busy_loop uses Queues.
+        self.input_queue: queue.Queue[EngineRequestUnion] = queue.Queue()
         self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
@@ -173,68 +162,7 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        with make_zmq_socket(ready_path, zmq.constants.PUSH) as ready_socket:
-            ready_socket.send_string(EngineCoreProc.READY_STR)
-
-    @staticmethod
-    def wait_for_startup(
-        proc: BaseProcess,
-        ready_path: str,
-    ) -> None:
-        """Wait until the EngineCore is ready."""
-
-        try:
-            sync_ctx = zmq.Context()  # type: ignore[attr-defined]
-            socket = sync_ctx.socket(zmq.constants.PULL)
-            socket.connect(ready_path)
-
-            # Wait for EngineCore to send EngineCoreProc.READY_STR.
-            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for EngineCoreProc to startup.")
-
-                if not proc.is_alive():
-                    raise RuntimeError("EngineCoreProc failed to start.")
-
-            message = socket.recv_string()
-            assert message == EngineCoreProc.READY_STR
-
-        except BaseException as e:
-            logger.exception(e)
-            raise e
-
-        finally:
-            sync_ctx.destroy(linger=0)
-
-    @staticmethod
-    def make_engine_core_process(
-        vllm_config: VllmConfig,
-        executor_class: Type[Executor],
-        usage_context: UsageContext,
-        input_path: str,
-        output_path: str,
-        ready_path: str,
-    ) -> EngineCoreProcHandle:
-        context = get_mp_context()
-
-        process_kwargs = {
-            "input_path": input_path,
-            "output_path": output_path,
-            "ready_path": ready_path,
-            "vllm_config": vllm_config,
-            "executor_class": executor_class,
-            "usage_context": usage_context,
-        }
-        # Run EngineCore busy loop in background process.
-        proc = context.Process(target=EngineCoreProc.run_engine_core,
-                               kwargs=process_kwargs)
-        proc.start()
-
-        # Wait for startup
-        EngineCoreProc.wait_for_startup(proc, ready_path)
-        return EngineCoreProcHandle(proc=proc,
-                                    ready_path=ready_path,
-                                    input_path=input_path,
-                                    output_path=output_path)
+        ready_pipe.send({"status": "READY"})
 
     @staticmethod
     def run_engine_core(*args, **kwargs):
@@ -258,6 +186,8 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        parent_process = psutil.Process().parent()
+
         engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
@@ -266,9 +196,10 @@ class EngineCoreProc(EngineCore):
         except SystemExit:
             logger.debug("EngineCore interrupted.")
 
-        except BaseException as e:
-            logger.exception(e)
-            raise e
+        except Exception:
+            traceback = get_exception_traceback()
+            logger.error("EngineCore hit an exception: %s", traceback)
+            parent_process.send_signal(signal.SIGQUIT)
 
         finally:
             if engine_core is not None:
@@ -302,7 +233,8 @@ class EngineCoreProc(EngineCore):
             outputs = self.step()
 
             # 4) Put EngineCoreOutputs into the output queue.
-            self.output_queue.put_nowait(outputs)
+            if len(outputs) > 0:
+                self.output_queue.put_nowait(outputs)
 
             self._log_stats()
 
@@ -320,43 +252,25 @@ class EngineCoreProc(EngineCore):
 
             self._last_logging_time = now
 
-    def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
-        """Handle EngineCoreRequest or EngineCoreABORT from Client."""
+    def _handle_client_request(self, request: EngineRequestUnion) -> None:
+        """Handle EngineRequest or EngineCoreABORT from Client."""
 
-        if isinstance(request, EngineCoreRequest):
+        if isinstance(request, EngineRequest):
             self.add_request(request)
-        elif isinstance(request, EngineCoreProfile):
+        elif isinstance(request, EngineProfileRequest):
             self.model_executor.profile(request.is_start)
+        elif isinstance(request, EngineAbortRequest):
+            self.abort_requests(request.request_ids)
         else:
-            # TODO: make an EngineCoreAbort wrapper
-            assert isinstance(request, list)
-            self.abort_requests(request)
+            raise ValueError("Unknown request type: {request}")
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding.
-        decoder_add_req = PickleEncoder()
-        decoder_abort_req = PickleEncoder()
-
-        with make_zmq_socket(input_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
             while True:
-                # (RequestType, RequestData)
-                type_frame, data_frame = socket.recv_multipart(copy=False)
-                request_type = type_frame.buffer
-                request_data = data_frame.buffer
-
-                # Deserialize the request data.
-                if request_type == EngineCoreRequestType.ADD.value:
-                    request = decoder_add_req.decode(request_data)
-                elif request_type == EngineCoreRequestType.ABORT.value:
-                    request = decoder_abort_req.decode(request_data)
-                elif request_type == EngineCoreRequestType.PROFILE.value:
-                    request = pickle.loads(request_data)
-                else:
-                    raise ValueError(f"Unknown RequestType: {request_type}")
-
                 # Push to input queue for core busy loop.
+                request = socket.recv_pyobj()
                 self.input_queue.put_nowait(request)
 
     def process_output_socket(self, output_path: str):
@@ -367,9 +281,36 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        with make_zmq_socket(output_path, zmq.constants.PUSH) as socket:
+        with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ), copy=False)
+                msg = (EngineRequestType.FROM_ENGINE_CORE.value, buffer)
+                socket.send_multipart(msg, copy=False)
+
+
+class MPEngineCoreClient(MPBackgroundProcess):
+    """Client for multi-proc EngineCore."""
+
+    def __init__(self, input_path: str, output_path: str,
+                 vllm_config: VllmConfig, executor_class: Type[Executor],
+                 usage_context: UsageContext):
+
+        super().__init__()
+
+        self.proc_handle = MPBackgroundProcess.wait_for_startup(
+            input_path=input_path,
+            output_path=output_path,
+            process_name="EngineCore",
+            target_fn=EngineCoreProc.run_engine_core,
+            process_kwargs={
+                "vllm_config": vllm_config,
+                "executor_class": executor_class,
+                "usage_context": usage_context,
+            },
+        )
+
+    async def profile_async(self, is_start: bool = True):
+        # TODO: enable this.
+        pass
