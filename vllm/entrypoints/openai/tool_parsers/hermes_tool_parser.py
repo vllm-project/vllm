@@ -1,13 +1,7 @@
 import json
 import re
 from typing import Dict, List, Sequence, Union
-try:
-    from json_repair import json_repair
-except ImportError:
-    # might remove codes below by adding json_repair in requirement.txt
-    import subprocess
-    subprocess.check_call(["pip", "install", "json_repair"])
-    from json_repair import json_repair
+from json_repair import json_repair
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
