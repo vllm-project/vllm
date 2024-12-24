@@ -264,15 +264,6 @@ def unified_attention_fake(
     return torch.empty_like(query).contiguous()
 
 
-direct_register_custom_op(
-    op_name="unified_attention",
-    op_func=unified_attention,
-    mutates_args=["kv_cache"],
-    fake_impl=unified_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-
 def unified_attention_with_output(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -308,10 +299,19 @@ def unified_attention_with_output_fake(
     return
 
 
-direct_register_custom_op(
-    op_name="unified_attention_with_output",
-    op_func=unified_attention_with_output,
-    mutates_args=["kv_cache", "output"],
-    fake_impl=unified_attention_with_output_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
+def register_custom_ops():
+    """Register custom ops for attention."""
+    direct_register_custom_op(
+        op_name="unified_attention",
+        op_func=unified_attention,
+        mutates_args=["kv_cache"],
+        fake_impl=unified_attention_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+    direct_register_custom_op(
+        op_name="unified_attention_with_output",
+        op_func=unified_attention_with_output,
+        mutates_args=["kv_cache", "output"],
+        fake_impl=unified_attention_with_output_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
