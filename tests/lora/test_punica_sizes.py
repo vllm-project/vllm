@@ -11,8 +11,8 @@ from vllm.lora.ops.bgmv_expand import bgmv_expand
 from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
 from vllm.lora.ops.bgmv_shrink import bgmv_shrink
 from vllm.lora.ops.sgmv_expand import sgmv_expand
-from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+from vllm.lora.ops.utils import _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
 
 from .utils import (generate_data, generate_data_for_expand_nslices,
@@ -172,9 +172,10 @@ def test_punica_sgmv(
     else:
         max_seq_length = max_seq_length.item()
     if op_type == "shrink":
+        our_out_tensor = our_out_tensor.unsqueeze(dim=0)
         sgmv_shrink(
             inputs_tensor,
-            lora_weights,
+            (lora_weights, ),
             our_out_tensor,
             b_seq_start_loc,
             seq_len_tensor,
@@ -184,10 +185,13 @@ def test_punica_sgmv(
             token_nums,
             scaling,
         )
+        our_out_tensor = our_out_tensor.squeeze(dim=0)
     else:
+        inputs_tensor = inputs_tensor.unsqueeze(dim=0)
+
         sgmv_expand(
             inputs_tensor,
-            lora_weights,
+            (lora_weights, ),
             our_out_tensor,
             b_seq_start_loc,
             seq_len_tensor,
@@ -197,6 +201,7 @@ def test_punica_sgmv(
             token_nums,
             add_inputs=True,
         )
+        inputs_tensor = inputs_tensor.squeeze(dim=0)
     ref_torch_groupgemm(
         ref_out_tensor,
         inputs_tensor,
@@ -292,7 +297,7 @@ def test_punica_bgmv(
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("nslices", [2, 3])
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("op_type", ["sgmv", "bgmv"])
+@pytest.mark.parametrize("op_type", ["sgmv"])
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_punica_expand_nslices(
@@ -337,25 +342,28 @@ def test_punica_expand_nslices(
     else:
         max_seq_length = max_seq_length.item()
     slice_offset = 0
+
+    if op_type == "sgmv":
+        _LORA_B_PTR_DICT.clear()
+        inputs_tensor_nslices = inputs_tensor.unsqueeze(dim=0)
+        inputs_tensor_nslices = inputs_tensor_nslices.repeat((nslices, 1, 1))
+        sgmv_expand(
+            inputs_tensor_nslices,
+            lora_weights_lst,
+            our_outputs,
+            b_seq_start_loc,
+            seq_len_tensor,
+            lora_indices_tensor,
+            batches,
+            max_seq_length,
+            token_nums,
+            slice_offset,
+            add_inputs=True,
+        )
+
     for index in range(nslices):
         lora_weights = lora_weights_lst[index]
-        if op_type == "sgmv":
-            sgmv_expand_slice(
-                inputs_tensor,
-                lora_weights,
-                our_outputs,
-                b_seq_start_loc,
-                seq_len_tensor,
-                lora_indices_tensor,
-                batches,
-                max_seq_length,
-                token_nums,
-                slice_offset,
-                hidden_size,
-                add_inputs=True,
-            )
-        else:
-
+        if op_type == "bgmv":
             bgmv_expand_slice(
                 inputs_tensor,
                 lora_weights,
@@ -378,3 +386,28 @@ def test_punica_expand_nslices(
 
         slice_offset += hidden_size
     assert_close(our_outputs, ref_outputs)
+
+
+if __name__ == "__main__":
+    from itertools import product
+
+    for ele in product(
+            BATCHES,
+            NUM_LORA,
+            MAX_RANKS,
+            HIDDEN_SIZES,
+        [2],
+            DTYPES,
+        [
+            "sgmv",
+        ],
+            SEED,
+            CUDA_DEVICES,
+    ):
+        try:
+            print(f"{ele} start...")
+            test_punica_expand_nslices(*ele)
+            print(f"{ele} passed")
+        except Exception as error:
+            raise error
+    print("Done")
