@@ -144,7 +144,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def _process_decode_and_stop(self, seq: Sequence,
                                  sampling_params: SamplingParams) -> None:
         new_char_count = 0
-        if sampling_params.detokenize:
+        if sampling_params.detokenize and self.detokenizer:
             new_char_count = self.detokenizer.decode_sequence_inplace(
                 seq, sampling_params)
 
@@ -171,7 +171,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         # generates a fixed number of tokens without evaluating stopping
         # conditions within the block. This can cause an eos token to be
         # unintentionally ignored.
-        if not sampling_params.ignore_eos:
+        if not sampling_params.ignore_eos and self.detokenizer:
             eos_token_id = self.get_tokenizer_for_seq(seq).eos_token_id
             # Avoiding .index calls as exception throwing in the happy path
             # is expensive.
