@@ -1372,6 +1372,7 @@ class Scheduler:
                     pooling_params=seq_group.pooling_params,
                     token_chunk_size=token_chunk_size,
                     lora_request=seq_group.lora_request,
+                    spec_decode_params=seq_group.spec_decode_params,
                     computed_block_nums=common_computed_block_nums,
                     encoder_seq_data=encoder_seq_data,
                     cross_block_table=cross_block_table,

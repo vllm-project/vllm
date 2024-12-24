@@ -50,6 +50,7 @@ from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceStatus)
+from vllm.spec_decode.spec_decode_params import SpecDecodeParams
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -582,6 +583,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        spec_decode_params: Optional[SpecDecodeParams],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
@@ -631,6 +633,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
+                spec_decode_params=spec_decode_params,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
@@ -642,6 +645,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
+                spec_decode_params=spec_decode_params,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
                 priority=priority)
@@ -670,6 +674,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -686,6 +691,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -703,6 +709,7 @@ class LLMEngine:
             params: Optional[Union[SamplingParams, PoolingParams]] = None,
             arrival_time: Optional[float] = None,
             lora_request: Optional[LoRARequest] = None,
+            spec_decode_params: Optional[SpecDecodeParams] = None,
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
@@ -724,6 +731,7 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            spec_decode_params: The speculative decoding parameters, if any.
             trace_headers: OpenTelemetry trace headers.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
@@ -793,6 +801,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            spec_decode_params=spec_decode_params,
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
@@ -826,6 +835,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        spec_decode_params: Optional[SpecDecodeParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
@@ -857,6 +867,7 @@ class LLMEngine:
             arrival_time=arrival_time,
             sampling_params=sampling_params,
             lora_request=lora_request,
+            spec_decode_params=spec_decode_params,
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
@@ -871,6 +882,7 @@ class LLMEngine:
         pooling_params: PoolingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        spec_decode_params: Optional[SpecDecodeParams],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
@@ -884,6 +896,7 @@ class LLMEngine:
             seqs=[seq],
             arrival_time=arrival_time,
             lora_request=lora_request,
+            spec_decode_params=spec_decode_params,
             pooling_params=pooling_params,
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
