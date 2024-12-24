@@ -33,7 +33,7 @@ It is important that the user kicks off the docker build using buildkit. Either 
 }
 ```
 
-[Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm) uses ROCm 6.3 by default, but also supports ROCm 5.7, 6.0 and 6.1 in older vLLM branches.
+[Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm) uses ROCm 6.3 by default, but also supports ROCm 5.7, 6.0, 6.1 and 6.2 in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
 - `BASE_IMAGE`: specifies the base image used when running `docker build`, specifically the PyTorch on ROCm base image.
