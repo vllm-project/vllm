@@ -62,6 +62,13 @@ class ExecutorBase(ABC):
         """
         raise NotImplementedError
 
+    # TODO: Make this an abstract method and all executors should implement it.
+    # @abstractmethod
+    def destroy_cache(self) -> None:
+        """Destroy the KV cache.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
