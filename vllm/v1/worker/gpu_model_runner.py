@@ -464,6 +464,7 @@ class GPUModelRunner:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        intermediate_tensors = None
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
@@ -518,8 +519,11 @@ class GPUModelRunner:
                 positions=self.positions[:num_input_tokens],
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
+                intermediate_tensors= intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+        if not get_pp_group().is_last_rank:
+            return hidden_states
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)

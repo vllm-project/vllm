@@ -57,11 +57,16 @@ try:
 
         def execute_model(
             self,
-            scheduler_output: "SchedulerOutput",
+            req_or_tuple
         ) -> ModelRunnerOutput:
             self.setup_device_if_necessary()
             assert self.worker is not None, "Worker is not initialized"
-            output = self.worker.model_runner.execute_model(scheduler_output)
+
+            if isinstance(req_or_tuple, tuple):
+                scheduler_output, intermediate_tensors = req_or_tuple
+            else:
+                scheduler_output, intermediate_tensors = req_or_tuple, None
+            output = self.worker.model_runner.execute_model(scheduler_output, intermediate_tensors)
             return output
 
     ray_import_err = None
