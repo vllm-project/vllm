@@ -60,7 +60,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-Full example: <gh-code:examples/offline_inference_vision_language.py>
+Full example: <gh-file:examples/offline_inference_vision_language.py>
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
@@ -91,7 +91,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-Full example: <gh-code:examples/offline_inference_vision_language_multi_image.py>
+Full example: <gh-file:examples/offline_inference_vision_language_multi_image.py>
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
@@ -125,13 +125,13 @@ for o in outputs:
 You can pass a list of NumPy arrays directly to the {code}`'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
-Full example: <gh-code:examples/offline_inference_vision_language.py>
+Full example: <gh-file:examples/offline_inference_vision_language.py>
 
 ### Audio
 
 You can pass a tuple {code}`(array, sampling_rate)` to the {code}`'audio'` field of the multi-modal dictionary.
 
-Full example: <gh-code:examples/offline_inference_audio_language.py>
+Full example: <gh-file:examples/offline_inference_audio_language.py>
 
 ### Embedding
 
@@ -208,7 +208,7 @@ A chat template is **required** to use Chat Completions API.
 
 Although most models come with a chat template, for others you have to define one yourself.
 The chat template can be inferred based on the documentation on the model's HuggingFace repo.
-For example, LLaVA-1.5 (`llava-hf/llava-1.5-7b-hf`) requires a chat template that can be found here: <gh-code:examples/template_llava.jinja>
+For example, LLaVA-1.5 (`llava-hf/llava-1.5-7b-hf`) requires a chat template that can be found here: <gh-file:examples/template_llava.jinja>
 ```
 
 ### Image
@@ -271,7 +271,7 @@ chat_response = client.chat.completions.create(
 print("Chat completion output:", chat_response.choices[0].message.content)
 ```
 
-Full example: <gh-code:examples/openai_chat_completion_client_for_multimodal.py>
+Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
 
 ```{tip}
 Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via `--allowed-local-media-path` when launching the API server/engine,
@@ -296,7 +296,7 @@ $ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 Instead of {code}`image_url`, you can pass a video file via {code}`video_url`.
 
-You can use [these tests](gh-code:entrypoints/openai/test_video.py) as reference.
+You can use [these tests](gh-file:entrypoints/openai/test_video.py) as reference.
 
 ````{note}
 By default, the timeout for fetching videos through HTTP URL url is `30` seconds.
@@ -399,7 +399,7 @@ result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output from audio url:", result)
 ```
 
-Full example: <gh-code:examples/openai_chat_completion_client_for_multimodal.py>
+Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
 
 ````{note}
 By default, the timeout for fetching audios through HTTP URL is `10` seconds.
@@ -435,7 +435,7 @@ Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to expl
 to run this model in embedding mode instead of text generation mode.
 
 The custom chat template is completely different from the original one for this model,
-and can be found here: <gh-code:examples/template_vlm2vec.jinja>
+and can be found here: <gh-file:examples/template_vlm2vec.jinja>
 ```
 
 Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
@@ -475,7 +475,7 @@ vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
 Like with VLM2Vec, we have to explicitly pass `--task embed`.
 
 Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
-by a custom chat template: <gh-code:examples/template_dse_qwen2_vl.jinja>
+by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
 ```
 
 ```{important}
@@ -483,4 +483,4 @@ Also important, `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of th
 example below for details.
 ```
 
-Full example: <gh-code:examples/openai_chat_embedding_client_for_multimodal.py>
+Full example: <gh-file:examples/openai_chat_embedding_client_for_multimodal.py>

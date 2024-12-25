@@ -39,7 +39,7 @@ def generate_examples():
         # Make script_path relative to doc_path and call it include_path
         include_path = '../../../..' / script_path.relative_to(root_dir)
         content = (f"{generate_title(doc_path.stem)}\n\n"
-                   f"Source: <gh-code:examples/{script_path.name}>.\n\n"
+                   f"Source: <gh-file:examples/{script_path.name}>.\n\n"
                    f"```{{literalinclude}} {include_path}\n"
                    ":language: python\n"
                    ":linenos:\n```")

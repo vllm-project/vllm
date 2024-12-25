@@ -29,7 +29,7 @@ Please refer to the {ref}`installation documentation <installation>` for more de
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-code:examples/offline_inference.py>
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference.py>
 
 The first line of this example imports the classes {class}`~vllm.LLM` and {class}`~vllm.SamplingParams`:
 
@@ -131,7 +131,7 @@ completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
 print("Completion result:", completion)
 ```
 
-A more detailed client example can be found here: <gh-code:examples/openai_completion_client.py>
+A more detailed client example can be found here: <gh-file:examples/openai_completion_client.py>
 
 ### OpenAI Chat Completions API with vLLM
 

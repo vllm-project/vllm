@@ -96,7 +96,7 @@ myst_url_schemes = {
         "title": "{{path}}",
         "classes": ["github"],
     },
-    "gh-code": {
+    "gh-file": {
         "url": "https://github.com/vllm-project/vllm/blob/main/{{path}}",
         "title": "{{path}}",
         "classes": ["github"],
