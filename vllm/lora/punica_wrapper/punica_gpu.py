@@ -269,7 +269,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                         output_slices,
                         add_inputs=True,
                         **kwargs)
-        pass
 
     def add_lora_logits(self,
                         y: torch.Tensor,
