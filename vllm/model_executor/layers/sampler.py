@@ -271,8 +271,22 @@ class Sampler(nn.Module):
         logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
 
         if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
-            logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
-                                        sampling_tensors.top_ks)
+            chunked_sorting = True
+            # using chunked sorting to avoid OOM, trading-off compute for memory
+            if chunked_sorting:
+                chunk_size = 64
+                _empty_logits = torch.empty_like(logits)
+                logits_chunks = torch.split(logits, chunk_size, dim=0)
+                top_ps_chunks = torch.split(sampling_tensors.top_ps, chunk_size, dim=0)
+                top_ks_chunks = torch.split(sampling_tensors.top_ks, chunk_size, dim=0)
+                for i in range(len(logits_chunks)):
+                    _empty_logits[i * chunk_size: (i + 1) * chunk_size] += _apply_top_k_top_p(
+                        logits_chunks[i], top_ps_chunks[i],
+                        top_ks_chunks[i])
+                logits = _empty_logits
+            else:
+                logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
+                                            sampling_tensors.top_ks)
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
