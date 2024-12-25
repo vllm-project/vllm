@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.model_executor.guided_decoding.utils import (
+    convert_lark_to_gbnf, grammar_is_likely_lark,
+    has_lmf_unsupported_json_features, has_xgrammar_unsupported_json_features)
 from vllm.platforms import CpuArchEnum, current_platform
 
 if TYPE_CHECKING:
@@ -13,76 +16,6 @@ if TYPE_CHECKING:
     from vllm.sampling_params import GuidedDecodingParams
 
 logger = init_logger(__name__)
-
-
-def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
-    """Check if JSON schema contains features unsupported by xgrammar."""
-
-    def check_object(obj: dict) -> bool:
-        if not isinstance(obj, dict):
-            return False
-
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
-        # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and any(
-                key in obj for key in [
-                    "minimum", "maximum", "exclusiveMinimum",
-                    "exclusiveMaximum", "multipleOf"
-                ]):
-            return True
-
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
-                        return True
-
-        return False
-
-    return check_object(schema)
-
-
-def has_lmf_unsupported_json_features(schema: dict) -> bool:
-    """
-    Check if JSON schema contains features unsupported 
-    by lm_format_enforcer.
-
-    Known issues:
-    - Regex patterns:
-        "grade": {
-            "type": "string",
-            "pattern": "^[A-D]$"  # Regex pattern
-        },
-    """
-
-    def check_object(obj: dict) -> bool:
-        if not isinstance(obj, dict):
-            return False
-
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
-                        return True
-
-        return False
-
-    return check_object(schema)
 
 
 def maybe_backend_fallback(
@@ -126,6 +59,20 @@ def maybe_backend_fallback(
                 "patterns or numeric ranges. "
                 "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
+
+        # xgrammar only supports GBNF grammars, so we must convert Lark.
+        # We must check if the grammar is likely Lark and if that
+        # grammar is convertible to GBNF
+        elif (guided_params.grammar is not None
+              and grammar_is_likely_lark(guided_params.grammar)):
+            try:
+                convert_lark_to_gbnf(guided_params.grammar)
+            except Exception:
+                logger.warning(
+                    "xgrammar does not support Lark grammars and the "
+                    "grammar failed to convert to GBNF. "
+                    "Falling back to use outlines instead.")
+                guided_params.backend = "outlines"
 
     if (guided_params.backend == "outlines"
             and guided_params.json_object is not None):

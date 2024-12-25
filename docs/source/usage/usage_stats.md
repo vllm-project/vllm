@@ -47,7 +47,7 @@ tail ~/.config/vllm/usage_stats.json
 
 ## Opt-out of Usage Stats Collection
 
-You can opt-out of usage stats collection by setting the VLLM_NO_USAGE_STATS or DO_NOT_TRACK environment variable, or by creating a ~/.config/vllm/do_not_track file:
+You can opt-out of usage stats collection by setting the `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` environment variable, or by creating a `~/.config/vllm/do_not_track` file:
 
 ```bash
 # Any of the following methods can disable usage stats collection
