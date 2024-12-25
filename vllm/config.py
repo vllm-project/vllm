@@ -2580,8 +2580,8 @@ class KVTransferConfig(BaseModel):
             self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
 
     @property
-    def need_kv_transfer(self) -> bool:
-        # When `kv_connector` is set, it means that this instance needs to 
+    def need_kv_transfer_agent(self) -> bool:
+        # Need to initialize the KV transfer agent when the connector is set.
         return self.kv_connector is not None
 
     @property

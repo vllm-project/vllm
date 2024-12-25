@@ -1077,7 +1077,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         return
 
     if all([
-            vllm_config.kv_transfer_config.need_kv_transfer,
+            vllm_config.kv_transfer_config.need_kv_transfer_agent,
             _KV_TRANSFER is None
     ]):
         logger.info("Need to transfer KV caches."
