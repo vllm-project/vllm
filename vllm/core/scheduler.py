@@ -298,7 +298,8 @@ def seq_group_metadata_builder():
                                  is_prompt=False,
                                  seq_data={},
                                  sampling_params=None,
-                                 block_tables={})
+                                 block_tables={},
+                                 block_global_computed_tables={})
 
 
 def scheduler_running_outputs_builder():
@@ -1314,6 +1315,8 @@ class Scheduler:
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
+            block_hash_map: Dict[int, Dict[int, int]] = {}
+            block_global_computed_tables : Dict[int, List[int]] = {}
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
@@ -1332,6 +1335,21 @@ class Scheduler:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+
+                if self.cache_config.enable_prefix_caching and self.cache_config.num_global_cache_blocks > 0 and seq_group.is_prefill():
+                    global_computed_list = []
+                    block_hash_dict = {}
+                    for block_id in block_tables[seq_id]:
+                        for block in self.block_manager.block_tables[seq_id].blocks:
+                            if block.block_id == block_id:
+                                if block.global_computed:
+                                    global_computed_list.append(block_id)
+                                if block.content_hash is not None:
+                                    block_hash_dict[block_id] = block.content_hash
+                                break
+                    block_global_computed_tables[seq_id] = global_computed_list
+                    block_hash_map[seq_id] = block_hash_dict
+                
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             if self.cache_config.enable_prefix_caching:
@@ -1344,7 +1362,7 @@ class Scheduler:
             # We should send the metadata to workers when the first prefill
             # is sent. Subsequent requests could be chunked prefill or decode.
             is_first_prefill = False
-            if is_prompt:
+            if is_prompt:                
                 seqs = seq_group.get_seqs()
                 # Prefill has only 1 sequence.
                 assert len(seqs) == 1
@@ -1368,6 +1386,8 @@ class Scheduler:
                     seq_data=seq_data,
                     sampling_params=seq_group.sampling_params,
                     block_tables=block_tables,
+                    block_global_computed_tables=block_global_computed_tables,
+                    block_hash_map=block_hash_map,
                     do_sample=do_sample,
                     pooling_params=seq_group.pooling_params,
                     token_chunk_size=token_chunk_size,
