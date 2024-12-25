@@ -861,7 +861,7 @@ class BaseMultiModalProcessor(ABC):
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         total_placeholders_by_modality = self._get_total_placeholder(
-            mm_inputs, mm_max_tokens)
+            placeholders_by_modality, mm_max_tokens)
 
         total_len = len(prompt_token_ids)
         if total_len > seq_len:
