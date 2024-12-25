@@ -36,6 +36,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import cached_get_tokenizer
@@ -43,7 +44,7 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.processor import get_processor
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -1121,7 +1122,33 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_molmo_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_molmo)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
-class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
+                       SupportsLoRA):
+
+    packed_modules_mapping = {
+        "qkv_proj": ["qkv_proj"],
+        "mlp.gate_up_proj": ["gate_up_proj"],
+        "image_projector.gate_up_proj": ["gate_proj", "up_proj"]
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        # language model
+        "qkv_proj",
+        "o_proj",
+        "mlp.gate_up_proj",
+        "image_projector.gate_up_proj",
+        "down_proj",
+        # vision tower
+        "wq",
+        "wk",
+        "wv",
+        "wo",
+        "w1",
+        "w2",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
@@ -1330,6 +1357,16 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         loader = AutoWeightsLoader(self)
         weights = _get_weights_with_merged_embedding(weights)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="model",
+            connector="vision_backbone.image_projector",
+            tower_model="vision_backbone",
+        )
 
 
 def _get_weights_with_merged_embedding(
