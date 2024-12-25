@@ -4,6 +4,7 @@ from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
+from vllm.attention.backends.utils import EVICTED_SLOT_ID
 
 Refcount = int
 
@@ -347,7 +348,8 @@ class NaiveBlock(Block):
             block.
         block_id (Optional[int], optional): The physical block index
             of this block. Defaults to None, which means no allocation has been
-            made.
+            made, which happens only when creating block pool.
+            block_id can not be None.
         _cow_target (Optional[Block], optional): The copy-on-write target block.
             If not provided, it defaults to self.
     """
@@ -360,7 +362,11 @@ class NaiveBlock(Block):
                  block_id: Optional[int] = None,
                  _cow_target: Optional[Block] = None,
                  extra_hash: Optional[int] = None):
+        assert block_id is not None or len(token_ids) == 0, (
+            "No block_id, can't initialize block")
+
         self._token_ids: List[int] = []
+        self._block_slot_mapping: List[int] = [EVICTED_SLOT_ID] * block_size
         self._block_size = block_size
         self._prev_block = prev_block
         self._block_id = block_id
@@ -380,8 +386,19 @@ class NaiveBlock(Block):
         self._append_token_ids_no_cow(token_ids)
 
         if self._block_id is not None:
+            prev_block_id = self._block_id
             self._block_id = (self._allocator.cow_block_if_not_appendable(
                 self._cow_target))
+            if self._block_id != prev_block_id:
+                self._update_block_slot_mapping(prev_block_id)
+
+    def _update_block_slot_mapping(self, prev_block_id) -> None:
+        """Update the block slot mapping with new block_id after copy-on-write
+        operation.
+        """
+        offset = (self._block_id - prev_block_id) * self._block_size
+        for i in range(len(self.token_ids)):
+            self._block_slot_mapping[i] += offset
 
     def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block
@@ -394,6 +411,13 @@ class NaiveBlock(Block):
 
         assert len(token_ids) <= self.num_empty_slots
 
+        slot_mapping_start = (self._block_size * self._block_id +
+                              len(self._token_ids))
+        slot_mapping_end = slot_mapping_start + len(token_ids)
+        slot_idx_start = len(self._token_ids)
+        slot_idx_end = slot_idx_start + len(token_ids)
+        self._block_slot_mapping[slot_idx_start:slot_idx_end] = (
+            list(range(slot_mapping_start, slot_mapping_end)))
         self._token_ids.extend(token_ids)
 
     @property
@@ -452,3 +476,7 @@ class NaiveBlock(Block):
     @property
     def content_hash(self) -> Optional[int]:
         return None
+
+    @property
+    def block_slot_mapping(self) -> List[int]:
+        return self._block_slot_mapping

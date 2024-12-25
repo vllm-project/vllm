@@ -102,6 +102,11 @@ class Block(ABC):
         """
         return None
 
+    @property
+    @abstractmethod
+    def block_slot_mapping(self) -> List[int]:
+        pass
+
 
 class BlockAllocator(ABC):
 

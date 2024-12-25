@@ -6,6 +6,7 @@ from vllm.core.block.interfaces import Block, BlockAllocator
 
 BlockId = int
 RefCount = int
+BlockSlotMapping = List[int]
 
 
 class RefCounterProtocol(Protocol):
@@ -235,12 +236,19 @@ class BlockList:
     def __init__(self, blocks: List[Block]):
         self._blocks: List[Block] = []
         self._block_ids: List[int] = []
+        self._block_slot_mappings: List[List[int]] = []
 
         self.update(blocks)
 
     def _add_block_id(self, block_id: Optional[BlockId]) -> None:
         assert block_id is not None
         self._block_ids.append(block_id)
+
+    def _add_block_slot_mapping(
+            self,
+            block_slot_mapping: Optional[BlockSlotMapping]) -> None:
+        assert block_slot_mapping is not None
+        self._block_slot_mappings.append(block_slot_mapping)
 
     def _update_block_id(self, block_index: int,
                          new_block_id: Optional[BlockId]) -> None:
@@ -255,6 +263,11 @@ class BlockList:
         for block in self._blocks:
             self._add_block_id(block.block_id)
 
+        # Cache block slot mappings for fast query
+        self._block_slot_mappings = []
+        for block in self._blocks:
+            self._add_block_slot_mapping(block.block_slot_mapping)
+
     def append_token_ids(self, block_index: int, token_ids: List[int]) -> None:
         block = self._blocks[block_index]
         prev_block_id = block.block_id
@@ -268,6 +281,7 @@ class BlockList:
     def append(self, new_block: Block):
         self._blocks.append(new_block)
         self._add_block_id(new_block.block_id)
+        self._add_block_slot_mapping(new_block.block_slot_mapping)
 
     def __len__(self) -> int:
         return len(self._blocks)
@@ -282,12 +296,16 @@ class BlockList:
     def reset(self):
         self._blocks = []
         self._block_ids = []
+        self._block_slot_mappings = []
 
     def list(self) -> List[Block]:
         return self._blocks
 
     def ids(self) -> List[int]:
         return self._block_ids
+
+    def block_slot_mappings(self) -> List[List[int]]:
+        return self._block_slot_mappings
 
 
 @dataclass

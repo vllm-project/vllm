@@ -24,7 +24,7 @@ class BlockTable:
             BlockTable is created.
         max_block_sliding_window (Optional[int], optional): The number of
             blocks to keep around for each sequence. If None, all blocks
-            are kept (eg., when sliding window is not used).
+            are kept (e.g., when sliding window is not used).
             It should at least fit the sliding window size of the model.
 
     Attributes:
@@ -106,7 +106,7 @@ class BlockTable:
 
     def update(self, blocks: List[Block]) -> None:
         """Resets the table to the newly provided blocks 
-        (with their corresponding block ids)
+        (with their corresponding block ids and slot mappings)
         """
         self._blocks.update(blocks)
 
@@ -256,6 +256,10 @@ class BlockTable:
                 BlockTable.
         """
         return self._blocks.ids()
+
+    @property
+    def block_slot_mappings(self) -> List[List[int]]:
+        return self._blocks.block_slot_mappings()
 
     def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
         """Get the number of "unseen" tokens in the sequence.

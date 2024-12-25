@@ -298,7 +298,8 @@ def seq_group_metadata_builder():
                                  is_prompt=False,
                                  seq_data={},
                                  sampling_params=None,
-                                 block_tables={})
+                                 block_tables={},
+                                 slot_mappings={})
 
 
 def scheduler_running_outputs_builder():
@@ -1309,11 +1310,14 @@ class Scheduler:
                 self.cache_id].get_object()
             seq_group_metadata.seq_data.clear()
             seq_group_metadata.block_tables.clear()
+            seq_group_metadata.slot_mappings.clear()
 
             # seq_id -> SequenceData
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
+            # seq_id -> token to slot mappings
+            slot_mappings: Dict[int, List[List[int]]] = {}
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
@@ -1332,6 +1336,7 @@ class Scheduler:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                slot_mappings[seq_id] = self.block_manager.get_slot_mapping(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             if self.cache_config.enable_prefix_caching:
@@ -1368,6 +1373,7 @@ class Scheduler:
                     seq_data=seq_data,
                     sampling_params=seq_group.sampling_params,
                     block_tables=block_tables,
+                    slot_mappings=slot_mappings,
                     do_sample=do_sample,
                     pooling_params=seq_group.pooling_params,
                     token_chunk_size=token_chunk_size,
@@ -1398,6 +1404,7 @@ class Scheduler:
                     seq_data_delta,
                     seq_group.request_id,
                     block_tables,
+                    slot_mappings,
                     is_prompt,
                     do_sample=do_sample,
                     token_chunk_size=token_chunk_size,

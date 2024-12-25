@@ -280,6 +280,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
         return block_ids  # type: ignore
 
+    def get_slot_mapping(self, seq: Sequence) -> List[List[int]]:
+        block_slot_mappings = self.block_tables[seq.seq_id].block_slot_mappings
+        return block_slot_mappings  # type: ignore
+
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
         request_id = seq_group.request_id
         assert request_id in self.cross_block_tables
