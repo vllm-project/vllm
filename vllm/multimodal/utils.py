@@ -145,9 +145,16 @@ def _load_video_from_bytes(b: bytes, num_frames: int = 32) -> npt.NDArray:
     return frames
 
 
-def _load_video_from_data_url(video_url: str):
+def _load_video_from_data_url(video_url: str) -> npt.NDArray:
     # Only split once and assume the second part is the base64 encoded video
     _, video_base64 = video_url.split(",", 1)
+
+    if video_url.startswith("data:video/jpeg;"):
+        return np.stack([
+            np.array(load_image_from_base64(frame_base64))
+            for frame_base64 in video_base64.split(",")
+        ])
+
     return load_video_from_base64(video_base64)
 
 
@@ -329,7 +336,7 @@ def rescale_image_size(image: Image.Image,
     return image
 
 
-def try_import_video_packages() -> Any:
+def try_import_video_packages():
     try:
         import cv2
         import decord
@@ -371,7 +378,7 @@ def sample_frames_from_video(frames: npt.NDArray,
         return sampled_frames
 
 
-def encode_video_base64(frames: npt.NDArray):
+def encode_video_base64(frames: npt.NDArray) -> str:
     base64_frames = []
     frames_list = [frames[i] for i in range(frames.shape[0])]
     for frame in frames_list:
