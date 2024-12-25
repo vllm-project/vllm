@@ -3,10 +3,13 @@ from pathlib import Path
 import pytest
 import transformers
 
+from ..utils import VLLM_PATH
+
+EXAMPLES_DIR = VLLM_PATH / "examples"
+
 jinja_paths = [
     pytest.param(path, id=path.stem)
-    for path in sorted((Path(__file__).parent.parent.parent /
-                        "examples").glob("*.jinja"))
+    for path in sorted(EXAMPLES_DIR.glob("*.jinja"))
 ]
 
 
