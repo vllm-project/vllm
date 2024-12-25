@@ -2560,14 +2560,6 @@ class KVTransferConfig(BaseModel):
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
-        supported_kv_connector = ["PyNcclConnector", "MooncakeConnector"]
-        if all([
-                self.kv_connector is not None, self.kv_connector
-                not in supported_kv_connector
-        ]):
-            raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
-                             f"Supported connectors are "
-                             f"{supported_kv_connector}.")
 
         if self.kv_role is not None and self.kv_role not in [
                 "kv_producer", "kv_consumer", "kv_both"
@@ -2588,10 +2580,9 @@ class KVTransferConfig(BaseModel):
             self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
 
     @property
-    def need_kv_parallel_group(self) -> bool:
-        # for those database-based connector, vLLM does not need to create
-        # parallel group, and in that case the kv parallel size will be 1.
-        return self.kv_connector is not None and self.kv_parallel_size > 1
+    def need_kv_transfer(self) -> bool:
+        # When `kv_connector` is set, it means that this instance needs to 
+        return self.kv_connector is not None
 
     @property
     def is_kv_producer(self) -> bool:
