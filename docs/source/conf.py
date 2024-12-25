@@ -80,12 +80,14 @@ myst_url_schemes = {
     'mailto': None,
     'ftp': None,
     "gh-issue": {
-        "url": "https://github.com/vllm-project/vllm/issues/{{path}}#{{fragment}}",
+        "url":
+        "https://github.com/vllm-project/vllm/issues/{{path}}#{{fragment}}",
         "title": "Issue #{{path}}",
         "classes": ["github"],
     },
     "gh-pr": {
-        "url": "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
+        "url":
+        "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
         "title": "Pull Request #{{path}}",
         "classes": ["github"],
     },
