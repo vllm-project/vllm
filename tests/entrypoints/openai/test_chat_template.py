@@ -12,7 +12,8 @@ assert chatml_jinja_path.exists()
 
 # Define models, templates, and their corresponding expected outputs
 MODEL_TEMPLATE_GENERATON_OUTPUT = [
-    ("facebook/opt-125m", chatml_jinja_path, True, False, """</s><|im_start|>user
+    ("facebook/opt-125m", chatml_jinja_path, True, False,
+     """</s><|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
@@ -20,13 +21,15 @@ Hi there!<|im_end|>
 What is the capital of<|im_end|>
 <|im_start|>assistant
 """),
-    ("facebook/opt-125m", chatml_jinja_path, False, False, """</s><|im_start|>user
+    ("facebook/opt-125m", chatml_jinja_path, False, False,
+     """</s><|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
 <|im_start|>user
 What is the capital of"""),
-    ("facebook/opt-125m", chatml_jinja_path, False, True, """</s><|im_start|>user
+    ("facebook/opt-125m", chatml_jinja_path, False, True,
+     """</s><|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
