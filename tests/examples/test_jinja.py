@@ -5,7 +5,7 @@ import transformers
 
 jinja_paths = [
     pytest.param(path, id=path.stem)
-    for path in sorted((Path(__name__).parent.parent /
+    for path in sorted((Path(__file__).parent.parent.parent /
                         "examples").glob("*.jinja"))
 ]
 
