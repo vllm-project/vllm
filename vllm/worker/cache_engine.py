@@ -52,11 +52,13 @@ class CacheEngine:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Get attention backend.
-        self.attn_backend = get_attn_backend(self.head_size,
-                                             model_config.dtype,
-                                             cache_config.cache_dtype,
-                                             self.block_size,
-                                             model_config.is_attention_free)
+        self.attn_backend = get_attn_backend(
+            self.head_size,
+            model_config.dtype,
+            cache_config.cache_dtype,
+            self.block_size,
+            model_config.is_attention_free,
+            use_mla=model_config.is_deepseek_v2)
 
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(
@@ -109,7 +111,7 @@ class CacheEngine:
             parallel_config)
 
         key_cache_block = cache_config.block_size * num_heads * head_size
-        # if model_config._is_deepseek_v2: # MLA share the K and V cache in one latent vector.
+        # if model_config.is_deepseek_v2: # MLA share the K and V cache in one latent vector.
         #     value_cache_block = 0
         # else:
         # TODO(simon): for MLA, this is repurpose for rope cache (64) but it is smaller than key cache (512).

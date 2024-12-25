@@ -597,14 +597,16 @@ class ModelConfig:
         return self.hf_text_config.hidden_size
 
     @property
-    def _is_deepseek_v2(self) -> bool:
-        return hasattr(
+    def is_deepseek_v2(self) -> bool:
+        result = hasattr(
             self.hf_text_config,
             "model_type") and self.hf_text_config.model_type == 'deepseek_v2'
+        assert result
+        return result
 
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if self._is_deepseek_v2:
+        if self.is_deepseek_v2:
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
             # return 256
@@ -668,7 +670,7 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
-        if self._is_deepseek_v2:
+        if self.is_deepseek_v2:
             # TODO(simon): feature flag MLA
             return 1
 

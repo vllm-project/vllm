@@ -487,15 +487,14 @@ class DeepseekV2MLAAttention(nn.Module):
         #                       quant_config=quant_config,
         #                       prefix=f"{prefix}.prefill_attn")
         # The decode attention will compute a multi-query attention by directly operating on the latent.
-        self.decode_attn = Attention(
-            num_heads=self.num_local_heads,
-            head_size=self.
-            kv_lora_rank,  # + self.qk_rope_head_dim, # TODO(simon): pass in qk_rope_head_dim? but i don't think
-            scale=self.scaling,
-            num_kv_heads=1,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.decode_attn")
+        self.attn = Attention(num_heads=self.num_local_heads,
+                              head_size=self.kv_lora_rank,
+                              scale=self.scaling,
+                              num_kv_heads=1,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn",
+                              use_mla=True)
 
         # To be computed during weight loading
         # self.W_QR = None
@@ -671,7 +670,7 @@ class DeepseekV2MLAAttention(nn.Module):
             value=0).squeeze(1)
         assert k.numel() == v.numel(), f"{k.numel()=} != {v.numel()=}"
 
-        attn_output = self.decode_attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
         # # debug: i just want to manually verify MLA is doing the right thing
         # # let's get all the previous kv cache and copy them here, run the MLA manually
