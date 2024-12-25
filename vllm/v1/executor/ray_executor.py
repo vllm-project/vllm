@@ -8,7 +8,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.executor.ray_utils import RayWorkerWrapper, ray
+from vllm.v1.executor.ray_utils import (RayWorkerWrapper,
+                                        initialize_ray_cluster, ray)
 from vllm.v1.outputs import ModelRunnerOutput
 
 if ray is not None:
@@ -33,7 +34,9 @@ class RayExecutor(Executor):
         if ray_usage != "1":
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
+        initialize_ray_cluster(self.parallel_config)
         placement_group = self.parallel_config.placement_group
+
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
