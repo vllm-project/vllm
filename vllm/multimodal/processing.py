@@ -684,7 +684,8 @@ class ProcessingCache:
         self._maybe_log_cache_stats()
 
         cache_key = self._hash_kwargs(model_id=model_id,
-                                      **{modality: input_item}, **input_kwargs)
+                                      **{modality: input_item},
+                                      **input_kwargs)
         return self._cache.get(cache_key)
 
     def put(
@@ -696,7 +697,8 @@ class ProcessingCache:
         output_kwargs: Mapping[str, MultiModalFieldItem],
     ) -> None:
         cache_key = self._hash_kwargs(model_id=model_id,
-                                      **{modality: input_item}, **input_kwargs)
+                                      **{modality: input_item},
+                                      **input_kwargs)
         self._cache.put(cache_key, output_kwargs)
 
 
