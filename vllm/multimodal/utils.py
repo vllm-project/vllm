@@ -125,16 +125,6 @@ async def async_fetch_image(image_url: str,
     return image.convert(image_mode)
 
 
-def _load_video_frames_from_bytes(b: bytes):
-    frame = Image.open(BytesIO(b))
-    return np.array(frame)
-
-
-def load_video_frames_from_base64(frame: Union[bytes, str]):
-    """Load frame from base64 format."""
-    return _load_video_frames_from_bytes(base64.b64decode(frame))
-
-
 def _load_video_from_bytes(b: bytes, num_frames: int = 32):
     _, decord = try_import_video_packages()
 
@@ -156,12 +146,9 @@ def _load_video_from_bytes(b: bytes, num_frames: int = 32):
 
 
 def _load_video_from_data_url(video_url: str):
-    # Only split once and assume the second part is the base64 encoded image
-    frames_base64 = video_url.split(",")[1:]
-    return np.stack([
-        load_video_frames_from_base64(frame_base64)
-        for frame_base64 in frames_base64
-    ])
+    # Only split once and assume the second part is the base64 encoded video
+    _, video_base64 = video_url.split(",", 1)
+    return load_video_from_base64(video_base64)
 
 
 def fetch_video(video_url: str, *, num_frames: int = 32) -> npt.NDArray:
@@ -391,6 +378,11 @@ def encode_video_base64(frames: npt.NDArray):
         img_base64 = encode_image_base64(Image.fromarray(frame))
         base64_frames.append(img_base64)
     return ",".join(base64_frames)
+
+
+def load_video_from_base64(video: Union[bytes, str]) -> Image.Image:
+    """Load video from base64 format."""
+    return _load_video_from_bytes(base64.b64decode(video))
 
 
 def resolve_visual_encoder_outputs(
