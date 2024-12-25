@@ -44,7 +44,7 @@ class RayExecutor(Executor):
                           **ray_remote_kwargs):
         # A list of workers to run a model.
         self.workers: List[RayWorkerWrapper] = []
-        self.tp_pp_workers: List[List[RayWorkerWrapper]] = []
+        self.pp_tp_workers: List[List[RayWorkerWrapper]] = []
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
@@ -177,16 +177,16 @@ class RayExecutor(Executor):
         self._run_workers("load_model")
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
-            self.tp_pp_workers.append([])
+            self.pp_tp_workers.append([])
             for tp_rank in range(
                     self.parallel_config.tensor_parallel_size):
                 # PP=2, TP=4
                 # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
                 rank = (pp_rank * self.parallel_config.tensor_parallel_size
                         ) + tp_rank
-                assert len(self.tp_pp_workers[pp_rank]) == tp_rank
-                assert pp_rank < len(self.tp_pp_workers)
-                self.tp_pp_workers[pp_rank].append(self.workers[rank])
+                assert len(self.pp_tp_workers[pp_rank]) == tp_rank
+                assert pp_rank < len(self.pp_tp_workers)
+                self.pp_tp_workers[pp_rank].append(self.workers[rank])
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
@@ -362,7 +362,7 @@ class RayExecutor(Executor):
                 # Each PP worker takes in the output of the previous PP worker,
                 # and the TP group executes in SPMD fashion.
                 outputs = [
-                    worker.execute_model_spmd.
+                    worker.execute_model.
                     bind(  # type: ignore[attr-defined]
                         outputs[i]) for i, worker in enumerate(tp_group)
                 ]

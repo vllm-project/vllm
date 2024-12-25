@@ -720,6 +720,8 @@ class GPUModelRunner:
         # Trigger compilation for general shape.
         hidden_states = self._dummy_run(self.model, self.max_num_tokens,
                                         dummy_kv_caches)
+        if not get_pp_group().is_last_rank:
+            return hidden_states
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
