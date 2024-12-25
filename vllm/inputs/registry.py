@@ -1,11 +1,11 @@
 import functools
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, NamedTuple,
-                    Optional, Protocol, Type)
+from typing import (TYPE_CHECKING, Any, Callable, Mapping, NamedTuple,
+                    Optional, Protocol, Union)
 
 from torch import nn
-from transformers import PretrainedConfig, ProcessorMixin
+from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
+P = TypeVar("P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
 @dataclass(frozen=True)
@@ -38,24 +39,28 @@ class InputContext:
     model_config: "ModelConfig"
     """The configuration of the model."""
 
-    def get_hf_config(self, hf_config_type: Type[C] = PretrainedConfig) -> C:
+    def get_hf_config(
+        self,
+        typ: Union[type[C], tuple[type[C], ...]] = PretrainedConfig,
+        /,
+    ) -> C:
         """
         Get the HuggingFace configuration
         (:class:`transformers.PretrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
-            TypeError: If the model is not of the specified type.
+            TypeError: If the configuration is not of the specified type.
         """
         hf_config = self.model_config.hf_config
-        if not isinstance(hf_config, hf_config_type):
+        if not isinstance(hf_config, typ):
             raise TypeError("Invalid type of HuggingFace config. "
-                            f"Expected type: {hf_config_type}, but "
+                            f"Expected type: {typ}, but "
                             f"found type: {type(hf_config)}")
 
         return hf_config
 
-    def get_hf_image_processor_config(self) -> Dict[str, Any]:
+    def get_hf_image_processor_config(self) -> dict[str, Any]:
         """
         Get the HuggingFace image processor configuration of the model.
         """
@@ -74,18 +79,37 @@ class InputContext:
 
         return mm_config
 
-    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+    def get_hf_processor(
+        self,
+        typ: Union[type[P], tuple[type[P], ...]] = ProcessorMixin,
+        /,
+        **kwargs: object,
+    ) -> P:
+        """
+        Get the HuggingFace processor
+        (:class:`transformers.ProcessorMixin`) of the model,
+        additionally checking its type.
+
+        Raises:
+            TypeError: If the processor is not of the specified type.
+        """
         base_kwargs = self.model_config.mm_processor_kwargs
         if base_kwargs is None:
             base_kwargs = {}
 
         merged_kwargs = {**base_kwargs, **kwargs}
 
-        return cached_get_processor(
+        hf_processor = cached_get_processor(
             self.model_config.model,
             trust_remote_code=self.model_config.trust_remote_code,
             **merged_kwargs,
         )
+        if not isinstance(hf_processor, typ):
+            raise TypeError("Invalid type of HuggingFace processor. "
+                            f"Expected type: {typ}, but "
+                            f"found type: {type(hf_processor)}")
+
+        return hf_processor
 
 
 @dataclass(frozen=True)
@@ -93,39 +117,55 @@ class InputProcessingContext(InputContext):
     tokenizer: AnyTokenizer
     """The tokenizer used to tokenize the inputs."""
 
-    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
-        base_kwargs = self.model_config.mm_processor_kwargs
-        if base_kwargs is None:
-            base_kwargs = {}
-
-        merged_kwargs = {**base_kwargs, **kwargs}
-
-        return cached_get_processor(
-            self.model_config.model,
-            tokenizer=self.tokenizer,  # Override the tokenizer with ours
-            trust_remote_code=self.model_config.trust_remote_code,
-            **merged_kwargs,
+    def get_hf_processor(
+        self,
+        typ: Union[type[P], tuple[type[P], ...]] = ProcessorMixin,
+        /,
+        **kwargs: object,
+    ) -> P:
+        return super().get_hf_processor(
+            typ,
+            tokenizer=self.tokenizer,
+            **kwargs,
         )
 
-    def resolve_hf_processor_call_kwargs(
+    def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
+        prompt: str,
+        processor_data: Mapping[str, object],
         inference_kwargs: Mapping[str, object],
-    ) -> Mapping[str, object]:
+    ) -> BatchFeature:
         assert callable(hf_processor)
 
         base_kwargs = self.model_config.mm_processor_kwargs
         if base_kwargs is None:
             base_kwargs = {}
 
-        return resolve_mm_processor_kwargs(
+        merged_kwargs = resolve_mm_processor_kwargs(
             base_kwargs,
             inference_kwargs,
             hf_processor,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
         )
 
+        try:
+            return hf_processor(
+                text=prompt,
+                **processor_data,
+                **merged_kwargs,
+                return_tensors="pt",
+            )
+        except Exception as exc:
+            data = dict(text=prompt, **processor_data)
+            msg = (f"Failed to apply {type(hf_processor).__name__} "
+                   f"on data={data} with kwargs={merged_kwargs}")
 
-N = TypeVar("N", bound=Type[nn.Module])
+            raise RuntimeError(msg) from exc
+
+
+N = TypeVar("N", bound=type[nn.Module])
 
 
 class DummyData(NamedTuple):
@@ -232,7 +272,7 @@ class InputRegistry:
 
         return wrapper
 
-    def _get_dummy_data_factory(self, model_cls: Type[nn.Module]):
+    def _get_dummy_data_factory(self, model_cls: type[nn.Module]):
         return self._dummy_factories_by_model_type \
             .get(model_cls, self._default_dummy_data_factory)
 
@@ -257,7 +297,7 @@ class InputRegistry:
 
         return wrapper
 
-    def _get_dummy_encoder_data_factory(self, model_cls: Type[nn.Module]):
+    def _get_dummy_encoder_data_factory(self, model_cls: type[nn.Module]):
         return self._dummy_encoder_factories_by_model_type \
             .get(model_cls, self._default_dummy_data_factory)
 
@@ -274,7 +314,7 @@ class InputRegistry:
         The model is identified by ``model_config``.
 
         See also:
-            :ref:`enabling_multimodal_inputs`
+            :ref:`enabling-multimodal-inputs`
 
         Note:
             This should be called after
@@ -351,7 +391,7 @@ class InputRegistry:
         happens before :meth:`~vllm.multimodal.MultiModalRegistry.map_input`.
 
         See also:
-            :ref:`input_processing_pipeline`
+            :ref:`input-processing-pipeline`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -368,14 +408,14 @@ class InputRegistry:
 
         return wrapper
 
-    def _get_model_input_processor(self, model_cls: Type[nn.Module]):
+    def _get_model_input_processor(self, model_cls: type[nn.Module]):
         return self._input_processors_by_model_type \
             .get(model_cls, self._default_input_processor)
 
     def _ensure_mm_kwargs(
         self,
         inputs: SingletonInputs,
-        mm_processor_kwargs: Dict[str, Any],
+        mm_processor_kwargs: dict[str, Any],
     ):
         if inputs["type"] == "token":
             # In case the input processor for that model fails to set it
@@ -395,7 +435,7 @@ class InputRegistry:
         The model is identified by ``model_config``.
 
         See also:
-            :ref:`input_processing_pipeline`
+            :ref:`input-processing-pipeline`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture

@@ -455,9 +455,13 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version(
-        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-    )
+    # TODO: Revisit this temporary approach: https://github.com/vllm-project/vllm/issues/9182#issuecomment-2404860236
+    try:
+        version = get_version(
+            write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+        )
+    except LookupError:
+        version = "0.0.0"
 
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
@@ -466,7 +470,7 @@ def get_vllm_version() -> str:
             version += f"{sep}empty"
     elif _is_cuda():
         if envs.VLLM_USE_PRECOMPILED:
-            version += ".precompiled"
+            version += f"{sep}precompiled"
         else:
             cuda_version = str(get_nvcc_cuda_version())
             if cuda_version != MAIN_CUDA_VERSION:
@@ -630,6 +634,7 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
         "video": ["decord"]  # Required for video processing
     },
