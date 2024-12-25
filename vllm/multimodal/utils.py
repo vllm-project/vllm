@@ -125,7 +125,7 @@ async def async_fetch_image(image_url: str,
     return image.convert(image_mode)
 
 
-def _load_video_from_bytes(b: bytes, num_frames: int = 32):
+def _load_video_from_bytes(b: bytes, num_frames: int = 32) -> npt.NDArray:
     _, decord = try_import_video_packages()
 
     video_path = BytesIO(b)
@@ -380,7 +380,7 @@ def encode_video_base64(frames: npt.NDArray):
     return ",".join(base64_frames)
 
 
-def load_video_from_base64(video: Union[bytes, str]) -> Image.Image:
+def load_video_from_base64(video: Union[bytes, str]) -> npt.NDArray:
     """Load video from base64 format."""
     return _load_video_from_bytes(base64.b64decode(video))
 
