@@ -33,42 +33,179 @@ class ModelRequestData(NamedTuple):
 # Unless specified, these settings have been tested to work on a single L4.
 
 
-def load_qwenvl_chat(question: str, image_urls: List[str]) -> ModelRequestData:
-    model_name = "Qwen/Qwen-VL-Chat"
-    llm = LLM(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=1024,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-    placeholders = "".join(f"Picture {i}: <img></img>\n"
-                           for i, _ in enumerate(image_urls, start=1))
-
-    # This model does not have a chat_template attribute on its tokenizer,
-    # so we need to explicitly pass it. We use ChatML since it's used in the
-    # generation utils of the model:
-    # https://huggingface.co/Qwen/Qwen-VL-Chat/blob/main/qwen_generation_utils.py#L265
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
-
-    # Copied from: https://huggingface.co/docs/transformers/main/en/chat_templating
-    chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"  # noqa: E501
-
-    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
-    prompt = tokenizer.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True,
-                                           chat_template=chat_template)
-
-    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
-    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+def load_aria(question, image_urls: List[str]) -> ModelRequestData:
+    model_name = "rhymes-ai/Aria"
+    llm = LLM(model=model_name,
+              tokenizer_mode="slow",
+              trust_remote_code=True,
+              dtype="bfloat16",
+              limit_mm_per_prompt={"image": len(image_urls)})
+    placeholders = "<fim_prefix><|img|><fim_suffix>\n" * len(image_urls)
+    prompt = (f"<|im_start|>user\n{placeholders}{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+    stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=chat_template,
+        chat_template=None)
+
+
+def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
+    model_name = "h2oai/h2ovl-mississippi-2b"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={"max_dynamic_patch": 4},
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for H2OVL-Mississippi
+    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
+    stop_token_ids = [tokenizer.eos_token_id]
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
+def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
+    model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        # if you are running out of memory, you can reduce the "longest_edge".
+        # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
+        mm_processor_kwargs={
+            "size": {
+                "longest_edge": 2 * 364
+            },
+        },
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    prompt = f"<|begin_of_text|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
+def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
+    model_name = "OpenGVLab/InternVL2-2B"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={"max_dynamic_patch": 4},
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for InternVL
+    # models variants may have different stop tokens
+    # please refer to the model card for the correct "stop words":
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
+def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
+    model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    llm = LLM(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    prompt = f"<|image|><|image|><|begin_of_text|>{question}"
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
+def load_nvlm_d(question: str, image_urls: List[str]):
+    model_name = "nvidia/NVLM-D-72B"
+
+    # Adjust this as necessary to fit in GPU
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        tensor_parallel_size=4,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={"max_dynamic_patch": 4},
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+    stop_token_ids = None
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
     )
 
 
@@ -107,107 +244,42 @@ def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
-    model_name = "h2oai/h2ovl-mississippi-2b"
-
+def load_qwenvl_chat(question: str, image_urls: List[str]) -> ModelRequestData:
+    model_name = "Qwen/Qwen-VL-Chat"
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
-        max_model_len=8192,
+        max_model_len=1024,
+        max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
-        mm_processor_kwargs={"max_dynamic_patch": 4},
     )
+    placeholders = "".join(f"Picture {i}: <img></img>\n"
+                           for i, _ in enumerate(image_urls, start=1))
 
-    placeholders = "\n".join(f"Image-{i}: <image>\n"
-                             for i, _ in enumerate(image_urls, start=1))
-    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
-
+    # This model does not have a chat_template attribute on its tokenizer,
+    # so we need to explicitly pass it. We use ChatML since it's used in the
+    # generation utils of the model:
+    # https://huggingface.co/Qwen/Qwen-VL-Chat/blob/main/qwen_generation_utils.py#L265
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
-    prompt = tokenizer.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True)
 
-    # Stop tokens for H2OVL-Mississippi
-    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
-    stop_token_ids = [tokenizer.eos_token_id]
+    # Copied from: https://huggingface.co/docs/transformers/main/en/chat_templating
+    chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"  # noqa: E501
 
-    return ModelRequestData(
-        llm=llm,
-        prompt=prompt,
-        stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
-    )
-
-
-def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
-    model_name = "OpenGVLab/InternVL2-2B"
-
-    llm = LLM(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        mm_processor_kwargs={"max_dynamic_patch": 4},
-    )
-
-    placeholders = "\n".join(f"Image-{i}: <image>\n"
-                             for i, _ in enumerate(image_urls, start=1))
     messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
-                                           add_generation_prompt=True)
+                                           add_generation_prompt=True,
+                                           chat_template=chat_template)
 
-    # Stop tokens for InternVL
-    # models variants may have different stop tokens
-    # please refer to the model card for the correct "stop words":
-    # https://huggingface.co/OpenGVLab/InternVL2-2B#service
-    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
-
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
-    )
-
-
-def load_nvlm_d(question: str, image_urls: List[str]):
-    model_name = "nvidia/NVLM-D-72B"
-
-    # Adjust this as necessary to fit in GPU
-    llm = LLM(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        tensor_parallel_size=4,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        mm_processor_kwargs={"max_dynamic_patch": 4},
-    )
-
-    placeholders = "\n".join(f"Image-{i}: <image>\n"
-                             for i, _ in enumerate(image_urls, start=1))
-    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
-    prompt = tokenizer.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True)
-    stop_token_ids = None
-
-    return ModelRequestData(
-        llm=llm,
-        prompt=prompt,
-        stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
+        chat_template=chat_template,
     )
 
 
@@ -268,68 +340,16 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
-    model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-
-    # The configuration below has been confirmed to launch on a single L40 GPU.
-    llm = LLM(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=16,
-        enforce_eager=True,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    prompt = f"<|image|><|image|><|begin_of_text|>{question}"
-    return ModelRequestData(
-        llm=llm,
-        prompt=prompt,
-        stop_token_ids=None,
-        image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
-    )
-
-
-def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
-    model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
-
-    # The configuration below has been confirmed to launch on a single L40 GPU.
-    llm = LLM(
-        model=model_name,
-        max_model_len=8192,
-        max_num_seqs=16,
-        enforce_eager=True,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        # if you are running out of memory, you can reduce the "longest_edge".
-        # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
-        mm_processor_kwargs={
-            "size": {
-                "longest_edge": 2 * 364
-            },
-        },
-    )
-
-    placeholders = "\n".join(f"Image-{i}: <image>\n"
-                             for i, _ in enumerate(image_urls, start=1))
-    prompt = f"<|begin_of_text|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
-    return ModelRequestData(
-        llm=llm,
-        prompt=prompt,
-        stop_token_ids=None,
-        image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
-    )
-
-
 model_example_map = {
-    "phi3_v": load_phi3v,
+    "aria": load_aria,
     "h2ovl_chat": load_h2onvl,
-    "internvl_chat": load_internvl,
-    "NVLM_D": load_nvlm_d,
-    "qwen2_vl": load_qwen2_vl,
-    "qwen_vl_chat": load_qwenvl_chat,
-    "mllama": load_mllama,
     "idefics3": load_idefics3,
+    "internvl_chat": load_internvl,
+    "mllama": load_mllama,
+    "NVLM_D": load_nvlm_d,
+    "phi3_v": load_phi3v,
+    "qwen_vl_chat": load_qwenvl_chat,
+    "qwen2_vl": load_qwen2_vl,
 }
 
 

@@ -66,6 +66,14 @@ void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
                                          torch::Tensor& weight,
                                          torch::Tensor& scale, double epsilon);
 
+void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
+                                      torch::Tensor const& input,
+                                      torch::Tensor const& weight,
+                                      torch::Tensor& scales,
+                                      double const epsilon,
+                                      std::optional<torch::Tensor> scale_ub,
+                                      std::optional<torch::Tensor> residual);
+
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       torch::Tensor& key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
@@ -128,6 +136,7 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              int64_t thx, int64_t thy);
 
 torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
+#endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
@@ -138,6 +147,7 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
 torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
                               int64_t row);
 
+#ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
@@ -152,6 +162,17 @@ void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& azp_adj,
                            c10::optional<torch::Tensor> const& azp,
                            c10::optional<torch::Tensor> const& bias);
+
+bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability);
+
+void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
+                              torch::Tensor const& b, torch::Tensor const& e,
+                              torch::Tensor const& a_scales,
+                              torch::Tensor const& b_scales,
+                              c10::optional<torch::Tensor> const& bias);
+
+bool cutlass_sparse_compress_entry(torch::Tensor& a_compressed,
+                                   torch::Tensor& e, torch::Tensor const& a);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

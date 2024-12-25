@@ -17,9 +17,7 @@ from vllm.attention.backends.utils import (
     is_all_cross_attn_metadata_set, is_all_encoder_attn_metadata_set)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.utils import print_warning_once
 
 
 class XFormersBackend(AttentionBackend):
@@ -284,7 +282,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
 def _get_attn_bias(
     attn_metadata: XFormersMetadata,
-    attn_type: AttentionType,
+    attn_type: str,
 ) -> Optional[AttentionBias]:
     '''
     Extract appropriate attention bias from attention metadata
@@ -314,7 +312,7 @@ def _get_attn_bias(
 def _set_attn_bias(
     attn_metadata: XFormersMetadata,
     attn_bias: List[Optional[AttentionBias]],
-    attn_type: AttentionType,
+    attn_type: str,
 ) -> None:
     '''
     Update appropriate attention bias field of attention metadata,
@@ -386,8 +384,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             raise ValueError(
                 "XFormers does not support block-sparse attention.")
         if logits_soft_cap is not None:
-            raise ValueError(
-                "XFormers does not support attention logits soft capping.")
+            print_warning_once("XFormers does not support logits soft cap. "
+                               "Outputs may be slightly off.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -416,7 +414,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         attn_metadata: "XFormersMetadata",
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -617,7 +616,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: XFormersMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Attention for 1D query of multiple prompts. Multiple prompt
         tokens are flattened in to `query` input.

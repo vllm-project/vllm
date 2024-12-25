@@ -1,5 +1,5 @@
 import enum
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.inputs import DecoderOnlyInputs, SingletonInputsAdapter, token_inputs
 from vllm.lora.request import LoRARequest
@@ -8,6 +8,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.utils import ConstantList
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_utils import BlockHashType
 
 
 class Request:
@@ -45,9 +48,7 @@ class Request:
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
         self.num_computed_tokens = 0
 
-        # Raw multimodal data before the mm input mapper (e.g., PIL images).
-        self.mm_data = self.inputs.multi_modal_data
-        self.mm_processor_kwargs = self.inputs.mm_processor_kwargs
+        # Multi-modal input metadata.
         mm_positions = self.inputs.multi_modal_placeholders
         if mm_positions:
             # FIXME(woosuk): Support other modalities.
@@ -56,6 +57,14 @@ class Request:
             self.mm_positions = []
         # Output of the mm input mapper (e.g., image tensors).
         self.mm_inputs: List[MultiModalKwargs] = []
+        if self.inputs.multi_modal_inputs:
+            self.mm_inputs = self.inputs.multi_modal_inputs
+
+        self.mm_hashes: List[str] = self.inputs.multi_modal_hashes
+
+        # Cache the computed kv block hashes of the request to avoid
+        # recomputing.
+        self._kv_block_hashes: List[BlockHashType] = []
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -64,9 +73,11 @@ class Request:
             inputs=token_inputs(
                 prompt_token_ids=request.prompt_token_ids,
                 prompt=request.prompt,
-                multi_modal_data=request.mm_data,
+                multi_modal_data=None,
+                multi_modal_inputs=request.mm_inputs,
+                multi_modal_hashes=request.mm_hashes,
                 multi_modal_placeholders=request.mm_placeholders,
-                mm_processor_kwargs=request.mm_processor_kwargs,
+                mm_processor_kwargs=None,
             ),
             sampling_params=request.sampling_params,
             eos_token_id=request.eos_token_id,
@@ -110,7 +121,7 @@ class Request:
         return RequestStatus.get_finished_reason(self.status)
 
     def has_encoder_inputs(self) -> bool:
-        return len(self.mm_data) > 0
+        return len(self.mm_inputs) > 0
 
     @property
     def num_encoder_inputs(self) -> int:
@@ -120,6 +131,17 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
+
+    @property
+    def kv_block_hashes(self) -> ConstantList["BlockHashType"]:
+        # Prevent directly appending to the kv_block_hashes.
+        return ConstantList(self._kv_block_hashes)
+
+    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
+        self._kv_block_hashes = value
+
+    def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
+        self._kv_block_hashes.append(block_hash)
 
 
 class RequestStatus(enum.IntEnum):

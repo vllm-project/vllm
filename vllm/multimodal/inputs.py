@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.types
 from PIL.Image import Image
-from typing_extensions import TypeAlias
+from typing_extensions import NotRequired, TypeAlias
 
 from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
@@ -15,31 +15,32 @@ _T = TypeVar("_T")
 # yapf: disable
 ImageItem: TypeAlias = Union[Image, np.ndarray, torch.Tensor]
 """
-A :class:`transformers.image_utils.ImageInput` representing a single image,
-which can be passed to a HuggingFace :code:`ImageProcessor`.
+A :class:`transformers.image_utils.ImageInput` representing a single image
+item, which can be passed to a HuggingFace :code:`ImageProcessor`.
 """
 
 VideoItem: TypeAlias = Union[
-    List[Image],
+    list[Image],
     np.ndarray,
     torch.Tensor,
-    List[np.ndarray],
-    List[torch.Tensor],
+    list[np.ndarray],
+    list[torch.Tensor],
 ]
 """
-
-A :class:`transformers.image_utils.VideoInput` representing a single video,
-which can be passed to a HuggingFace :code:`VideoProcessor`.
+A :class:`transformers.image_utils.VideoInput` representing a single video
+item, which can be passed to a HuggingFace :code:`VideoProcessor`.
 """
 
 AudioItem: TypeAlias = Union[
     np.ndarray,
-    List[float],
-    Tuple[np.ndarray, float],  # DEPRECATED: Use mm_processor_kwargs instead
+    list[float],
+    # `(audio, sampling_rate)`: If the audio's sampling rate is different
+    # from that expected by the model, we need to resample it.
+    tuple[np.ndarray, float],
 ]
 """
-Represents a single audio that can be inputted to a HuggingFace
-:code:`AudioProcessor`.
+Represents a single audio
+item, which can be passed to a HuggingFace :code:`AudioProcessor`.
 """
 # yapf: enable
 
@@ -74,7 +75,7 @@ Note:
     This dictionary also accepts modality keys defined outside
     :class:`MultiModalDataBuiltins` as long as a customized plugin
     is registered through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
-    Read more on that :ref:`here <adding_multimodal_plugin>`.
+    Read more on that :ref:`here <adding-multimodal-plugin>`.
 """
 
 
@@ -96,7 +97,8 @@ class PlaceholderRange(TypedDict):
     """The length of the placeholder."""
 
 
-NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
+NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor,
+                      Tuple[torch.Tensor, ...]]
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
@@ -203,20 +205,19 @@ class MultiModalInputsV2(TypedDict):
     """The type of inputs."""
 
     prompt: str
-    """
-    The original, unprocessed prompt text.
-
-    Note:
-        Since prompt text is not required by vLLM internals, we leave this
-        unprocessed to save CPU computation. You can still call
-        :code:`tokenizer.decode(prompt_token_ids)` to get the processed text.
-    """
+    """The processed prompt text."""
 
     prompt_token_ids: List[int]
     """The processed token IDs which includes placeholder tokens."""
 
+    token_type_ids: NotRequired[List[int]]
+    """The token type IDs of the prompt."""
+
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
+
+    mm_hashes: NotRequired[List[str]]
+    """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict
     """
