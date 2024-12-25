@@ -35,6 +35,13 @@ def get_model_architecture(
             and model_config.quantization not in mixtral_supported
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
+    
+    # FIXME(Isotr0py): This is a temporary hack to enable transformers fallback.
+    architectures = ["TransformersModel"]
+
+    model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
+    if model_config.runner_type == "pooling":
+        model_cls = as_embedding_model(model_cls)
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":

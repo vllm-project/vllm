@@ -205,7 +205,6 @@ class ImageSize(NamedTuple):
     width: int
     height: int
 
-
 class MultiModalDataItems(UserDict[str, list[Any]]):
     """
     As :class:`MultiModalDataDict`, but normalized such that each entry
@@ -337,7 +336,6 @@ def iter_token_matches(
             start_idx = end_idx
         else:
             start_idx += 1
-
 
 @dataclass(repr=False)
 class _PromptReplacementMatch(ABC):
@@ -709,6 +707,24 @@ class BaseMultiModalProcessor(ABC):
             processor_data=processor_data,
             mm_processor_kwargs=mm_processor_kwargs,
         )
+        hf_inputs.update(passthrough_data)
+
+        return hf_inputs
+
+        try:
+            hf_inputs = hf_processor(
+                text=prompt,  # type: ignore
+                **processor_data,
+                **mm_processor_kwargs,
+                return_tensors="pt",
+            )
+        except Exception as exc:
+            data = dict(text=prompt, **processor_data)
+
+            raise RuntimeError(
+                f"Failed to apply {type(hf_processor).__name__} "
+                f"on data={data} with kwargs={mm_processor_kwargs}") from exc
+
         hf_inputs.update(passthrough_data)
 
         return hf_inputs
