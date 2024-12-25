@@ -153,7 +153,7 @@ def _sgmv_expand(
     """
     Args:
         inputs (torch.Tensor): input tensor
-        lora_b_weights (List[torch.Tensor]): lora'a weight
+        lora_b_weights (List[torch.Tensor]): lora'b weight
         output_tensor (torch.Tensor): output tensor
         b_seq_start_loc (torch.Tensor): (batch_size,). The cumulative
             sequence lengths of the sequences in the batch, used to index
