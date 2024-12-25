@@ -552,7 +552,7 @@ class InputPreprocessor:
                 prompt,
                 request_id=request_id,
             )
-            if self._can_process_multimodal():
+            if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
                     self._handle_multimodal_enc_dec_inputs(inputs))
