@@ -145,10 +145,9 @@ def _sgmv_shrink(
     scaling: float,
 ) -> None:
     """
-
     Args:
         inputs (torch.Tensor): input tensor
-        lora_a_weights (torch.Tensor): lora'a weight
+        lora_a_weights (List[torch.Tensor]): lora'a weight
         output_tensor (torch.Tensor): output tensor
         b_seq_start_loc (torch.Tensor): (batch_size,). The cumulative
             sequence lengths of the sequences in the batch, used to index

@@ -150,6 +150,30 @@ def _sgmv_expand(
     offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:
+    """
+    Args:
+        inputs (torch.Tensor): input tensor
+        lora_b_weights (List[torch.Tensor]): lora'a weight
+        output_tensor (torch.Tensor): output tensor
+        b_seq_start_loc (torch.Tensor): (batch_size,). The cumulative
+            sequence lengths of the sequences in the batch, used to index
+            into sequence. E.g., if the sequence length is [4, 6], it is
+            [0, 4].
+        seq_len_tensor (torch.Tensor): (batch_size,). Record the sequence
+            length of the sequences in the batch.
+        lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
+            corresponding to each batch. An index of -1 means no lora should be
+            applied.
+        batches (int): batch size
+        max_seq_length (int): The max sequence lengths of the sequences in the 
+            batch.
+        token_nums (int): The token numbers in the batch. Used to verify if the 
+            token numbers in the inputs matches the one in the metadata.
+        offset_start (int, optional): Offset start for output_tensor. 
+            Defaults to 0.
+        add_inputs (bool, optional): Whether to add the input tensor to the 
+            output tensor. Defaults to False.
+    """
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     assert lora_b_weights[0].dtype in [
         torch.float16,

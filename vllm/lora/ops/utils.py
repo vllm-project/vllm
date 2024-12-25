@@ -55,7 +55,7 @@ _LORA_B_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
 def _get_lora_a_ptr(lora_a_weights, device):
     """
     `_LORA_A_PTR_DICT` collects the required information during `profile_run`, 
-    and subsequent usage is through LUT.
+    After this, it remains constant and subsequent usage is through LUT.
     Refer to: 
     https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
     """
@@ -108,7 +108,7 @@ def _get_lora_a_ptr(lora_a_weights, device):
 def _get_lora_b_ptr(lora_weights, offset_start, device):
     """ 
      `_LORA_B_PTR_DICT` collects the required information during `profile_run`, 
-    and subsequent usage is through LUT.
+    After this, it remains constant and subsequent usage is through LUT.
     Refer to: 
     https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
 
