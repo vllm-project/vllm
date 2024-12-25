@@ -676,23 +676,27 @@ class ProcessingCache:
 
     def get(
         self,
+        model_id: str,
         modality: str,
         input_item: object,
         input_kwargs: Mapping[str, object],
     ) -> Optional[Mapping[str, MultiModalFieldItem]]:
         self._maybe_log_cache_stats()
 
-        cache_key = self._hash_kwargs(**{modality: input_item}, **input_kwargs)
+        cache_key = self._hash_kwargs(model_id=model_id,
+                                      **{modality: input_item}, **input_kwargs)
         return self._cache.get(cache_key)
 
     def put(
         self,
+        model_id: str,
         modality: str,
         input_item: object,
         input_kwargs: Mapping[str, object],
         output_kwargs: Mapping[str, MultiModalFieldItem],
     ) -> None:
-        cache_key = self._hash_kwargs(**{modality: input_item}, **input_kwargs)
+        cache_key = self._hash_kwargs(model_id=model_id,
+                                      **{modality: input_item}, **input_kwargs)
         self._cache.put(cache_key, output_kwargs)
 
 
@@ -886,6 +890,7 @@ class BaseMultiModalProcessor(ABC):
         caching the results and reusing cached results.
         """
         cache = self.cache
+        model_id = self.ctx.model_config.model
 
         if cache is None or mm_data_items.has_embedding_inputs():
             return self._apply_hf_processor(
@@ -896,7 +901,7 @@ class BaseMultiModalProcessor(ABC):
 
         mm_maybe_cached_field_items = {
             modality: [
-                cache.get(modality, item, hf_processor_mm_kwargs)
+                cache.get(model_id, modality, item, hf_processor_mm_kwargs)
                 for item in items
             ]
             for modality, items in mm_data_items.items()
@@ -936,6 +941,7 @@ class BaseMultiModalProcessor(ABC):
                     )
 
                     cache.put(
+                        model_id,
                         modality,
                         mm_data_items[modality][idx],
                         hf_processor_mm_kwargs,
