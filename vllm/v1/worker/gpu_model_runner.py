@@ -20,7 +20,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -259,7 +259,11 @@ class GPUModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+    def _prepare_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> FlashAttentionMetadata:
+
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -367,13 +371,13 @@ class GPUModelRunner:
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
-        # TODO: Support prompt logprobs.
-        logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices
+        return attn_metadata
 
     def _prepare_sampling(
         self,
         scheduler_output: "SchedulerOutput",
+        num_input_tokens: int,
+        query_start_loc: torch.Tensor,
     ) -> SamplingMetadata:
         skip_copy = True
         if (scheduler_output.finished_req_ids
@@ -383,7 +387,12 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        sampling_metadata = self.input_batch.make_sampling_metadata(
+            scheduler_output.partial_req_index,
+            num_input_tokens,
+            query_start_loc,
+            skip_copy,
+        )
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -474,7 +483,7 @@ class GPUModelRunner:
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        attn_metadata = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -486,6 +495,15 @@ class GPUModelRunner:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
+
+        sampling_metadata = self._prepare_sampling(
+            scheduler_output, num_input_tokens, attn_metadata.query_start_loc)
+        # Indicate whether one or more requests in the batch require sample
+        # logprobs or prompt logprobs to be computed, respectively
+        do_batch_sample_logprobs = (
+            sampling_metadata.max_num_batch_sample_logprobs > 0)
+        do_batch_prompt_logprobs = (
+            sampling_metadata.max_num_batch_prompt_logprobs > 0)
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -519,14 +537,12 @@ class GPUModelRunner:
                 attn_metadata=None,
                 inputs_embeds=inputs_embeds,
             )
+
         hidden_states = hidden_states[:num_scheduled_tokens]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self._prepare_sampling(scheduler_output)
-        sampler_output = self.model.sample(
-            logits=logits,
+        sampler_output: SamplerOutput = self.model.sample(
+            logits=self.model.compute_logits(hidden_states, None),
             sampling_metadata=sampling_metadata,
         )
 
@@ -553,28 +569,43 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        if sampler_output.logprob_token_ids is None:
-            logprob_token_ids = None
+        # Prepare batch-level sample logprobs in a way that the type-checker
+        # understands
+        if do_batch_sample_logprobs:
+            assert (sampler_output.batch_sample_logprob_token_ids is not None)
+            assert (sampler_output.batch_sample_logprobs is not None)
+            batch_logprob_token_ids_cpu = (
+                sampler_output.batch_sample_logprob_token_ids.cpu().numpy())
+            batch_logprobs_cpu = (
+                sampler_output.batch_sample_logprobs.cpu().numpy())
         else:
-            logprob_token_ids = sampler_output.logprob_token_ids.cpu()
-        if sampler_output.logprobs is None:
-            logprobs = None
-        else:
-            logprobs = sampler_output.logprobs.cpu()
+            batch_logprob_token_ids_cpu = None
+            batch_logprobs_cpu = None
 
-        # num_reqs entries should be non-None
-        assert all(
-            req_id is not None for req_id in
-            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
-        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
+        # Prepare batch-level prompt logprobs in a way that the type-checker
+        # understands
+        if do_batch_prompt_logprobs:
+            assert (sampler_output.batch_prompt_logprob_token_ids is not None)
+            assert (sampler_output.batch_prompt_logprobs is not None)
+            batch_prompt_logprob_token_ids_cpu = (
+                sampler_output.batch_prompt_logprob_token_ids.cpu().numpy())
+            batch_prompt_logprobs_cpu = (
+                sampler_output.batch_prompt_logprobs.cpu().numpy())
+        else:
+            batch_prompt_logprob_token_ids_cpu = None
+            batch_prompt_logprobs_cpu = None
 
         model_runner_output = ModelRunnerOutput(
-            req_ids=req_ids,
+            req_ids=cast(List[str], self.input_batch.req_ids[:num_reqs]),
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
-        )
+            # NOTE: sample and prompt logprob CPU-GPU synchronization happens
+            # here
+            batch_logprob_token_ids_cpu=batch_logprob_token_ids_cpu,
+            batch_logprobs_cpu=batch_logprobs_cpu,
+            batch_prompt_logprob_token_ids_cpu=(
+                batch_prompt_logprob_token_ids_cpu),
+            batch_prompt_logprobs_cpu=(batch_prompt_logprobs_cpu))
         return model_runner_output
 
     def load_model(self) -> None:
