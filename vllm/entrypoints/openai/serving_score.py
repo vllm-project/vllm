@@ -20,32 +20,6 @@ from vllm.utils import make_async, merge_async_iterators
 logger = init_logger(__name__)
 
 
-def request_output_to_score_response(
-        final_res_batch: List[PoolingRequestOutput], request_id: str,
-        created_time: int, model_name: str) -> ScoreResponse:
-    data: List[ScoreResponseData] = []
-    num_prompt_tokens = 0
-    for idx, final_res in enumerate(final_res_batch):
-        classify_res = ScoringRequestOutput.from_base(final_res)
-
-        score_data = ScoreResponseData(index=idx,
-                                       score=classify_res.outputs.score)
-        data.append(score_data)
-
-    usage = UsageInfo(
-        prompt_tokens=num_prompt_tokens,
-        total_tokens=num_prompt_tokens,
-    )
-
-    return ScoreResponse(
-        id=request_id,
-        created=created_time,
-        model=model_name,
-        data=data,
-        usage=usage,
-    )
-
-
 def make_pairs(text_1: Union[List[str], str], text_2: Union[List[str],
                                                             str]) -> List:
     if isinstance(text_1, (str, dict)):
@@ -103,7 +77,7 @@ class OpenAIServingScores(OpenAIServing):
 
         model_name = request.model
         request_id = f"score-{self._base_request_id(raw_request)}"
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
         truncate_prompt_tokens = request.truncate_prompt_tokens
 
         request_prompts = []
@@ -203,8 +177,12 @@ class OpenAIServingScores(OpenAIServing):
             final_res_batch_checked = cast(List[PoolingRequestOutput],
                                            final_res_batch)
 
-            response = request_output_to_score_response(
-                final_res_batch_checked, request_id, created_time, model_name)
+            response = self.request_output_to_score_response(
+                final_res_batch_checked,
+                request_id,
+                created_time,
+                model_name,
+            )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
@@ -212,3 +190,38 @@ class OpenAIServingScores(OpenAIServing):
             return self.create_error_response(str(e))
 
         return response
+
+    def request_output_to_score_response(
+        self,
+        final_res_batch: List[PoolingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+    ) -> ScoreResponse:
+        items: List[ScoreResponseData] = []
+        num_prompt_tokens = 0
+
+        for idx, final_res in enumerate(final_res_batch):
+            classify_res = ScoringRequestOutput.from_base(final_res)
+
+            item = ScoreResponseData(
+                index=idx,
+                score=classify_res.outputs.score,
+            )
+            prompt_token_ids = final_res.prompt_token_ids
+
+            items.append(item)
+            num_prompt_tokens += len(prompt_token_ids)
+
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            total_tokens=num_prompt_tokens,
+        )
+
+        return ScoreResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            data=items,
+            usage=usage,
+        )
