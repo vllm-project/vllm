@@ -10,39 +10,42 @@ from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import PyNcclPipe
 
 
 def test_run(my_rank, pipe):
+    print(f"rank {my_rank} test_run starts....")
     # test run
     x = torch.tensor([1]).to(pipe.device)
     y = torch.tensor([[2., 3., 4., 8.]]).to(pipe.device)
     if my_rank == 0:
         pipe.send_tensor(x)
-        print("sent tensor x")
+        print(f"rank {my_rank} sent tensor x")
         pipe.send_tensor(y)
-        print("sent tensor y")
+        print(f"rank {my_rank} sent tensor y")
         x2 = pipe.recv_tensor()
-        print("received x2 = ", x2)
+        print(f"rank {my_rank} received x2 = ", x2)
         y2 = pipe.recv_tensor()
-        print("received y2 = ", x2)
+        print(f"rank {my_rank} received y2 = ", x2)
 
     else:
         x2 = pipe.recv_tensor()
-        print("received x2 = ", x2)
+        print(f"rank {my_rank} received x2 = ", x2)
         y2 = pipe.recv_tensor()
-        print("received y2 = ", x2)
+        print(f"rank {my_rank} received y2 = ", x2)
         pipe.send_tensor(x)
-        print("sent tensor x")
+        print(f"rank {my_rank} sent tensor x")
         pipe.send_tensor(y)
-        print("sent tensor y")
+        print(f"rank {my_rank} sent tensor y")
 
     assert torch.allclose(x, x2)
     assert torch.allclose(y, y2)
 
+    print(f"rank {my_rank} test_run passed!")
+
 
 def stress_test(my_rank, pipe):
-
-    torch.distributed.barrier()
+    print(f"rank {my_rank} stress_test starts....")
 
     tensors: List[torch.Tensor] = []
 
+    torch.distributed.barrier()
     torch.manual_seed(0)
 
     for i in tqdm(range(500)):
@@ -86,7 +89,6 @@ def stress_test(my_rank, pipe):
 
 
 def latency_test(my_rank, pipe, nelement, ntensor):
-
     latencies = []
 
     torch.distributed.barrier()
@@ -149,6 +151,7 @@ if __name__ == "__main__":
     )
 
     test_run(my_rank, pipe)
+
     stress_test(my_rank, pipe)
 
     # Use this function if you want to test the latency of pipe impl.

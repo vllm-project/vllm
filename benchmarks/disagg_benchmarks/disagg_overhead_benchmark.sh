@@ -10,7 +10,8 @@ set -ex
 
 kill_gpu_processes() {
   # kill all processes on GPU.
-  pkill -f pt_main_thread
+  pgrep pt_main_thread | xargs -r kill -9
+  pgrep python3 | xargs -r kill -9
   sleep 10
 
   # remove vllm config file
@@ -54,7 +55,7 @@ benchmark() {
 
   CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --model $model \
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
@@ -64,7 +65,7 @@ benchmark() {
 
   CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --model $model \
     --port 8200 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
@@ -87,7 +88,7 @@ benchmark() {
           --port 8100 \
           --save-result \
           --result-dir $results_folder \
-          --result-filename disagg_prefill_2xtp4.json \
+          --result-filename disagg_prefill_tp1.json \
           --request-rate "inf"
 
 
@@ -105,7 +106,7 @@ benchmark() {
           --port 8200 \
           --save-result \
           --result-dir $results_folder \
-          --result-filename disagg_prefill_2xtp4.json \
+          --result-filename disagg_prefill_tp1_overhead.json \
           --request-rate "$qps"
   kill_gpu_processes
 
@@ -118,7 +119,7 @@ main() {
   (which jq) || (apt-get -y install jq)
   (which socat) || (apt-get -y install socat)
 
-  pip install quart httpx
+  pip install quart httpx datasets
 
   cd "$(dirname "$0")"
 
