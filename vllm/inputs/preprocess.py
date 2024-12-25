@@ -545,6 +545,11 @@ class InputPreprocessor:
             if inputs["type"] == "multimodal":
                 encoder_inputs, decoder_inputs = (
                     self._handle_multimodal_enc_dec_inputs(inputs))
+            elif self._can_process_multimodal():
+                # Encoder-Decoder Multimodal model with text-only inputs
+                encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
+
+                decoder_inputs = inputs
             else:
                 encoder_inputs = inputs
 
@@ -586,6 +591,11 @@ class InputPreprocessor:
             if inputs["type"] == "multimodal":
                 encoder_inputs, decoder_inputs = (
                     self._handle_multimodal_enc_dec_inputs(inputs))
+            elif self._can_process_multimodal():
+                # Encoder-Decoder Multimodal model with text-only inputs
+                encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
+
+                decoder_inputs = inputs
             else:
                 encoder_inputs = inputs
 
