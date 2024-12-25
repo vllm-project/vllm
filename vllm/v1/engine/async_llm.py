@@ -60,9 +60,13 @@ class AsyncLLM(EngineClient):
         self.client_aborted_requests: List[str] = []
 
         # Processor (converts Inputs --> EngineCoreRequests).
-        self.processor = Processor(vllm_config.model_config,
-                                   vllm_config.lora_config, self.tokenizer,
-                                   input_registry)
+        self.processor = Processor(
+            model_config=vllm_config.model_config,
+            cache_config=vllm_config.cache_config,
+            lora_config=vllm_config.lora_config,
+            tokenizer=self.tokenizer,
+            input_registry=input_registry,
+        )
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
         self.detokenizer = Detokenizer(
@@ -94,7 +98,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-    ) -> "AsyncLLMEngine":
+    ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
         # Create the engine configs.
@@ -382,7 +386,3 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return Exception()  # TODO: implement
-
-
-# Retain V0 name for backwards compatibility.
-AsyncLLMEngine = AsyncLLM

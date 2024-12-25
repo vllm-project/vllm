@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.model_executor.guided_decoding.utils import (
+    convert_lark_to_gbnf, grammar_is_likely_lark,
+    has_lmf_unsupported_json_features, has_xgrammar_unsupported_json_features)
 from vllm.platforms import CpuArchEnum, current_platform
 
 if TYPE_CHECKING:
@@ -15,49 +18,24 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
-    """Check if JSON schema contains features unsupported by xgrammar."""
-
-    def check_object(obj: dict) -> bool:
-        if not isinstance(obj, dict):
-            return False
-
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
-        # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and any(
-                key in obj for key in [
-                    "minimum", "maximum", "exclusiveMinimum",
-                    "exclusiveMaximum", "multipleOf"
-                ]):
-            return True
-
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
-                        return True
-
-        return False
-
-    return check_object(schema)
-
-
 def maybe_backend_fallback(
         guided_params: GuidedDecodingParams) -> GuidedDecodingParams:
     # lm-format-enforce doesn't support grammar, fallback to xgrammar
-    if (guided_params.backend == "lm-format-enforcer"
-            and guided_params.grammar is not None):
-        logger.warning(
-            "lm-format-enforcer does not support grammar guided decoding. "
-            "Falling back to use xgrammar instead.")
-        guided_params.backend = "xgrammar"
+    if guided_params.backend == "lm-format-enforcer":
+        if guided_params.grammar is not None:
+            logger.warning(
+                "lm-format-enforcer does not support grammar guided decoding. "
+                "Falling back to use xgrammar instead.")
+            guided_params.backend = "xgrammar"
+
+        # lm-format-enforcer doesn't support some JSON schema features
+        elif (guided_params.json is not None
+              and has_lmf_unsupported_json_features(guided_params.json)):
+            logger.warning(
+                "lm-format-enforcer does not support advanced JSON schema "
+                "features like patterns or numeric ranges. "
+                "Falling back to use outlines instead.")
+            guided_params.backend = "outlines"
 
     if guided_params.backend == "xgrammar":
         # xgrammar only has x86 wheels for linux, fallback to outlines
@@ -81,6 +59,27 @@ def maybe_backend_fallback(
                 "patterns or numeric ranges. "
                 "Falling back to use outlines instead.")
             guided_params.backend = "outlines"
+
+        # xgrammar only supports GBNF grammars, so we must convert Lark.
+        # We must check if the grammar is likely Lark and if that
+        # grammar is convertible to GBNF
+        elif (guided_params.grammar is not None
+              and grammar_is_likely_lark(guided_params.grammar)):
+            try:
+                convert_lark_to_gbnf(guided_params.grammar)
+            except Exception:
+                logger.warning(
+                    "xgrammar does not support Lark grammars and the "
+                    "grammar failed to convert to GBNF. "
+                    "Falling back to use outlines instead.")
+                guided_params.backend = "outlines"
+
+    if (guided_params.backend == "outlines"
+            and guided_params.json_object is not None):
+        # outlines doesn't support json_object, fallback to xgrammar
+        logger.warning("outlines does not support json_object. "
+                       "Falling back to use xgrammar instead.")
+        guided_params.backend = "xgrammar"
 
     return guided_params
 

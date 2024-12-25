@@ -55,6 +55,11 @@ class OpenAIServingCompletion(OpenAIServing):
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
+        diff_sampling_param = self.model_config.get_diff_sampling_param()
+        if diff_sampling_param:
+            logger.info(
+                "Overwriting default completion sampling param with: %s",
+                diff_sampling_param)
 
     async def create_completion(
         self,
@@ -118,13 +123,17 @@ class OpenAIServingCompletion(OpenAIServing):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
+                # Build default sampling params
+                default_sampling_params = (
+                    self.model_config.get_diff_sampling_param())
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens)
+                        default_max_tokens, default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
                         default_max_tokens,
-                        self.model_config.logits_processor_pattern)
+                        self.model_config.logits_processor_pattern,
+                        default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
 

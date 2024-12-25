@@ -1,13 +1,12 @@
 #!/bin/bash
 
-# Requirement: 8x H100 GPUs.
+# Requirement: 2x GPUs.
 
 
-# Model: neuralmagic/Meta-Llama-3-70B-Instruct-FP8-KV 
-# Query: 2048 input tokens, 11 output tokens, QPS 4, 500 requests
-# Resource: 8x H100
+# Model: meta-llama/Meta-Llama-3.1-8B-Instruct
+# Query: 1024 input tokens, 6 output tokens, QPS 2/4/6/8, 100 requests
+# Resource: 2x GPU
 # Approaches:
-# 1. Chunked prefill: 1 vllm instance with tp=8
 # 2. Chunked prefill: 2 vllm instance with tp=4, equivalent to 1 tp=4 instance with QPS 4
 # 3. Disaggregated prefill: 1 prefilling instance and 1 decoding instance
 # Prefilling instance: max_output_token=1
@@ -114,7 +113,6 @@ benchmark() {
           --request-rate "$qps"
 
   sleep 2
-
 }
 
 
@@ -123,8 +121,9 @@ main() {
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
   (which jq) || (apt-get -y install jq)
   (which socat) || (apt-get -y install socat)
+  (which lsof) || (apt-get -y install lsof)
 
-  pip install quart httpx matplotlib aiohttp
+  pip install quart httpx matplotlib aiohttp datasets
 
   cd "$(dirname "$0")"
 

@@ -1,5 +1,4 @@
 import contextlib
-import functools
 import importlib
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
@@ -34,34 +33,6 @@ else:
         from torch.library import register_fake
     except ImportError:
         from torch.library import impl_abstract as register_fake
-
-
-def hint_on_error(fn):
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-
-        except NotImplementedError as e:
-            msg = (
-                "Error in calling custom op %s: %s\n"
-                "Not implemented or built, mostly likely because the current current device "
-                "does not support this kernel (less likely TORCH_CUDA_ARCH_LIST was set "
-                "incorrectly while building)")
-            logger.error(msg, fn.__name__, e)
-            raise NotImplementedError(msg % (fn.__name__, e)) from e
-        except AttributeError as e:
-            msg = (
-                "Error in calling custom op %s: %s\n"
-                "Possibly you have built or installed an obsolete version of vllm.\n"
-                "Please try a clean build and install of vllm,"
-                "or remove old built files such as vllm/*cpython*.so and build/ ."
-            )
-            logger.error(msg, fn.__name__, e)
-            raise e
-
-    return wrapper
 
 
 # activation ops
@@ -552,6 +523,114 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     return out
 
 
+def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_sparse_scaled_mm_supported(
+        cuda_device_capability)
+
+
+def cutlass_sparse_compress(a: torch.Tensor) \
+    -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compresses a sparse matrix for use with Cutlass sparse operations.
+
+    This function takes a dense tensor and compresses it into two components:
+    non-zero elements and metadata. The compressed representation is compatible
+    with Cutlass sparse kernels.
+
+    Args:
+        a (torch.Tensor): 
+            The input tensor to be compressed. Must have one of the following data types:
+            - `torch.int8`
+            - `torch.float8_e4m3fn`
+            - `torch.bfloat16`
+            - `torch.float16`
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: 
+            A tuple containing:
+            - `a_nzs` (torch.Tensor): A tensor containing non-zero elements of `a`.
+            - `a_meta` (torch.Tensor): A tensor containing metadata for the sparse representation.
+
+    Raises:
+        ValueError: If the compression operation fails.
+
+    Notes:
+        - The `a_meta` tensor has a data type of `torch.uint8`.
+        - Each metadata element encodes the sparsity of 4 non-zero elements (i.e., `elemsPerMetaElem = 4`).
+        - The shape of `a_nzs` is `(m, k // 2)`, where `m` and `k` are the dimensions of the input tensor.
+        - The shape of `a_meta` is `(m, k // 2 // elemsPerMetaElem)`.
+    """
+    assert (a.dtype in [
+        torch.int8, torch.float8_e4m3fn, torch.bfloat16, torch.float16
+    ])
+    assert (a.is_contiguous())
+
+    # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
+    elemsPerMetaElem = 4
+
+    m = a.shape[0]
+    k = a.shape[1]
+    assert (k % 2 == 0)
+    a_nzs = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
+    a_meta = torch.empty((m, k // 2 // elemsPerMetaElem),
+                         dtype=torch.uint8,
+                         device=a.device)
+
+    if not (torch.ops._C.cutlass_sparse_compress_entry(a_nzs, a_meta, a)):
+        raise ValueError
+
+    assert (a_nzs.is_contiguous())
+    assert (a_meta.is_contiguous())
+
+    return a_nzs, a_meta
+
+
+def cutlass_scaled_sparse_mm(
+        a: torch.Tensor,
+        bt_nzs: torch.Tensor,
+        bt_meta: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Performs a scaled sparse matrix multiplication using Cutlass.
+
+    Steps:
+    1. Create a dense matrix `a` of shape (m, k) on the CUDA device:
+    `a = torch.randn((m, k), device='cuda')`.
+
+    2. Create a dense matrix `b` of shape (k, n) on the CUDA device:
+    `b = torch.randn((k, n), device='cuda')`.
+
+    3. Prune matrix `b` to 2:4 sparsity along the specified dimension:
+    `b = prune_to_2_4(b, dim=0)`.
+
+    4. Compress the transposed sparse matrix `b.t()`:
+    `bt_nzs, bt_meta = cutlass_sparse_compress(b.t())`.
+
+    5. Perform sparse matrix multiplication using the compressed matrix,
+    applying scaling factors for `a` and `b`, and the output data type:
+    `out = cutlass_scaled_sparse_mm(a, bt_nzs, bt_meta, scale_a, scale_b, out_dtype)`.
+
+    Returns:
+    - The result of the scaled sparse matrix multiplication.
+    """
+    assert (bt_nzs.shape[0] % 16 == 0 and bt_nzs.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.shape[0] == bt_nzs.shape[0] \
+        and bias.dtype == out_dtype
+
+    m = a.shape[0]
+    n = bt_nzs.shape[0]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_scaled_sparse_mm(out, a, bt_nzs, bt_meta, scale_a,
+                                          scale_b, bias)
+
+    return out
+
+
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
@@ -993,25 +1072,3 @@ def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[int], List[int]]:
 def register_graph_buffers(fa: int, handles: List[List[int]],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
-
-
-# temporary fix for https://github.com/vllm-project/vllm/issues/5456
-# TODO: remove this in v0.6.0
-names_and_values = globals()
-names_and_values_to_update = {}
-# prepare variables to avoid dict size change during iteration
-k, v, arg = None, None, None
-fn_type = type(lambda x: x)
-for k, v in names_and_values.items():
-    # find functions that are defined in this file and have torch.Tensor
-    # in their annotations. `arg == "torch.Tensor"` is used to handle
-    # the case when users use `import __annotations__` to turn type
-    # hints into strings.
-    if isinstance(v, fn_type) \
-        and v.__code__.co_filename == __file__ \
-        and any(arg is torch.Tensor or arg == "torch.Tensor"
-                for arg in v.__annotations__.values()):
-        names_and_values_to_update[k] = hint_on_error(v)
-
-names_and_values.update(names_and_values_to_update)
-del names_and_values_to_update, names_and_values, v, k, fn_type

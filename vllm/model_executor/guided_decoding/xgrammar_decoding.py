@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import torch
 from transformers import PreTrainedTokenizerFast
@@ -14,8 +14,9 @@ try:
 except ImportError:
     pass
 
-from vllm.model_executor.guided_decoding.xgrammar_utils import (
-    convert_lark_to_gbnf, grammar_is_likely_lark)
+from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
+                                                       grammar_is_likely_lark)
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -37,11 +38,21 @@ def get_local_xgrammar_guided_decoding_logits_processor(
     return XGrammarLogitsProcessor(config)
 
 
-class TokenizerData(NamedTuple):
+@dataclass(frozen=True)
+class TokenizerData:
     """Immutable container for cached tokenizer data."""
-    encoded_vocab: list[str]
-    stop_token_ids: list[int] | None
-    backend_str: str
+    encoded_vocab: list[str] = field(default_factory=list)
+    stop_token_ids: list[int] | None = None
+    # These fields are mutually exclusive: `backend_str` is used to create a
+    # TokenizeInfo with `TokenizerInfo.from_huggingface` while `vocab_type` is
+    # used within the constructor of TokenizeInfo
+    backend_str: str | None = None
+    vocab_type: xgr.VocabType | None = None
+
+    def __post_init__(self):
+        # Check for mutual exclusive
+        assert not (self.backend_str and self.vocab_type), \
+            "backend_str and vocab_type are mutual exclusive"
 
 
 class TokenizerDataCache:
@@ -68,18 +79,27 @@ class TokenizerDataCache:
                     "get_vocab method.") from e
 
             stop_token_ids = None
-            backend_str = xgr.VocabType.RAW
+            backend_str = ""
+            vocab_type = xgr.VocabType.RAW
+
+            if stop_token_ids is None and hasattr(
+                    tokenizer,
+                    "eos_token_id") and tokenizer.eos_token_id is not None:
+                stop_token_ids = [tokenizer.eos_token_id]
+
             if isinstance(tokenizer, PreTrainedTokenizerFast):
                 backend_str = tokenizer.backend_tokenizer.to_str()
-                if stop_token_ids is None and hasattr(
-                        tokenizer,
-                        "eos_token_id") and tokenizer.eos_token_id is not None:
-                    stop_token_ids = [tokenizer.eos_token_id]
+                vocab_type = None
+
+            elif isinstance(tokenizer, MistralTokenizer):
+                # REF: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
+                vocab_type = xgr.VocabType.BYTE_FALLBACK
 
             cls._cache[tokenizer_hash] = TokenizerData(
                 encoded_vocab=encoded_vocab,
                 stop_token_ids=stop_token_ids,
-                backend_str=backend_str)
+                backend_str=backend_str,
+                vocab_type=vocab_type)
 
         return cls._cache[tokenizer_hash]
 
@@ -98,11 +118,30 @@ class GrammarCompilerCache:
         cache_key = str(config.tokenizer_hash)
 
         if cache_key not in cls._cache:
-            assert config.encoded_vocab is not None
-            tokenizer_info = xgr.TokenizerInfo._create_from_handle(
-                xgr_core.TokenizerInfo.from_huggingface(
-                    config.encoded_vocab, config.backend_str,
-                    config.vocab_size, config.stop_token_ids))
+            assert config.tokenizer_data is not None
+            assert config.tokenizer_data.encoded_vocab is not None
+
+            config_data = config.tokenizer_data
+
+            # In TokenizerDataCache.get_tokenizer_data, a serializable
+            # tokenizer_data is created and cached. This data is used to build
+            # a tokenizer_info and create an xgrammar compiler.
+            # - If tokenizer_data has backend_str set, use
+            # xgr_core.TokenizerInfo.from_huggingface (a C++ bind).
+            # - Otherwise, use the default constructor with vocab_type.
+            # - xgr_core.TokenizerInfo.from_huggingface !=
+            #   xgr.TokenizerInfo.from_huggingface.
+            if config_data.backend_str:
+                tokenizer_info = xgr.TokenizerInfo._create_from_handle(
+                    xgr_core.TokenizerInfo.from_huggingface(
+                        config_data.encoded_vocab, config_data.backend_str,
+                        config.vocab_size, config_data.stop_token_ids))
+            else:
+                tokenizer_info = xgr.TokenizerInfo(
+                    config_data.encoded_vocab,
+                    config_data.vocab_type,
+                    vocab_size=config.vocab_size,
+                    stop_token_ids=config_data.stop_token_ids)
             cls._cache[cache_key] = xgr.GrammarCompiler(
                 tokenizer_info, max_threads=config.max_threads)
 
@@ -118,10 +157,7 @@ class GrammarConfig:
     grammar_str: str | None = None
     json_object: bool | None = None
     max_threads: int = 8
-    # Only populated if tokenizer_hash not in cache
-    encoded_vocab: list[str] | None = None
-    stop_token_ids: list[int] | None = None
-    backend_str: str | None = None
+    tokenizer_data: TokenizerData | None = None
 
     @classmethod
     def from_guided_params(cls,
@@ -132,9 +168,6 @@ class GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
         tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
-        encoded_vocab = tokenizer_data.encoded_vocab
-        stop_token_ids = tokenizer_data.stop_token_ids
-        backend_str = tokenizer_data.backend_str
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -152,11 +185,9 @@ class GrammarConfig:
 
             return cls(json_str=json_str,
                        vocab_size=model_config.hf_text_config.vocab_size,
-                       encoded_vocab=encoded_vocab,
-                       stop_token_ids=stop_token_ids,
-                       backend_str=backend_str,
                        tokenizer_hash=tokenizer_hash,
-                       max_threads=max_threads)
+                       max_threads=max_threads,
+                       tokenizer_data=tokenizer_data)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -181,19 +212,17 @@ class GrammarConfig:
 
             return cls(grammar_str=grammar_str,
                        vocab_size=model_config.hf_text_config.vocab_size,
-                       encoded_vocab=encoded_vocab,
-                       stop_token_ids=stop_token_ids,
-                       backend_str=backend_str,
                        tokenizer_hash=tokenizer_hash,
-                       max_threads=max_threads)
+                       max_threads=max_threads,
+                       tokenizer_data=tokenizer_data)
         elif guided_params.json_object:
-            return cls(json_object=True,
-                       vocab_size=model_config.hf_text_config.vocab_size,
-                       encoded_vocab=encoded_vocab,
-                       stop_token_ids=stop_token_ids,
-                       backend_str=backend_str,
-                       tokenizer_hash=tokenizer_hash,
-                       max_threads=max_threads)
+            return cls(
+                json_object=True,
+                vocab_size=model_config.hf_text_config.vocab_size,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+            )
         else:
             raise ValueError(
                 "Currently only support JSON and EBNF grammar mode for xgrammar"
@@ -269,10 +298,14 @@ class XGrammarLogitsProcessor:
         # fill_next_token_bitmask so we move it to the device of scores
         device_type = scores.device.type
         if device_type != "cuda":
-            scores = scores.to("cpu")
+            scores = scores.to("cpu").unsqueeze(0)
+
+        # Note: In this method, if the tensors have different dimensions
+        # on CPU device fails, but on GPU it runs without error. Hence the
+        # unsqueeze above for scores, to match the token bitmask shape
         xgr.apply_token_bitmask_inplace(scores,
                                         self.token_bitmask.to(scores.device))
         if device_type != "cuda":
-            scores = scores.to(device_type)
+            scores = scores.to(device_type).squeeze()
 
         return scores

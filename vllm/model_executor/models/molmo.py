@@ -928,7 +928,11 @@ def image_input_mapper_for_molmo(
     data: object,
 ):
     if isinstance(data, list):
+        assert len(data) == 1, "Molmo supports only one image per prompt."
         data = data[0]
+
+    # Remove unused dummy PIL image
+    data.pop('raw_mm_data', None)
     return MultiModalKwargs(data)
 
 
@@ -974,6 +978,7 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     dummy_imgdata = {
         "images": out["images"],
         "image_input_idx": out["image_input_idx"],
+        "raw_mm_data": dummy_image,
     }
     if "image_masks" in out:
         dummy_imgdata["image_masks"] = out["image_masks"]
@@ -1117,6 +1122,34 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_molmo)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
 class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            # vision backbone mapping
+            "image_projector.w1.": "image_projector.gate_proj.",
+            "image_projector.w3.": "image_projector.up_proj.",
+            "image_projector.w2.": "image_projector.down_proj.",
+            # language backbone mapping
+            "att_proj": "self_attn.qkv_proj",
+            "attn_out": "self_attn.o_proj",
+            "q_norm": "self_attn.q_norm",
+            "k_norm": "self_attn.k_norm",
+            "ff_proj": "mlp.gate_up_proj",
+            "ff_out": "mlp.down_proj",
+            "attn_norm": "input_layernorm",
+            "ff_norm": "post_attention_layernorm",
+        },
+        orig_to_new_prefix={
+            # vision backbone mapping
+            "model.vision_backbone.": "vision_backbone.",
+            # language backbone mapping
+            "model.transformer.blocks.": "model.layers.",
+            "model.transformer.ln_f.": "model.norm.",
+            # lm_head is renamed to model.transformer.mlp.down_proj firstly,
+            # we need to run a second renaming for it
+            "model.transformer.mlp.down_proj.": "lm_head.",
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1293,36 +1326,10 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_substr={
-                # vision backbone mapping
-                "image_projector.w1.": "image_projector.gate_proj.",
-                "image_projector.w3.": "image_projector.up_proj.",
-                "image_projector.w2.": "image_projector.down_proj.",
-                # language backbone mapping
-                "att_proj": "self_attn.qkv_proj",
-                "attn_out": "self_attn.o_proj",
-                "q_norm": "self_attn.q_norm",
-                "k_norm": "self_attn.k_norm",
-                "ff_proj": "mlp.gate_up_proj",
-                "ff_out": "mlp.down_proj",
-                "attn_norm": "input_layernorm",
-                "ff_norm": "post_attention_layernorm",
-            },
-            orig_to_new_prefix={
-                # vision backbone mapping
-                "model.vision_backbone.": "vision_backbone.",
-                # language backbone mapping
-                "model.transformer.blocks.": "model.layers.",
-                "model.transformer.ln_f.": "model.norm.",
-                # lm_head is renamed to model.transformer.mlp.down_proj firstly,
-                # we need to run a second renaming for it
-                "model.transformer.mlp.down_proj.": "lm_head.",
-            },
-        )
+
         loader = AutoWeightsLoader(self)
         weights = _get_weights_with_merged_embedding(weights)
-        return loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _get_weights_with_merged_embedding(
