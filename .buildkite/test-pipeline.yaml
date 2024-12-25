@@ -187,6 +187,7 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - examples/
+  - tests/examples/
   commands:
     - pip install tensorizer # for tensorizer test
     - python3 offline_inference.py
@@ -202,13 +203,7 @@ steps:
     - python3 offline_inference_embedding.py
     - python3 offline_inference_scoring.py
     - python3 offline_profile.py --model facebook/opt-125m run_num_steps --num-steps 2
-
-- label: Examples Unit Test
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - tests/examples/
-  - examples/
-  commands:
+    - cd /vllm-workspace/tests
     - pytest -v -s examples
 
 - label: Prefix Caching Test # 9min
