@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
 from .inputs import MultiModalDataDict, PlaceholderRange
+from .video import try_import_video_packages
 
 logger = init_logger(__name__)
 
@@ -328,60 +329,6 @@ def encode_image_base64(
 def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     """Load image from base64 format."""
     return _load_image_from_bytes(base64.b64decode(image))
-
-
-def rescale_image_size(image: Image.Image,
-                       size_factor: float,
-                       transpose: int = -1) -> Image.Image:
-    """Rescale the dimensions of an image by a constant factor."""
-    new_width = int(image.width * size_factor)
-    new_height = int(image.height * size_factor)
-    image = image.resize((new_width, new_height))
-    if transpose >= 0:
-        image = image.transpose(Image.Transpose(transpose))
-    return image
-
-
-def try_import_video_packages() -> Any:
-    try:
-        import cv2
-        import decord
-    except ImportError as exc:
-        raise ImportError(
-            "Please install vllm[video] for video support.") from exc
-    return cv2, decord
-
-
-def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
-    cv2, _ = try_import_video_packages()
-
-    num_frames, _, _, channels = frames.shape
-    new_height, new_width = size
-    resized_frames = np.empty((num_frames, new_height, new_width, channels),
-                              dtype=frames.dtype)
-    for i, frame in enumerate(frames):
-        resized_frame = cv2.resize(frame, (new_width, new_height))
-        resized_frames[i] = resized_frame
-    return resized_frames
-
-
-def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
-    _, height, width, _ = frames.shape
-    new_height = int(height * size_factor)
-    new_width = int(width * size_factor)
-
-    return resize_video(frames, (new_height, new_width))
-
-
-def sample_frames_from_video(frames: npt.NDArray,
-                             num_frames: int) -> npt.NDArray:
-    total_frames = frames.shape[0]
-    if num_frames == -1:
-        return frames
-    else:
-        frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-        sampled_frames = frames[frame_indices, ...]
-        return sampled_frames
 
 
 def encode_video_base64(frames: npt.NDArray):
