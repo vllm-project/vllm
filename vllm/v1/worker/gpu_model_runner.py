@@ -8,8 +8,8 @@ import torch.distributed
 import torch.nn as nn
 
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed.parallel_state import graph_capture
 from vllm.distributed import get_pp_group
+from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -461,11 +461,9 @@ class GPUModelRunner:
         return encoder_outputs
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-        intermediate_tensors = None
-    ) -> ModelRunnerOutput:
+    def execute_model(self,
+                      scheduler_output: "SchedulerOutput",
+                      intermediate_tensors=None) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
         if self.is_multimodal_model:
@@ -519,7 +517,7 @@ class GPUModelRunner:
                 positions=self.positions[:num_input_tokens],
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
-                intermediate_tensors= intermediate_tensors,
+                intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
         if not get_pp_group().is_last_rank:

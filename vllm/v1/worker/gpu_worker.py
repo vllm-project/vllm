@@ -14,6 +14,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -199,8 +200,10 @@ class Worker:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        output = self.model_runner.execute_model(scheduler_output)
+        output = self.model_runner.execute_model(scheduler_output,
+                                                 intermediate_tensors)
         return output if self.rank == 0 else None
 
     def profile(self, is_start: bool = True):

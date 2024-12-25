@@ -456,13 +456,13 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
-            # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
-            #                         -> 1 -> (ExecuteModelReq, IntermediateOutput) -> 5 -> SamplerOutput   # noqa: E501
-            #                         -> 2 -> (ExecuteModelReq, IntermediateOutput) -> 6 -> SamplerOutput   # noqa: E501
-            #                         -> 3 -> (ExecuteModelReq, IntermediateOutput) -> 7 -> SamplerOutput   # noqa: E501
+            # (SchedulerOutput, None) -> 0 -> (SchedulerOutput, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
+            #                         -> 1 -> (SchedulerOutput, IntermediateOutput) -> 5 -> SamplerOutput   # noqa: E501
+            #                         -> 2 -> (SchedulerOutput, IntermediateOutput) -> 6 -> SamplerOutput   # noqa: E501
+            #                         -> 3 -> (SchedulerOutput, IntermediateOutput) -> 7 -> SamplerOutput   # noqa: E501
 
             # All workers in the first TP group will take in the
-            # ExecuteModelRequest as input.
+            # SchedulerOutput as input.
             outputs = [input_data for _ in self.pp_tp_workers[0]]
             for pp_rank, tp_group in enumerate(self.pp_tp_workers):
                 # Each PP worker takes in the output of the previous PP worker,

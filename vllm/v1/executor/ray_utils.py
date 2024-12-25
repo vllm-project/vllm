@@ -1,16 +1,14 @@
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.utils import get_ip
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
-
-if TYPE_CHECKING:
-    from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
 PG_WAIT_TIMEOUT = 60
@@ -55,10 +53,7 @@ try:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-        def execute_model(
-            self,
-            req_or_tuple
-        ) -> ModelRunnerOutput:
+        def execute_model(self, req_or_tuple) -> ModelRunnerOutput:
             self.setup_device_if_necessary()
             assert self.worker is not None, "Worker is not initialized"
 
@@ -66,7 +61,11 @@ try:
                 scheduler_output, intermediate_tensors = req_or_tuple
             else:
                 scheduler_output, intermediate_tensors = req_or_tuple, None
-            output = self.worker.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            output = self.worker.model_runner.execute_model(
+                scheduler_output=scheduler_output,
+                intermediate_tensors=intermediate_tensors)
+            if isinstance(output, IntermediateTensors):
+                output = scheduler_output, output
             return output
 
     ray_import_err = None
