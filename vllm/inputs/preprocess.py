@@ -469,20 +469,30 @@ class InputPreprocessor:
         For encoder/decoder models only:
         Separate Encoder/Decoder inputs from a MultiModalEncDecInputs
         """
-        assert ("encoder_prompt" in inputs
-                and "encoder_prompt_token_ids" in inputs)
-        inputs = cast(MultiModalEncDecInputs, inputs)
-        encoder_inputs = token_inputs(
-            prompt=inputs["encoder_prompt"],
-            prompt_token_ids=inputs["encoder_prompt_token_ids"],
-        )
-        decoder_inputs = MultiModalInputsV2(
-            type="multimodal",
-            prompt=inputs["prompt"],
-            prompt_token_ids=inputs["prompt_token_ids"],
-            mm_kwargs=inputs["mm_kwargs"],
-            mm_placeholders=inputs["mm_placeholders"],
-        )
+        encoder_inputs: SingletonInputs
+        decoder_inputs: SingletonInputs
+        if inputs["type"] == "multimodal":
+            # Multimodal data inputs
+            assert ("encoder_prompt" in inputs
+                    and "encoder_prompt_token_ids" in inputs)
+            inputs = cast(MultiModalEncDecInputs, inputs)
+            encoder_inputs = token_inputs(
+                prompt=inputs["encoder_prompt"],
+                prompt_token_ids=inputs["encoder_prompt_token_ids"],
+            )
+            decoder_inputs = MultiModalInputsV2(
+                type="multimodal",
+                prompt=inputs["prompt"],
+                prompt_token_ids=inputs["prompt_token_ids"],
+                mm_kwargs=inputs["mm_kwargs"],
+                mm_placeholders=inputs["mm_placeholders"],
+            )
+        elif inputs["type"] == "token":
+            # Text-only inputs
+            encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
+            decoder_inputs = inputs
+        else:
+            raise AssertionError("This line should be unreachable.")
         return encoder_inputs, decoder_inputs
 
     def _process_encoder_decoder_prompt(
@@ -542,14 +552,10 @@ class InputPreprocessor:
                 prompt,
                 request_id=request_id,
             )
-            if inputs["type"] == "multimodal":
+            if self._can_process_multimodal():
+                # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
                     self._handle_multimodal_enc_dec_inputs(inputs))
-            elif self._can_process_multimodal():
-                # Encoder-Decoder Multimodal model with text-only inputs
-                encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
-
-                decoder_inputs = inputs
             else:
                 encoder_inputs = inputs
 
@@ -588,14 +594,10 @@ class InputPreprocessor:
                 prompt,
                 request_id=request_id,
             )
-            if inputs["type"] == "multimodal":
+            if self._can_process_multimodal():
+                # Encoder-Decoder Multimodal model
                 encoder_inputs, decoder_inputs = (
                     self._handle_multimodal_enc_dec_inputs(inputs))
-            elif self._can_process_multimodal():
-                # Encoder-Decoder Multimodal model with text-only inputs
-                encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
-
-                decoder_inputs = inputs
             else:
                 encoder_inputs = inputs
 
