@@ -320,17 +320,15 @@ class DeepseekV2Attention(nn.Module):
         return output
 
 
-from vllm.attention.backends.flash_attn import flash_attn_varlen_func, _get_query_key_seq_metadata, AttentionType
-from vllm import _custom_ops as ops
-
-
 class DeepseekV2MLAAttention(nn.Module):
     """
-    Main reference: DeepseekV2 paper, and FlashInfer Implementation https://github.com/flashinfer-ai/flashinfer/pull/551.
+    Main reference: DeepseekV2 paper, and FlashInfer Implementation
+    (https://github.com/flashinfer-ai/flashinfer/pull/551).
 
     Deepseek's MLA attention works the following way:
-    * The key idea is to use a single latent vector to represent the entire KV cache.
-    * The attention should simulate a multi-head attention, while the compute is similar to multi-query attention.
+    * Use a single latent vector to represent the entire KV cache.
+    * The attention "simulates" a multi-head attention, while the compute is
+      similar to multi-query attention.
     * The dataflow is as follows,
 
         * B: batch/sequence length
@@ -339,43 +337,66 @@ class DeepseekV2MLAAttention(nn.Module):
         * Lq: latent dimension for Q
         * Lkv: latent dimension for K/V
         * P: nope dimension, P+R is the actual head_dim in common attention.
-        * R: rope dimension, this slide of the head_dim goes through rotary embeddings.
+        * R: rope dimension, this slide of the head_dim goes through rope.
         * V: V head dim.
 
         # The reconstructed way, as implemented in DeepseekV2Attention:
-        1. The hidden states (B, H) are projected down into q_latent (B, Lq) and kv_latent (B, Lkv+R).
-        2. The kv_latent is split into kv_a (B, Lkv) and k_pe (B, R). q_latent and kv_a are normalized.
-        3. The q_latent and kv_a are then projected up into the multi-head version.
-           q_latent goes from (B, Lq) to (B, N(P+R)) included the rope dimension,
-           which is split into q_nope (B, N, P) and q_pe (B, N, R).
-           kv_a goes from (B, Lkv) to (B, N(P+V)) which has the nope dimensions for K and V,
-           which is split into k_nope (B, N, P) and v (B, N, V).
+        1. The hidden states (B, H) are projected down into q_latent (B, Lq) and
+           kv_latent (B, Lkv+R).
+        2. The kv_latent is split into kv_a (B, Lkv) and k_pe (B, R). q_latent
+           and kv_a are normalized.
+        3. The q_latent and kv_a are then projected up into the multi-head
+           version. q_latent goes from (B, Lq) to (B, N(P+R)) included the rope
+           dimension, which is split into q_nope (B, N, P) and q_pe (B, N, R).
+           kv_a goes from (B, Lkv) to (B, N(P+V)) which has the nope dimensions
+           for K and V, which is split into k_nope (B, N, P) and v (B, N, V).
         3. q_pe, k_pe are then passed through rotary embeddings.
-        4. q (B, N, (P+R)) and k (B, N, (P+R)) matrices are assembled from q_nope, q_pe, k_nope, k_pe.
+        4. q (B, N, (P+R)) and k (B, N, (P+R)) matrices are assembled from
+           q_nope, q_pe, k_nope, k_pe.
         5. Attention is computued with q, k, v.
-        6. The KV cache is updated with the new entries k (B, N, (P+R)) and v (B, N, V), we pad the head dim to 256
-           so that the KV cache has consistent shape and works with a typical cache implementation.
-        7. The attention computation returns (B, N, V), which is projected back to (B, H) using out projection.
+        6. The KV cache is updated with the new entries k (B, N, (P+R)) and v
+           (B, N, V), we pad the head dim to 256 so that the KV cache has
+           consistent shape and works with a typical cache implementation.
+        7. The attention computation returns (B, N, V), which is projected back
+           to (B, H) using out projection.
 
         # The recommended way, as described in the paper:
-        1. The hidden states (B, H) are projected down into q_latent (B, Lq) and kv_latent (B, Lkv+R).
-        2. The kv_latent is split into kv_a (B, Lkv) and k_pe (B, R). q_latent and kv_a are normalized.
-        3. Here's the change, we do not perform up the full up projection for q_latent, and there is no
-           up projection at all for kv_a. This is achieved by the technique of "weight absorption". The paper says
-           "Fortunately, due to the associative law of matrix multiplication, we can absorb WUK into WUQ, and WUV into WO"
-           * The q up projection turns (B, Lq) into (B, N(P+R)), we split it into W_UQ (Lq, N, P) and W_QR (Lq, N, R).
-           * The kv_a up projection turns (B, Lkv) into (B, N(P+V)), we split it into W_UK (Lkv, N, P) and W_UV (Lkv, N, V).
-           * The out projection turns (B, N, V) into (B, H), has shape W_O (V, H)
-           * We can precompute the product of W_UQ and W_UK into W_UQ_UK (Lq, N, Lkv), which is possible due to QK^T operation in attention.
-           * We can precompute the product of W_UV and W_O into W_UV_O (N, Lkv, H), which is possible due to V@O as the "epilogue" of attention
-        4. We still need to compute q_pe (B, N, R) by applying W_QR to q_latent. The rotary embeddingss still need to be applied to q_pe and k_pe.
-        5. By applying W_UQ_UK to q_latent, we have the new q_nope of shape (B, N, Lkv).
-        6. q (B, N, (Lkv+R)), k (B, (Lkv+R)) are assembled from q_nope, q_pe, kv_a, k_pe. v (B, Lkv) is exactly the same vector as kv_a.
-        6. The attention is computed with q, k, v. Note that we just performed a MQA attention with (LKv+R) as our head dim.
-        7. The KV cache is updated using the new entries k (B, N, (Lkv+R)), which included the v and rope values.
-        8. The attention computation returns (B, N, Lkv), which is projected back to (B, H) using W_UV_O.
+        1. The hidden states (B, H) are projected down into q_latent (B, Lq) and
+           kv_latent (B, Lkv+R).
+        2. The kv_latent is split into kv_a (B, Lkv) and k_pe (B, R). q_latent
+           and kv_a are normalized.
+        3. Here's the change, we do not perform up the full up projection for
+           q_latent, and there is no up projection at all for kv_a. This is
+           achieved by the technique of "weight absorption". The paper says
+           "Fortunately, due to the associative law of matrix multiplication,
+           we can absorb WUK into WUQ, and WUV into WO"
+           * The q up projection turns (B, Lq) into (B, N(P+R)), we split it
+             into W_UQ (Lq, N, P) and W_QR (Lq, N, R).
+           * The kv_a up projection turns (B, Lkv) into (B, N(P+V)), we split it
+             into W_UK (Lkv, N, P) and W_UV (Lkv, N, V).
+           * The out projection shape W_O (V, H)turns (B, N, V) into (B, H).
+           * We can precompute the product of W_UQ and W_UK into
+             W_UQ_UK (Lq, N, Lkv), which is possible due to QK^T operation in
+             attention.
+           * We can precompute the product of W_UV and W_O into
+             W_UV_O (N, Lkv, H), which is possible due to V@O as the
+             "epilogue" of attention
+        4. We still need to compute q_pe (B, N, R) by applying W_QR to q_latent.
+           The rotary embeddingss still need to be applied to q_pe and k_pe.
+        5. By applying W_UQ_UK to q_latent, we have the new q_nope of shape
+           (B, N, Lkv).
+        6. q (B, N, (Lkv+R)), k (B, (Lkv+R)) are assembled from q_nope, q_pe,
+           kv_a, k_pe. v (B, Lkv) is exactly the same vector as kv_a.
+        6. The attention is computed with q, k, v. Note that we just performed
+           a MQA attention with (LKv+R) as our head dim.
+        7. The KV cache is updated using the new entries k (B, N, (Lkv+R)),
+           which included the v and rope values.
+        8. The attention computation returns (B, N, Lkv), which is projected
+           back to (B, H) using W_UV_O.
 
-    From @tsu-bin's calculation, we only want to use the absorption technique for decode.
+    From @tsu-bin's calculation, we only want to use the absorption technique
+    for decode. The prefill algorithm should still use the up-projected MHA
+    for less flops and momory usage.
     """
 
     def __init__(
@@ -477,16 +498,6 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        # The prefill attention will compute a multi-headed attention by up-projecting the latents.
-        # TODO(simon): enable this for prefill, and save only the latents.
-        # self.prefill_attn = Attention(num_heads=self.num_local_heads,
-        #                       head_size=256,
-        #                       scale=self.scaling,
-        #                       num_kv_heads=self.num_local_heads,
-        #                       cache_config=cache_config,
-        #                       quant_config=quant_config,
-        #                       prefix=f"{prefix}.prefill_attn")
-        # The decode attention will compute a multi-query attention by directly operating on the latent.
         self.attn = Attention(num_heads=self.num_local_heads,
                               head_size=self.kv_lora_rank,
                               scale=self.scaling,
@@ -524,7 +535,6 @@ class DeepseekV2MLAAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # TODO(simon): support append/chunked prefill by two kernels, or using the decode kernel somehow.
-
         if attn_metadata.prefill_metadata:
             return self.forward_prefill(positions, hidden_states, kv_cache,
                                         attn_metadata)
@@ -579,43 +589,14 @@ class DeepseekV2MLAAttention(nn.Module):
         k[..., :self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim:] = k_pe
 
-        # write the latent and rope to kv cache
-        to_cache_key = kv_a.unsqueeze(1)
-        to_cache_key_rope = torch.nn.functional.pad(
-            k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim], value=0)
-        if kv_cache.numel() > 0:
-            ops.reshape_and_cache_flash(
-                to_cache_key,
-                to_cache_key_rope,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype="auto",  # TODO: remove hard code
-                k_scale=1.0,
-                v_scale=1.0,
-            )
+        # HACK
+        attn_metadata.extras = {
+            "kv_a":
+            kv_a.unsqueeze(1),  # restore the head dim to write to kv cache
+            "k_pe": k_pe,
+        }
 
-        # run the prefill kernels
-        q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim], value=0)
-        k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim], value=0)
-        v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim], value=0)
-
-        prefill_meta = attn_metadata.prefill_metadata
-        q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = _get_query_key_seq_metadata(
-            prefill_meta, True, AttentionType.DECODER)
-        attn_output = flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=q_seq_start_loc,
-            cu_seqlens_k=k_seq_start_loc,
-            max_seqlen_q=q_seq_len,
-            max_seqlen_k=k_seq_len,
-            causal=True,
-        )
-        attn_output = attn_output.view(
-            -1, self.num_local_heads, 256)[..., :self.v_head_dim].reshape(
-                -1, self.num_local_heads * self.v_head_dim)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
         # B(N'V) -> BH
         output, _ = self.o_proj(attn_output)
@@ -628,8 +609,6 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # Let's implement the matrix absorption dataflow.
-        # We will start with applying the projection instead of fusing them.
         B = hidden_states.shape[0]
 
         # Apply UQ and QR.
@@ -648,7 +627,6 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_a, k_pe = latent_cache.split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
-        # print(f"{q.shape=}, {q_nope.shape=}, {q_pe.shape=}, {k_pe.shape=}, {kv_a.shape=}, {latent_cache.shape=}")
         k_pe = k_pe.unsqueeze(1)
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
         # Apply UK, q_nope (B, N, P) @ W_UK (L, N, P) -> (B, N, L)
@@ -663,51 +641,14 @@ class DeepseekV2MLAAttention(nn.Module):
         q[..., self.kv_lora_rank:] = q_pe
         # q = q.view(B, self.num_local_heads * (self.kv_lora_rank + self.qk_rope_head_dim))
 
-        k = kv_a
+        k = kv_a.unsqueeze(1)
         # The padding is only used for kv storage.
         v = torch.nn.functional.pad(
-            k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim],
-            value=0).squeeze(1)
+            k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim], value=0)
         assert k.numel() == v.numel(), f"{k.numel()=} != {v.numel()=}"
 
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
-        # # debug: i just want to manually verify MLA is doing the right thing
-        # # let's get all the previous kv cache and copy them here, run the MLA manually
-        # paged_kv_indptr = attn_metadata.decode_metadata.paged_kv_indptr
-        # paged_kv_indices = attn_metadata.decode_metadata.paged_kv_indices
-        # paged_kv_last_page_len = attn_metadata.decode_metadata.paged_kv_last_page_len
-
-        # # debug: we always have batch size 1 and one page
-        # assert paged_kv_indptr.cpu().tolist() == [
-        #     0, 1
-        # ], f"{paged_kv_indptr.cpu().tolist()=}"
-        # paged_idx = paged_kv_indices[0]
-        # full_latent_cache = kv_cache[paged_idx, 0]
-        # full_rope_cache = kv_cache[paged_idx, 1]
-        # # let's write k and v into the full cache at paged_kv_last_page_len-1
-        # full_latent_cache[paged_kv_last_page_len - 1, :, :] = k
-        # full_rope_cache[paged_kv_last_page_len - 1, :, :] = v
-        # full_latent_cache = full_latent_cache[:paged_kv_last_page_len, :, :]
-        # full_rope_cache = full_rope_cache[:paged_kv_last_page_len, :, :self.
-        #                                   qk_rope_head_dim]
-        # full_kv_cache = torch.cat([full_latent_cache, full_rope_cache], dim=-1)
-
-        # # now let's run the MLA manually
-        # q_B_N_LR = q
-        # k_S_1_LR = full_kv_cache
-        # v_S_1_L = full_latent_cache
-        # import math
-        # scale = 1.0 / math.sqrt(self.kv_lora_rank + self.qk_rope_head_dim)
-        # attn_scores = torch.einsum("bnl,snl->nbs", q_B_N_LR, k_S_1_LR) * scale
-        # attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
-        # attn_output_ref = torch.einsum("nbs,snl->bnl", attn_probs, v_S_1_L)
-
-        # # assert torch.allclose(attn_output.sum(), attn_output_ref.sum()), f"{attn_output.sum()=}\n{attn_output_ref.sum()=}"
-
-        assert attn_output.shape == (
-            B, self.num_local_heads, self.kv_lora_rank
-        ), f"{attn_output.shape=}!={B=}, {self.num_local_heads=}, {self.kv_lora_rank=}"
         # idk why but the attn_output is fp32
         attn_output = attn_output.to(q.dtype)
         # Apply UV, (B, N, L) @ W_UV (L, N, V) -> (B, N, V)
