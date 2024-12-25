@@ -114,7 +114,7 @@ def sample_frames_from_video(frames: npt.NDArray,
     total_frames = frames.shape[0]
     if num_frames == -1:
         return frames
-    else:
-        frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-        sampled_frames = frames[frame_indices, ...]
-        return sampled_frames
+
+    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+    sampled_frames = frames[frame_indices, ...]
+    return sampled_frames
