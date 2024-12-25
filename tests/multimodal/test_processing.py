@@ -508,8 +508,7 @@ def _rand_video(
     min_wh: int,
     max_wh: int,
 ):
-    # Temporary fix. Qwen2-VL video processor fails on video of shape
-    # (b, 199, 178, 3) where b in (3, 5, 7)
+    # Temporary workaround for https://github.com/huggingface/transformers/issues/35412
     num_frames = rng.randint(min_frames, max_frames)
     num_frames = (num_frames // 2) * 2
 
