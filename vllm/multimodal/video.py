@@ -78,7 +78,7 @@ class VideoPlugin(ImagePlugin):
         return 4096
 
 
-def try_import_video_packages() -> Any:
+def try_import_video_packages() -> tuple[Any, Any]:
     try:
         import cv2
         import decord

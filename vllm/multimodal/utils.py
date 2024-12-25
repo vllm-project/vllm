@@ -2,7 +2,7 @@ import base64
 import os
 from functools import lru_cache
 from io import BytesIO
-from typing import Any, List, Optional, Tuple, TypeVar, Union
+from typing import List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -14,6 +14,7 @@ from vllm.connections import global_http_connection
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
+from .audio import try_import_audio_packages
 from .inputs import MultiModalDataDict, PlaceholderRange
 from .video import try_import_video_packages
 
@@ -203,16 +204,6 @@ async def async_fetch_video(video_url: str,
         raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
                          "with either 'data:video' or 'http'.")
     return video
-
-
-def try_import_audio_packages() -> Tuple[Any, Any]:
-    try:
-        import librosa
-        import soundfile
-    except ImportError as exc:
-        raise ImportError(
-            "Please install vllm[audio] for audio support.") from exc
-    return librosa, soundfile
 
 
 def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
