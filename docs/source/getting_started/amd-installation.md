@@ -22,7 +22,7 @@ Installation options:
 
 You can build and install vLLM from source.
 
-First, build a docker image from [Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm) and launch a docker container from the image.
+First, build a docker image from <gh-file:Dockerfile.rocm> and launch a docker container from the image.
 It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
 ```console
@@ -33,7 +33,7 @@ It is important that the user kicks off the docker build using buildkit. Either 
 }
 ```
 
-[Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm) uses ROCm 6.2 by default, but also supports ROCm 5.7, 6.0 and 6.1 in older vLLM branches.
+<gh-file:Dockerfile.rocm> uses ROCm 6.2 by default, but also supports ROCm 5.7, 6.0 and 6.1 in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
 - `BASE_IMAGE`: specifies the base image used when running `docker build`, specifically the PyTorch on ROCm base image.

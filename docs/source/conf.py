@@ -74,6 +74,35 @@ html_theme_options = {
 html_static_path = ["_static"]
 html_js_files = ["custom.js"]
 
+myst_url_schemes = {
+    'http': None,
+    'https': None,
+    'mailto': None,
+    'ftp': None,
+    "gh-issue": {
+        "url":
+        "https://github.com/vllm-project/vllm/issues/{{path}}#{{fragment}}",
+        "title": "Issue #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-pr": {
+        "url":
+        "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
+        "title": "Pull Request #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-dir": {
+        "url": "https://github.com/vllm-project/vllm/tree/main/{{path}}",
+        "title": "{{path}}",
+        "classes": ["github"],
+    },
+    "gh-file": {
+        "url": "https://github.com/vllm-project/vllm/blob/main/{{path}}",
+        "title": "{{path}}",
+        "classes": ["github"],
+    },
+}
+
 # see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
 READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
 if READTHEDOCS_VERSION_TYPE == "tag":

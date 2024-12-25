@@ -65,8 +65,7 @@ and all chat requests will error.
 vllm serve <model> --chat-template ./path-to-chat-template.jinja
 ```
 
-vLLM community provides a set of chat templates for popular models. You can find them in the examples
-directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
+vLLM community provides a set of chat templates for popular models. You can find them under the <gh-dir:examples> directory.
 
 With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
 both a `type` and a `text` field. An example is provided below:
@@ -184,9 +183,7 @@ The order of priorities is `command line > config file values > defaults`.
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-#### Code example
-
-See [examples/openai_completion_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py).
+Code example: <gh-file:examples/openai_completion_client.py>
 
 #### Extra parameters
 
@@ -217,9 +214,7 @@ We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 see our [Multimodal Inputs](../usage/multimodal_inputs.md) guide for more information.
 - *Note: `image_url.detail` parameter is not supported.*
 
-#### Code example
-
-See [examples/openai_chat_completion_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client.py).
+Code example: <gh-file:examples/openai_chat_completion_client.py>
 
 #### Extra parameters
 
@@ -252,9 +247,7 @@ which will be treated as a single prompt to the model.
 This enables multi-modal inputs to be passed to embedding models, see [this page](#multimodal-inputs) for details.
 ```
 
-#### Code example
-
-See [examples/openai_embedding_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_embedding_client.py).
+Code example: <gh-file:examples/openai_embedding_client.py>
 
 #### Extra parameters
 
@@ -298,9 +291,7 @@ Our Pooling API encodes input prompts using a [pooling model](../models/pooling_
 
 The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-#### Code example
-
-See [examples/openai_pooling_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_pooling_client.py).
+Code example: <gh-file:examples/openai_pooling_client.py>
 
 (score-api)=
 ### Score API
@@ -310,9 +301,7 @@ Usually, the score for a sentence pair refers to the similarity between two sent
 
 You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
-#### Code example
-
-See [examples/openai_cross_encoder_score.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_cross_encoder_score.py).
+Code example: <gh-file:examples/openai_cross_encoder_score.py>
 
 #### Single inference
 

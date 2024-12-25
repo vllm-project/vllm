@@ -4,7 +4,7 @@ vLLM collects anonymous usage data by default to help the engineering team bette
 
 ## What data is collected?
 
-You can see the up to date list of data collected by vLLM in the [usage_lib.py](https://github.com/vllm-project/vllm/blob/main/vllm/usage/usage_lib.py).
+The list of data collected by the latest version of vLLM can be found here: <gh-file:vllm/usage/usage_lib.py>
 
 Here is an example as of v0.4.0:
 

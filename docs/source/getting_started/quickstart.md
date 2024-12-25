@@ -29,7 +29,7 @@ Please refer to the {ref}`installation documentation <installation>` for more de
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). The example script for this section can be found [here](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py).
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference.py>
 
 The first line of this example imports the classes {class}`~vllm.LLM` and {class}`~vllm.SamplingParams`:
 
@@ -87,7 +87,8 @@ $ vllm serve Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 ```{note}
-By default, the server uses a predefined chat template stored in the tokenizer. You can learn about overriding it [here](https://github.com/vllm-project/vllm/blob/main/docs/source/serving/openai_compatible_server.md#chat-template).
+By default, the server uses a predefined chat template stored in the tokenizer.
+You can learn about overriding it [here](#chat-template).
 ```
 
 This server can be queried in the same format as OpenAI API. For example, to list the models:
@@ -130,7 +131,7 @@ completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
 print("Completion result:", completion)
 ```
 
-A more detailed client example can be found [here](https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py).
+A more detailed client example can be found here: <gh-file:examples/openai_completion_client.py>
 
 ### OpenAI Chat Completions API with vLLM
 

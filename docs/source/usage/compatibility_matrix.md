@@ -82,7 +82,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
    * - [LoRA](#lora-adapter)
-     - [✗](https://github.com/vllm-project/vllm/pull/9057)
+     - [✗](gh-pr:9057)
      - ✅
      -
      -
@@ -168,10 +168,10 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
    * - <abbr title="Encoder-Decoder Models">enc-dec</abbr>
      - ✗
-     - [✗](https://github.com/vllm-project/vllm/issues/7366)
+     - [✗](gh-issue:7366)
      - ✗
      - ✗
-     - [✗](https://github.com/vllm-project/vllm/issues/7366)
+     - [✗](gh-issue:7366)
      - ✅
      - ✅
      -
@@ -205,7 +205,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](https://github.com/vllm-project/vllm/pull/8199)
+     - [✗](gh-pr:8199)
      - ✅
      - ✗
      - ✅
@@ -244,7 +244,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✗
      - ✗
      - ✅
-     - [✗](https://github.com/vllm-project/vllm/issues/8198)
+     - [✗](gh-issue:8198)
      - ✅
      -
      -
@@ -253,8 +253,8 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
    * - <abbr title="Multimodal Inputs">mm</abbr>
      - ✅
-     -  [✗](https://github.com/vllm-project/vllm/pull/8348)
-     -  [✗](https://github.com/vllm-project/vllm/pull/7199)
+     -  [✗](gh-pr:8348)
+     -  [✗](gh-pr:7199)
      - ?
      - ?
      - ✅
@@ -273,14 +273,14 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](https://github.com/vllm-project/vllm/issues/6137)
+     - [✗](gh-issue:6137)
      - ✅
      - ✗
      - ✅
      - ✅
      - ✅
      - ?
-     - [✗](https://github.com/vllm-project/vllm/issues/7968)
+     - [✗](gh-issue:7968)
      - ✅
      -
      -
@@ -290,14 +290,14 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](https://github.com/vllm-project/vllm/issues/6137)
+     - [✗](gh-issue:6137)
      - ✅
      - ✗
      - ✅
      - ✅
      - ✅
      - ?
-     - [✗](https://github.com/vllm-project/vllm/issues/7968>)
+     - [✗](gh-issue:7968>)
      - ?
      - ✅
      -
@@ -314,7 +314,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](https://github.com/vllm-project/vllm/issues/9893)
+     - [✗](gh-issue:9893)
      - ?
      - ✅
      - ✅
@@ -338,7 +338,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - CPU
      - AMD
    * - [CP](#chunked-prefill)
-     - [✗](https://github.com/vllm-project/vllm/issues/2729)
+     - [✗](gh-issue:2729)
      - ✅
      - ✅
      - ✅
@@ -346,7 +346,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
    * - [APC](#apc)
-     - [✗](https://github.com/vllm-project/vllm/issues/3687)
+     - [✗](gh-issue:3687)
      - ✅
      - ✅
      - ✅
@@ -359,7 +359,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](https://github.com/vllm-project/vllm/pull/4830)
+     - [✗](gh-pr:4830)
      - ✅
    * - <abbr title="Prompt Adapter">prmpt adptr</abbr>
      - ✅
@@ -367,7 +367,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](https://github.com/vllm-project/vllm/issues/8475)
+     - [✗](gh-issue:8475)
      - ✅
    * - [SD](#spec_decode)
      - ✅
@@ -439,7 +439,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](https://github.com/vllm-project/vllm/issues/8477)
+     - [✗](gh-issue:8477)
      - ✅
    * - best-of
      - ✅

@@ -154,8 +154,7 @@ For more information about using TPUs with GKE, see
 
 ## Build a docker image with {code}`Dockerfile.tpu`
 
-You can use [Dockerfile.tpu](https://github.com/vllm-project/vllm/blob/main/Dockerfile.tpu)
-to build a Docker image with TPU support.
+You can use <gh-file:Dockerfile.tpu> to build a Docker image with TPU support.
 
 ```console
 $ docker build -f Dockerfile.tpu -t vllm-tpu .

@@ -36,11 +36,10 @@ def generate_examples():
 
     # Generate the example docs for each example script
     for script_path, doc_path in zip(script_paths, doc_paths):
-        script_url = f"https://github.com/vllm-project/vllm/blob/main/examples/{script_path.name}"
         # Make script_path relative to doc_path and call it include_path
         include_path = '../../../..' / script_path.relative_to(root_dir)
         content = (f"{generate_title(doc_path.stem)}\n\n"
-                   f"Source: <{script_url}>.\n\n"
+                   f"Source: <gh-file:examples/{script_path.name}>.\n\n"
                    f"```{{literalinclude}} {include_path}\n"
                    ":language: python\n"
                    ":linenos:\n```")

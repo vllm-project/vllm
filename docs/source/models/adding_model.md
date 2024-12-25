@@ -31,8 +31,8 @@ If you don't want to fork the repository and modify vLLM's codebase, please refe
 
 ## 1. Bring your model code
 
-Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the [vllm/model_executor/models](https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models) directory.
-For instance, vLLM's [OPT model](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/opt.py) was adapted from the HuggingFace's [modeling_opt.py](https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py) file.
+Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the <gh-dir:vllm/model_executor/models> directory.
+For instance, vLLM's [OPT model](gh-file:vllm/model_executor/models/opt.py) was adapted from the HuggingFace's [modeling_opt.py](https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py) file.
 
 ```{warning}
 When copying the model code, make sure to review and adhere to the code's copyright and licensing terms.
@@ -99,7 +99,7 @@ Currently, vLLM supports the basic multi-head attention mechanism and its varian
 If your model employs a different attention mechanism, you will need to implement a new attention layer in vLLM.
 ```
 
-For reference, check out the [LLAMA model](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py). vLLM already supports a large number of models. It is recommended to find a model similar to yours and adapt it to your model's architecture. Check out the [vLLM models](https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models) directory for more examples.
+For reference, check out our [Llama implementation](gh-file:vllm/model_executor/models/llama.py). vLLM already supports a large number of models. It is recommended to find a model similar to yours and adapt it to your model's architecture. Check out <gh-dir:vllm/model_executor/models> for more examples.
 
 ## 3. (Optional) Implement tensor parallelism and quantization support
 
@@ -123,7 +123,7 @@ This method should load the weights from the HuggingFace's checkpoint file and a
 
 ## 5. Register your model
 
-Finally, register your {code}`*ForCausalLM` class to the {code}`_VLLM_MODELS` in [vllm/model_executor/models/registry.py](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/registry.py).
+Finally, register your {code}`*ForCausalLM` class to the {code}`_VLLM_MODELS` in <gh-file:vllm/model_executor/models/registry.py>.
 
 ## 6. Out-of-Tree Model Integration
 

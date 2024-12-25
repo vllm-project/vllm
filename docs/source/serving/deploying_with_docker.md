@@ -25,7 +25,7 @@ memory to share data between processes under the hood, particularly for tensor p
 
 ## Building vLLM's Docker Image from Source
 
-You can build and run vLLM from source via the provided [Dockerfile](https://github.com/vllm-project/vllm/blob/main/Dockerfile). To build vLLM:
+You can build and run vLLM from source via the provided <gh-file:Dockerfile>. To build vLLM:
 
 ```console
 $ # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
