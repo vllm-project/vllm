@@ -83,6 +83,5 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
 
     # Append a block back and check again
     queue.append(block_to_remove)
-    assert queue.get_all_free_blocks() == blocks[1:2] + blocks[3:] + [
-        block_to_remove
-    ]
+    assert queue.get_all_free_blocks() == \
+        blocks[1:2] + blocks[3:] + [block_to_remove]
