@@ -373,6 +373,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             "k_proj",
             "v_proj",
         ],
+        "in_proj": ["in_proj"],
     }
 
     # LoRA specific attributes
@@ -580,38 +581,11 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     if is_pp_missing_parameter(name, self):
                         continue
 
-                    if "in_proj" in name:
-                        #  To support LoRA, in_proj weight needs to be split to
-                        #  two separate tensors, and here we load it manually
-                        #  manually splits in_proj_lin and in_proj_gate
-                        name_lin = name.replace("in_proj", "in_proj_lin")
-                        name_gate = name.replace("in_proj", "in_proj_gate")
-
-                        #   need to split the loaded weight of in_proj
-                        param = params_dict[name_lin]
-                        weight_loader = getattr(param, "weight_loader",
-                                                default_weight_loader)
-
-                        weight_loader(param,
-                                      loaded_weight[:loaded_weight.shape[0] //
-                                                    2, :])  # the lin split
-
-                        loaded_params.add(name_lin)
-                        param = params_dict[name_gate]
-                        weight_loader = getattr(param, "weight_loader",
-                                                default_weight_loader)
-
-                        weight_loader(param,
-                                      loaded_weight[loaded_weight.shape[0] //
-                                                    2:, :])  # the lin split
-                        loaded_params.add(name_gate)
-                    else:
-                        param = params_dict[name]
-                        weight_loader = getattr(param, "weight_loader",
-                                                default_weight_loader)
-                        weight_loader(param, loaded_weight)
-            if "in_proj" not in name:
-                loaded_params.add(name)
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+            loaded_params.add(name)
         return loaded_params
 
 

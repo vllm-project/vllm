@@ -30,7 +30,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
     return generated_texts
 
 
-@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("tp_size", [4])
 def test_jamba_lora(jamba_lora_files, tp_size):
     """Original test, the LoRA model has the common target modules, not all"""
     if torch.cuda.device_count() < tp_size:
@@ -48,7 +48,7 @@ def test_jamba_lora(jamba_lora_files, tp_size):
     )
 
     expected_jamba_output = [
-        """Once upon a time, in a lush green meadow, there lived a sheep named Clara and a goat named Billy. Clara was a gentle and kind-hearted sheep, always ready to help others""",  # noqa: E501
+        """Once upon a time, in a lush green meadow, there lived a sheep named Clara and a goat named Billy. Clara was a gentle creature, always nibbling on the soft grass and humming"""  # noqa: E501
     ]
     assert do_sample(llm, jamba_lora_files, lora_id=1,
                      prompts=prompts) == expected_jamba_output

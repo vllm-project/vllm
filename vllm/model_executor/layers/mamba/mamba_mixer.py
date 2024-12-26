@@ -8,6 +8,7 @@ from vllm.distributed.parallel_state import (
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
@@ -61,12 +62,9 @@ class MambaMixer(CustomOp):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        self.in_proj_lin = ColumnParallelLinear(hidden_size,
-                                                intermediate_size,
-                                                bias=use_bias)
-        self.in_proj_gate = ColumnParallelLinear(hidden_size,
-                                                 intermediate_size,
-                                                 bias=use_bias)
+        self.in_proj = MergedColumnParallelLinear(hidden_size,
+                                                  [intermediate_size] * 2,
+                                                  bias=use_bias)
 
         # selective projection used to make dt, B and C input dependent
         self.x_proj = RowParallelLinear(
@@ -139,8 +137,8 @@ class MambaMixer(CustomOp):
                      mamba_cache_params: MambaCacheParams):
 
         # 1. Gated MLP's linear projection
-        gate = self.in_proj_gate(hidden_states)[0].transpose(-2, -1)
-        hidden_states = self.in_proj_lin(hidden_states)[0].transpose(-2, -1)
+        projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
+        hidden_states, gate = projected_states.chunk(2, dim=-2)
 
         # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
