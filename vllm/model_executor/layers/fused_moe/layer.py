@@ -155,7 +155,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
 
-    This layer contains both MergedColumnParallel weights (gate_up_proj / 
+    This layer contains both MergedColumnParallel weights (gate_up_proj /
     w13) and RowParallelLinear weights (down_proj/ w2).
 
     Note: Mixtral uses w1, w2, and w3 for gate, up, and down_proj. We
@@ -189,6 +189,7 @@ class FusedMoE(torch.nn.Module):
         tp_size: Optional[int] = None,
         prefix: str = "",
         custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
     ):
         super().__init__()
 
@@ -208,6 +209,10 @@ class FusedMoE(torch.nn.Module):
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
+        self.scoring_func = scoring_func
+
+        if self.scoring_func != "softmax" and not self.use_grouped_topk:
+            raise ValueError("Only softmax scoring function is supported for non-grouped topk.")
 
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
@@ -441,7 +446,8 @@ class FusedMoE(torch.nn.Module):
                        renormalize: bool,
                        topk_group: Optional[int] = None,
                        num_expert_group: Optional[int] = None,
-                       custom_routing_function: Optional[Callable] = None):
+                       custom_routing_function: Optional[Callable] = None,
+                       scoring_func: str = "softmax"):
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
 
@@ -455,7 +461,8 @@ class FusedMoE(torch.nn.Module):
                 topk=top_k,
                 renormalize=renormalize,
                 num_expert_group=num_expert_group,
-                topk_group=topk_group)
+                topk_group=topk_group,
+                scoring_func=scoring_func)
         elif custom_routing_function is None:
             topk_weights, topk_ids = fused_topk(hidden_states=hidden_states,
                                                 gating_output=router_logits,
