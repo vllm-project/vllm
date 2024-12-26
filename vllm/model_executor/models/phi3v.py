@@ -32,12 +32,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputsV2, MultiModalKwargs,
-                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalDataItems,
+                                    MultiModalFieldConfig, MultiModalInputsV2,
+                                    MultiModalKwargs, NestedTensors,
+                                    PlaceholderRange)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement,
+                                        ProcessorInputs, PromptReplacement,
                                         _BoundPromptReplacement,
                                         _PlaceholderInfo)
 from vllm.sequence import IntermediateTensors

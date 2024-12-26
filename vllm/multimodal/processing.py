@@ -1,7 +1,6 @@
 import pickle
 import re
 from abc import ABC, abstractmethod
-from collections import UserDict
 from collections.abc import Callable, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -12,18 +11,15 @@ import torch
 from blake3 import blake3
 from PIL.Image import Image
 from transformers import BatchFeature, ProcessorMixin
-from typing_extensions import assert_never
 
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby, is_list_of
 
-from .audio import resample_audio
-from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
+from .inputs import (MultiModalDataDict, MultiModalDataItems,
                      MultiModalFieldConfig, MultiModalFieldItem,
-                     MultiModalInputsV2, MultiModalKwargs, PlaceholderRange,
-                     VideoItem)
+                     MultiModalInputsV2, MultiModalKwargs, PlaceholderRange)
 
 logger = init_logger(__name__)
 
@@ -202,120 +198,6 @@ class _BoundPromptReplacement:
             self._replacement_cache[cache_key] = bound_replacement
 
         return bound_replacement
-
-
-class ImageSize(NamedTuple):
-    width: int
-    height: int
-
-
-class MultiModalDataItems(UserDict[str, list[Any]]):
-    """
-    As :class:`MultiModalDataDict`, but normalized such that each entry
-    corresponds to a list.
-    """
-
-    @staticmethod
-    def from_dict(data: MultiModalDataDict) -> "MultiModalDataItems":
-        """
-        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`.
-        """
-        multi_data = MultiModalDataItems()
-
-        for k, v in data.items():
-            # TODO: Make a separate modality for embedding inputs
-            # to avoid confusion
-            # yapf: disable
-            if k == "video":
-                # Special case since even a single item can be a list
-                multi_data[k] = (  # type: ignore[index]
-                    v if (
-                        isinstance(v, torch.Tensor)
-                        or is_list_of(v, list)
-                        or isinstance(v[0], (np.ndarray, torch.Tensor))
-                           and v[0].ndim == 4
-                    ) else [v]
-                )
-            elif k in ("image", "audio"):
-                multi_data[k] = (  # type: ignore[index]
-                    v if isinstance(v, (torch.Tensor, list)) else [v]
-                )
-            else:
-                multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
-            # yapf: enable
-
-        return multi_data
-
-    # NOTE: When a field (e.g. `images`) doesn't exist, directly appending to
-    # `self.images` doesn't update this dictionary, which may be confusing
-    # We annotate the getter methods as `Sequence` to prevent others from
-    # trying to update the list in this way
-    @property
-    def images(self) -> Sequence[ImageItem]:
-        return self.get("image", [])
-
-    @property
-    def videos(self) -> Sequence[VideoItem]:
-        return self.get("video", [])
-
-    @property
-    def audios(self) -> Sequence[AudioItem]:
-        return self.get("audio", [])
-
-    def get_item_counts(self) -> Mapping[str, int]:
-        return {m: len(items) for m, items in self.items()}
-
-    def has_embedding_inputs(self) -> bool:
-        return any(
-            any(isinstance(item, torch.Tensor) for item in items)
-            for items in self.values())
-
-    def get_image_size(self, item_idx: int) -> ImageSize:
-        image = self.images[item_idx]
-
-        if isinstance(image, Image):
-            return ImageSize(*image.size)
-        if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
-            return ImageSize(w, h)
-
-        assert_never(image)
-
-    def get_audio_with_sr(
-        self,
-        item_idx: int,
-        *,
-        default_sr: float,
-    ) -> tuple[np.ndarray, float]:
-        audio = self.audios[item_idx]
-
-        if isinstance(audio, tuple):
-            return audio
-        if isinstance(audio, list):
-            return np.array(audio), default_sr
-        if isinstance(audio, np.ndarray):
-            return audio, default_sr
-
-        assert_never(audio)
-
-    def resample_audios(self, new_sr: float, *, drop_sr: bool = True) -> None:
-        """
-        If :code:`drop_sr=True`, the audio items in this dictionary are updated
-        to be NumPy arrays which implicitly means that their sampling rate is
-        the same as the model's expected sampling rate; otherwise, they remain
-        as :code:`(audio, new_sr)` tuples.
-        """
-        if not self.audios:
-            return
-
-        new_audios = []
-        for item_idx in range(len(self.audios)):
-            audio, sr = self.get_audio_with_sr(item_idx, default_sr=new_sr)
-            audio = resample_audio(audio, orig_sr=sr, target_sr=new_sr)
-
-            new_audios.append(audio if drop_sr else (audio, new_sr))
-
-        self["audio"] = new_audios
 
 
 class _TokenMatch(NamedTuple):
