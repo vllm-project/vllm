@@ -136,12 +136,9 @@ class InputProcessingContext(InputContext):
         self,
         hf_processor: ProcessorMixin,
         data: Mapping[str, object],
-        kwargs: Optional[Mapping[str, object]] = None,
+        kwargs: Mapping[str, object] = {},
     ) -> BatchFeature:
         assert callable(hf_processor)
-
-        if kwargs is None:
-            kwargs = {}
 
         base_kwargs = self.model_config.mm_processor_kwargs
         if base_kwargs is None:

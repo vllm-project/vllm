@@ -257,19 +257,6 @@ class LRUCache(Generic[_K, _V]):
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
-    def get_or_put(self, key: _K, default_factory: Callable[[], _V]) -> _V:
-        if key in self.cache:
-            value = self.cache[key]
-            self.cache.move_to_end(key)
-
-            self._hits += 1
-        else:
-            value = default_factory()
-            self.put(key, value)
-
-        self._total += 1
-        return value
-
     def pin(self, key: _K) -> None:
         """
         Pins a key in the cache preventing it from being

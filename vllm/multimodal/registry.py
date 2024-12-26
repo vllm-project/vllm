@@ -22,6 +22,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# TODO: Tune the MM cache size
+MM_CACHE_SIZE = 256
+
 N = TypeVar("N", bound=Type[nn.Module])
 
 
@@ -74,7 +77,7 @@ class MultiModalRegistry:
 
         self._limits_by_model = _MultiModalLimits()
 
-        self._processing_cache = ProcessingCache(256)  # MM_CACHE_SIZE
+        self._processing_cache = ProcessingCache(MM_CACHE_SIZE)
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """

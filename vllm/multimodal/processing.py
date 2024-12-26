@@ -624,7 +624,7 @@ class ProcessingCache:
             logger.debug("ProcessingCache: hit_ratio = %.2f",
                          cache_stats.hit_ratio)
 
-    def _hash_item(self, obj: object) -> bytes:
+    def _serialize_item(self, obj: object) -> bytes:
         # Simple cases
         if isinstance(obj, str):
             return obj.encode("utf-8")
@@ -647,7 +647,7 @@ class ProcessingCache:
 
         return pickle.dumps(obj)
 
-    def _iter_bytes_to_hash(
+    def _item_to_bytes(
         self,
         key: str,
         obj: object,
@@ -655,20 +655,20 @@ class ProcessingCache:
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
-                yield from self._iter_bytes_to_hash(f"{key}.{i}", elem)
+                yield from self._item_to_bytes(f"{key}.{i}", elem)
         elif isinstance(obj, dict):
             for k, v in obj.items():
-                yield from self._iter_bytes_to_hash(f"{key}.{k}", v)
+                yield from self._item_to_bytes(f"{key}.{k}", v)
         else:
-            key_bytes = self._hash_item(key)
-            value_bytes = self._hash_item(obj)
+            key_bytes = self._serialize_item(key)
+            value_bytes = self._serialize_item(obj)
             yield key_bytes, value_bytes
 
     def _hash_kwargs(self, **kwargs: object) -> str:
         hasher = blake3()
 
         for k, v in kwargs.items():
-            for k_bytes, v_bytes in self._iter_bytes_to_hash(k, v):
+            for k_bytes, v_bytes in self._item_to_bytes(k, v):
                 hasher.update(k_bytes)
                 hasher.update(v_bytes)
 
