@@ -1,3 +1,4 @@
+# Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
 
 import pytest
@@ -27,7 +28,7 @@ def native_per_token_group_quant_fp8(x,
                                      group_size,
                                      eps=1e-10,
                                      dtype=torch.float8_e4m3fn):
-    """Function to perform per-token-group quantization on an input tensor 
+    """Function to perform per-token-group quantization on an input tensor
     `x` using native torch."""
     assert x.shape[-1] % group_size == 0, ("the last dimension of `x` cannot "
                                            "be divisible by `group_size`")
