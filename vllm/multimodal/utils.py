@@ -148,7 +148,7 @@ def fetch_audio(audio_url: str) -> tuple[np.ndarray, Union[int, float]]:
     return global_media_connector.load_from_url(
         audio_url,
         audio_io,
-        fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
     )
 
 
@@ -162,7 +162,7 @@ async def async_fetch_audio(
     return await global_media_connector.load_from_url_async(
         audio_url,
         audio_io,
-        fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
     )
 
 
@@ -219,7 +219,7 @@ def fetch_video(
     return global_media_connector.load_from_url(
         video_url,
         video_io,
-        fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
     )
 
 
@@ -240,7 +240,7 @@ async def async_fetch_video(
     return await global_media_connector.load_from_url_async(
         video_url,
         video_io,
-        fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
     )
 
 
