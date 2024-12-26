@@ -48,6 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     runai_safetensors_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.transformers_utils.s3_utils import glob as s3_glob
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import is_pin_memory_available
 
@@ -1269,16 +1270,6 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
         If the model is not local, it will be downloaded."""
         is_s3_path = is_s3(model_name_or_path)
-        if is_s3_path:
-            try:
-                from vllm.transformers_utils.s3_utils import glob as s3_glob
-            except ImportError as err:
-                raise ImportError(
-                    "Please install Run:ai optional dependency "
-                    "to use the S3 capabilities. "
-                    "You can install it with: pip install vllm[runai]"
-                ) from err
-
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"
         index_file = SAFE_WEIGHTS_INDEX_NAME

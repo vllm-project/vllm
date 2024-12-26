@@ -6,7 +6,12 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-import boto3
+from vllm.utils import PlaceholderModule
+
+try:
+    import boto3
+except ImportError:
+    boto3 = PlaceholderModule("boto3")  # type: ignore[assignment]
 
 
 def _filter_allow(paths: list[str], patterns: list[str]) -> list[str]:
