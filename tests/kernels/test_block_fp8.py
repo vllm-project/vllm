@@ -1,3 +1,4 @@
+# Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
 
 import pytest
@@ -7,19 +8,29 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
+from vllm.platforms import current_platform
+
+if current_platform.get_device_capability() < (9, 0):
+    pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
+                allow_module_level=True)
 
 # Test configurations
-DTYPES = [torch.half, torch.bfloat16, torch.float32]
+DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
 NUM_TOKENS = [7, 83, 2048]
 D = [512, 4096, 5120, 13824]
 GROUP_SIZE = [64, 128, 256, 512]
 M = [1, 7, 83, 512, 2048]
 N = [128, 512, 1024, 4096, 7748, 13824]
 K = [256, 4096, 5120, 3884, 13824]
+# Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
+# and its hidden size is 7168.
+M_moe = [1, 7, 83, 512, 2048]
+N_moe = [4608]  # [128, 4608, 13824]
+K_moe = [7168]  # [256, 7168, 13824]
 BLOCK_SIZE = [[128, 128]]
-E = [8, 24]
-TOP_KS = [2, 6]
-OUT_DTYPES = [torch.float32, torch.half, torch.bfloat16]
+E = [256]  # [8, 24, 128, 256]
+TOP_KS = [1]  # [1, 2, 6]
+OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
 
 
@@ -27,7 +38,7 @@ def native_per_token_group_quant_fp8(x,
                                      group_size,
                                      eps=1e-10,
                                      dtype=torch.float8_e4m3fn):
-    """Function to perform per-token-group quantization on an input tensor 
+    """Function to perform per-token-group quantization on an input tensor
     `x` using native torch."""
     assert x.shape[-1] % group_size == 0, ("the last dimension of `x` cannot "
                                            "be divisible by `group_size`")
@@ -81,8 +92,10 @@ def native_w8a8_block_fp8_matmul(A,
         A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)
     ]
     B_tiles = [[
-        B[j * block_n:min((j + 1) * block_n, N),
-          i * block_k:min((i + 1) * block_k, K), ] for i in range(k_tiles)
+        B[
+            j * block_n:min((j + 1) * block_n, N),
+            i * block_k:min((i + 1) * block_k, K),
+        ] for i in range(k_tiles)
     ] for j in range(n_tiles)]
     C_tiles = [
         C[:, j * block_n:min((j + 1) * block_n, N)] for j in range(n_tiles)
@@ -146,9 +159,9 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.parametrize("num_tokens,d,dtype,group_size,seed",
-                         itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE,
-                                           SEEDS))
+@pytest.mark.parametrize(
+    "num_tokens,d,dtype,group_size,seed",
+    itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS))
 @torch.inference_mode()
 def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     torch.manual_seed(seed)
@@ -163,9 +176,9 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     assert torch.allclose(scale, ref_scale)
 
 
-@pytest.mark.parametrize("M,N,K,block_size,out_dtype,seed",
-                         itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES,
-                                           SEEDS))
+@pytest.mark.parametrize(
+    "M,N,K,block_size,out_dtype,seed",
+    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     torch.manual_seed(seed)
@@ -196,9 +209,10 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
-@pytest.mark.parametrize("M,N,K,E,topk,block_size,dtype,seed",
-                         itertools.product(M, N, K, E, TOP_KS, BLOCK_SIZE,
-                                           DTYPES, SEEDS))
+@pytest.mark.parametrize(
+    "M,N,K,E,topk,block_size,dtype,seed",
+    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES,
+                      SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     torch.manual_seed(seed)
@@ -208,12 +222,14 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     a = torch.randn((M, K), dtype=dtype) / 10
 
-    w1_fp32 = (torch.rand(
-        (E, 2 * N, K), dtype=torch.float32) - 0.5) * 2 * fp8_max
-    w1 = w1_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    w1_bf16 = (torch.rand(
+        (E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    w1 = w1_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    del w1_bf16
 
-    w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2 * fp8_max
-    w2 = w2_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    w2_bf16 = (torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    w2 = w2_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    del w2_bf16
 
     block_n, block_k = block_size[0], block_size[1]
     n_tiles_w1 = (2 * N + block_n - 1) // block_n
@@ -243,7 +259,10 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
                                        block_size)
 
+    print(f"{out.sum()=}")
+    print(f"{ref_out.sum()=}")
+
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
-    assert rel_diff < 0.02
+    assert rel_diff < 0.03

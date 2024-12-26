@@ -67,9 +67,10 @@ def block_quant_to_tensor_quant(
     x_dq_block = x_q_block.to(torch.float32)
 
     x_dq_block_tiles = [[
-        x_dq_block[j * block_n:min((j + 1) * block_n, n),
-                   i * block_k:min((i + 1) * block_k, k), ]
-        for i in range(k_tiles)
+        x_dq_block[
+            j * block_n:min((j + 1) * block_n, n),
+            i * block_k:min((i + 1) * block_k, k),
+        ] for i in range(k_tiles)
     ] for j in range(n_tiles)]
 
     for i in range(k_tiles):
@@ -140,9 +141,10 @@ def per_token_group_quant_fp8(
         Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor for quantization.
     """
-    assert (x.shape[-1] % group_size == 0
-            ), "the last dimension of `x` cannot be divisible by `group_size`"
-    assert x.is_contiguous(), "`x` is not contiguous"
+    assert (x.shape[-1] % group_size == 0), (
+        f"the last dimension of `x` {x.shape[-1]} must be divisible "
+        f"by `group_size` {group_size}")
+    assert x.is_contiguous(), "`x` must be contiguous"
 
     finfo = torch.finfo(dtype)
     fp8_min = finfo.min
