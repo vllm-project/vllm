@@ -40,6 +40,7 @@ class TopKTopPSampler(nn.Module):
         no_top_p: bool,
         p: torch.Tensor,
     ) -> torch.Tensor:
+        """PyTorch-native implementation of top-k and top-p sampling."""
         logits = apply_top_k_top_p(logits, no_top_k, k, no_top_p, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators)
@@ -53,8 +54,12 @@ class TopKTopPSampler(nn.Module):
         no_top_p: bool,
         p: torch.Tensor,
     ) -> torch.Tensor:
+        """More optimized implementation for top-k and top-p sampling."""
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         if no_top_k and no_top_p:
+            # We prefer `random_sample` over `flashinfer_sample` when sorting is
+            # not needed. This is because `random_sample` does not require
+            # CPU-GPU synchronization while `flashinfer_sample` does.
             return random_sample(probs, generators)
         return flashinfer_sample(probs, no_top_k, k, no_top_p, p, generators)
 
@@ -66,6 +71,10 @@ def apply_top_k_top_p(
     no_top_p: bool,
     p: torch.Tensor,
 ) -> torch.Tensor:
+    """Apply top-k and top-p masks to the logits.
+
+    This function sorts the logits tensor, which can be slow for large batches.
+    """
     if no_top_k and no_top_p:
         return logits
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
@@ -96,13 +105,17 @@ def random_sample(
     probs: torch.Tensor,
     generators: Dict[int, torch.Generator],
 ) -> torch.Tensor:
+    """Randomly sample from the probabilities.
+
+    We use this function instead of torch.multinomial because torch.multinomial
+    causes CPU-GPU synchronization.
+    """
     q = torch.empty_like(probs)
     # NOTE(woosuk): To batch-process the requests without their own seeds,
     # which is the common case, we first assume that every request does
     # not have its own seed. Then, we overwrite the values for the requests
     # that have their own seeds.
     if len(generators) != probs.shape[0]:
-        # This might still be done here unnecessarily if there are greedies
         q.exponential_()
     if generators:
         # TODO(woosuk): This can be slow because we handle each request
@@ -120,6 +133,20 @@ def flashinfer_sample(
     p: torch.Tensor,
     generators: Dict[int, torch.Generator],
 ) -> torch.Tensor:
+    """Sample from the probabilities using FlashInfer.
+
+    Statistically, this function is equivalent to the `random_sample` function.
+    However, this function is faster because it avoids sorting the logits tensor
+    via rejection sampling.
+    
+    NOTE: The outputs of this function do not necessarily match the outputs of
+    the `random_sample` function. It only guarantees that the outputs are
+    statistically equivalent.
+
+    NOTE: This function includes CPU-GPU synchronization, while `random_sample`
+    does not. Call this function at the end of the forward pass to minimize
+    the synchronization overhead.
+    """
     assert not (no_top_k and no_top_p)
     max_top_k_round = 32
     batch_size = probs.shape[0]
