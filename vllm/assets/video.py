@@ -7,7 +7,7 @@ import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from vllm.multimodal.utils import (sample_frames_from_video,
+from vllm.multimodal.video import (sample_frames_from_video,
                                    try_import_video_packages)
 
 from .base import get_cache_dir

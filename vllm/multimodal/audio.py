@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 import numpy.typing as npt
 
@@ -24,6 +26,16 @@ class AudioPlugin(MultiModalPlugin):
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         raise NotImplementedError(
             "There is no default maximum multimodal tokens")
+
+
+def try_import_audio_packages() -> tuple[Any, Any]:
+    try:
+        import librosa
+        import soundfile
+    except ImportError as exc:
+        raise ImportError(
+            "Please install vllm[audio] for audio support.") from exc
+    return librosa, soundfile
 
 
 def resample_audio(
