@@ -207,9 +207,9 @@ def test_mamba_chunk_scan_single_example(dim, n_heads, seq_len_chunk_size,
     # just test the last head
     # NOTE, in the kernel we always cast states to fp32
     torch.allclose(final_state[:, -1],
-                               final_state_min[:, -1].to(torch.float32),
-                               atol=1e-3,
-                               rtol=1e-3)
+                   final_state_min[:, -1].to(torch.float32),
+                   atol=1e-3,
+                   rtol=1e-3)
 
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16])
