@@ -294,12 +294,58 @@ $ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 ### Video
 
-Instead of {code}`image_url`, you can pass a video file via {code}`video_url`.
+Instead of {code}`image_url`, you can pass a video file via {code}`video_url`. Here is a simple example using [LLaVA-OneVision](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf).
 
-You can use [these tests](gh-file:entrypoints/openai/test_video.py) as reference.
+First, launch the OpenAI-compatible server:
+
+```bash
+vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model-len 8192
+```
+
+Then, you can use the OpenAI client as follows:
+```python
+from openai import OpenAI
+
+openai_api_key = "EMPTY"
+openai_api_base = "http://localhost:8000/v1"
+
+client = OpenAI(
+    api_key=openai_api_key,
+    base_url=openai_api_base,
+)
+
+video_url = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
+
+## Use video url in the payload
+chat_completion_from_url = client.chat.completions.create(
+    messages=[{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "What's in this video?"
+            },
+            {
+                "type": "video_url",
+                "video_url": {
+                    "url": video_url
+                },
+            },
+        ],
+    }],
+    model=model,
+    max_completion_tokens=64,
+)
+
+result = chat_completion_from_url.choices[0].message.content
+print("Chat completion output from image url:", result)
+```
+
+Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
 
 ````{note}
-By default, the timeout for fetching videos through HTTP URL url is `30` seconds.
+By default, the timeout for fetching videos through HTTP URL is `30` seconds.
 You can override this by setting the environment variable:
 
 ```console
