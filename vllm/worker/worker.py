@@ -95,6 +95,12 @@ class Worker(LocalOrDistributedWorkerBase):
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
+        # Uninitialized buffer for swapping in/out blocks. Will be initialized
+        # by initialize_cache.
+        self.blocks_to_swap_in_buffer: torch.Tensor
+        self.blocks_to_swap_out_buffer: torch.Tensor
+
+
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -274,6 +280,17 @@ class Worker(LocalOrDistributedWorkerBase):
         self._init_cache_engine()
         self._warm_up_model()
 
+        # Initialize the buffer for swapping in/out blocks.
+        max_num_blocks = max(num_gpu_blocks, num_cpu_blocks)
+        self.blocks_to_swap_in_buffer= torch.zeros((max_num_blocks, 2),
+                                                   dtype=torch.int64,
+                                                   device="cpu",
+                                                   pin_memory=True)
+        self.blocks_to_swap_out_buffer = torch.zeros((max_num_blocks, 2),
+                                                     dtype=torch.int64,
+                                                     device="cpu",
+                                                     pin_memory=True)
+
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
@@ -315,6 +332,11 @@ class Worker(LocalOrDistributedWorkerBase):
         blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
                                           device="cpu",
                                           dtype=torch.int64).view(-1, 2)
+        swap_in_cnt = blocks_to_swap_in.size(0)
+        swap_out_cnt = blocks_to_swap_out.size(0)
+        self.blocks_to_swap_in_buffer[:swap_in_cnt] = blocks_to_swap_in
+        self.blocks_to_swap_out_buffer[:swap_out_cnt] = blocks_to_swap_out
+
         # `blocks_to_copy` is a gpu tensor. The src and tgt of
         # blocks to copy are in the same device, and `blocks_to_copy`
         # can be used directly within cuda kernels.
@@ -324,8 +346,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_swap_in=self.blocks_to_swap_in_buffer[:swap_in_cnt],
+            blocks_to_swap_out=self.blocks_to_swap_out_buffer[:swap_out_cnt],
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
