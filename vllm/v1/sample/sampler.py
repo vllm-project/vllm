@@ -22,14 +22,14 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        # Use float32 for the logits.
-        logits = logits.to(torch.float32)
         needs_logprobs = sampling_metadata.max_num_logprobs > 0
         if needs_logprobs:
             orig_logits = logits.clone()
 
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
+        # Use float32 for the logits.
+        logits = logits.to(torch.float32)
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         # Sample the next token.
@@ -66,7 +66,9 @@ class Sampler(nn.Module):
     ) -> torch.Tensor:
         # Avoid division by zero.
         temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
-        return logits.div_(temp.unsqueeze(dim=1))
+        # Use in-place division to avoid creating a new tensor.
+        logits.div_(temp.unsqueeze(dim=1))
+        return logits
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
