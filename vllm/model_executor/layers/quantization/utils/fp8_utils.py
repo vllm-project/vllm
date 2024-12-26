@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 import torch
 import triton
@@ -35,7 +35,8 @@ def input_to_float8(
     x: torch.Tensor,
     dtype: torch.dtype = torch.float8_e4m3fn
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """This function quantizes input values to float8 values with tensor-wise quantization."""
+    """This function quantizes input values to float8 values "
+    "with tensor-wise quantization."""
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
     amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
@@ -49,11 +50,11 @@ def block_quant_to_tensor_quant(
     x_s: torch.Tensor,
     block_size: List[int],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """This function converts block-wise quantization to tensor-wise quantization.
-    The inputs are block-wise quantization tensor `x_q_block`, block-wise quantization scale
-    and the block size.
-    The outputs are tensor-wise quantization tensor and tensor-wise quantization scale.
-    Note only float8 is supported for now.
+    """This function converts block-wise quantization to tensor-wise
+    quantization. The inputs are block-wise quantization tensor `x_q_block`,
+    block-wise quantization scale and the block size.
+    The outputs are tensor-wise quantization tensor and tensor-wise
+    quantization scale. Note only float8 is supported for now.
     """
     block_n, block_k = block_size[0], block_size[1]
     n, k = x_q_block.shape
@@ -96,8 +97,8 @@ def _per_token_group_quant_fp8(
     # Meta-parameters
     BLOCK: tl.constexpr,
 ):
-    """A Triton-accelerated function to perform per-token-group quantization on a
-    tensor.
+    """A Triton-accelerated function to perform per-token-group
+    quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
     # Map the program id to the row of X and Y it should compute.
@@ -132,9 +133,11 @@ def per_token_group_quant_fp8(
         x: The input tenosr with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
-        dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn` is supported for now.
+        dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn`
+        is supported for now.
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the scaling factor for quantization.
+        Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
+        scaling factor for quantization.
     """
     assert (x.shape[-1] % group_size == 0
             ), "the last dimension of `x` cannot be divisible by `group_size`"
@@ -207,8 +210,8 @@ def _w8a8_block_fp8_matmul(
     GROUP_SIZE_M: tl.constexpr,
 ):
     """Triton-accelerated function used to perform linear operations (dot
-    product) on input tensors `A` and `B` with block-wise quantization, and store the result in output
-    tensor `C`.
+    product) on input tensors `A` and `B` with block-wise quantization, and
+    store the result in output tensor `C`.
     """
 
     pid = tl.program_id(axis=0)
@@ -271,7 +274,8 @@ def w8a8_block_fp8_matmul(
     block_size: List[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    """This function performs matrix multiplication with block-wise quantization.
+    """This function performs matrix multiplication with block-wise
+    quantization.
     It takes two input tensors `A` and `B` with scales `As` and `Bs`.
     The output is returned in the specified `output_dtype`.
     Args:
@@ -279,7 +283,8 @@ def w8a8_block_fp8_matmul(
         B: The input tensor, e.g., weight.
         As: The per-token-group quantization scale for `A`.
         Bs: The per-block quantization scale for `B`.
-        block_size: The block size for per-block quantization. It should be 2-dim, e.g., [128, 128].
+        block_size: The block size for per-block quantization. It should 
+        be 2-dim, e.g., [128, 128].
         output_dytpe: The dtype of the returned tensor.
     Returns:
         torch.Tensor: The result of matmul.
