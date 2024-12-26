@@ -109,14 +109,14 @@ def parse_fine_tuned_lora_name(
             is_lora_a whether the tensor is lora_a or lora_b.
             is_bias whether the tensor is lora bias.
     """
-    # LoRA weights qualified name always starts with `base_model.model.`,
+    # LoRA weight qualified name always starts with `base_model.model.`,
     # so we remove the prefix `base_model.model.` to make the following
     # mapping correctly.
     parts = name.split(".")
     if parts[0] == "base_model" and parts[1] == "model":
         name = ".".join(parts[2:])
     else:
-        raise ValueError(f"Invalid LoRA weight name: {name}")
+        raise ValueError(f"{name} is unsupported LoRA weight")
 
     if weights_mapper:
         name = weights_mapper._map_name(name)
