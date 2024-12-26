@@ -24,9 +24,9 @@ class TopKTopPSampler(nn.Module):
                 self.forward = self.forward_cuda
             else:
                 logger.warning(
-                    "flashinfer.sampling is not available. Falling back to "
-                    "Pytorch-native implementation of sampling. For the best "
-                    "performance, please install FalshInfer.")
+                    "FlashInfer is not available. Falling back to the PyTorch-"
+                    "native implementation of top-p & top-k sampling. For the "
+                    "best performance, please install FalshInfer.")
                 self.forward = self.forward_native
         else:
             self.forward = self.forward_native
