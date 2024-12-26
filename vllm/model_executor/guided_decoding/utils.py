@@ -9,7 +9,7 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
             return False
 
         # Check for pattern restrictions
-        if "pattern" in obj:
+        if "pattern" in obj or "required" in obj:
             return True
 
         # Check for numeric ranges
