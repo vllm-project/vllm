@@ -196,7 +196,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action="store_true",
         help="If specified, will run the OpenAI frontend server in the same "
         "process as the model serving engine.")
-
+    parser.add_argument(
+        "--enable-request-id-headers",
+        action="store_true",
+        help="If specified, API server will add X-Request-Id header to "
+        "responses. Caution: this hurts performance at high QPS.")
     parser.add_argument(
         "--enable-auto-tool-choice",
         action="store_true",

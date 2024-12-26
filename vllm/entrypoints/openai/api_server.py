@@ -585,12 +585,18 @@ def build_app(args: Namespace) -> FastAPI:
                                     status_code=401)
             return await call_next(request)
 
-    @app.middleware("http")
-    async def add_request_id(request: Request, call_next):
-        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
-        response = await call_next(request)
-        response.headers["X-Request-Id"] = request_id
-        return response
+    if args.enable_request_id_headers:
+        logger.warning(
+            "CAUTION: Enabling X-Request-Id headers in the API Server. "
+            "This can harm performance at high QPS.")
+
+        @app.middleware("http")
+        async def add_request_id(request: Request, call_next):
+            request_id = request.headers.get(
+                "X-Request-Id") or uuid.uuid4().hex
+            response = await call_next(request)
+            response.headers["X-Request-Id"] = request_id
+            return response
 
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)
