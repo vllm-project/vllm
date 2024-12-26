@@ -113,8 +113,10 @@ class Sampler(nn.Module):
                                   sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
-            apply_penalties(logits, sampling_metadata.prompt_token_ids,
-                            sampling_metadata.presence_penalties,
-                            sampling_metadata.frequency_penalties,
-                            sampling_metadata.repetition_penalties,
-                            sampling_metadata.output_token_ids)
+            logits = apply_penalties(logits,
+                                     sampling_metadata.prompt_token_ids,
+                                     sampling_metadata.presence_penalties,
+                                     sampling_metadata.frequency_penalties,
+                                     sampling_metadata.repetition_penalties,
+                                     sampling_metadata.output_token_ids)
+        return logits
