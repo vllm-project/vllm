@@ -47,6 +47,7 @@ def test_jamba_lora(jamba_lora_files, tp_size):
         tensor_parallel_size=tp_size,
     )
 
+
     expected_jamba_output = [
         """Once upon a time, in a lush green meadow, there lived a sheep named Clara and a goat named Billy. Clara was a gentle creature, always nibbling on the soft grass and humming"""  # noqa: E501
     ]
