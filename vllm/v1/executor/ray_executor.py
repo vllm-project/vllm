@@ -1,3 +1,4 @@
+import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
@@ -14,6 +15,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+    from ray.exceptions import RayChannelTimeoutError
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -297,6 +299,35 @@ class RayExecutor(Executor):
         # Others return None.
         output = ray.get(self.forward_dag.execute(scheduler_output))[0]
         return output
+
+    async def submit_microbatch(self, scheduler_output):
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag()
+        futures = await self.forward_dag.execute_async(scheduler_output)
+        return futures[0]
+
+    # def execute_model_pipelined(self, scheduler_output):
+    #     logger.info("Executing model pipelined")
+    #     if self.forward_dag is None:
+    #         self.forward_dag = self._compiled_ray_dag()
+
+    #     outputs = []
+    #     for dag_ref, schd_output in self.micro_batches:
+    #         try:
+    #             outputs.append((ray.get(dag_ref, timeout=0)[0], schd_output))
+    #         except RayChannelTimeoutError as e:
+    #             logger.info("Received exception: %s", e)
+    #             break
+    #     self.micro_batches = self.micro_batches[len(outputs):]
+    #     if len(self.micro_batches
+    #            ) == self.parallel_config.pipeline_parallel_size:
+    #         # ValueError: ray.get() can only be called once on a CompiledDAGRef,
+    #         # and it was already called.
+    #         outputs.append((ray.get(self.micro_batches[0],
+    #                                 timeout=-1)[0], scheduler_output))
+    #     ref = self.forward_dag.execute(scheduler_output)
+    #     self.micro_batches.append((ref, scheduler_output))
+    #     return outputs
 
     def profile(self, is_start=True):
         raise NotImplementedError

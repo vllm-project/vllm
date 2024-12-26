@@ -1,3 +1,4 @@
+import asyncio
 import pickle
 import queue
 import signal
@@ -147,15 +148,9 @@ class EngineCoreProc(EngineCore):
 
     READY_STR = "READY"
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: Type[Executor],
-        usage_context: UsageContext,
-        input_path: str,
-        output_path: str,
-        ready_path: str,
-    ):
+    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+                 usage_context: UsageContext, input_path: str,
+                 output_path: str, ready_path: str, async_engine_core: bool):
         super().__init__(vllm_config, executor_class, usage_context)
 
         # Background Threads and Queues for IO. These enable us to
@@ -163,8 +158,16 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[EngineCoreRequestUnion] = queue.Queue()
-        self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
+        if async_engine_core:
+            self.input_queue: asyncio.Queue[
+                EngineCoreRequestUnion] = asyncio.Queue(
+                    vllm_config.parallel_config.pipeline_parallel_size)
+            self.microbatch_queue = asyncio.Queue()
+        else:
+            self.input_queue: queue.Queue[
+                EngineCoreRequestUnion] = queue.Queue()
+        self.output_queue: queue.Queue[
+            List[EngineCoreOutput]] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
                          daemon=True).start()
@@ -216,6 +219,7 @@ class EngineCoreProc(EngineCore):
     ) -> EngineCoreProcHandle:
         context = get_mp_context()
 
+        async_engine_core = True
         process_kwargs = {
             "input_path": input_path,
             "output_path": output_path,
@@ -223,6 +227,7 @@ class EngineCoreProc(EngineCore):
             "vllm_config": vllm_config,
             "executor_class": executor_class,
             "usage_context": usage_context,
+            "async_engine_core": async_engine_core
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=EngineCoreProc.run_engine_core,
@@ -261,7 +266,10 @@ class EngineCoreProc(EngineCore):
         engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
-            engine_core.run_busy_loop()
+            if kwargs["async_engine_core"]:
+                asyncio.run(engine_core.engine_main())
+            else:
+                engine_core.run_busy_loop()
 
         except SystemExit:
             logger.debug("EngineCore interrupted.")
@@ -274,6 +282,34 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
                 engine_core = None
+
+    async def engine_main(self):
+        producer = asyncio.create_task(self.submit_microbatch())
+        consumer = asyncio.create_task(self.finish_microbatch())
+        await asyncio.gather(producer, consumer)
+
+    async def submit_microbatch(self):
+        while True:
+            if not self.scheduler.has_unfinished_requests():
+                req = await self.input_queue.get()
+                self._handle_client_request(req)
+            while not self.input_queue.empty():
+                req = self.input_queue.get_nowait()
+                self._handle_client_request(req)
+            scheduler_output = self.scheduler.schedule()
+            microbatch_future = await self.model_executor.submit_microbatch(
+                scheduler_output)
+            await self.microbatch_queue.put(
+                (microbatch_future, scheduler_output))
+
+    async def finish_microbatch(self):
+        while True:
+            microbatch_future, scheduler_output = await self.microbatch_queue.get(
+            )
+            model_output = await microbatch_future
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output)
+            self.output_queue.put_nowait(engine_core_outputs)
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
