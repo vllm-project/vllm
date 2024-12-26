@@ -46,7 +46,7 @@ void launch_swap_block_kernel(DTYPE* dst, const DTYPE* src,
                               const int64_t* block_mapping_ptr,
                               const int num_blocks,
                               const int block_size_in_bytes,
-                              const torch::Device &device) {
+                              const torch::Device& device) {
   c10::cuda::CUDAGuard device_guard(device);
 
   int num_threads = 1024;
@@ -54,8 +54,7 @@ void launch_swap_block_kernel(DTYPE* dst, const DTYPE* src,
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vllm::paged_copy<<<grid_size, num_threads, 0, stream>>>(
-      dst, src, block_mapping_ptr, num_blocks,
-      block_size_in_bytes / DTYPE_LEN);
+      dst, src, block_mapping_ptr, num_blocks, block_size_in_bytes / DTYPE_LEN);
 }
 
 template <typename T, typename TENSOR_TYPE>
@@ -67,8 +66,8 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
     return static_cast<T*>(tensor.data_ptr());
   } else if (device.is_cpu() && tensor.is_pinned()) {
     T* ptr;
-    cudaHostGetDevicePointer((void**)&ptr, static_cast<void*>(tensor.data_ptr()),
-                             0);
+    cudaHostGetDevicePointer((void**)&ptr,
+                             static_cast<void*>(tensor.data_ptr()), 0);
     return ptr;
   } else if (device.is_cpu()) {
     return NULL;
@@ -122,7 +121,7 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping) {
   int64_t* src_ptr = get_kernel_ptr<int64_t, torch::Tensor>(src);
   int64_t* dst_ptr = get_kernel_ptr<int64_t, torch::Tensor>(dst);
-  const int64_t* block_mapping_ptr = 
+  const int64_t* block_mapping_ptr =
       get_kernel_ptr<const int64_t, const torch::Tensor>(block_mapping);
 
   if (src_ptr == NULL || dst_ptr == NULL || block_mapping_ptr == NULL) {
@@ -142,13 +141,9 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     const int64_t num_blocks = block_mapping.size(0);
     const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
 
-    launch_swap_block_kernel<8, int64_t>(
-            dst_ptr, 
-            (const int64_t*)src_ptr,
-            block_mapping_ptr, 
-            num_blocks,
-            block_size_in_bytes,
-            cuda_device);
+    launch_swap_block_kernel<8, int64_t>(dst_ptr, (const int64_t*)src_ptr,
+                                         block_mapping_ptr, num_blocks,
+                                         block_size_in_bytes, cuda_device);
   }
 }
 

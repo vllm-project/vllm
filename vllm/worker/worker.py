@@ -100,7 +100,6 @@ class Worker(LocalOrDistributedWorkerBase):
         self.blocks_to_swap_in_buffer: torch.Tensor
         self.blocks_to_swap_out_buffer: torch.Tensor
 
-
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -282,10 +281,10 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Initialize the buffer for swapping in/out blocks.
         max_num_blocks = max(num_gpu_blocks, num_cpu_blocks)
-        self.blocks_to_swap_in_buffer= torch.zeros((max_num_blocks, 2),
-                                                   dtype=torch.int64,
-                                                   device="cpu",
-                                                   pin_memory=True)
+        self.blocks_to_swap_in_buffer = torch.zeros((max_num_blocks, 2),
+                                                    dtype=torch.int64,
+                                                    device="cpu",
+                                                    pin_memory=True)
         self.blocks_to_swap_out_buffer = torch.zeros((max_num_blocks, 2),
                                                      dtype=torch.int64,
                                                      device="cpu",
