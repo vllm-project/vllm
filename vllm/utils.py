@@ -12,6 +12,7 @@ import inspect
 import ipaddress
 import os
 import re
+import resource
 import signal
 import socket
 import subprocess
@@ -1818,3 +1819,20 @@ def memory_profiling(
     result.non_torch_increase_in_bytes = current_cuda_memory_bytes - baseline_memory_in_bytes - weights_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
     result.profile_time = diff.timestamp
     result.non_kv_cache_memory_in_bytes = result.non_torch_increase_in_bytes + result.torch_peak_increase_in_bytes + result.weights_memory_in_bytes  # noqa
+
+
+# Adapted from: https://github.com/sgl-project/sglang/blob/f46f394f4d4dbe4aae85403dec006199b34d2840/python/sglang/srt/utils.py#L630 # noqa: E501Curre
+def set_ulimit(target_soft_limit=65535):
+    resource_type = resource.RLIMIT_NOFILE
+    current_soft, current_hard = resource.getrlimit(resource_type)
+
+    if current_soft < target_soft_limit:
+        try:
+            resource.setrlimit(resource_type,
+                               (target_soft_limit, current_hard))
+        except ValueError as e:
+            logger.warning(
+                "Found ulimit of %s and failed to automatically increase"
+                "with error %s. This can cause fd limit errors like"
+                "`OSError: [Errno 24] Too many open files`. Consider "
+                "increasing with ulimit -n", current_soft, e)
