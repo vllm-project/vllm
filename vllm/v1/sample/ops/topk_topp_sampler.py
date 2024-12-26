@@ -10,9 +10,9 @@ logger = init_logger(__name__)
 
 try:
     import flashinfer.sampling
-    use_flashinfer = True
+    is_flashinfer_available = True
 except ImportError:
-    use_flashinfer = False
+    is_flashinfer_available = False
 
 
 class TopKTopPSampler(nn.Module):
@@ -20,7 +20,8 @@ class TopKTopPSampler(nn.Module):
     def __init__(self):
         super().__init__()
         if current_platform.is_cuda:
-            if use_flashinfer:
+            if is_flashinfer_available:
+                logger.info("Using FlashInfer for top-p & top-k sampling.")
                 self.forward = self.forward_cuda
             else:
                 logger.warning(
