@@ -1550,6 +1550,62 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
+# Should handle every optional module in vLLM
+# This is based on `extras_require` from setup.py
+_EXTRAS_REQUIRE = {
+    "tensorizer": ["tensorizer"],
+    "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
+    "audio": ["librosa", "soundfile"],  # Required for audio processing
+    "video": ["decord"]  # Required for video processing
+}
+
+
+@dataclass(frozen=True)
+class PlaceholderModule:
+    """
+    A placeholder object to use when a module does not exist.
+
+    This enables more informative errors when trying to access attributes
+    of a module that does not exists.
+    """
+    name: str
+
+    def placeholder_attr(self, attr_path: str):
+        return _PlaceholderModuleAttr(self, attr_path)
+
+    def __getattr__(self, key: str):
+        name = self.name
+
+        try:
+            importlib.import_module(self.name)
+        except ImportError as exc:
+            for extra, names in _EXTRAS_REQUIRE.items():
+                if name in names:
+                    msg = f"Please install vllm[{extra}] for {extra} support"
+                    raise ImportError(msg) from exc
+
+            raise exc
+
+        raise AssertionError("PlaceholderModule should not be used "
+                             "when the original module can be imported")
+
+
+@dataclass(frozen=True)
+class _PlaceholderModuleAttr:
+    module: PlaceholderModule
+    attr_path: str
+
+    def placeholder_attr(self, attr_path: str):
+        return _PlaceholderModuleAttr(self.module,
+                                      f"{self.attr_path}.{attr_path}")
+
+    def __getattr__(self, key: str):
+        getattr(self.module, f"{self.attr_path}.{key}")
+
+        raise AssertionError("PlaceholderModule should not be used "
+                             "when the original module can be imported")
+
+
 # create a library to hold the custom op
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
