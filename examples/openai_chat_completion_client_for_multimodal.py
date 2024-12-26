@@ -152,9 +152,7 @@ def run_multi_image() -> None:
 
 # Video input inference
 def run_video() -> None:
-    from vllm.assets.video import VideoAsset
-
-    video_url = VideoAsset("sample_demo_1.mp4").url
+    video_url = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
     video_base64 = encode_base64_content_from_url(video_url)
 
     ## Use video url in the payload
@@ -165,7 +163,7 @@ def run_video() -> None:
             "content": [
                 {
                     "type": "text",
-                    "text": "What's in this image?"
+                    "text": "What's in this video?"
                 },
                 {
                     "type": "video_url",
@@ -190,7 +188,7 @@ def run_video() -> None:
             "content": [
                 {
                     "type": "text",
-                    "text": "Why is this video funny?"
+                    "text": "What's in this video?"
                 },
                 {
                     "type": "video_url",
@@ -313,12 +311,11 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using OpenAI client for online inference with '
         'multimodal language models served with vLLM.')
-    parser.add_argument(
-        '--chat-type',
-        '-c',
-        type=str,
-        default="single-image",
-        choices=list(example_function_map.keys()),
-        help='Conversation type with multimodal data.')
+    parser.add_argument('--chat-type',
+                        '-c',
+                        type=str,
+                        default="single-image",
+                        choices=list(example_function_map.keys()),
+                        help='Conversation type with multimodal data.')
     args = parser.parse_args()
     main(args)

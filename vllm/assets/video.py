@@ -4,7 +4,7 @@ from typing import List, Literal
 
 import numpy as np
 import numpy.typing as npt
-from huggingface_hub import hf_hub_download, hf_hub_url
+from huggingface_hub import hf_hub_download
 from PIL import Image
 
 from vllm.multimodal.video import (sample_frames_from_video,
@@ -32,16 +32,6 @@ def download_video_asset(filename: str) -> str:
             cache_dir=video_directory,
         )
     return video_path_str
-
-
-@lru_cache
-def get_video_asset_url(filename: str) -> str:
-    video_url = hf_hub_url(
-        repo_id="raushan-testing-hf/videos-test",
-        filename=filename,
-        repo_type="dataset",
-    )
-    return video_url
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
@@ -93,7 +83,3 @@ class VideoAsset:
         video_path = download_video_asset(self.name)
         ret = video_to_ndarrays(video_path, self.num_frames)
         return ret
-
-    @property
-    def url(self) -> str:
-        return get_video_asset_url(self.name)
