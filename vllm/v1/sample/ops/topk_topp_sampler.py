@@ -145,6 +145,7 @@ def flashinfer_sample(
             flashinfer.sampling.top_k_top_p_sampling_from_probs(
                 probs, uniform_samples, k, p, deterministic=True))
 
+    # NOTE: CPU-GPU synchronization happens here.
     if not success.all():
         if not no_top_k:
             probs = flashinfer.sampling.top_k_renorm_prob(probs, k)

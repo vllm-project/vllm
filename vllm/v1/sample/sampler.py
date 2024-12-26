@@ -24,6 +24,8 @@ class Sampler(nn.Module):
     ) -> SamplerOutput:
         needs_logprobs = sampling_metadata.max_num_logprobs > 0
         if needs_logprobs:
+            # NOTE: We need to clone the tensor because the below ops may
+            # modify the logits tensor in-place.
             orig_logits = logits.clone()
 
         # Apply penalties (e.g., min_tokens, freq_penalties).
