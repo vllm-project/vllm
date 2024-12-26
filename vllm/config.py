@@ -160,7 +160,7 @@ class ModelConfig:
             override default pooling config for the pooling model.
         logits_processor_pattern: Optional regex pattern specifying valid
             logits processor qualified names that can be passed with the
-            `logits_processors` extra completion argument. Defaults to None, 
+            `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
     """
@@ -363,7 +363,7 @@ class ModelConfig:
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
         """
-        Pull the model config or tokenizer to a temporary 
+        Pull the model config or tokenizer to a temporary
         directory in case of S3.
 
         Args:
@@ -721,7 +721,7 @@ class ModelConfig:
     def get_head_size(self) -> int:
         # TODO remove hard code
         if hasattr(self.hf_text_config, "model_type"
-                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+                   ) and (self.hf_text_config.model_type in ('deepseek_v2', 'deepseek_v3')):
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
             return 256
@@ -874,14 +874,14 @@ class ModelConfig:
 
     def get_diff_sampling_param(self) -> Dict[str, Any]:
         """
-        This method returns a dictionary containing the parameters 
-        that differ from the default sampling parameters, but only 
-        if `generation_config` is set. If `generation_config` is not 
+        This method returns a dictionary containing the parameters
+        that differ from the default sampling parameters, but only
+        if `generation_config` is set. If `generation_config` is not
         set, an empty dictionary is returned.
 
         Returns:
-            Dict[str, Any]: A dictionary with the differing sampling 
-            parameters if `generation_config` is set, otherwise an 
+            Dict[str, Any]: A dictionary with the differing sampling
+            parameters if `generation_config` is set, otherwise an
             empty dictionary.
         """
         if self.generation_config is None:
