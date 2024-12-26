@@ -18,7 +18,6 @@ import base64
 import requests
 from openai import OpenAI
 
-from vllm.assets.audio import AudioAsset
 from vllm.utils import FlexibleArgumentParser
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
@@ -151,8 +150,68 @@ def run_multi_image() -> None:
     print("Chat completion output:", result)
 
 
+# Video input inference
+def run_video() -> None:
+    from vllm.assets.video import VideoAsset
+
+    video_url = VideoAsset("sample_demo_1.mp4").url
+    video_base64 = encode_base64_content_from_url(video_url)
+
+    ## Use video url in the payload
+    chat_completion_from_url = client.chat.completions.create(
+        messages=[{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What's in this image?"
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {
+                        "url": video_url
+                    },
+                },
+            ],
+        }],
+        model=model,
+        max_completion_tokens=64,
+    )
+
+    result = chat_completion_from_url.choices[0].message.content
+    print("Chat completion output from image url:", result)
+
+    ## Use base64 encoded video in the payload
+    chat_completion_from_base64 = client.chat.completions.create(
+        messages=[{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Why is this video funny?"
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {
+                        "url": f"data:video/mp4;base64,{video_base64}"
+                    },
+                },
+            ],
+        }],
+        model=model,
+        max_completion_tokens=64,
+    )
+
+    result = chat_completion_from_base64.choices[0].message.content
+    print("Chat completion output from base64 encoded image:", result)
+
+
 # Audio input inference
 def run_audio() -> None:
+    from vllm.assets.audio import AudioAsset
+
     audio_url = AudioAsset("winning_call").url
     audio_base64 = encode_base64_content_from_url(audio_url)
 
@@ -240,6 +299,7 @@ example_function_map = {
     "text-only": run_text_only,
     "single-image": run_single_image,
     "multi-image": run_multi_image,
+    "video": run_video,
     "audio": run_audio,
 }
 
@@ -258,7 +318,7 @@ if __name__ == "__main__":
         '-c',
         type=str,
         default="single-image",
-        choices=["text-only", "single-image", "multi-image", "audio"],
+        choices=list(example_function_map.keys()),
         help='Conversation type with multimodal data.')
     args = parser.parse_args()
     main(args)
