@@ -14,12 +14,14 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+# yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
                                            RowvLLMParameter)
+# yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
