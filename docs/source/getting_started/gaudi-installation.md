@@ -80,10 +80,8 @@ $ python setup.py develop
 
 ## Supported Features
 
-- [Offline batched
-  inference](https://docs.vllm.ai/en/latest/getting_started/quickstart.html#offline-batched-inference)
-- Online inference via [OpenAI-Compatible
-  Server](https://docs.vllm.ai/en/latest/getting_started/quickstart.html#openai-compatible-server)
+- [Offline batched inference](#offline-batched-inference)
+- Online inference via [OpenAI-Compatible Server](#openai-compatible-server)
 - HPU autodetection - no need to manually select device within vLLM
 - Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 - Custom Intel Gaudi implementations of Paged Attention, KV cache ops,
