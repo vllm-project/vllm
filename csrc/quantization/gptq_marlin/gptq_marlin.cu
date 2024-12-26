@@ -1338,8 +1338,8 @@ __global__ void Marlin(
               int red_sh_wr =
                   red_sh_delta * j + (red_sh_rd - red_sh_stride * i);
               if (i < red_off) {
-                float* c_rd =
-                    reinterpret_cast<float*>(&sh_red[red_sh_delta * j + red_sh_rd]);
+                float* c_rd = reinterpret_cast<float*>(
+                    &sh_red[red_sh_delta * j + red_sh_rd]);
                 float* c_wr = reinterpret_cast<float*>(&sh_red[red_sh_wr]);
   #pragma unroll
                 for (int k = 0; k < 4; k++)
@@ -1864,9 +1864,11 @@ bool is_valid_cache_size(thread_config_t const& th_config, int max_m_blocks,
 
   float pipe_size = (a_size + b_size) * pipe_stages;
 
+  float reduce_size = th_config.num_threads * 2 * 4 * 4;
+
   TORCH_CHECK(max_shared_mem / 2 > scales_cache_size);  // Sanity
 
-  return pipe_size < 0.95f * (max_shared_mem - scales_cache_size);
+  return pipe_size + reduce_size < 0.95f * (max_shared_mem - scales_cache_size);
 }
 
 bool is_valid_config(thread_config_t const& th_config, int max_m_blocks,
