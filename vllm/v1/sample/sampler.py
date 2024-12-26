@@ -42,6 +42,8 @@ class Sampler(nn.Module):
         if needs_logprobs:
             # NOTE(woosuk): Use the original logits (before any penalties or
             # temperature scaling) for the top-k logprobs.
+            # This is different from the V0 sampler, which uses the logits that
+            # is used for sampling (after penalties and temperature scaling).
             logprobs = self.get_logprobs(orig_logits)
             # FIXME: Mask the sampled token_id, get topk logprobs,
             # and concatenate the topk with the sampled token_id.
