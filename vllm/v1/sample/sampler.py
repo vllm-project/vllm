@@ -1,9 +1,11 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict
+from typing import Dict, List, Set, Tuple
 
 import torch
 import torch.nn as nn
 
+from vllm.model_executor.layers.utils import apply_penalties
+from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -17,9 +19,18 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
+        _apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
+                                   sampling_metadata.stop_token_ids,
+                                   sampling_metadata.min_tokens)
+        if not sampling_metadata.no_penalties:
+            assert sampling_metadata.prompt_token_ids is not None
+            _apply_penalties(logits, sampling_metadata.prompt_token_ids,
+                             sampling_metadata.presence_penalties,
+                             sampling_metadata.frequency_penalties,
+                             sampling_metadata.repetition_penalties,
+                             sampling_metadata.output_token_ids)
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         logits = self.apply_top_k_top_p(logits, sampling_metadata)
-
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
         # Use int32 to reduce the tensor size.
@@ -157,3 +168,53 @@ def _apply_top_k_top_p(
     # Re-sort the probabilities.
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
+
+
+def _apply_min_token_penalties(logits: torch.Tensor,
+                               output_token_ids: List[List[int]],
+                               stop_token_ids: List[Set[int]],
+                               min_tokens: List[int]):
+    """
+    Applies minimum token penalty by setting the logits of the stop tokens
+    to -inf.
+    """
+    min_tokens_logits_to_penalize: List[Tuple[int, int]] = []
+    for index, min_token in enumerate(min_tokens):
+        if (len(output_token_ids[index]) < min_token):
+            for stop_token_id in stop_token_ids[index]:
+                min_tokens_logits_to_penalize.append((index, stop_token_id))
+    if min_tokens_logits_to_penalize:
+        logits[tuple(zip(*min_tokens_logits_to_penalize))] = -float("inf")
+
+
+def _apply_penalties(logits: torch.Tensor, prompt_token_ids: torch.Tensor,
+                     presence_penalties: torch.Tensor,
+                     frequency_penalties: torch.Tensor,
+                     repetition_penalties: torch.Tensor,
+                     output_token_ids: List[List[int]]):
+    """
+    Applies presence, frequency and repetition penalties to the logits.
+    """
+    _, vocab_size = logits.shape
+    output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size,
+                                          logits.device)
+    return apply_penalties(logits, prompt_token_ids, output_tokens_t,
+                           presence_penalties, frequency_penalties,
+                           repetition_penalties)
+
+
+def _convert_to_tensors(output_token_ids: List[List[int]], vocab_size: int,
+                        device: torch.device) -> torch.Tensor:
+    """
+    Convert the different list data structures to tensors.
+    """
+    output_tokens_tensor = make_tensor_with_pad(
+        output_token_ids,
+        # Use the value of vocab_size as a pad since we don't have a
+        # token_id of this value.
+        pad=vocab_size,
+        device="cpu",
+        dtype=torch.int64,
+        pin_memory=is_pin_memory_available(),
+    )
+    return output_tokens_tensor.to(device, non_blocking=True)
