@@ -610,8 +610,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder(placeholder)
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
-        audio_data = input_audio.get("data","")
-        audio_format = input_audio.get("format","")
+        audio_data = input_audio.get("data", "")
+        audio_format = input_audio.get("format", "")
         audio_url = f"data:audio/{audio_format};base64,{audio_data}"
 
         return self.parse_audio(audio_url)
