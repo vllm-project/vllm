@@ -71,4 +71,4 @@ $      --pipeline-parallel-size=2 \
 $      -tp=8
 ```
 
-By default, a ray instance will be launched automatically if no existing one is detected in system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring helper [script](https://github.com/vllm-project/vllm/tree/main/examples/run_cluster.sh).
+By default, a ray instance will be launched automatically if no existing one is detected in system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/run_cluster.sh> helper script.

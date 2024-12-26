@@ -22,13 +22,13 @@ Set the env variable VLLM_RPC_TIMEOUT to a big number before you start the serve
 `export VLLM_RPC_TIMEOUT=1800000`
 ```
 
-## Example commands and usage:
+## Example commands and usage
 
-### Offline Inference:
+### Offline Inference
 
-Refer to [examples/offline_inference_with_profiler.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_with_profiler.py) for an example.
+Refer to <gh-file:examples/offline_inference_with_profiler.py> for an example.
 
-### OpenAI Server:
+### OpenAI Server
 
 ```bash
 VLLM_TORCH_PROFILER_DIR=./vllm_profile python -m vllm.entrypoints.openai.api_server --model meta-llama/Meta-Llama-3-70B

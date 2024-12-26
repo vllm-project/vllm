@@ -65,7 +65,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found in [examples/offline_inference_embedding.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_embedding.py).
+A code example can be found here: <gh-file:examples/offline_inference_embedding.py>
 
 ### `LLM.classify`
 
@@ -80,7 +80,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found in [examples/offline_inference_classification.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_classification.py).
+A code example can be found here: <gh-file:examples/offline_inference_classification.py>
 
 ### `LLM.score`
 
@@ -102,7 +102,7 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found in [examples/offline_inference_scoring.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_scoring.py).
+A code example can be found here: <gh-file:examples/offline_inference_scoring.py>
 
 ## Online Inference
 
