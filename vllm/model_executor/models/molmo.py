@@ -1164,17 +1164,14 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     embedding_modules = {}
     embedding_padding_modules = {}
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 lora_config: Optional[LoRAConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
+        self.lora_config = vllm_config.lora_config
 
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config,
@@ -1197,8 +1194,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-
-        self.lora_config = lora_config
 
     def _parse_and_validate_image_input(
         self,
