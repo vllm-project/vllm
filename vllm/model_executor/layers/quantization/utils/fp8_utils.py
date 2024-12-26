@@ -19,9 +19,12 @@ def apply_w8a8_block_fp8_linear(
     output_shape = [*input.shape[:-1], weight.shape[0]]
 
     q_input, x_scale = per_token_group_quant_fp8(input_2d, block_size[1])
-    output = w8a8_block_fp8_matmul(
-        q_input, weight, x_scale, weight_scale, block_size, output_dtype=input.dtype
-    )
+    output = w8a8_block_fp8_matmul(q_input,
+                                   weight,
+                                   x_scale,
+                                   weight_scale,
+                                   block_size,
+                                   output_dtype=input.dtype)
 
     if bias is not None:
         output = output + bias
@@ -29,7 +32,8 @@ def apply_w8a8_block_fp8_linear(
 
 
 def input_to_float8(
-    x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+    x: torch.Tensor,
+    dtype: torch.dtype = torch.float8_e4m3fn
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to float8 values with tensor-wise quantization."""
     finfo = torch.finfo(dtype)
@@ -60,16 +64,11 @@ def block_quant_to_tensor_quant(
 
     x_dq_block = x_q_block.to(torch.float32)
 
-    x_dq_block_tiles = [
-        [
-            x_dq_block[
-                j * block_n : min((j + 1) * block_n, n),
-                i * block_k : min((i + 1) * block_k, k),
-            ]
-            for i in range(k_tiles)
-        ]
-        for j in range(n_tiles)
-    ]
+    x_dq_block_tiles = [[
+        x_dq_block[j * block_n:min((j + 1) * block_n, n),
+                   i * block_k:min((i + 1) * block_k, k), ]
+        for i in range(k_tiles)
+    ] for j in range(n_tiles)]
 
     for i in range(k_tiles):
         for j in range(n_tiles):
@@ -77,7 +76,6 @@ def block_quant_to_tensor_quant(
 
     x_q_tensor, scale = input_to_float8(x_dq_block, dtype=x_q_block.dtype)
     return x_q_tensor, scale
-
 
 
 @triton.jit
@@ -88,7 +86,7 @@ def _per_token_group_quant_fp8(
     y_s_ptr,
     # Stride of input
     y_stride,
-    # Collums of input
+    # Columns of input
     N,
     # Avoid to divide zero
     eps,
@@ -138,9 +136,8 @@ def per_token_group_quant_fp8(
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the scaling factor for quantization.
     """
-    assert (
-        x.shape[-1] % group_size == 0
-    ), "the last dimension of `x` cannot be divisible by `group_size`"
+    assert (x.shape[-1] % group_size == 0
+            ), "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
 
     finfo = torch.finfo(dtype)
@@ -151,7 +148,7 @@ def per_token_group_quant_fp8(
     M = x.numel() // group_size
     N = group_size
     x_s = torch.empty(
-        x.shape[:-1] + (x.shape[-1] // group_size,),
+        x.shape[:-1] + (x.shape[-1] // group_size, ),
         device=x.device,
         dtype=torch.float32,
     )
@@ -160,7 +157,7 @@ def per_token_group_quant_fp8(
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
-    _per_token_group_quant_fp8[(M,)](
+    _per_token_group_quant_fp8[(M, )](
         x,
         x_q,
         x_s,
@@ -236,8 +233,12 @@ def _w8a8_block_fp8_matmul(
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        a = tl.load(a_ptrs,
+                    mask=offs_k[None, :] < K - k * BLOCK_SIZE_K,
+                    other=0.0)
+        b = tl.load(b_ptrs,
+                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
+                    other=0.0)
 
         k_start = k * BLOCK_SIZE_K
         offs_ks = k_start // group_k
@@ -296,12 +297,12 @@ def w8a8_block_fp8_matmul(
     assert triton.cdiv(N, block_n) == Bs.shape[0]
     assert triton.cdiv(K, block_k) == Bs.shape[1]
 
-    C_shape = A.shape[:-1] + (N,)
+    C_shape = A.shape[:-1] + (N, )
     C = A.new_empty(C_shape, dtype=output_dtype)
 
-    # TODO(HandH1998):
+    # TODO:
     # BLOCK_SIZE_M, BLOCK_SIZE_K, BLOCK_SIZE_N can be optimized.
-    # BLOCK_SIZE_K must be divisable by block_k
+    # BLOCK_SIZE_K must be divisible by block_k
     # BLOCK_SIZE_N and BLOCK_SIZE_M has no requirements
     BLOCK_SIZE_M = 128
     if M < BLOCK_SIZE_M:
@@ -312,9 +313,8 @@ def w8a8_block_fp8_matmul(
     BLOCK_SIZE_N = block_n
 
     def grid(META):
-        return (
-            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-        )
+        return (triton.cdiv(M, META["BLOCK_SIZE_M"]) *
+                triton.cdiv(N, META["BLOCK_SIZE_N"]), )
 
     _w8a8_block_fp8_matmul[grid](
         A,
