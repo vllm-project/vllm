@@ -47,8 +47,7 @@ outputs = llm.generate(
 )
 ```
 
-Check out [examples/multilora_inference.py](https://github.com/vllm-project/vllm/blob/main/examples/multilora_inference.py)
-for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+Check out <gh-file:examples/multilora_inference.py> for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
 ## Serving LoRA Adapters
 

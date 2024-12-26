@@ -4,8 +4,8 @@
 
 ```{warning}
 Please note that speculative decoding in vLLM is not yet optimized and does
-not usually yield inter-token latency reductions for all prompt datasets or sampling parameters. The work
-to optimize it is ongoing and can be followed in [this issue.](https://github.com/vllm-project/vllm/issues/4630)
+not usually yield inter-token latency reductions for all prompt datasets or sampling parameters.
+The work to optimize it is ongoing and can be followed here: <gh-issue:4630>
 ```
 
 ```{warning}
@@ -176,7 +176,7 @@ speculative decoding, breaking down the guarantees into three key areas:
    >   distribution. [View Test Code](https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252)
    > - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
    >   without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler,
-   >   provides a lossless guarantee. Almost all of the tests in [this directory](https://github.com/vllm-project/vllm/tree/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e)
+   >   provides a lossless guarantee. Almost all of the tests in <gh-dir:tests/spec_decode/e2e>.
    >   verify this property using [this assertion implementation](https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291)
 
 3. **vLLM Logprob Stability**
@@ -202,4 +202,4 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 - [A Hacker's Guide to Speculative Decoding in vLLM](https://www.youtube.com/watch?v=9wNAgpX6z_4)
 - [What is Lookahead Scheduling in vLLM?](https://docs.google.com/document/d/1Z9TvqzzBPnh5WHcRwjvK2UEeFeq5zMZb5mFE8jR0HCs/edit#heading=h.1fjfb0donq5a)
 - [Information on batch expansion](https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit#heading=h.kk7dq05lc6q8)
-- [Dynamic speculative decoding](https://github.com/vllm-project/vllm/issues/4565)
+- [Dynamic speculative decoding](gh-issue:4565)
