@@ -36,9 +36,9 @@ class BlockTable:
         )
         self.block_table_np = self.block_table_cpu.numpy()
 
-        self.use_uva = is_uva_available()
+        # UVA requires pinned memory.
+        self.use_uva = is_uva_available() and pin_memory
         if self.use_uva:
-            # Pinned memory is required to use UVA.
             self.block_table_diff = torch.zeros((max_num_reqs, 2),
                                                 dtype=torch.int32,
                                                 device="cpu",
