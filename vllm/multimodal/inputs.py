@@ -204,9 +204,14 @@ class PlaceholderRange(TypedDict):
     """
     Placeholder location information for multi-modal data.
 
-    For example:
-        Prompt: AAAA BBBB What is in these images?
+    Example:
+
+        Prompt: :code:`AAAA BBBB What is in these images?`
+
         Images A and B will have:
+
+        .. code-block::
+
             A: { "offset": 0, "length": 4 }
             B: { "offset": 5, "length": 4 }
     """
@@ -376,31 +381,31 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     A dictionary that represents the keyword arguments to
     :meth:`~torch.nn.Module.forward`.
 
-    The metadata `items_by_key` defines how to split batched keyword
+    The metadata :code:`items_by_key` defines how to split batched keyword
     arguments corresponding to each data item in :class:`MultiModalDataItems`:
 
-    - For a keyword argument, we can access the `i`th item in the batch via
-      `items_by_key[key][i]`.
+    - For a keyword argument, we can access the :code:`i` th item in the batch
+      via :code:`items_by_key[key][i]`.
     - We can gather the keyword arguments belonging to a modality by finding
-      the keys with items that belong to that modality, then accessing the
-      `i`th item in the batch for each such key.
-    
+      the keys with items that belong to that modality, then accessing
+      the :code:`i` th item in the batch for each such key.
+
     Example:
 
-        ```python
-        # All items belong to the "image" modality
-        items_by_key={
-            "pixel_values": [a, b, c, d],  # "image" modality
-            "image_grid_thw": [e, f, g, h],  # "image" modality
-            "pixel_values_video": [h, i, j],  # "video" modality
-            "video_grid_thw": [k, l, m],  # "video" modality
-        }
-        ```
+        .. code-block:: python
+
+            # All items belong to the "image" modality
+            items_by_key={
+                "pixel_values": [a, b, c, d],  # "image" modality
+                "image_grid_thw": [e, f, g, h],  # "image" modality
+                "pixel_values_video": [h, i, j],  # "video" modality
+                "video_grid_thw": [k, l, m],  # "video" modality
+            }
 
         - The keyword arguments belonging to the first image are
-          `{"pixel_values": a, "image_grid_thw": e}`.
+          :code:`{"pixel_values": a, "image_grid_thw": e}`.
         - The keyword arguments belonging to the second video are
-          `{"pixel_values_video": i, "video_grid_thw": l}`.
+          :code:`{"pixel_values_video": i, "video_grid_thw": l}`.
     """
 
     @staticmethod
