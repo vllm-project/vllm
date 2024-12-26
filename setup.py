@@ -408,7 +408,7 @@ def get_rocm_version():
         ):
             return "%d.%d.%d" % (major.value, minor.value, patch.value)
         return None
-    except:
+    except Exception:
         return None
 
 
