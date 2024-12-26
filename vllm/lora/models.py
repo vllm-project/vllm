@@ -231,7 +231,8 @@ class LoRAModel(AdapterModel):
             with safetensors.safe_open(lora_tensor_path,
                                        framework="pt") as f:  # type: ignore
                 for lora_module in f.keys():  # noqa
-                    module_name, _, _ = parse_fine_tuned_lora_name(lora_module)
+                    module_name, _, _ = parse_fine_tuned_lora_name(
+                        lora_module, weights_mapper)
                     part_name = module_name.split(".")[-1]
                     if part_name not in expected_lora_modules:
                         unexpected_modules.append(module_name)
