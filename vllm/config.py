@@ -29,6 +29,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
     try_get_generation_config, uses_mrope)
+from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, print_warning_once, random_uuid,
@@ -372,15 +373,6 @@ class ModelConfig:
 
         """
         if is_s3(model) or is_s3(tokenizer):
-            try:
-                from vllm.transformers_utils.s3_utils import S3Model
-            except ImportError as err:
-                raise ImportError(
-                    "Please install Run:ai optional dependency "
-                    "to use the S3 capabilities. "
-                    "You can install it with: pip install vllm[runai]"
-                ) from err
-
             if is_s3(model):
                 self.s3_model = S3Model()
                 self.s3_model.pull_files(model, allow_pattern=["*config.json"])
@@ -638,7 +630,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.md
         # If the feature combo become valid
         if not current_platform.is_async_output_supported(self.enforce_eager):
             logger.warning(
@@ -658,7 +650,7 @@ class ModelConfig:
         if self.runner_type == "pooling":
             self.use_async_output_proc = False
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
             logger.warning("Async output processing is not supported with"
@@ -2058,7 +2050,7 @@ class LoRAConfig:
                            model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.md
         # If the feature combo become valid
         if scheduler_config.chunked_prefill_enabled:
             logger.warning("LoRA with chunked prefill is still experimental "

@@ -1,7 +1,9 @@
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+import cv2
 import numpy as np
+import numpy.typing as npt
 
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
@@ -75,3 +77,33 @@ class VideoPlugin(ImagePlugin):
 
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         return 4096
+
+
+def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
+    num_frames, _, _, channels = frames.shape
+    new_height, new_width = size
+    resized_frames = np.empty((num_frames, new_height, new_width, channels),
+                              dtype=frames.dtype)
+    for i, frame in enumerate(frames):
+        resized_frame = cv2.resize(frame, (new_width, new_height))
+        resized_frames[i] = resized_frame
+    return resized_frames
+
+
+def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
+    _, height, width, _ = frames.shape
+    new_height = int(height * size_factor)
+    new_width = int(width * size_factor)
+
+    return resize_video(frames, (new_height, new_width))
+
+
+def sample_frames_from_video(frames: npt.NDArray,
+                             num_frames: int) -> npt.NDArray:
+    total_frames = frames.shape[0]
+    if num_frames == -1:
+        return frames
+
+    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+    sampled_frames = frames[frame_indices, ...]
+    return sampled_frames

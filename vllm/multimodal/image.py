@@ -84,3 +84,15 @@ class ImagePlugin(MultiModalPlugin):
 
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         return 3000
+
+
+def rescale_image_size(image: Image.Image,
+                       size_factor: float,
+                       transpose: int = -1) -> Image.Image:
+    """Rescale the dimensions of an image by a constant factor."""
+    new_width = int(image.width * size_factor)
+    new_height = int(image.height * size_factor)
+    image = image.resize((new_width, new_height))
+    if transpose >= 0:
+        image = image.transpose(Image.Transpose(transpose))
+    return image

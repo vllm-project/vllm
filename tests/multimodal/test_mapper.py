@@ -6,7 +6,7 @@ from transformers import LlavaNextImageProcessor
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MultiModalRegistry
-from vllm.multimodal.utils import rescale_image_size
+from vllm.multimodal.image import rescale_image_size
 
 
 @pytest.fixture
