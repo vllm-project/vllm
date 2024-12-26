@@ -37,6 +37,7 @@ if __name__ == '__main__':
     parser.add_argument("--temperature", type=float, default=1)
     parser.add_argument("--scale_rate", type=float, default=2.7)
     parser.add_argument("--cut_tail", type=int, default=0)
+    parser.add_argument("--profile-run", action="store_true", default=False)
 
     args = parser.parse_args()
 
@@ -54,7 +55,8 @@ if __name__ == '__main__':
                                  chunk_size=args.chunk_size,
                                  first_chunk_size=args.first_chunk_size,
                                  cut_tail=args.cut_tail,
-                                 scale_rate=args.scale_rate)
+                                 scale_rate=args.scale_rate,
+                                 profile_run=args.profile_run)
     if args.lora:
         model_setting.support_lora = True
     tts_engine = XTtsEngine(model_setting)

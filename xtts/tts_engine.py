@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from typing import Any, Union
 
@@ -32,7 +33,9 @@ class XTtsEngine:
         self.post_init()
     
     def post_init(self):
-        
+        if self.model_setting.profile_run:
+            os.environ["VLLM_TORCH_PROFILER_DIR"] = "/home/zhn/vllm_profile3"
+
         # initialize tokenizer
         logger.info('Loading tokenizer...')
         self.tokenizer = Tokenizer.from_file('/home/zhn/fishtts/vocab.json')
@@ -62,7 +65,8 @@ class XTtsEngine:
                                       gpu_memory_utilization=self.model_setting.gpu_memory_utilization, 
                                       dtype=self.model_setting.dtype,
                                       skip_tokenizer_init=True)
-        
+        self.max_tokens = 2048
+
         logger.info('LLM loaded.')
 
         # initialize audio generator
@@ -123,11 +127,21 @@ class XTtsEngine:
         lora_request = None
         if lora_path:
             lora_request=LoRARequest("lora", 1, lora_local_path=lora_path)
+        
+        if self.model_setting.profile_run:
+            os.environ["VLLM_TORCH_PROFILER_DIR"] = "/home/zhn/vllm_profile3"
+            self.max_tokens = 10
+            self.llm_engine.start_profile()
+
         for i,p in enumerate(prompts):
             logger.debug(f'Processing text {i+1}/{len(prompts)}...')
+            if self.model_setting.profile_run and i == 3:
+                logger.debug('Early stop for profiling')
+                break
+
             metrics = TtsMetrics(chunk_size=self.model_setting.chunk_size)
             metrics.time_start = time.perf_counter()
-            sampling_params = SamplingParams(detokenize=False, stop_token_ids=[1025], ignore_eos=True, max_tokens=2048,
+            sampling_params = SamplingParams(detokenize=False, stop_token_ids=[1025], ignore_eos=True, max_tokens=self.max_tokens,
                                              repetition_penalty=1.5, repetition_window=16, 
                                              top_k=top_k, top_p=top_p, temperature=temperature)
             outputs = self.llm_engine.generate(p, sampling_params, lora_request=lora_request)
@@ -147,6 +161,10 @@ class XTtsEngine:
             logger.debug(f'Audio generated')
             metrics.time_end = time.perf_counter()
             metrics.calc_non_streaming()
+    
+        if self.model_setting.profile_run:
+            self.llm_engine.stop_profile()
+            time.sleep(15)
 
     async def generate_token_streaming(self, engine: AsyncLLMEngine,
                                        prompt: dict[str, Any], lora_request: LoRARequest, id: str, sampling_params: SamplingParams,

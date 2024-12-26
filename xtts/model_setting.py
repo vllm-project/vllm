@@ -15,7 +15,8 @@ class ModelSetting:
                  chunk_padding: bool = True,
                  cut_tail: int = 150,
                  support_lora: bool = False,
-                 scale_rate: float = 2.7):
+                 scale_rate: float = 2.7,
+                 profile_run: bool = False):
         self.model_dir = model_dir
         self.runtime = runtime
         self.chunk_size = chunk_size
@@ -34,5 +35,6 @@ class ModelSetting:
         self.support_lora = support_lora
         self.use_onnx_graph = False
 
-        self.gpu_memory_utilization = 0.7
+        self.gpu_memory_utilization = 0.3
         self.scale_rate = scale_rate
+        self.profile_run = profile_run
