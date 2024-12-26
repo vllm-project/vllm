@@ -29,6 +29,7 @@ class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
     CHANNEL = "channel"
     GROUP = "group"
+    BLOCK = "block"
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
@@ -199,6 +200,7 @@ class FusedMoE(torch.nn.Module):
                         get_tensor_model_parallel_world_size())
         self.top_k = top_k
         self.num_experts = num_experts
+        assert intermediate_size % self.tp_size == 0
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
@@ -398,7 +400,10 @@ class FusedMoE(torch.nn.Module):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=tp_rank)
-            elif quant_method == FusedMoeWeightScaleSupported.GROUP.value:
+            elif quant_method in [
+                    FusedMoeWeightScaleSupported.GROUP.value,
+                    FusedMoeWeightScaleSupported.BLOCK.value,
+            ]:
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
