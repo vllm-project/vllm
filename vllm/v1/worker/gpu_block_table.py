@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.utils import get_cuda_view_from_cpu_tensor
+from vllm.utils import get_cuda_view_from_cpu_tensor, is_uva_available
 
 
 class BlockTable:
@@ -36,10 +36,9 @@ class BlockTable:
         )
         self.block_table_np = self.block_table_cpu.numpy()
 
-        # Pinned memory is required to use UVA.
-        # TODO(woosuk): Add other requirements for UVA.
-        self.use_uva = pin_memory
+        self.use_uva = is_uva_available()
         if self.use_uva:
+            # Pinned memory is required to use UVA.
             self.block_table_diff = torch.zeros((max_num_reqs, 2),
                                                 dtype=torch.int32,
                                                 device="cpu",
