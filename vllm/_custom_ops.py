@@ -538,7 +538,7 @@ def cutlass_sparse_compress(a: torch.Tensor) \
     with Cutlass sparse kernels.
 
     Args:
-        a (torch.Tensor):
+        a (torch.Tensor): 
             The input tensor to be compressed. Must have one of the following data types:
             - `torch.int8`
             - `torch.float8_e4m3fn`
@@ -546,7 +546,7 @@ def cutlass_sparse_compress(a: torch.Tensor) \
             - `torch.float16`
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]:
+        Tuple[torch.Tensor, torch.Tensor]: 
             A tuple containing:
             - `a_nzs` (torch.Tensor): A tensor containing non-zero elements of `a`.
             - `a_meta` (torch.Tensor): A tensor containing metadata for the sparse representation.
