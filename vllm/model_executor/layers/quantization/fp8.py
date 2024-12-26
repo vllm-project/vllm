@@ -605,6 +605,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
         from vllm.model_executor.layers.fused_moe import fused_experts
@@ -617,7 +619,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             renormalize=renormalize,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function)
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+        )
 
         return fused_experts(
             x,

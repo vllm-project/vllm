@@ -593,6 +593,14 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            # TODO(simon): support nextn predict layers
+            if self.config.num_nextn_predict_layers > 0:
+                assert self.config.num_nextn_predict_layers == 1
+                layer_idx = self.config.num_hidden_layers
+                if name.startswith(f"model.layers.{layer_idx}"):
+                    continue
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
