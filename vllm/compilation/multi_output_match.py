@@ -7,9 +7,9 @@ from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor import pattern_matcher as pm
 from torch._ops import OpOverload
+from torch.fx import Node
 
 from vllm.compilation.fx_utils import find_auto_fn
-from torch.fx import Node
 
 
 class MultiOutputMatch(abc.ABC):
