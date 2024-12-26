@@ -1169,9 +1169,10 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        lora_config = vllm_config.lora_config
         self.config = config
         self.multimodal_config = multimodal_config
-        self.lora_config = vllm_config.lora_config
+        self.lora_config = lora_config
 
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config,
