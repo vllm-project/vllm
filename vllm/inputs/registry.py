@@ -138,6 +138,10 @@ class InputProcessingContext(InputContext):
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
     ) -> BatchFeature:
+        """
+        Call :code:`hf_processor` on the prompt :code:`data`
+        (text, image, audio...) with configurable options :code:`kwargs`.
+        """
         assert callable(hf_processor)
 
         base_kwargs = self.model_config.mm_processor_kwargs

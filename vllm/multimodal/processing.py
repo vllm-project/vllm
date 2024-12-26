@@ -563,6 +563,15 @@ class ProcessingCache:
         input_item: object,
         input_kwargs: Mapping[str, object],
     ) -> Optional[Mapping[str, MultiModalFieldItem]]:
+        """
+        Get a processed multi-modal item from the cache
+        according to its dependencies, including:
+
+        - The model ID
+        - The modality of the item
+        - The original data item passed to the HF processor
+        - The configuration options of the HF processor
+        """
         self._maybe_log_cache_stats()
 
         cache_key = self._hash_kwargs(model_id=model_id,
@@ -578,6 +587,10 @@ class ProcessingCache:
         input_kwargs: Mapping[str, object],
         output_kwargs: Mapping[str, MultiModalFieldItem],
     ) -> None:
+        """
+        Put a processed multi-modal item into the cache
+        according to its dependencies (see :meth:`get`).
+        """
         cache_key = self._hash_kwargs(model_id=model_id,
                                       **{modality: input_item},
                                       **input_kwargs)
