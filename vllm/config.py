@@ -970,6 +970,7 @@ class CacheConfig:
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
+        block_allocator: str = "CpuGpuBlockAllocator",
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -980,6 +981,7 @@ class CacheConfig:
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
+        self.block_allocator = block_allocator
 
         self._verify_args()
         self._verify_cache_dtype()
@@ -1003,6 +1005,13 @@ class CacheConfig:
                 and self.block_size > 32):
             raise ValueError("CUDA Paged Attention kernel only supports "
                              f"block sizes up to 32. Got {self.block_size}.")
+
+        if self.block_allocator not in [
+                "CpuGpuBlockAllocator", "CpuOffloadingBlockAllocator"
+        ]:
+            raise ValueError(
+                "Only CpuGpuBlockAllocator and CpuOffloadingBlockAllocator is "
+                f"supported. Got {self.block_allocator}.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":

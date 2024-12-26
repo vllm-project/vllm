@@ -5,6 +5,8 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.cpu_offloading_block_allocator import (
+    CpuOffloadingBlockAllocator)
 from vllm.core.block.interfaces import Block
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
@@ -15,6 +17,11 @@ from vllm.utils import Device
 
 SeqId = int
 EncoderSeqId = str
+
+block_allocator_creator = {
+    "CpuGpuBlockAllocator": CpuGpuBlockAllocator.create,
+    "CpuOffloadingBlockAllocator": CpuOffloadingBlockAllocator.create,
+}
 
 
 class SelfAttnBlockSpaceManager(BlockSpaceManager):
@@ -65,6 +72,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
+        block_allocator: str = "CpuGpuBlockAllocator",
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -90,7 +98,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
-        self.block_allocator = CpuGpuBlockAllocator.create(
+        self.block_allocator = block_allocator_creator[block_allocator](
             allocator_type="prefix_caching" if enable_caching else "naive",
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
@@ -158,6 +166,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             # Add blocks to the block table only if the sequence is non empty.
             block_table.allocate(token_ids=seq.get_token_ids(),
                                  extra_hash=extra_hash)
+
+        # If the block allocator is CpuOffloadingBlockAllocator, we need to
+        # tell the computed_blocks_tracker to invalidate the previous computed
+        # num cached tokens
+        if isinstance(self.block_allocator, CpuOffloadingBlockAllocator) and \
+                self.block_allocator.will_swap_in_cpu_blocks():
+            self._computed_blocks_tracker.on_swap_in_cpu_blocks(seq.seq_id)
 
         return block_table
 
@@ -514,3 +529,20 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         cached in the block manager for the sequence.
         """
         return self._computed_blocks_tracker.get_num_cached_tokens(seq)
+
+    def get_and_reset_swaps(self,
+                            now: float) -> Tuple[List[Tuple[int, int]], ...]:
+        """Returns and clears the mapping of source to destination block IDs.
+        Will be called after every swapping operations for now, and after every
+        schedule when BlockManagerV2 become default. 
+        
+        Args:
+            now (float): The time stamp.
+
+        Returns:
+            A tuple of two lists: (blocks_to_swap_out, blocks_to_swap_in).
+            Each list is a List[Tuple[int, int]], containing the mapping of 
+            source to destination block IDs. The block IDs are physical block
+            IDs and it's expected to be used by the cache engine directly.
+        """
+        return self.block_allocator.get_and_reset_swaps(now)

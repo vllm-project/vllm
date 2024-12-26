@@ -930,6 +930,8 @@ class ComputedBlocksTracker:
         # `get_num_cached_tokens` for more details.
         self._seq_id_to_num_tokens_computed: Dict[int, int] = {}
 
+        self._seq_id_has_cpu_blocks: Set[int] = set()
+
     def _update_seq_hashes(self, seq: Sequence) -> None:
         """Incrementally update the sequence's block hashes and record them."""
         assert self._enable_caching
@@ -991,7 +993,8 @@ class ComputedBlocksTracker:
 
         # TODO(rickyx): This hack could be removed once we mark blocks as
         # computed correctly with chunked prefills.
-        if num_computed_tokens_prev is not None and seq.is_prefill():
+        if num_computed_tokens_prev is not None and seq.is_prefill() \
+                and seq.seq_id not in self._seq_id_has_cpu_blocks:
             # For a sequence that is still in prefill, we don't
             # recompute the number of cached tokens.
             # This also handles correctly chunked prefill since currently
@@ -1009,6 +1012,14 @@ class ComputedBlocksTracker:
         self._seq_id_to_num_tokens_computed[seq.seq_id] = num_cached_tokens
         return num_cached_tokens
 
+    def on_swap_in_cpu_blocks(self, seq_id: int) -> None:
+        """Mark the sequence as having CPU blocks swapped in."""
+        # NOTE(Yihua): This is a temporary solution to handle the case where
+        # the CPU offloading is enabled and the sequence has CPU blocks swapped
+        # in. In this case, the number in self._seq_id_to_num_tokens_computed
+        # should be invalidated and we need to re-compute it.
+        self._seq_id_has_cpu_blocks.add(seq_id)
+
     def remove_seq(self, seq_id: int) -> None:
         """Stop tracking the sequence."""
         if not self._enable_caching:
@@ -1018,6 +1029,8 @@ class ComputedBlocksTracker:
 
         assert seq_id in self._seq_id_to_num_tokens_computed
         del self._seq_id_to_num_tokens_computed[seq_id]
+
+        self._seq_id_has_cpu_blocks.discard(seq_id)
 
 
 class LastAccessBlocksTracker:
