@@ -345,7 +345,7 @@ print("Chat completion output from image url:", result)
 Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
 
 ````{note}
-By default, the timeout for fetching videos through HTTP URL url is `30` seconds.
+By default, the timeout for fetching videos through HTTP URL is `30` seconds.
 You can override this by setting the environment variable:
 
 ```console
