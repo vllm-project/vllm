@@ -14,8 +14,6 @@ from typing_extensions import NotRequired, TypeAlias, assert_never
 
 from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
-from .audio import resample_audio
-
 _T = TypeVar("_T")
 
 # yapf: disable
@@ -186,6 +184,9 @@ class MultiModalDataItems(UserDict[str, list[Any]]):
         the same as the model's expected sampling rate; otherwise, they remain
         as :code:`(audio, new_sr)` tuples.
         """
+        # Avoid circular import
+        from .audio import resample_audio
+
         if not self.audios:
             return
 
