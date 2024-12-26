@@ -3,25 +3,33 @@ from typing import Dict
 import torch
 import torch.nn as nn
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
+
+try:
+    import flashinfer.sampling
+    use_flashinfer = True
+except ImportError:
+    use_flashinfer = False
 
 
 class TopKTopPSampler(nn.Module):
 
-    def forward(
-        self,
-        logits: torch.Tensor,
-        generators: Dict[int, torch.Generator],
-        no_top_k: bool,
-        k: torch.Tensor,
-        no_top_p: bool,
-        p: torch.Tensor,
-    ) -> torch.Tensor:
+    def __init__(self):
+        super().__init__()
         if current_platform.is_cuda:
-            return self.forward_cuda(logits, generators, no_top_k, k, no_top_p,
-                                     p)
-        return self.forward_native(logits, generators, no_top_k, k, no_top_p,
-                                   p)
+            if use_flashinfer:
+                self.forward = self.forward_cuda
+            else:
+                logger.warning(
+                    "flashinfer.sampling is not available. Falling back to "
+                    "Pytorch-native implementation of sampling. For the best "
+                    "performance, please install FalshInfer.")
+                self.forward = self.forward_native
+        else:
+            self.forward = self.forward_native
 
     def forward_native(
         self,
@@ -123,7 +131,6 @@ def flashinfer_sample(
         for i, generator in generators.items():
             uniform_samples[:, i].uniform_(generator=generator)
 
-    import flashinfer.sampling
     if no_top_k:
         # Top-p only.
         next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
