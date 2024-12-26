@@ -102,7 +102,7 @@ class MoEGate(nn.Module):
             torch.empty(config.n_routed_experts, config.hidden_size))
         if config.topk_method == "noaux_tc":
             self.e_score_correction_bias = nn.Parameter(
-                torch.empty((config.n_routed_experts)))
+                torch.empty(config.n_routed_experts))
         else:
             self.e_score_correction_bias = None
 
