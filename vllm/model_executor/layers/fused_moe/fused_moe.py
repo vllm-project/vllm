@@ -580,7 +580,7 @@ def outplace_fused_experts(
         block_shape: Optional[List[int]] = None) -> torch.Tensor:
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, use_fp8_w8a8, use_int8_w8a16, w1_scale,
-                              w2_scale, a1_scale, a2_scale)
+                              w2_scale, a1_scale, a2_scale, block_shape)
 
 
 def outplace_fused_experts_fake(
