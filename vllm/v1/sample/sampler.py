@@ -27,11 +27,11 @@ class Sampler(nn.Module):
             # NOTE: We need to clone the tensor because the below ops may
             # modify the logits tensor in-place.
             orig_logits = logits.clone()
+        # Use float32 for the logits.
+        logits = logits.to(torch.float32)
 
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
-        # Use float32 for the logits.
-        logits = logits.to(torch.float32)
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         # Sample the next token.
