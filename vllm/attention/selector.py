@@ -81,6 +81,7 @@ def get_attn_backend(
     block_size: int,
     is_attention_free: bool,
     is_blocksparse: bool = False,
+    use_mla: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     # Accessing envs.* behind an @lru_cache decorator can cause the wrong
@@ -95,6 +96,7 @@ def get_attn_backend(
         is_attention_free=is_attention_free,
         is_blocksparse=is_blocksparse,
         use_v1=envs.VLLM_USE_V1,
+        use_mla=use_mla,
     )
 
 
@@ -107,6 +109,7 @@ def _cached_get_attn_backend(
     is_attention_free: bool,
     is_blocksparse: bool = False,
     use_v1: bool = False,
+    use_mla: bool = False,
 ) -> Type[AttentionBackend]:
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")
@@ -115,7 +118,7 @@ def _cached_get_attn_backend(
         return BlocksparseFlashAttentionBackend
 
     backend = which_attn_to_use(head_size, dtype, kv_cache_dtype, block_size,
-                                is_attention_free, use_v1)
+                                is_attention_free, use_v1, use_mla)
     if backend == _Backend.FLASH_ATTN:
         logger.info("Using Flash Attention backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
@@ -155,6 +158,10 @@ def _cached_get_attn_backend(
         logger.info("Using Flashinfer backend.")
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
+    elif backend == _Backend.FLASHINFER_MLA:
+        logger.info("Using Flashinfer MLA backend.")
+        from vllm.attention.backends.flashinfer_mla import FlashInferMLABackend
+        return FlashInferMLABackend
     elif backend == _Backend.HPU_ATTN:
         logger.info("Using HPUAttention backend.")
         from vllm.attention.backends.hpu_attn import HPUAttentionBackend
@@ -176,7 +183,8 @@ def which_attn_to_use(head_size: int,
                       kv_cache_dtype: Optional[str],
                       block_size: int,
                       is_attention_free: bool,
-                      use_v1: bool = False) -> _Backend:
+                      use_v1: bool = False,
+                      use_mla: bool = False) -> _Backend:
     """Returns which flash attention backend to use."""
     # Default case.
     selected_backend = _Backend.FLASH_ATTN
@@ -209,6 +217,9 @@ def which_attn_to_use(head_size: int,
 
     if use_v1:
         return _Backend.FLASH_ATTN_VLLM_V1
+
+    if use_mla:
+        return _Backend.FLASHINFER_MLA
 
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
