@@ -40,6 +40,8 @@ class Sampler(nn.Module):
         sampled = sampled.to(torch.int32)
 
         if needs_logprobs:
+            # NOTE(woosuk): Use the original logits (before any penalties or
+            # temperature scaling) for the top-k logprobs.
             logprobs = self.get_logprobs(orig_logits)
             # FIXME: Mask the sampled token_id, get topk logprobs,
             # and concatenate the topk with the sampled token_id.
