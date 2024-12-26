@@ -6,10 +6,12 @@ import datetime
 import enum
 import gc
 import getpass
+import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -1550,14 +1552,18 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
-# Should handle every optional module in vLLM
-# This is based on `extras_require` from setup.py
-_EXTRAS_REQUIRE = {
-    "tensorizer": ["tensorizer"],
-    "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
-    "audio": ["librosa", "soundfile"],  # Required for audio processing
-    "video": ["decord"]  # Required for video processing
-}
+def get_vllm_optional_dependencies():
+    metadata = importlib.metadata.metadata("vllm")
+    requirements = metadata.get_all("Requires-Dist", [])
+    extras = metadata.get_all("Provides-Extra", [])
+
+    return {
+        extra: [
+            re.split(r";|>=|<=|==", req)[0] for req in requirements
+            if req.endswith(f'extra == "{extra}"')
+        ]
+        for extra in extras
+    }
 
 
 @dataclass(frozen=True)
@@ -1579,7 +1585,7 @@ class PlaceholderModule:
         try:
             importlib.import_module(self.name)
         except ImportError as exc:
-            for extra, names in _EXTRAS_REQUIRE.items():
+            for extra, names in get_vllm_optional_dependencies().items():
                 if name in names:
                     msg = f"Please install vllm[{extra}] for {extra} support"
                     raise ImportError(msg) from exc
