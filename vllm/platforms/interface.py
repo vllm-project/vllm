@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -261,6 +262,13 @@ class Platform:
                            "This may slow down the performance.")
             return False
         return True
+
+    @classmethod
+    def get_punica_wrapper(cls, *args, **kwargs) -> PunicaWrapperBase:
+        """
+        Return the punica wrapper for current platform.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):

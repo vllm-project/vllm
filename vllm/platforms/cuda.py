@@ -15,6 +15,8 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
+from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -215,6 +217,11 @@ class CudaPlatformBase(Platform):
 
         logger.info("Using Flash Attention backend.")
         return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
+
+    @classmethod
+    def get_punica_wrapper(cls, *args, **kwargs) -> PunicaWrapperBase:
+        logger.info_once("Using PunicaWrapperGPU.")
+        return PunicaWrapperGPU(*args, **kwargs)
 
 
 # NVML utils
