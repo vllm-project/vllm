@@ -7,7 +7,7 @@ from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
-MODEL_PATH = "/home/sobey/Models/llm_models/BaseModel/Qwen/Qwn2-VL/Qwen2-VL-7B-Instruct"
+MODEL_PATH = "Qwen/Qwen2-VL-7B-Instruct"
 
 PROMPT_TEMPLATE = (
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
@@ -80,4 +80,3 @@ def test_qwen2vl_lora(qwen2vl_lora_files):
     output2 = do_sample(llm, qwen2vl_lora_files, lora_id=2)
     for i in range(len(EXPECTED_OUTPUT)):
         assert EXPECTED_OUTPUT[i].startswith(output2[i])
-

@@ -110,7 +110,6 @@ def parse_fine_tuned_lora_name(
             is_bias whether the tensor is lora bias.
     """
 
-  
     # LoRA weight qualified name always starts with `base_model.model.`,
     # so we remove the prefix `base_model.model.` to make the following
     # mapping correctly.
