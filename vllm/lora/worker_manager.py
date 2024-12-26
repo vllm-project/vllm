@@ -91,6 +91,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
+
+            expected_lora_modules = list(set(expected_lora_modules))
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
