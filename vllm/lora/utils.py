@@ -1,4 +1,3 @@
-import copy
 import os
 import re
 from typing import List, Optional, Set, Tuple, Type, Union
@@ -32,7 +31,6 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -112,36 +110,28 @@ def parse_fine_tuned_lora_name(
             is_bias whether the tensor is lora bias.
     """
 
-    w_mapper = None
-    if weights_mapper:
-        w_mapper = copy.deepcopy(weights_mapper)
-        # TODO: Currently only supports mapping for prefix, mapping for
-        # substr and subfix will be supported in the future.
-        for attr, mapping in [
-            ("orig_to_new_substr", w_mapper.orig_to_new_substr),
-            ("orig_to_new_suffix", w_mapper.orig_to_new_suffix),
-        ]:
-            if mapping:
-                print_warning_once(
-                    f"vLLM currently does not support mapping of LoRA weights "
-                    f"for {mapping}.")
-                setattr(w_mapper, attr, {})
+    # LoRA weight qualified name always starts with `base_model.model.`,
+    # so we remove the prefix `base_model.model.` to make the following
+    # mapping correctly.
+    if "base_model.model." in name:
+        name = name.replace("base_model.model.", "")
+        name = weights_mapper._map_name(name) if weights_mapper else name
+        # recover the prefix `base_model.model.`
+        name = "base_model.model." + name
 
-    mapper = (lambda name: w_mapper._map_name(name)
-              if w_mapper is not None else name)
     parts = name.split(".")
     if parts[-1] == "weight" and (parts[-2] == "lora_A"
                                   or parts[-2] == "lora_B"):
         new_name = ".".join(parts[2:-2])
-        return mapper(new_name), parts[-2] == "lora_A", False
+        return new_name, parts[-2] == "lora_A", False
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[2:-1])
-        return mapper(new_name), parts[-1] == "lora_embedding_A", False
+        return new_name, parts[-1] == "lora_embedding_A", False
 
     if parts[-1] == "bias":
         new_name = ".".join(parts[2:-2])
-        return mapper(new_name), False, True
+        return new_name, False, True
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 

@@ -2,7 +2,7 @@ import base64
 import os
 from functools import lru_cache
 from io import BytesIO
-from typing import Any, List, Optional, Tuple, TypeVar, Union
+from typing import List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -13,8 +13,24 @@ import vllm.envs as envs
 from vllm.connections import global_http_connection
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.utils import PlaceholderModule
 
 from .inputs import MultiModalDataDict, PlaceholderRange
+
+try:
+    import decord
+except ImportError:
+    decord = PlaceholderModule("decord")  # type: ignore[assignment]
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
+
+try:
+    import soundfile
+except ImportError:
+    soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 logger = init_logger(__name__)
 
@@ -125,19 +141,7 @@ async def async_fetch_image(image_url: str,
     return image.convert(image_mode)
 
 
-def _load_video_frames_from_bytes(b: bytes):
-    frame = Image.open(BytesIO(b))
-    return np.array(frame)
-
-
-def load_video_frames_from_base64(frame: Union[bytes, str]):
-    """Load frame from base64 format."""
-    return _load_video_frames_from_bytes(base64.b64decode(frame))
-
-
-def _load_video_from_bytes(b: bytes, num_frames: int = 32):
-    _, decord = try_import_video_packages()
-
+def _load_video_from_bytes(b: bytes, num_frames: int = 32) -> npt.NDArray:
     video_path = BytesIO(b)
     vr = decord.VideoReader(video_path, num_threads=1)
     total_frame_num = len(vr)
@@ -155,13 +159,17 @@ def _load_video_from_bytes(b: bytes, num_frames: int = 32):
     return frames
 
 
-def _load_video_from_data_url(video_url: str):
-    # Only split once and assume the second part is the base64 encoded image
-    frames_base64 = video_url.split(",")[1:]
-    return np.stack([
-        load_video_frames_from_base64(frame_base64)
-        for frame_base64 in frames_base64
-    ])
+def _load_video_from_data_url(video_url: str) -> npt.NDArray:
+    # Only split once and assume the second part is the base64 encoded video
+    _, video_base64 = video_url.split(",", 1)
+
+    if video_url.startswith("data:video/jpeg;"):
+        return np.stack([
+            np.array(load_image_from_base64(frame_base64))
+            for frame_base64 in video_base64.split(",")
+        ])
+
+    return load_video_from_base64(video_base64)
 
 
 def fetch_video(video_url: str, *, num_frames: int = 32) -> npt.NDArray:
@@ -204,22 +212,10 @@ async def async_fetch_video(video_url: str,
     return video
 
 
-def try_import_audio_packages() -> Tuple[Any, Any]:
-    try:
-        import librosa
-        import soundfile
-    except ImportError as exc:
-        raise ImportError(
-            "Please install vllm[audio] for audio support.") from exc
-    return librosa, soundfile
-
-
 def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
     """
     Load audio from a URL.
     """
-    librosa, _ = try_import_audio_packages()
-
     if audio_url.startswith("http"):
         audio_bytes = global_http_connection.get_bytes(
             audio_url,
@@ -240,8 +236,6 @@ async def async_fetch_audio(
     """
     Asynchronously fetch audio from a URL.
     """
-    librosa, _ = try_import_audio_packages()
-
     if audio_url.startswith("http"):
         audio_bytes = await global_http_connection.async_get_bytes(
             audio_url,
@@ -300,8 +294,6 @@ def encode_audio_base64(
     sampling_rate: int,
 ) -> str:
     """Encode audio as base64."""
-    _, soundfile = try_import_audio_packages()
-
     buffered = BytesIO()
     soundfile.write(buffered, audio, sampling_rate, format="WAV")
 
@@ -330,67 +322,18 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return _load_image_from_bytes(base64.b64decode(image))
 
 
-def rescale_image_size(image: Image.Image,
-                       size_factor: float,
-                       transpose: int = -1) -> Image.Image:
-    """Rescale the dimensions of an image by a constant factor."""
-    new_width = int(image.width * size_factor)
-    new_height = int(image.height * size_factor)
-    image = image.resize((new_width, new_height))
-    if transpose >= 0:
-        image = image.transpose(Image.Transpose(transpose))
-    return image
-
-
-def try_import_video_packages() -> Any:
-    try:
-        import cv2
-        import decord
-    except ImportError as exc:
-        raise ImportError(
-            "Please install vllm[video] for video support.") from exc
-    return cv2, decord
-
-
-def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
-    cv2, _ = try_import_video_packages()
-
-    num_frames, _, _, channels = frames.shape
-    new_height, new_width = size
-    resized_frames = np.empty((num_frames, new_height, new_width, channels),
-                              dtype=frames.dtype)
-    for i, frame in enumerate(frames):
-        resized_frame = cv2.resize(frame, (new_width, new_height))
-        resized_frames[i] = resized_frame
-    return resized_frames
-
-
-def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
-    _, height, width, _ = frames.shape
-    new_height = int(height * size_factor)
-    new_width = int(width * size_factor)
-
-    return resize_video(frames, (new_height, new_width))
-
-
-def sample_frames_from_video(frames: npt.NDArray,
-                             num_frames: int) -> npt.NDArray:
-    total_frames = frames.shape[0]
-    if num_frames == -1:
-        return frames
-    else:
-        frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-        sampled_frames = frames[frame_indices, ...]
-        return sampled_frames
-
-
-def encode_video_base64(frames: npt.NDArray):
+def encode_video_base64(frames: npt.NDArray) -> str:
     base64_frames = []
     frames_list = [frames[i] for i in range(frames.shape[0])]
     for frame in frames_list:
         img_base64 = encode_image_base64(Image.fromarray(frame))
         base64_frames.append(img_base64)
     return ",".join(base64_frames)
+
+
+def load_video_from_base64(video: Union[bytes, str]) -> npt.NDArray:
+    """Load video from base64 format."""
+    return _load_video_from_bytes(base64.b64decode(video))
 
 
 def resolve_visual_encoder_outputs(

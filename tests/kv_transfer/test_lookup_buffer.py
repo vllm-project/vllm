@@ -48,7 +48,7 @@ def test_run(my_rank, buffer, device):
         assert buffer.buffer_size == 0
         assert len(buffer.buffer) == 0
 
-    print("Test run passed!")
+    print("My rank: %d, Test run passed!" % (my_rank))
 
 
 def stress_test(my_rank, buf, device):
@@ -108,7 +108,7 @@ def stress_test(my_rank, buf, device):
     else:
         torch.distributed.send(torch.tensor([n]), 0)
 
-    print("Passed stress test!")
+    print("My rank: %d, Passed stress test!" % (my_rank))
 
 
 if __name__ == "__main__":
