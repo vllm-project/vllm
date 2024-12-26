@@ -319,7 +319,7 @@ See [this page](#generative-models) for more information on how to use generativ
     - ✅︎
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
-    - :code:`Qwen/Qwen2-7B-Instruct`, :code:`Qwen/Qwen2-7B`, etc.
+    - :code:`Qwen/QwQ-32B-Preview`, :code:`Qwen/Qwen2-7B-Instruct`, :code:`Qwen/Qwen2-7B`, etc.
     - ✅︎
     - ✅︎
   * - :code:`Qwen2MoeForCausalLM`
@@ -710,7 +710,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
     - T + I\ :sup:`E+` + V\ :sup:`E+`
-    - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
+    - :code:`Qwen/QVQ-72B-Preview`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     - ✅︎
     - ✅︎
     -
