@@ -596,6 +596,12 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
+        if (self.hf_config.model_type == 'deepseek_v3'
+                and not self.enforce_eager):
+            logger.warning("CUDA graph is not supported for Deepseek V3 yet, "
+                           "fallback to the eager mode.")
+            self.enforce_eager = True
+
     def _verify_bnb_config(self) -> None:
         """
         The current version of bitsandbytes (0.44.0) with 8-bit models does not

@@ -27,7 +27,6 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
@@ -90,28 +89,6 @@ class DeepseekV3MLP(nn.Module):
         return x
 
 
-class MoEGate(nn.Module):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-    ):
-        super().__init__()
-        # TODO(simon): make this replicated linear
-        self.weight = nn.Parameter(
-            torch.empty(config.n_routed_experts, config.hidden_size))
-        if config.topk_method == "noaux_tc":
-            self.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
-        else:
-            self.e_score_correction_bias = None
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return torch.nn.functional.linear(hidden_states,
-                                          self.weight,
-                                          bias=None)
-
-
 class DeepseekV3MoE(nn.Module):
 
     def __init__(
@@ -134,7 +111,17 @@ class DeepseekV3MoE(nn.Module):
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
 
-        self.gate = MoEGate(config)
+        self.gate = ReplicatedLinear(config.hidden_size,
+                                     config.n_routed_experts,
+                                     bias=False,
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
+        if config.topk_method == "noaux_tc":
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(config.n_routed_experts))
+        else:
+            self.gate.e_score_correction_bias = None
+
         self.experts = FusedMoE(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -167,7 +154,7 @@ class DeepseekV3MoE(nn.Module):
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
-        router_logits = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
@@ -426,7 +413,8 @@ class DeepseekV3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+# TODO(simon): check whether we support torch compile for Deepseek V3
+# @support_torch_compile
 class DeepseekV3Model(nn.Module):
 
     fall_back_to_pt_during_load = False
