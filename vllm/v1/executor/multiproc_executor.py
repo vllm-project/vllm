@@ -23,7 +23,7 @@ from vllm.utils import (get_distributed_init_method, get_open_port,
                         get_open_zmq_ipc_path)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import make_zmq_socket
+from vllm.utils import zmq_socket_ctx
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -250,7 +250,7 @@ class WorkerProc:
         worker_response_mq_handle = self.worker_response_mq.export_handle()
 
         # Send Readiness signal to EngineCore process.
-        with make_zmq_socket(ready_path, zmq.constants.PUSH) as ready_socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
             payload = pickle.dumps(worker_response_mq_handle,
                                    protocol=pickle.HIGHEST_PROTOCOL)
             ready_socket.send_string(WorkerProc.READY_STR)
@@ -352,7 +352,7 @@ class WorkerProc:
         ready_path: str,
     ) -> Optional[Handle]:
         """Wait until the Worker is ready."""
-        with make_zmq_socket(ready_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
 
             # Wait for Worker to send READY.
             while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:

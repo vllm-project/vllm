@@ -25,7 +25,7 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
-from vllm.v1.utils import make_zmq_socket
+from vllm.utils import zmq_socket_ctx
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -173,7 +173,7 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        with make_zmq_socket(ready_path, zmq.constants.PUSH) as ready_socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
             ready_socket.send_string(EngineCoreProc.READY_STR)
 
     @staticmethod
@@ -339,7 +339,7 @@ class EngineCoreProc(EngineCore):
         decoder_add_req = PickleEncoder()
         decoder_abort_req = PickleEncoder()
 
-        with make_zmq_socket(input_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
@@ -367,7 +367,7 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        with make_zmq_socket(output_path, zmq.constants.PUSH) as socket:
+        with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)

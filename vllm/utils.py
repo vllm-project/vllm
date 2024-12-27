@@ -23,6 +23,7 @@ import time
 import uuid
 import warnings
 import weakref
+import zmq
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Iterable, Mapping
@@ -1836,3 +1837,58 @@ def set_ulimit(target_soft_limit=65535):
                 "with error %s. This can cause fd limit errors like"
                 "`OSError: [Errno 24] Too many open files`. Consider "
                 "increasing with ulimit -n", current_soft, e)
+
+
+def make_zmq_socket(
+    ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
+    path: str,
+    type: Any,
+) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
+    """Make a ZMQ socket with the proper bind/connect semantics."""
+
+    import psutil
+    mem = psutil.virtual_memory()
+
+    socket = ctx.socket(type)
+
+    # Calculate buffer size based on system memory
+    total_mem = mem.total / 1024**3
+    available_mem = mem.available / 1024**3
+    # For systems with substantial memory (>32GB total, >16GB available):
+    # - Set a large 0.5GB buffer to improve throughput
+    # For systems with less memory:
+    # - Use system default (-1) to avoid excessive memory consumption
+    if total_mem > 32 and available_mem > 16:
+        buf_size = int(0.5 * 1024**3)  # 0.5GB in bytes
+    else:
+        buf_size = -1  # Use system default buffer size
+
+    if type == zmq.constants.PULL:
+        socket.setsockopt(zmq.constants.RCVHWM, 0)
+        socket.setsockopt(zmq.constants.RCVBUF, buf_size)
+        socket.bind(path)
+    elif type == zmq.constants.PUSH:
+        socket.setsockopt(zmq.constants.SNDHWM, 0)
+        socket.setsockopt(zmq.constants.SNDBUF, buf_size)
+        socket.connect(path)
+    else:
+        raise ValueError(f"Unknown Socket Type: {type}")
+
+    return socket
+
+
+@contextlib.contextmanager
+def zmq_socket_ctx(
+        path: str,
+        type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
+    """Context manager for a ZMQ socket"""
+
+    ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+    try:
+        yield make_zmq_socket(ctx, path, type)
+
+    except KeyboardInterrupt:
+        logger.debug("Got Keyboard Interrupt.")
+
+    finally:
+        ctx.destroy(linger=0)
