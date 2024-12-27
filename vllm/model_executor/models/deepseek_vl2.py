@@ -46,6 +46,10 @@ class DeepseekVL2ImagePixelInputs(TypedDict):
     """
     Shape: `(batch_size * num_images, num_channels, height, width)`
     """
+    images_spatial_crop: torch.Tensor
+    """
+    Shape: `(batch_size, num_images, num_crops)`
+    """
 
 
 class DeepseekVL2VImageEmbeddingInputs(TypedDict):
@@ -274,7 +278,107 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_image_input(
             self, image_input: DeepseekVL2ImageInputs) -> torch.Tensor:
-        raise NotImplementedError("This method is not implemented.")
+        pixel_values = image_input["pixel_values"]
+        images_spatial_crop = image_input["images_spatial_crop"]
+        bs, max_n_images, _ = images_spatial_crop.shape
+        batch_num_tiles = [0 for _ in range(bs)]
+        total_tiles = []
+        for idx in range(bs):
+            for jdx in range(max_n_images):
+                num_width_tiles, num_height_tiles = images_spatial_crop[idx, jdx]
+                if num_width_tiles == 0 or num_height_tiles == 0:
+                    break
+                batch_num_tiles[idx] += (1 + num_width_tiles * num_height_tiles)
+
+            total_tiles.append(pixel_values[idx, :batch_num_tiles[idx]])
+
+        # [batch_all_tiles, 3, height, width]
+        total_tiles = torch.cat(total_tiles, dim=0)
+        assert total_tiles.shape[0] == sum(batch_num_tiles)
+
+        # [batch_all_tiles, vit_seq_len, c]
+        images_feature = self.vision(total_tiles)
+
+        # [batch_all_tiles, hw, D]
+        images_embeds = self.projector(images_feature)
+
+        _, hw, n_dim = images_embeds.shape
+        h = w = int(hw ** 0.5)
+
+        # 根据self.tile_tag & self.global_view_pos填充image token sequence
+        tile_index = 0
+        vision_embeddings = []
+        for idx in range(images_spatial_crop.shape[0]):
+            images_in_this_batch = []
+            for jdx in range(images_spatial_crop.shape[1]):
+
+                # extra global & local features
+                num_width_tiles, num_height_tiles = images_spatial_crop[idx, jdx]
+                if num_width_tiles == 0 or num_height_tiles == 0:
+                    break
+
+                num_tiles_in_image = num_width_tiles * num_height_tiles
+
+                # [hw, D]
+                global_features = images_embeds[tile_index]
+
+                # [num_height_tiles * num_width_tiles, hw, D]
+                local_features = images_embeds[tile_index + 1: tile_index + 1 + num_tiles_in_image]
+
+                tile_index += num_tiles_in_image + 1
+
+                # format global and local features
+                # ----------------- global view add newline -----------------
+                # [hw, D] -> [h, w, D]
+                global_features = global_features.view(h, w, n_dim)
+
+                # [D]     -> [h, 1, D]
+                new_lines_in_global = repeat(self.image_newline, "d -> h 1 d", h=h)
+
+                # cat([h, w, D], [h, 1, D], dim=1) -> [h, w + 1, D]
+                global_features = torch.cat([global_features, new_lines_in_global], dim=1)
+
+                # [h, w + 1, D] -> [h * (w + 1), D]
+                global_features = global_features.view(-1, n_dim)
+
+                # ----------------- local view add newline -----------------
+                # [num_height_tiles * num_width_tiles, h * w, D] -> [num_height_tiles * h, num_width_tiles * w, D]
+                local_features = rearrange(
+                    local_features,
+                    "(th tw) (h w) d -> (th h) (tw w) d",
+                    th=num_height_tiles,
+                    tw=num_width_tiles,
+                    h=h,
+                    w=w
+                )
+
+                # [D] -> [num_height_tiles * h, 1, D]
+                new_lines_in_local = repeat(
+                    self.image_newline,
+                    "d -> (th h) 1 d",
+                    th=num_height_tiles,
+                    h=h
+                )
+
+                # [num_height_tiles * h, num_width_tiles * w + 1, D]
+                local_features = torch.cat([local_features, new_lines_in_local], dim=1)
+
+                # [num_height_tiles * h, num_width_tiles * w + 1, D]
+                #   --> [(num_height_tiles * h) * (num_width_tiles * w + 1), D]
+                local_features = local_features.view(-1, n_dim)
+
+                # ----------------- merge global and local tiles -----------------
+                if self.global_view_pos == "head":
+                    global_local_features = torch.cat(
+                        [global_features, self.view_seperator[None, :], local_features], dim=0)
+                else:
+                    global_local_features = torch.cat(
+                        [local_features, self.view_seperator[None, :], global_features], dim=0)
+
+                images_in_this_batch.append(global_local_features)
+
+            vision_embeddings.extend(images_in_this_batch)
+        return torch.cat(vision_embeddings, dim=0)
 
     def get_multimodal_embeddings(self, **kwargs: object) -> torch.Tensor:
         image_input = self._parse_and_validate_image_input(**kwargs)
