@@ -34,7 +34,7 @@ from vllm.utils import is_list_of
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
 IMG_START = '<img>'
@@ -472,6 +472,18 @@ input_pipeline = InternVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
 @INPUT_REGISTRY.register_dummy_data(input_pipeline.dummy_data)
 @INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
+
+    # BitandBytes specific attributes
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={".qkv.": ".qkv_proj."})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

@@ -155,13 +155,21 @@ class InternParallelAttention(nn.Module):
                                               self.tp_size)
 
         self.scale = self.head_dim**-0.5
-        self.qkv = QKVParallelLinear(
+        # self.qkv = QKVParallelLinear(
+        #     self.embed_dim,
+        #     self.head_dim,
+        #     num_dummy_heads + self.num_heads,
+        #     bias=config.qkv_bias,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.qkv",
+        # )
+        self.qkv_proj = QKVParallelLinear(
             self.embed_dim,
             self.head_dim,
             num_dummy_heads + self.num_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv",
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.qk_normalization = config.qk_normalization
