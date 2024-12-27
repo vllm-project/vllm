@@ -33,8 +33,7 @@ from functools import lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
                     NamedTuple, Optional, Tuple, Type, TypeVar, Union,
-                    overload)            
-                
+                    overload)
 from uuid import uuid4
 
 import numpy as np
