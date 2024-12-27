@@ -483,7 +483,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={".qkv.": ".qkv_proj."})
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".qkv.": ".qkv_proj."})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
