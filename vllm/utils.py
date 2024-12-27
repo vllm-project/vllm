@@ -1867,11 +1867,11 @@ def make_zmq_socket(
     if type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
         socket.setsockopt(zmq.constants.RCVBUF, buf_size)
-        socket.bind(path)
+        socket.connect(path)
     elif type == zmq.constants.PUSH:
         socket.setsockopt(zmq.constants.SNDHWM, 0)
         socket.setsockopt(zmq.constants.SNDBUF, buf_size)
-        socket.connect(path)
+        socket.bind(path)
     else:
         raise ValueError(f"Unknown Socket Type: {type}")
 

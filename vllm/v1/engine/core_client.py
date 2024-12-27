@@ -1,4 +1,4 @@
-from typing import List, Type
+from typing import List, Optional, Type
 
 import msgspec
 import zmq
@@ -13,7 +13,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import PickleEncoder
-from vllm.v1.utils import BackgroundProcessHandler
+from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
 
@@ -155,7 +155,8 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
-        self.proc_handler = BackgroundProcessHandler(
+        self.proc_handle: Optional[BackgroundProcHandle]
+        self.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
             process_name="EngineCore",
@@ -169,8 +170,9 @@ class MPClient(EngineCoreClient):
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
 
-        if hasattr(self, "proc_handler") and self.proc_handler:
-            self.proc_handler.shutdown()
+        if hasattr(self, "proc_handle") and self.proc_handle:
+            self.proc_handle.shutdown()
+            self.proc_handle = None
 
 
 class SyncMPClient(MPClient):

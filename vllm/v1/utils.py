@@ -79,30 +79,7 @@ class ConstantList(Generic[T], Sequence):
         return len(self._x)
 
 
-@dataclass
 class BackgroundProcHandle:
-    proc: BaseProcess
-    input_path: str
-    output_path: str
-
-    def shutdown(self):
-        # Shutdown the process if needed.
-        if self.proc.is_alive():
-            self.proc.terminate()
-            self.proc.join(5)
-
-            if self.proc.is_alive():
-                kill_process_tree(self.proc.pid)
-
-        # Remove zmq ipc socket files
-        ipc_sockets = [self.output_path, self.input_path]
-        for ipc_socket in ipc_sockets:
-            socket_file = ipc_socket.replace("ipc://", "")
-            if os and os.path.exists(socket_file):
-                os.remove(socket_file)
-
-
-class BackgroundProcessHandler:
     """
     Utility class to handle creation, readiness, and shutdown
     of background processes used by the AsyncLLM and LLMEngine.
@@ -127,23 +104,34 @@ class BackgroundProcessHandler:
         process_kwargs["ready_pipe"] = writer
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
+        self.input_path = input_path
+        self.output_path = output_path
 
         # Run Detokenizer busy loop in background process.
-        proc = context.Process(target=target_fn, kwargs=process_kwargs)
-        proc.start()
+        # self.proc: Optional[BaseProcess]
+        self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
+        self.proc.start()
 
         # Wait for startup.
         if reader.recv()["status"] != "READY":
             raise RuntimeError(f"{process_name} initialization failed. "
                                "See root cause above.")
 
-        self.proc_handle: Optional[BackgroundProcHandle]
-        self.proc_handle = BackgroundProcHandle(proc, input_path, output_path)
-
     def __del__(self):
         self.shutdown()
 
     def shutdown(self):
-        if hasattr(self, "proc_handle") and self.proc_handle:
-            self.proc_handle.shutdown()
-            self.proc_handle = None
+        # Shutdown the process if needed.
+        if hasattr(self, "proc") and self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join(5)
+
+            if self.proc.is_alive():
+                kill_process_tree(self.proc.pid)
+
+        # Remove zmq ipc socket files
+        ipc_sockets = [self.output_path, self.input_path]
+        for ipc_socket in ipc_sockets:
+            socket_file = ipc_socket.replace("ipc://", "")
+            if os and os.path.exists(socket_file):
+                os.remove(socket_file)
