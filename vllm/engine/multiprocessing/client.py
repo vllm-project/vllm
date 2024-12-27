@@ -23,9 +23,8 @@ from vllm.engine.async_llm_engine import (
     build_guided_decoding_logits_processor_async)
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR,
                                          RPC_REQUEST_T,
-                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCProcessRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
+                                         RPCAbortRequest, RPCError,
+                                         RPCProcessRequest,
                                          RPCUProfileRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable

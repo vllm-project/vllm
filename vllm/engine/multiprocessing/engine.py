@@ -2,7 +2,7 @@ import pickle
 import psutil
 import signal
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Union
+from typing import Iterator, List
 
 import cloudpickle
 import zmq
@@ -11,19 +11,16 @@ from vllm import AsyncEngineArgs, SamplingParams
 from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
-                                         IPC_HEALTH_EXT, IPC_INPUT_EXT,
-                                         IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
+from vllm.engine.multiprocessing import (REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCProcessRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import kill_process_tree, get_exception_traceback
+from vllm.utils import get_exception_traceback, make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -88,22 +85,6 @@ class MQLLMEngine:
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
-        # Send heartbeats back to client.
-        self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.heartbeat_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
-
-        # IPC path for the data socket.
-        self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
-
-        # Error state.
-        self._errored_with: Optional[BaseException] = None
-
-    @property
-    def dead_error(self) -> BaseException:
-        if self._errored_with is not None:
-            return ENGINE_DEAD_ERROR(self._errored_with)
-        else:
-            return ENGINE_DEAD_ERROR()
 
     @classmethod
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
@@ -126,57 +107,11 @@ class MQLLMEngine:
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context)
 
-    def start(self):
-        try:
-            try:
-                logger.debug("Starting Startup Loop.")
-                self.run_startup_loop()
-                logger.debug("Starting Engine Loop.")
-                self.run_engine_loop()
-            except Exception as e:
-                logger.exception(repr(e))
-        except KeyboardInterrupt:
-            logger.debug("Shutting down MQLLMEngine.")
-        finally:
-            logger.debug("MQLLMEngine is shut down.")
-            self.cleanup()
-
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
         # Closes all sockets and destroys context.
         self.ctx.destroy(linger=0)
         del self.engine
-
-    @contextmanager
-    def make_data_socket(
-            self) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
-        socket = self.ctx.socket(zmq.constants.ROUTER)
-        try:
-            socket.bind(self.data_ipc_path)
-            yield socket
-        finally:
-            socket.close(linger=0)
-
-    def run_startup_loop(self) -> None:
-        """Startup loop for sending data from Engine -> Client."""
-
-        with self.make_data_socket() as socket:
-            response: Union[RPCStartupResponse, BaseException]
-            try:
-                identity, message = socket.recv_multipart(copy=False)
-                request: RPCStartupRequest = pickle.loads(message.buffer)
-
-                # Handle the query from the Client.
-                if request == RPCStartupRequest.IS_SERVER_READY:
-                    tracing_enabled = self.engine.is_tracing_enabled()
-                    response = RPCStartupResponse(
-                        tracing_enabled=tracing_enabled)
-
-            except Exception as e:
-                response = e
-
-            socket.send_multipart((identity, pickle.dumps(response)),
-                                  copy=False)
 
     def run_engine_loop(self):
         """Core busy loop of the LLMEngine."""
@@ -187,7 +122,7 @@ class MQLLMEngine:
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                     # When there's no work, check on engine health and send
                     # health status back to client
-                    self._health_check()
+                    self.engine.check_health()
                     self.engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
 
@@ -195,65 +130,41 @@ class MQLLMEngine:
             self.handle_new_input()
 
             # Engine step.
-            request_outputs = self.engine_step()
+            request_outputs = self.engine.step()
 
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
                 self._send_outputs(request_outputs)
 
-    def engine_step(self) -> List[RequestOutput]:
-        """Engine step wrapper with error handling."""
-        try:
-            return self.engine.step()
-        except SystemExit:
-            raise
-        except BaseException as e:
-            self._set_errored(e)
-            rpc_err = RPCError(request_id=None,
-                               is_engine_errored=True,
-                               exception=e)
-            self._send_outputs(rpc_err)
-            raise e
 
     def handle_new_input(self):
         """Handle new input from the socket"""
-        try:
-            while self.input_socket.poll(timeout=0) != 0:
-                frames = self.input_socket.recv_multipart(copy=False)
-                request = pickle.loads(frames[0].buffer)
 
-                if isinstance(request, RPCProcessRequest):
-                    if len(frames) > 1:
-                        # Use cloudpickle for logits processors
-                        assert isinstance(request.params, SamplingParams)
-                        lprocs = cloudpickle.loads(frames[1].buffer)
-                        request.params.logits_processors = lprocs
-                    self._handle_process_request(request)
-                elif isinstance(request, RPCAbortRequest):
-                    self._handle_abort_request(request)
-                elif isinstance(request, RPCUProfileRequest):
-                    if request == RPCUProfileRequest.START_PROFILE:
-                        self.start_profile()
-                    else:
-                        self.stop_profile()
+        while self.input_socket.poll(timeout=0) != 0:
+            frames = self.input_socket.recv_multipart(copy=False)
+            request = pickle.loads(frames[0].buffer)
+
+            if isinstance(request, RPCProcessRequest):
+                if len(frames) > 1:
+                    # Use cloudpickle for logits processors
+                    assert isinstance(request.params, SamplingParams)
+                    lprocs = cloudpickle.loads(frames[1].buffer)
+                    request.params.logits_processors = lprocs
+                self._handle_process_request(request)
+            elif isinstance(request, RPCAbortRequest):
+                self._handle_abort_request(request)
+            elif isinstance(request, RPCUProfileRequest):
+                if request == RPCUProfileRequest.START_PROFILE:
+                    self.start_profile()
                 else:
-                    raise ValueError("Unknown RPCRequest Type: "
-                                     f"{type(request)}")
-
-        except Exception as e:
-            self._set_errored(e)
-            self._send_unhealthy(e)
-            raise e
+                    self.stop_profile()
+            else:
+                raise ValueError(
+                    f"Unknown RPCRequest Type: {type(request)}")
 
     def _handle_process_request(self, request: RPCProcessRequest):
         """Handle RPCProcessRequest by adding it to the LLMEngine."""
         request_id = request.request_id
-
-        if self._errored_with is not None:
-            rpc_err = RPCError(request_id=request_id,
-                               is_engine_errored=True,
-                               exception=ENGINE_DEAD_ERROR(self._errored_with))
-            self._send_outputs(rpc_err)
 
         try:
             self.engine.add_request(
@@ -272,9 +183,7 @@ class MQLLMEngine:
             # We do not set self._errored = True here, since the error
             # is due to an issue adding this request to the engine,
             # rather than an issue with the engine itself.
-            is_errored = self._errored_with is not None
             rpc_err = RPCError(request_id=request_id,
-                               is_engine_errored=is_errored,
                                exception=e)
             self._send_outputs(rpc_err)
 
@@ -285,17 +194,6 @@ class MQLLMEngine:
         self.engine.abort_request(request.request_id)
         if self.log_requests:
             logger.info("Aborted request %s.", request.request_id)
-
-    def _health_check(self):
-        # Send unhealthy if engine has already errored
-        if self._errored_with is not None:
-            self._send_unhealthy(self._errored_with)
-        try:
-            self.engine.check_health()
-            self._send_healthy()
-        except Exception as e:
-            self._set_errored(e)
-            self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
@@ -314,27 +212,11 @@ class MQLLMEngine:
             output_bytes = pickle.dumps(outputs)
             self.output_socket.send_multipart((output_bytes, ), copy=False)
 
-    def _send_healthy(self):
-        """Send HEALTHY message to RPCClient."""
-        if not self.heartbeat_socket.closed:
-            self.heartbeat_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
-
-    def _send_unhealthy(self, error: BaseException):
-        """Send UNHEALTHY message to RPCClient."""
-        if not self.heartbeat_socket.closed:
-            error_bytes = pickle.dumps(error)
-            self.heartbeat_socket.send_multipart((error_bytes, ), copy=False)
-
     def _async_socket_engine_callback(self,
                                       request_outputs: REQUEST_OUTPUTS_T):
         """Callback used by engine to make socket handling async with GPU."""
         self._send_outputs(request_outputs)
         self.handle_new_input()
-
-    def _set_errored(self, e: BaseException):
-        """Log and set errored status if this is the first issue."""
-        if self._errored_with is None:
-            self._errored_with = e
 
     def start_profile(self) -> None:
         if type(self.engine.model_executor) is GPUExecutor:
@@ -347,27 +229,30 @@ class MQLLMEngine:
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
+    
+    @staticmethod
+    def run_mq_llm_engine(
+        engine_args: AsyncEngineArgs,
+        usage_context: UsageContext,
+        ipc_path: str
+    ):
+        parent_process = psutil.Process().parent()
+        signal.signal(signal.SIGTERM, signal_handler)
+
+        try:
+            engine = MQLLMEngine.from_engine_args(
+                engine_args, usage_context, ipc_path)
+            engine.run_engine_loop()
+        
+        # If an exception arises, log the error and raise a SIGQUIT.
+        # The parent process will listen for SIGQUIT and shutdown if
+        # it arises. The root cause will show up at the bottom of the
+        # stack trace for both startup time and runtime error.
+        except Exception:
+            traceback = get_exception_traceback()
+            logger.error("EngineCore hit an exception: %s", traceback)
+            parent_process.send_signal(signal.SIGQUIT)
 
 
 def signal_handler(*_) -> None:
     raise KeyboardInterrupt("MQLLMEngine terminated")
-
-
-def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
-                  ipc_path: str):
-
-    parent_process = psutil.Process().parent()
-
-    try:
-        engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                              usage_context=usage_context,
-                                              ipc_path=ipc_path)
-
-        signal.signal(signal.SIGTERM, signal_handler)
-
-        engine.start()
-
-    except Exception:
-        traceback = get_exception_traceback()
-        logger.error("EngineCore hit an exception: %s", traceback)
-        parent_process.send_signal(signal.SIGQUIT)

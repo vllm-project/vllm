@@ -29,7 +29,7 @@ from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.engine.multiprocessing.engine import run_mp_engine
+from vllm.engine.multiprocessing.engine import run_mq_llm_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
@@ -186,7 +186,7 @@ async def build_async_engine_client_from_engine_args(
                 input_path=input_path,
                 output_path=output_path,
                 process_name="MQLLMEngine",
-                target_fn=run_mp_engine,
+                target_fn=run_mq_llm_engine,
                 process_kwargs={
                     "engine_args": engine_args,
                     "usage_context": UsageContext.OPENAI_API_SERVER,
