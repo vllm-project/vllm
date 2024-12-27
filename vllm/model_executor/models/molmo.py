@@ -462,10 +462,10 @@ class MolmoAttention(nn.Module):
 
 
 class SwiGLU(nn.Module):
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, gate = x.chunk(2, dim=-1)
-        # Note that the order is reversed compared to 
+        # Note that the order is reversed compared to
         # SiluAndMul.
         return x * F.silu(gate)
 

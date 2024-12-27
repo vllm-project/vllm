@@ -1019,7 +1019,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet.")
 
-        # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
+        # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
         if (hasattr(model, "hf_to_vllm_mapper")
                 and model.hf_to_vllm_mapper is not None):
