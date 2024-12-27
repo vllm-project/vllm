@@ -187,31 +187,6 @@ _VLLM_MODELS = {
     **_SPECULATIVE_DECODING_MODELS,
 }
 
-# Models not supported by ROCm.
-_ROCM_UNSUPPORTED_MODELS: List[str] = []
-
-# Models partially supported by ROCm.
-# Architecture -> Reason.
-_ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
-                    "Triton flash attention. For half-precision SWA support, "
-                    "please use CK flash attention by setting "
-                    "`VLLM_USE_TRITON_FLASH_ATTN=0`")
-_ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
-    "Qwen2ForCausalLM":
-    _ROCM_SWA_REASON,
-    "MistralForCausalLM":
-    _ROCM_SWA_REASON,
-    "MixtralForCausalLM":
-    _ROCM_SWA_REASON,
-    "PaliGemmaForConditionalGeneration":
-    ("ROCm flash attention does not yet "
-     "fully support 32-bit precision on PaliGemma"),
-    "Phi3VForCausalLM":
-    ("ROCm Triton flash attention may run into compilation errors due to "
-     "excessive use of shared memory. If this happens, disable Triton FA "
-     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
-}
-
 
 @dataclass(frozen=True)
 class _ModelInfo:
@@ -297,17 +272,7 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
-    if current_platform.is_rocm():
-        if model_arch in _ROCM_UNSUPPORTED_MODELS:
-            raise ValueError(f"Model architecture '{model_arch}' is not "
-                             "supported by ROCm for now.")
-
-        if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
-            msg = _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch]
-            logger.warning(
-                "Model architecture '%s' is partially "
-                "supported by ROCm: %s", model_arch, msg)
-
+    current_platform.verify_model_arch(model_arch)
     try:
         return model.load_model_cls()
     except Exception:

@@ -200,6 +200,18 @@ class Platform:
         pass
 
     @classmethod
+    def verify_model_arch(cls, model_arch: str) -> None:
+        """
+        Verify whether the current platform supports the specified model
+        architecture.
+
+        - This will raise an Error or Warning based on the model support on
+        the current platform.
+        - By default all models are considered supported.
+        """
+        pass
+
+    @classmethod
     def verify_quantization(cls, quant: str) -> None:
         """
         Verify whether the quantization is supported by the current platform.
