@@ -242,6 +242,7 @@ class AsyncLLM(EngineClient):
         # generate() task will be canceled. So, we abort the
         # request if we end up here.
         except asyncio.CancelledError:
+            print("calling abort")
             await self.abort(request_id)
             raise
 
