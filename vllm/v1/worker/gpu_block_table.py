@@ -4,8 +4,8 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.utils import get_cuda_view_from_cpu_tensor, is_uva_available
 from vllm.logger import init_logger
+from vllm.utils import get_cuda_view_from_cpu_tensor, is_uva_available
 
 logger = init_logger(__name__)
 
