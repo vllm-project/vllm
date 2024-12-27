@@ -186,6 +186,12 @@ class Sampler(nn.Module):
         # speculative decoding.
         self.include_gpu_probs_tensor = False
         self.should_modify_greedy_probs_inplace = False
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        # we sample at most max_num_seqs sequences during profiling,
+        # here we remember the value so that we can limit the number of
+        # sequences for sampling during runtime to control peak memory usage
+        self.max_sampling_tokens = vllm_config.scheduler_config.max_num_seqs
 
     def _init_sampling_tensors(
         self,
@@ -271,22 +277,32 @@ class Sampler(nn.Module):
         logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
 
         if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
-            chunked_sorting = True
-            # using chunked sorting to avoid OOM, trading-off compute for memory
-            if chunked_sorting:
-                chunk_size = 64
-                _empty_logits = torch.empty_like(logits)
-                logits_chunks = torch.split(logits, chunk_size, dim=0)
-                top_ps_chunks = torch.split(sampling_tensors.top_ps, chunk_size, dim=0)
-                top_ks_chunks = torch.split(sampling_tensors.top_ks, chunk_size, dim=0)
-                for i in range(len(logits_chunks)):
-                    _empty_logits[i * chunk_size: (i + 1) * chunk_size] += _apply_top_k_top_p(
-                        logits_chunks[i], top_ps_chunks[i],
-                        top_ks_chunks[i])
-                logits = _empty_logits
-            else:
+            if logits.shape[0] <= self.max_sampling_tokens:
+                # for the most common case, every sequence only has one token
+                # for sampling, and the total number of tokens to sample
+                # is less than `self.max_sampling_tokens`
                 logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                             sampling_tensors.top_ks)
+            else:
+                # when prompt_logprobs are required, the number of tokens
+                # to sample can be larger than `self.max_sampling_tokens`,
+                # and the memory footprint can be very large. We split the
+                # operation into chunks to control the peak memory usage during
+                # runtime.
+                chunk_size = self.max_sampling_tokens
+                output_logits = torch.empty_like(logits)
+                logits_chunks = torch.split(logits, chunk_size, dim=0)
+                start_idx = 0
+                for logits_chunk in logits_chunks:
+                    current_chunk_size = logits_chunk.shape[0]
+                    end_idx = start_idx + current_chunk_size
+                    output_logits[start_idx:end_idx].copy_(
+                        _apply_top_k_top_p(
+                            logits_chunk,
+                            sampling_tensors.top_ps[start_idx:end_idx],
+                            sampling_tensors.top_ks[start_idx:end_idx]))
+                    start_idx = end_idx
+                logits = output_logits
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
