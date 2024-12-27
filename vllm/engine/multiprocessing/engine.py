@@ -95,8 +95,13 @@ class MQLLMEngine:
             del self.engine
 
     @classmethod
-    def from_engine_args(cls, engine_args: AsyncEngineArgs,
-                         usage_context: UsageContext, ipc_path: str):
+    def from_engine_args(
+        cls, 
+        engine_args: AsyncEngineArgs,
+        usage_context: UsageContext,
+        input_path: str,
+        output_path: str,
+    ):
         """Creates an MQLLMEngine from the engine arguments."""
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
@@ -107,7 +112,8 @@ class MQLLMEngine:
 
         use_async_sockets = engine_config.model_config.use_async_output_proc
 
-        return cls(ipc_path=ipc_path,
+        return cls(input_path=input_path,
+                   output_path=output_path,
                    use_async_sockets=use_async_sockets,
                    vllm_config=engine_config,
                    executor_class=executor_class,
@@ -237,18 +243,17 @@ class MQLLMEngine:
         signal.signal(signal.SIGTERM, signal_handler)
 
         parent_process = psutil.Process().parent()
-        engine: Optional[MQLLMEngine]
+        engine: Optional[MQLLMEngine] = None
         try:
             engine = MQLLMEngine.from_engine_args(engine_args, usage_context,
                                                   input_path, output_path)
             # Send Readiness signal to EngineClient.
-            ready_pipe.send({
-                "status": "READY",
-                "data": {
-                    "is_tracing_enabled": engine.engine.is_tracing_enabled()
-                }
-            })
+            tracing_data = {"is_tracing_enabled": engine.engine.is_tracing_enabled()}
+            ready_pipe.send({"status": "READY", "data": tracing_data})
             engine.run_engine_loop()
+
+        except KeyboardInterrupt:
+            raise
 
         # If an exception arises, log the error and raise a SIGQUIT.
         # The parent process will listen for SIGQUIT and shutdown if

@@ -172,20 +172,21 @@ async def build_async_engine_client_from_engine_args(
                 "you will find inaccurate metrics. Unset the variable "
                 "and vLLM will properly handle cleanup.")
 
+        build_mq_engine = partial(MQLLMEngineClient,
+                                  engine_args=engine_args,
+                                  usage_context=UsageContext.OPENAI_API_SERVER)
+
+        mq_engine_client: Optional[MQLLMEngineClient] = None
         try:
-            build_engine = partial(
-                MQLLMEngineClient,
-                engine_args=engine_args,
-                usage_context=UsageContext.OPENAI_API_SERVER)
-            engine_client = await asyncio.get_running_loop().run_in_executor(
-                None, build_engine)
-            mq_engine_client = MQLLMEngineClient(engine_args)
+            mq_engine_client = await asyncio.get_running_loop().run_in_executor(
+                None, build_mq_engine)
 
             yield mq_engine_client  # type: ignore[misc]
-
+        
         finally:
-            # Close all open connections to the backend
-            mq_engine_client.close()
+            # Shutdown background process + connections to backend.
+            if mq_engine_client:
+                mq_engine_client.shutdown()
 
             # Lazy import for prometheus multiprocessing.
             # We need to set PROMETHEUS_MULTIPROC_DIR environment variable

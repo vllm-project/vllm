@@ -213,13 +213,19 @@ class MQLLMEngineClient(EngineClient):
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient output handler.")
 
-    def close(self):
-        """Destroy the ZeroMQ Context."""
+    def shutdown(self):
+        """Destroy the MQLLMEngine."""
+
+        # Shutdown the background process.
+        if hasattr(self, "engine_proc_handler"):
+            self.engine_proc_handler.shutdown()
+
         # Close all sockets and terminate the context.
-        self.ctx.destroy(linger=0)
+        if hasattr(self, "ctx"):
+            self.ctx.destroy(linger=0)
 
         # Cancel background tasks.
-        if self.output_loop is not None:
+        if hasattr(self, "output_loop") and self.output_loop:
             self.output_loop.cancel()
 
     def _set_errored(self, e: BaseException):
