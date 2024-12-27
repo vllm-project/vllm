@@ -43,6 +43,7 @@ async def serve_http(app: FastAPI, **uvicorn_kwargs: Any):
 
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    loop.add_signal_handler(signal.SIGQUIT, sigquit_handler)
 
     try:
         await server_task

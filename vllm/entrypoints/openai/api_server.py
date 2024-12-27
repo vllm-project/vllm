@@ -687,15 +687,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # The child processes will send SIGQUIT to this process when
-    # any error happens. This process then clean up the whole tree.
-    # TODO(rob): move this into AsyncLLM.__init__ once we remove
-    # the context manager below.
-    def sigquit_handler(signum, frame):
-        kill_process_tree(os.getpid())
-
-    signal.signal(signal.SIGQUIT, sigquit_handler)
-
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
 
