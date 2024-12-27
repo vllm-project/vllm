@@ -2,7 +2,6 @@ import warnings
 from typing import Optional
 
 import pytest
-from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -91,10 +90,7 @@ def _assert_mm_data_is_image_input(
     image_data = mm_data.get("image")
     assert image_data is not None
 
-    if image_count == 1:
-        assert isinstance(image_data, Image.Image)
-    else:
-        assert isinstance(image_data, list) and len(image_data) == image_count
+    assert isinstance(image_data, list) and len(image_data) == image_count
 
 
 def test_parse_chat_messages_single_image(
