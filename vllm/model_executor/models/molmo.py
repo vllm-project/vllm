@@ -880,10 +880,6 @@ class MolmoModel(nn.Module):
         loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
-            # if "gate_up_proj" in name:
-            #     up_proj, gate_proj = loaded_weight.chunk(2, dim=0)
-            #     loaded_weight = torch.cat([gate_proj, up_proj], dim=0)
-
             if name.endswith(".bias") and name not in params_dict:
                 continue
             if is_pp_missing_parameter(name, self):
@@ -1194,6 +1190,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             "model.transformer.mlp.down_proj.": "lm_head.",
         },
     )
+
     # BitandBytes specific attributes
     bitsandbytes_stacked_params_mapping = {
         "gate_proj": ("merged_linear", 0),
