@@ -79,12 +79,17 @@ void paged_attention_v2_launcher(
   const float* attn_bias_ptr =
       attn_bias ? reinterpret_cast<const float*>(attn_bias.value().data_ptr())
                 : nullptr;
+  const int padded_max_seq_len =
+      DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
   if (attn_bias_ptr) {
     const torch::Tensor& abias = attn_bias.value();
     TORCH_CHECK(abias.dtype() == torch::kFloat32,
                 "Unsupported bias dtype: ", abias.dtype());
-    TORCH_CHECK(abias.size(abias.dim() - 1) == max_seq_len,
-                "Unexpected attn_bias shape: ", abias.sizes());
+    TORCH_CHECK(abias.size(abias.dim() - 1) == padded_max_seq_len,
+                "The last dimension of the attention bias must "
+                "match the block-aligned maximum sequence length (",
+                padded_max_seq_len,
+                "). However, the given dimensions are: ", abias.sizes());
   }
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
@@ -97,18 +102,16 @@ void paged_attention_v2_launcher(
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
-  int padded_max_seq_len =
-      DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
-  int logits_size = PARTITION_SIZE * sizeof(float);
-  int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
+  const int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
+  const int logits_size = PARTITION_SIZE * sizeof(float);
+  const int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
 
   // For paged attention v2 kernel.
   dim3 grid(num_heads, num_seqs, max_num_partitions);
-  int shared_mem_size = std::max(logits_size, outputs_size);
+  const int shared_mem_size = std::max(logits_size, outputs_size);
   // For paged attention v2 reduce kernel.
   dim3 reduce_grid(num_heads, num_seqs);
-  int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
+  const int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
 
   dim3 block(NUM_THREADS);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
