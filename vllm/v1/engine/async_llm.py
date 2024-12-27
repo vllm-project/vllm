@@ -54,7 +54,7 @@ class AsyncLLM(EngineClient):
         self.tokenizer.ping()
 
         # Request streams (map of request_id -> queue).
-        self.rid_to_queues: Dict[str, asyncio.Queue] = {}
+        self.rid_to_queue: Dict[str, asyncio.Queue] = {}
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -248,15 +248,15 @@ class AsyncLLM(EngineClient):
         request_id: str,
     ) -> asyncio.Queue[RequestOutput]:
 
-        if request_id in self.rid_to_queues:
+        if request_id in self.rid_to_queue:
             raise ValueError(f"Request id {request_id} already running.")
 
-        self.rid_to_queues[request_id] = asyncio.Queue()
+        self.rid_to_queue[request_id] = asyncio.Queue()
 
         if self.log_requests:
             logger.info("Added request %s.", request_id)
 
-        return self.rid_to_queues[request_id]
+        return self.rid_to_queue[request_id]
 
     def _process_request_outputs(self, request_outputs: List[RequestOutput]):
         """Process outputs by putting them into per-request queues."""
@@ -267,9 +267,8 @@ class AsyncLLM(EngineClient):
             # Note: it is possible a request was aborted and removed from
             # the state due to client cancellations, so if we encounter a
             # request id not in the state, we skip.
-            if request_id in self.rid_to_queues:
-                q = self.rid_to_queues[request_id]
-                q.put_nowait(request_output)
+            if request_id in self.rid_to_queue:
+                self.rid_to_queue[request_id].put_nowait(request_output)
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
@@ -303,8 +302,8 @@ class AsyncLLM(EngineClient):
         # then it is possible that the request is already
         # removed from the queues, so we do nothing if the
         # request_id is no longer in the tracked queues.
-        if request_id in self.rid_to_queues:
-            del self.rid_to_queues[request_id]
+        if request_id in self.rid_to_queue:
+            del self.rid_to_queue[request_id]
 
     def encode(
         self,
