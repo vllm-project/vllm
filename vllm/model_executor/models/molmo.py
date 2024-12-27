@@ -36,6 +36,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import cached_get_tokenizer
@@ -1158,17 +1159,30 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     )
 
     packed_modules_mapping = {
-        "att_proj": ["att_proj"],
-        "attn_out": ["attn_out"],
-        "ff_proj": ["ff_proj"],
-        "ff_out": ["ff_out"],
+        "qkv_proj": ["qkv_proj"],
+        "gate_up_proj": ["gate_up_proj"],  # language model
+        "merged_linear": ["gate_proj", "up_proj"]  # image_projector
     }
+
+    # LoRA specific attributes
     supported_lora_modules = [
-        "att_proj",
-        "ff_proj",
+        # language model
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj", # same name with image_projector
+        # vision tower
+        "wq",
+        "wk",
+        "wv",
+        "wo",
+        "w1",
+        "w2",
+        # image_projector
+        "merged_linear",
     ]
     embedding_modules = {}
-    embedding_padding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1351,6 +1365,16 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         loader = AutoWeightsLoader(self)
         weights = _get_weights_with_merged_embedding(weights)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="model",
+            connector="vision_backbone.image_projector",
+            tower_model="vision_backbone",
+        )
 
 
 def _get_weights_with_merged_embedding(
