@@ -2,7 +2,6 @@ import warnings
 from typing import Optional
 
 import pytest
-from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
