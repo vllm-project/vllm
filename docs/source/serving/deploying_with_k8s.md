@@ -47,7 +47,11 @@ data:
   token: "REPLACE_WITH_TOKEN"
 ```
 
-Create a deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model:
+Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
+
+Here are two examples for using NVIDIA GPU and AMD GPU. 
+
+- NVIDIA GPU
 
 ```yaml
 apiVersion: apps/v1
@@ -119,7 +123,7 @@ spec:
           periodSeconds: 5
 ```
 
-- AMD ROCm GPU
+- AMD GPU
 
 You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
 
@@ -190,7 +194,7 @@ spec:
         - name: shm
           mountPath: /dev/shm
 ```
-The full example is at <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
+You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
 2. **Create a Kubernetes Service for vLLM**
 
