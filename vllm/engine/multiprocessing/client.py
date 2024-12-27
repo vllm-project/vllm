@@ -161,15 +161,14 @@ class MQLLMEngineClient(EngineClient):
                 # Note: the server can keep running if this happens,
                 # it only impacts a specific request.
                 if isinstance(output, RPCError):
-                    
+
                     rpc_error: RPCError = output
 
                     # Put in the queue so it can be raised in generate().
-                    queue = self.output_queues.get(
-                        rpc_error.request_id, None)
+                    queue = self.output_queues.get(rpc_error.request_id, None)
                     if queue is not None:
                         queue.put_nowait(rpc_error.exception)
-                
+
                 # One request output for each item in the batch.
                 elif isinstance(output, List):
                     request_outputs: List[RequestOutput] = output
@@ -180,10 +179,10 @@ class MQLLMEngineClient(EngineClient):
                             request_output.request_id, None)
                         if queue is not None:
                             queue.put_nowait(request_output)
-                
+
                 else:
-                    self._set_errored(ValueError(
-                        f"Unknown output in handler: {output}"))
+                    self._set_errored(
+                        ValueError(f"Unknown output in handler: {output}"))
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient output handler.")

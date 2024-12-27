@@ -185,15 +185,15 @@ async def build_async_engine_client_from_engine_args(
 
         finally:
             # Shutdown background process + connections to backend.
-            if mq_engine_client:
+            if mq_engine_client is not None:
                 mq_engine_client.shutdown()
 
-            # Lazy import for prometheus multiprocessing.
-            # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
-            # before prometheus_client is imported.
-            # See https://prometheus.github.io/client_python/multiprocess/
-            from prometheus_client import multiprocess
-            multiprocess.mark_process_dead(mq_engine_client.engine_pid)
+                # Lazy import for prometheus multiprocessing.
+                # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+                # before prometheus_client is imported.
+                # https://prometheus.github.io/client_python/multiprocess/
+                from prometheus_client import multiprocess
+                multiprocess.mark_process_dead(mq_engine_client.engine_pid)
 
 
 router = APIRouter()
