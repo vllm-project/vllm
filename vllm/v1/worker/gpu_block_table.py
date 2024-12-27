@@ -5,6 +5,9 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.utils import get_cuda_view_from_cpu_tensor, is_uva_available
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class BlockTable:
@@ -39,6 +42,8 @@ class BlockTable:
         # UVA requires pinned memory.
         self.use_uva = is_uva_available() and pin_memory
         if self.use_uva:
+            logger.info("Using Unified Virtual Addressing (UVA) for block "
+                        "table transfer.")
             self.block_table_diff = torch.zeros((max_num_reqs, 2),
                                                 dtype=torch.int32,
                                                 device="cpu",
@@ -49,6 +54,10 @@ class BlockTable:
                 self.block_table_cpu)
             self.block_table_diff_cuda_view = get_cuda_view_from_cpu_tensor(
                 self.block_table_diff)
+        else:
+            logger.warning("Unified Virtual Addressing (UVA) is not supported "
+                           "in the current environment. This may result in "
+                           "lower performance.")
 
     def add_row(self, row_idx: int, block_ids: List[int]) -> None:
         num_blocks = len(block_ids)

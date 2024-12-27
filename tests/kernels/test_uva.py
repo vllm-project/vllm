@@ -55,7 +55,6 @@ def test_gpu_write(device):
     cuda_view[4, 5] = -1
     cuda_view.mul_(2)
 
-    torch.cuda.synchronize()
     assert cpu_tensor[0, 0] == 2
     assert cpu_tensor[2, 3] == 4
     assert cpu_tensor[4, 5] == -2
