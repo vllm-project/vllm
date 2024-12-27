@@ -30,7 +30,7 @@ def get_max_qwen2_vl_image_tokens():
 
 
 @pytest.mark.parametrize("mm_processor_kwargs,expected_max_tokens", [
-    ({}, 1225),
+    ({}, 16384),
     ({
         MIN_PIXELS: 64**2,
         MAX_PIXELS: 512**2
