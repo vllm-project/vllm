@@ -1401,17 +1401,10 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         return self.base_layer.bias
 
     @property
-    def embedding_dim(self):
-        return self.base_layer.embedding_dim
-
-    @property
-    def bias(self):
-        return self.base_layer.bias
-
-    @property
     def linear_method(self):
         if self.punica_wrapper.no_lora:
             return self.base_layer.linear_method
+
         return self
 
     @property

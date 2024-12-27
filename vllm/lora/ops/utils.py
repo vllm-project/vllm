@@ -27,9 +27,6 @@ def _get_default_config(op_type: str, batch: int, hidden_size: int):
     if op_type == "embed":
         return {"BLOCK_N": 4}
 
-    if op_type == "embed":
-        return {"BLOCK_N": 4}
-
     if op_type == "expand":
         return {
             "BLOCK_N": 256,

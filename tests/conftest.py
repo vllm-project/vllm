@@ -776,6 +776,7 @@ class VllmRunner:
         prompts: List[str],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
+        lora_requests: Optional[List[LoRARequest]] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         lora_requests: Optional[List[LoRARequest]] = None,
@@ -921,15 +922,12 @@ class VllmRunner:
         
         
 
-        outputs = self.generate_w_logprobs(prompts,
-                                           greedy_logprobs_params,
-                                           images=images,
-                                           audios=audios,
-                                           videos=videos,
-                                           lora_requests=lora_requests)
-
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
+        return self.generate_w_logprobs(prompts,
+                                        greedy_logprobs_params,
+                                        images=images,
+                                        audios=audios,
+                                        videos=videos,
+                                        lora_requests=lora_requests)
 
     def generate_encoder_decoder_greedy_logprobs(
         self,

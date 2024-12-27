@@ -153,11 +153,6 @@ def llama3_lora_lm_head_files():
 
 
 @pytest.fixture(scope="session")
-def llama3_lora_lm_head_files():
-    return '/workspace/llama3_lora'
-
-
-@pytest.fixture(scope="session")
 def sql_lora_files(sql_lora_huggingface_id):
     return snapshot_download(repo_id=sql_lora_huggingface_id)
 
