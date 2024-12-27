@@ -682,6 +682,7 @@ class LLM:
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
                     tools=tools,
+                    tokenize=True,
                 )
 
             prompt: Union[TokensPrompt, TextPrompt]
