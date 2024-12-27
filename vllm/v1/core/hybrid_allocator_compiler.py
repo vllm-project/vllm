@@ -1,6 +1,7 @@
-from typing import Tuple
+import math
+from typing import Dict, List, Tuple
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheTensorSeperate, LayerConfig, SelfAttentionCache, SlidingWindowCache
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheTensor, KVCacheTensorSeperate, KVCacheTensorShareBuffer, LayerCache, LayerConfig, SelfAttentionCache, SlidingWindowCache
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -10,10 +11,12 @@ def get_kv_cache_config(vllm_config: VllmConfig, layer_config: LayerConfig,
                         available_memory: int) -> Tuple[KVCacheConfig, int]:
     check_enough_memory(vllm_config, layer_config, available_memory)
     if is_same_type(layer_config):
+        # TODO (Chen): improve the readability of default path (self attn only models)
         return _get_kv_cache_config_same_type(vllm_config, layer_config,
                                               available_memory)
     elif is_same_hidden_size(layer_config):
-        raise NotImplementedError
+        return _get_kv_cache_config_same_size(vllm_config, layer_config,
+                                              available_memory)
     else:
         raise NotImplementedError
 
@@ -56,12 +59,77 @@ def _get_kv_cache_config_same_type(
     return kv_cache_config, num_gpu_blocks
 
 
+def _get_kv_cache_config_same_size(
+        vllm_config: VllmConfig, layer_config: LayerConfig,
+        available_memory: int) -> Tuple[KVCacheConfig, int]:
+    # Grouped allocation
+    # TODO (Chen): explain it, need test
+
+    page_sizes = {lc.page_size for lc in layer_config.layers.values()}
+    assert len(page_sizes) == 1
+    page_size = page_sizes.pop()
+
+    grouped_layers: Dict[str, List[str]] = {}  # key -> List[layer_id]
+    for layer_id, lc in layer_config.layers.items():
+        if lc.key not in grouped_layers:
+            grouped_layers[lc.key] = []
+        grouped_layers[lc.key].append(layer_id)
+
+    group_size_gcd = math.gcd(
+        *[len(layers) for layers in grouped_layers.values()])
+
+    allocator_page_size = page_size * group_size_gcd
+    # TODO (Chen): remove -1 and avoid overflow
+    num_pages = available_memory // allocator_page_size
+    buffer_size = num_pages * allocator_page_size
+
+    if vllm_config.cache_config.num_gpu_blocks_override is not None:
+        num_gpu_blocks_override = \
+            vllm_config.cache_config.num_gpu_blocks_override
+        logger.info(
+            "Overriding num_gpu_blocks=%d with "
+            "num_gpu_blocks_override=%d", num_pages, num_gpu_blocks_override)
+        # TODO (Chen): num_page and num_block has different meaning
+        num_pages = num_gpu_blocks_override
+
+    block_table_sharing = {}
+    tensors: Dict[int, KVCacheTensor] = {}
+    layer_id_mapping_reverse = {
+        layer_id: layer_cnt
+        for layer_cnt, layer_id in layer_config.layer_id_mapping.items()
+    }
+
+    for group_key, layers in grouped_layers.items():
+        for i in range(0, len(layers), group_size_gcd):
+            group_id = f"{group_key}_{i // group_size_gcd}"
+            block_table_sharing[group_id] = []
+            for idx_in_group, layer_id in enumerate(layers[i:i +
+                                                           group_size_gcd]):
+                block_table_sharing[group_id].append(layer_id)
+                tensors[layer_id_mapping_reverse[
+                    layer_id]] = KVCacheTensorShareBuffer(
+                        size=buffer_size - idx_in_group * page_size,
+                        start_bias=idx_in_group * page_size,
+                    )
+
+    kv_cache_config = KVCacheConfig(
+        buffer_size=num_pages * allocator_page_size,
+        tensors=tensors,
+        block_table_sharing=block_table_sharing,
+        layer_config=layer_config,
+    )
+
+    print("kv_cache_config", kv_cache_config)
+    return kv_cache_config, num_pages
+
+
 def is_same_type(layer_config: LayerConfig) -> bool:
     layer_keys = set(lc.key for lc in layer_config.layers.values())
     return len(layer_keys) == 1
 
 
 def is_same_hidden_size(layer_config: LayerConfig):
+    # TODO (Chen): needs more accurate check
     return all(
         isinstance(lc, (SelfAttentionCache, SlidingWindowCache))
         for lc in layer_config.layers.values())

@@ -22,7 +22,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheTensorSeperate, LayerCache, LayerConfig, SelfAttentionCache, SlidingWindowCache
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheTensorSeperate, KVCacheTensorShareBuffer, LayerCache, LayerConfig, SelfAttentionCache, SlidingWindowCache
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -724,7 +724,12 @@ class GPUModelRunner:
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         assert len(self.kv_caches) == 0
         if kv_cache_config.buffer_size != -1:
-            raise NotImplementedError
+            buffer = torch.zeros((kv_cache_config.buffer_size, ),
+                                 dtype=torch.int8,
+                                 device=self.device)
+        else:
+            buffer = None
+
         for layer_cnt in range(self.num_attn_layers):
             layer_id = kv_cache_config.layer_config.layer_id_mapping[layer_cnt]
             layer = kv_cache_config.layer_config.layers[layer_id]
@@ -742,6 +747,11 @@ class GPUModelRunner:
                 tensor = torch.zeros(kv_cache_shape,
                                      dtype=dtype,
                                      device=self.device)
+            elif isinstance(tensor_config, KVCacheTensorShareBuffer):
+                assert isinstance(buffer, torch.Tensor)
+                tensor = buffer[
+                    tensor_config.start_bias:tensor_config.start_bias +
+                    tensor_config.size].view(dtype).view(kv_cache_shape)
             else:
                 raise NotImplementedError
             self.kv_caches.append(tensor)

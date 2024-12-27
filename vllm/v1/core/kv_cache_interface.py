@@ -38,7 +38,7 @@ class SelfAttentionCache(LayerCache):
 
     @property
     def key(self) -> str:
-        return "self_attention"
+        return f"self_attention_{self.block_size}_{self.memory_size(1)}"
 
     @property
     def page_size(self) -> int:
@@ -59,7 +59,7 @@ class SlidingWindowCache(LayerCache):
 
     @property
     def key(self) -> str:
-        return f"sliding_window_{self.sliding_window}"
+        return f"sliding_window_{self.sliding_window}_{self.memory_size(1)}"
 
     @property
     def page_size(self) -> int:

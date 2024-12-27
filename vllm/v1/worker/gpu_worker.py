@@ -162,7 +162,7 @@ class Worker:
         print("available kv cache memory", available_kv_cache_memory, "bytes",
               available_kv_cache_memory / 1024 / 1024 / 1024, "GB")
 
-        return available_kv_cache_memory
+        return int(available_kv_cache_memory)
 
     def get_layer_config(self) -> LayerConfig:
         return self.model_runner.get_layer_config()
