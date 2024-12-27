@@ -137,6 +137,11 @@ See [this page](#generative-models) for more information on how to use generativ
     - :code:`deepseek-ai/DeepSeek-V2`, :code:`deepseek-ai/DeepSeek-V2-Chat` etc.
     -
     - ✅︎
+  * - :code:`DeepseekV3ForCausalLM`
+    - DeepSeek-V3
+    - :code:`deepseek-ai/DeepSeek-V3-Base`, :code:`deepseek-ai/DeepSeek-V3` etc.
+    -
+    - ✅︎
   * - :code:`ExaoneForCausalLM`
     - EXAONE-3
     - :code:`LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc.
@@ -319,7 +324,7 @@ See [this page](#generative-models) for more information on how to use generativ
     - ✅︎
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
-    - :code:`Qwen/Qwen2-7B-Instruct`, :code:`Qwen/Qwen2-7B`, etc.
+    - :code:`Qwen/QwQ-32B-Preview`, :code:`Qwen/Qwen2-7B-Instruct`, :code:`Qwen/Qwen2-7B`, etc.
     - ✅︎
     - ✅︎
   * - :code:`Qwen2MoeForCausalLM`
@@ -676,7 +681,7 @@ See [this page](#generative-models) for more information on how to use generativ
     - PaliGemma, PaliGemma 2
     - T + I\ :sup:`E`
     - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, :code:`google/paligemma2-3b-ft-docci-448`, etc.
-    - 
+    -
     - ✅︎
     -
   * - :code:`Phi3VForCausalLM`
@@ -710,7 +715,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
     - T + I\ :sup:`E+` + V\ :sup:`E+`
-    - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
+    - :code:`Qwen/QVQ-72B-Preview`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     - ✅︎
     - ✅︎
     -
