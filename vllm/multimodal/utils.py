@@ -79,7 +79,7 @@ class MediaConnector:
                                "`--allowed-local-media-path`.")
 
         filepath = Path(url_spec.path)
-        if not filepath.is_relative_to(allowed_local_media_path):
+        if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
                 f"of `--allowed-local-media-path` {allowed_local_media_path}.")

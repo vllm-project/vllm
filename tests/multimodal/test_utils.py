@@ -113,17 +113,17 @@ async def test_fetch_image_local_files(image_url: str):
         # Check that the images are equal
         assert not ImageChops.difference(image_sync, image_async).getbbox()
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="must be a subpath"):
             await local_connector.fetch_image_async(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
-        with pytest.raises(ValueError):
+        with pytest.raises(RuntimeError, match="Cannot load local files"):
             await connector.fetch_image_async(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="must be a subpath"):
             local_connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
-        with pytest.raises(ValueError):
+        with pytest.raises(RuntimeError, match="Cannot load local files"):
             connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
