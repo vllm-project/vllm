@@ -333,8 +333,13 @@ class Worker(LocalOrDistributedWorkerBase):
                                           dtype=torch.int64).view(-1, 2)
         swap_in_cnt = blocks_to_swap_in.size(0)
         swap_out_cnt = blocks_to_swap_out.size(0)
-        self.blocks_to_swap_in_buffer[:swap_in_cnt] = blocks_to_swap_in
-        self.blocks_to_swap_out_buffer[:swap_out_cnt] = blocks_to_swap_out
+
+        # The buffer will be allocated only if the cache engines are initialized
+        if hasattr(self, "blocks_to_swap_in_buffer"):
+            self.blocks_to_swap_in_buffer[:swap_in_cnt] = blocks_to_swap_in
+            self.blocks_to_swap_out_buffer[:swap_out_cnt] = blocks_to_swap_out
+            blocks_to_swap_in = self.blocks_to_swap_in_buffer[:swap_in_cnt]
+            blocks_to_swap_out = self.blocks_to_swap_out_buffer[:swap_out_cnt]
 
         # `blocks_to_copy` is a gpu tensor. The src and tgt of
         # blocks to copy are in the same device, and `blocks_to_copy`
@@ -345,8 +350,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,
-            blocks_to_swap_in=self.blocks_to_swap_in_buffer[:swap_in_cnt],
-            blocks_to_swap_out=self.blocks_to_swap_out_buffer[:swap_out_cnt],
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
