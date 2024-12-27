@@ -107,25 +107,25 @@ async def test_fetch_image_local_files(image_url: str):
                           icc_profile=origin_image.info.get('icc_profile'))
 
         image_async = await local_connector.fetch_image_async(
-            f"file://{temp_dir}/{os.path.basename(image_url)}", )
+            f"file://{temp_dir}/{os.path.basename(image_url)}")
         image_sync = local_connector.fetch_image(
-            f"file://{temp_dir}/{os.path.basename(image_url)}", )
+            f"file://{temp_dir}/{os.path.basename(image_url)}")
         # Check that the images are equal
         assert not ImageChops.difference(image_sync, image_async).getbbox()
 
         with pytest.raises(ValueError):
             await local_connector.fetch_image_async(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}", )
+                f"file://{temp_dir}/../{os.path.basename(image_url)}")
         with pytest.raises(ValueError):
             await connector.fetch_image_async(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}", )
+                f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
         with pytest.raises(ValueError):
             local_connector.fetch_image(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}", )
+                f"file://{temp_dir}/../{os.path.basename(image_url)}")
         with pytest.raises(ValueError):
             connector.fetch_image(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}", )
+                f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
 
 @pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
