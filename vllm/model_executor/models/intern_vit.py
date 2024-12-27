@@ -207,7 +207,8 @@ class InternParallelAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, _ = x.shape
-        qkv, _ = self.qkv(x)
+        # qkv, _ = self.qkv(x)
+        qkv, _ = self.qkv_proj(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
         if self.qk_normalization:
