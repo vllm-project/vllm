@@ -285,10 +285,8 @@ class AsyncLLM(EngineClient):
         await self.engine_core.abort_requests_async(request_ids)
         self.detokenizer.abort_requests(request_ids)
 
-        # If a request is finished while we await above,
-        # then it is possible that the request is already
-        # removed from the queues, so we do nothing if the
-        # request_id is no longer in the tracked queues.
+        # If a request finishes while we await then the request_id
+        # will be removed from the tracked queues before we get here.
         if request_id in self.rid_to_queue:
             del self.rid_to_queue[request_id]
 
