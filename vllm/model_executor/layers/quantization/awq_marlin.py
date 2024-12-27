@@ -440,11 +440,13 @@ class AWQMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
-        renormalize: bool = True,
+        renormalize: bool,
         use_grouped_topk: bool = False,
-        num_expert_group: Optional[int] = None,
         topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -454,7 +456,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
             renormalize=renormalize,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function)
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
 
         return torch.ops.vllm.fused_marlin_moe(
             x,
