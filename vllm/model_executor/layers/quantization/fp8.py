@@ -608,7 +608,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         topk_weights, topk_ids = FusedMoE.select_experts(

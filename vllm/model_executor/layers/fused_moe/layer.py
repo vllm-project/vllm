@@ -41,9 +41,20 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
     @abstractmethod
-    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-              router_logits: torch.Tensor, top_k: int, renormalize: bool,
-              use_grouped_topk: bool) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         raise NotImplementedError
 
 
