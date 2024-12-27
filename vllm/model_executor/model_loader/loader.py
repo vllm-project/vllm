@@ -1001,8 +1001,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     for sub_name in sub_modules:
                         self.target_modules.append(
                             name.replace(last_name, sub_name))
-                else:
-                    self.target_modules.append(name)
+                # Add original module name even if the module has stacked map,
+                # in case model has a mixture of disk-merged and disk-splitted
+                # weights with same last name.
+                self.target_modules.append(name)
+
         assert (self.target_modules
                 ), "vllm currently does not support BNB quantization for"
         f" {type(model).__name__}"
