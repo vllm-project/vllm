@@ -41,6 +41,7 @@ import torch
 import torch.types
 import yaml
 import zmq
+import zmq.asyncio
 from packaging.version import Version
 from torch.library import Library
 from typing_extensions import ParamSpec, TypeIs, assert_never
