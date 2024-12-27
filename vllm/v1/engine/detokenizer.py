@@ -223,10 +223,6 @@ class Detokenizer:
         """Remove the request_ids from the Detokenizer."""
 
         for request_id in request_ids:
-            # Note: it is possible that a request is "finished"
-            # in process of an abort call by AsyncLLM. So we
-            # simply do nothing if a request id is not in the
-            # active request states.
             self.request_states.pop(request_id, None)
 
     def add_request(
