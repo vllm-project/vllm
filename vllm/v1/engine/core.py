@@ -6,6 +6,7 @@ import time
 from multiprocessing.connection import Connection
 from typing import List, Tuple, Type
 
+import psutil
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
@@ -14,7 +15,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import zmq_socket_ctx
+from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
@@ -185,6 +186,7 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        parent_process = psutil.Process().parent()
         engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
@@ -193,9 +195,10 @@ class EngineCoreProc(EngineCore):
         except SystemExit:
             logger.debug("EngineCore interrupted.")
 
-        except BaseException as e:
-            logger.exception(e)
-            raise e
+        except Exception:
+            traceback = get_exception_traceback()
+            logger.error("EngineCore hit an exception: %s", traceback)
+            parent_process.send_signal(signal.SIGQUIT)
 
         finally:
             if engine_core is not None:
