@@ -77,12 +77,17 @@ void paged_attention_v1_launcher(
   const float* attn_bias_ptr =
       attn_bias ? reinterpret_cast<const float*>(attn_bias.value().data_ptr())
                 : nullptr;
+  const int padded_max_seq_len =
+      DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
   if (attn_bias_ptr) {
     const torch::Tensor& abias = attn_bias.value();
     TORCH_CHECK(abias.dtype() == torch::kFloat32,
                 "Unsupported bias dtype: ", abias.dtype());
-    TORCH_CHECK(abias.size(abias.dim() - 1) == max_seq_len,
-                "Unexpected attn_bias shape: ", abias.sizes());
+    TORCH_CHECK(abias.size(abias.dim() - 1) == padded_max_seq_len,
+                "The last dimension of the attention bias must "
+                "match the block-aligned maximum sequence length (",
+                padded_max_seq_len,
+                "). However, the given dimensions are: ", abias.sizes());
   }
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
@@ -92,13 +97,11 @@ void paged_attention_v1_launcher(
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  int padded_max_seq_len =
-      DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
-  int logits_size = padded_max_seq_len * sizeof(float);
-  int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
+  const int logits_size = padded_max_seq_len * sizeof(float);
+  const int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   // Python-side check in vllm.worker.worker._check_if_can_support_max_seq_len
   // Keep that in sync with the logic here!
-  int shared_mem_size = std::max(logits_size, outputs_size);
+  const int shared_mem_size = std::max(logits_size, outputs_size);
 
   dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);

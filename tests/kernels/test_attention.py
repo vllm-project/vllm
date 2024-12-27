@@ -162,26 +162,29 @@ def test_paged_attention(
     max_seq_len = max(seq_lens)
     seq_lens = torch.tensor(seq_lens, dtype=torch.int)
     attn_bias_list = None
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     if use_custom_attn_bias:
         # NOTE (NickLucche) each sequence can have a different bias,
-        # depending on its len, but it *must* be float (f32)!
+        # depending on its len, but it *must* be padded to the block
+        # aligned max_seq_len and of type float32!
         attn_bias_list = [
             torch.randn(num_query_heads, 1, seq_len, dtype=torch.float)
             for seq_len in seq_lens
         ]
-        attn_bias = torch.empty(num_seqs,
-                                num_query_heads,
-                                1,
-                                max_seq_len,
-                                device=device,
-                                dtype=torch.float)
+        block_aligned_max_seq_len = max_num_blocks_per_seq * block_size
+        attn_bias = torch.empty(
+            num_seqs,
+            num_query_heads,
+            1,
+            block_aligned_max_seq_len,  # padded dim
+            device=device,
+            dtype=torch.float)
 
         for i, (seq_len, bias) in enumerate(zip(seq_lens, attn_bias_list)):
             # first `seq_len` entries of the bias matrix for each head/seq
             attn_bias[i, :, :, :seq_len] = bias
 
     # Create the block tables.
-    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     block_tables_lst: List[List[int]] = []
     for _ in range(num_seqs):
         block_table = [
