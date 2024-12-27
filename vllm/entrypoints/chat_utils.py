@@ -30,14 +30,10 @@ from openai.types.chat.chat_completion_content_part_input_audio_param import (
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Required, TypeAlias, TypedDict
 
-import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
-from vllm.multimodal.audio import AudioMediaIO
-from vllm.multimodal.image import ImageMediaIO
 from vllm.multimodal.utils import MediaConnector
-from vllm.multimodal.video import VideoMediaIO
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import print_warning_once
 
@@ -530,30 +526,15 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._connector = MediaConnector(
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
-        self._get_image = partial(
-            self._connector.load_from_url,
-            media_io=ImageMediaIO(),
-            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
-        self._get_audio = partial(
-            self._connector.load_from_url,
-            media_io=AudioMediaIO(),
-            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
-        )
-        self._get_video = partial(
-            self._connector.load_from_url,
-            media_io=VideoMediaIO(ImageMediaIO()),
-            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-        )
 
     def parse_image(self, image_url: str) -> None:
-        image = self._get_image(image_url)
+        image = self._connector.fetch_image(image_url)
 
         placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
-        audio = self._get_audio(audio_url)
+        audio = self._connector.fetch_audio(audio_url)
 
         placeholder = self._tracker.add("audio", audio)
         self._add_placeholder(placeholder)
@@ -566,7 +547,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url)
 
     def parse_video(self, video_url: str) -> None:
-        video = self._get_video(video_url)
+        video = self._connector.fetch_video(video_url)
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)
@@ -581,30 +562,15 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._connector = MediaConnector(
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
-        self._get_image_async = partial(
-            self._connector.load_from_url_async,
-            media_io=ImageMediaIO(),
-            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
-        self._get_audio_async = partial(
-            self._connector.load_from_url_async,
-            media_io=AudioMediaIO(),
-            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
-        )
-        self._get_video_async = partial(
-            self._connector.load_from_url_async,
-            media_io=VideoMediaIO(ImageMediaIO()),
-            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-        )
 
     def parse_image(self, image_url: str) -> None:
-        image_coro = self._get_image_async(image_url)
+        image_coro = self._connector.fetch_image_async(image_url)
 
         placeholder = self._tracker.add("image", image_coro)
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
-        audio_coro = self._get_audio_async(audio_url)
+        audio_coro = self._connector.fetch_audio_async(audio_url)
 
         placeholder = self._tracker.add("audio", audio_coro)
         self._add_placeholder(placeholder)
@@ -617,7 +583,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url)
 
     def parse_video(self, video_url: str) -> None:
-        video = self._get_video_async(video_url)
+        video = self._connector.fetch_video_async(video_url)
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)

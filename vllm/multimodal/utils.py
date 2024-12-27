@@ -134,114 +134,121 @@ class MediaConnector:
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
 
+    def fetch_audio(
+        self,
+        audio_url: str,
+    ) -> tuple[np.ndarray, Union[int, float]]:
+        """
+        Load audio from a URL.
+        """
+        audio_io = AudioMediaIO()
+
+        return self.load_from_url(
+            audio_url,
+            audio_io,
+            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+        )
+
+    async def fetch_audio_async(
+        self,
+        audio_url: str,
+    ) -> tuple[np.ndarray, Union[int, float]]:
+        """
+        Asynchronously fetch audio from a URL.
+        """
+        audio_io = AudioMediaIO()
+
+        return await self.load_from_url_async(
+            audio_url,
+            audio_io,
+            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+        )
+
+    def fetch_image(
+        self,
+        image_url: str,
+        *,
+        image_mode: str = "RGB",
+    ) -> Image.Image:
+        """
+        Load a PIL image from a HTTP or base64 data URL.
+
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+
+        return self.load_from_url(
+            image_url,
+            image_io,
+            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
+
+    async def fetch_image_async(
+        self,
+        image_url: str,
+        *,
+        image_mode: str = "RGB",
+    ) -> Image.Image:
+        """
+        Asynchronously load a PIL image from a HTTP or base64 data URL.
+
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+
+        return await self.load_from_url_async(
+            image_url,
+            image_io,
+            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
+
+    def fetch_video(
+        self,
+        video_url: str,
+        *,
+        image_mode: str = "RGB",
+        num_frames: int = 32,
+    ) -> npt.NDArray:
+        """
+        Load video from a HTTP or base64 data URL.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+
+        return self.load_from_url(
+            video_url,
+            video_io,
+            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
+
+    async def fetch_video_async(
+        self,
+        video_url: str,
+        *,
+        image_mode: str = "RGB",
+        num_frames: int = 32,
+    ) -> npt.NDArray:
+        """
+        Asynchronously load video from a HTTP or base64 data URL.
+
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+
+        return await self.load_from_url_async(
+            video_url,
+            video_io,
+            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
+
 
 global_media_connector = MediaConnector()
 """The global :class:`MediaConnector` instance used by vLLM."""
 
-
-def fetch_audio(audio_url: str) -> tuple[np.ndarray, Union[int, float]]:
-    """
-    Load audio from a URL.
-    """
-    audio_io = AudioMediaIO()
-
-    return global_media_connector.load_from_url(
-        audio_url,
-        audio_io,
-        fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
-    )
-
-
-async def async_fetch_audio(
-        audio_url: str) -> tuple[np.ndarray, Union[int, float]]:
-    """
-    Asynchronously fetch audio from a URL.
-    """
-    audio_io = AudioMediaIO()
-
-    return await global_media_connector.load_from_url_async(
-        audio_url,
-        audio_io,
-        fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
-    )
-
-
-def fetch_image(
-    image_url: str,
-    *,
-    image_mode: str = "RGB",
-) -> Image.Image:
-    """
-    Load a PIL image from a HTTP or base64 data URL.
-
-    By default, the image is converted into RGB format.
-    """
-    image_io = ImageMediaIO(image_mode=image_mode)
-
-    return global_media_connector.load_from_url(
-        image_url,
-        image_io,
-        fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-    )
-
-
-async def async_fetch_image(
-    image_url: str,
-    *,
-    image_mode: str = "RGB",
-) -> Image.Image:
-    """
-    Asynchronously load a PIL image from a HTTP or base64 data URL.
-
-    By default, the image is converted into RGB format.
-    """
-    image_io = ImageMediaIO(image_mode=image_mode)
-
-    return await global_media_connector.load_from_url_async(
-        image_url,
-        image_io,
-        fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-    )
-
-
-def fetch_video(
-    video_url: str,
-    *,
-    image_mode: str = "RGB",
-    num_frames: int = 32,
-) -> npt.NDArray:
-    """
-    Load video from a HTTP or base64 data URL.
-    """
-    image_io = ImageMediaIO(image_mode=image_mode)
-    video_io = VideoMediaIO(image_io, num_frames=num_frames)
-
-    return global_media_connector.load_from_url(
-        video_url,
-        video_io,
-        fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-    )
-
-
-async def async_fetch_video(
-    video_url: str,
-    *,
-    image_mode: str = "RGB",
-    num_frames: int = 32,
-) -> npt.NDArray:
-    """
-    Asynchronously load video from a HTTP or base64 data URL.
-
-    By default, the image is converted into RGB format.
-    """
-    image_io = ImageMediaIO(image_mode=image_mode)
-    video_io = VideoMediaIO(image_io, num_frames=num_frames)
-
-    return await global_media_connector.load_from_url_async(
-        video_url,
-        video_io,
-        fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-    )
+fetch_audio = global_media_connector.fetch_audio
+fetch_image = global_media_connector.fetch_image
+fetch_video = global_media_connector.fetch_video
 
 
 def encode_audio_base64(
