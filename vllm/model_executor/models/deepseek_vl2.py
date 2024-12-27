@@ -31,6 +31,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
+from vllm.transformers_utils.configs.deepseek_vl2 import VisionEncoderConfig, MlpProjectorConfig, DeepseekVLV2Config
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
@@ -61,7 +62,7 @@ DeepseekVL2ImageInputs = Union[DeepseekVL2ImagePixelInputs, DeepseekVL2VImageEmb
 
 class MlpProjector(nn.Module):
 
-    def __init__(self, cfg: PretrainedConfig):
+    def __init__(self, cfg: MlpProjectorConfig):
 
         super().__init__()
 
@@ -133,7 +134,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config: DeepseekVLV2Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -159,7 +160,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     
     def _init_vision_module(
         self,
-        config: PretrainedConfig,
+        vision_config: VisionEncoderConfig,
         quant_config: Optional[QuantizationConfig],
         prefix: str = "",
     ) -> nn.Module:
@@ -171,7 +172,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         with set_default_torch_dtype(torch.float16):
             model = timm.create_model(
-                "vit_so400m_patch14_siglip_384.webli",
+                vision_config.model_name,
                 pretrained=False,
                 num_classes=0,
                 dynamic_img_size=True,
