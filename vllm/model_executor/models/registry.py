@@ -185,6 +185,7 @@ _VLLM_MODELS = {
     **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
+    "TransformersModel": ("transformers", "TransformersModel"),
 }
 
 
