@@ -6,8 +6,8 @@ import torch.nn as nn
 
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.penalties import (apply_min_token_penalties,
-                                          apply_penalties)
+from vllm.v1.sample.ops.penalties import (apply_all_penalties,
+                                          apply_min_token_penalties)
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
@@ -127,10 +127,10 @@ class Sampler(nn.Module):
                                   sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
-            logits = apply_penalties(logits,
-                                     sampling_metadata.prompt_token_ids,
-                                     sampling_metadata.presence_penalties,
-                                     sampling_metadata.frequency_penalties,
-                                     sampling_metadata.repetition_penalties,
-                                     sampling_metadata.output_token_ids)
+            logits = apply_all_penalties(
+                logits, sampling_metadata.prompt_token_ids,
+                sampling_metadata.presence_penalties,
+                sampling_metadata.frequency_penalties,
+                sampling_metadata.repetition_penalties,
+                sampling_metadata.output_token_ids)
         return logits
