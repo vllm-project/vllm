@@ -1,10 +1,10 @@
+import ctypes
 import importlib.util
 import logging
 import os
 import re
 import subprocess
 import sys
-import ctypes
 from pathlib import Path
 from shutil import which
 from typing import Dict, List
@@ -400,12 +400,8 @@ def get_rocm_version():
         minor = ctypes.c_uint32()
         patch = ctypes.c_uint32()
 
-        if (
-            get_rocm_core_version(
-                ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch)
-            )
-            == 0
-        ):
+        if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
+                                  ctypes.byref(patch)) == 0):
             return "%d.%d.%d" % (major.value, minor.value, patch.value)
         return None
     except Exception:
