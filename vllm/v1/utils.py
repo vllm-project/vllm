@@ -112,9 +112,17 @@ class BackgroundProcHandle:
         assert self.pid is not None, f"{process_name} process failed to start."
 
         # Wait for startup.
-        if reader.recv()["status"] != "READY":
-            raise RuntimeError(f"{process_name} process initialization failed. "
-                               "See root cause above.")
+        response = reader.recv()
+        if response["status"] != "READY":
+            raise RuntimeError(
+                f"{process_name} process initialization failed. "
+                "See root cause above.")
+
+        # Background processes can send optional data that
+        # is parsed by the main process.
+        self.data: Optional[Dict[str, Any]]
+        if "data" in response:
+            self.data = response["data"]
 
     def __del__(self):
         self.shutdown()

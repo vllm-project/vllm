@@ -1,10 +1,10 @@
 import pickle
-import psutil
 import signal
-from contextlib import contextmanager
-from typing import Iterator, List
+from multiprocessing.connection import Connection
+from typing import Optional
 
 import cloudpickle
+import psutil
 import zmq
 
 from vllm import AsyncEngineArgs, SamplingParams
@@ -18,7 +18,6 @@ from vllm.engine.multiprocessing import (REQUEST_OUTPUTS_T,
 # yapf: enable
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_exception_traceback, make_zmq_socket
 
@@ -57,7 +56,8 @@ class MQLLMEngine:
     """
 
     def __init__(self,
-                 ipc_path: str,
+                 input_path: str,
+                 output_path: str,
                  use_async_sockets: bool,
                  *args,
                  log_requests: bool = True,
@@ -67,24 +67,32 @@ class MQLLMEngine:
         # the python object to be reused again.
         kwargs['use_cached_outputs'] = True
 
+        # Startup LLMEngine.
         self.engine = LLMEngine(*args, **kwargs)
         self.log_requests = log_requests
 
+        # If enabled, ZMQ IO is performed as callback in the LLMEngine
+        # to ensure overlap with GPU execution, which releases the GIL.
         self.use_async_sockets = use_async_sockets
         if self.use_async_sockets:
             self.engine.process_request_outputs_callback = \
                 self._async_socket_engine_callback
 
+        # Startup ZMQ IO.
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.input_socket = make_zmq_socket(self.ctx, input_path,
+                                            zmq.constants.PULL)
+        self.output_socket = make_zmq_socket(self.ctx, output_path,
+                                             zmq.constants.PUSH)
 
-        # Receive input from the client.
-        self.input_socket = self.ctx.socket(zmq.constants.PULL)
-        self.input_socket.bind(f"{ipc_path}{IPC_INPUT_EXT}")
+    def shutdown(self):
+        """Cleanup state on exit."""
 
-        # Send output stream back to client.
-        self.output_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
+        if hasattr(self, "ctx"):
+            self.ctx.destroy(linger=0)
 
+        if hasattr(self, "engine"):
+            del self.engine
 
     @classmethod
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
@@ -107,12 +115,6 @@ class MQLLMEngine:
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context)
 
-    def cleanup(self):
-        """Cleanup zeromq state on shutdown."""
-        # Closes all sockets and destroys context.
-        self.ctx.destroy(linger=0)
-        del self.engine
-
     def run_engine_loop(self):
         """Core busy loop of the LLMEngine."""
 
@@ -120,8 +122,8 @@ class MQLLMEngine:
             if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                    # When there's no work, check on engine health and send
-                    # health status back to client
+                    # When there's no work, check on engine health. If an
+                    # exception arises, we will raise a SIGQUIT.
                     self.engine.check_health()
                     self.engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
@@ -135,7 +137,6 @@ class MQLLMEngine:
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
                 self._send_outputs(request_outputs)
-
 
     def handle_new_input(self):
         """Handle new input from the socket"""
@@ -159,8 +160,7 @@ class MQLLMEngine:
                 else:
                     self.stop_profile()
             else:
-                raise ValueError(
-                    f"Unknown RPCRequest Type: {type(request)}")
+                raise ValueError(f"Unknown RPCRequest Type: {type(request)}")
 
     def _handle_process_request(self, request: RPCProcessRequest):
         """Handle RPCProcessRequest by adding it to the LLMEngine."""
@@ -183,8 +183,7 @@ class MQLLMEngine:
             # We do not set self._errored = True here, since the error
             # is due to an issue adding this request to the engine,
             # rather than an issue with the engine itself.
-            rpc_err = RPCError(request_id=request_id,
-                               exception=e)
+            rpc_err = RPCError(request_id=request_id, exception=e)
             self._send_outputs(rpc_err)
 
             # Remove request from the engine.
@@ -229,21 +228,28 @@ class MQLLMEngine:
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
-    
+
     @staticmethod
-    def run_mq_llm_engine(
-        engine_args: AsyncEngineArgs,
-        usage_context: UsageContext,
-        ipc_path: str
-    ):
-        parent_process = psutil.Process().parent()
+    def run_mq_llm_engine(engine_args: AsyncEngineArgs,
+                          usage_context: UsageContext, input_path: str,
+                          output_path: str, ready_pipe: Connection):
+
         signal.signal(signal.SIGTERM, signal_handler)
 
+        parent_process = psutil.Process().parent()
+        engine: Optional[MQLLMEngine]
         try:
-            engine = MQLLMEngine.from_engine_args(
-                engine_args, usage_context, ipc_path)
+            engine = MQLLMEngine.from_engine_args(engine_args, usage_context,
+                                                  input_path, output_path)
+            # Send Readiness signal to EngineClient.
+            ready_pipe.send({
+                "status": "READY",
+                "data": {
+                    "is_tracing_enabled": engine.engine.is_tracing_enabled()
+                }
+            })
             engine.run_engine_loop()
-        
+
         # If an exception arises, log the error and raise a SIGQUIT.
         # The parent process will listen for SIGQUIT and shutdown if
         # it arises. The root cause will show up at the bottom of the
@@ -252,6 +258,10 @@ class MQLLMEngine:
             traceback = get_exception_traceback()
             logger.error("EngineCore hit an exception: %s", traceback)
             parent_process.send_signal(signal.SIGQUIT)
+
+        finally:
+            if engine is not None:
+                engine.shutdown()
 
 
 def signal_handler(*_) -> None:

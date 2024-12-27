@@ -105,7 +105,6 @@ class RPCAbortRequest:
     request_id: str
 
 
-
 class RPCUProfileRequest(Enum):
     START_PROFILE = 1
     STOP_PROFILE = 2

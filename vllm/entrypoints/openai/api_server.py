@@ -1,8 +1,6 @@
 import asyncio
-import atexit
 import importlib
 import inspect
-import multiprocessing
 import os
 import re
 import signal
@@ -29,7 +27,6 @@ from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.engine.multiprocessing.engine import run_mq_llm_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
@@ -67,9 +64,8 @@ from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, kill_process_tree, set_ulimit)
-from vllm.v1.utils import BackgroundProcHandle
+from vllm.utils import (FlexibleArgumentParser, is_valid_ipv6_address,
+                        kill_process_tree, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -176,27 +172,14 @@ async def build_async_engine_client_from_engine_args(
                 "you will find inaccurate metrics. Unset the variable "
                 "and vLLM will properly handle cleanup.")
 
-        # Select random path for IPC.
-        input_path = get_open_zmq_ipc_path()
-        output_path = get_open_zmq_ipc_path()
-
         try:
-            # Start MQLLMEngine in a background process.
-            engine_proc_handler = BackgroundProcHandle(
-                input_path=input_path,
-                output_path=output_path,
-                process_name="MQLLMEngine",
-                target_fn=run_mq_llm_engine,
-                process_kwargs={
-                    "engine_args": engine_args,
-                    "usage_context": UsageContext.OPENAI_API_SERVER,
-                }
-            )
-            
-            # Build the client.
-            engine_config = engine_args.create_engine_config()
-            mq_engine_client = MQLLMEngineClient(
-                input_path, output_path, engine_config)
+            build_engine = partial(
+                MQLLMEngineClient,
+                engine_args=engine_args,
+                usage_context=UsageContext.OPENAI_API_SERVER)
+            engine_client = await asyncio.get_running_loop().run_in_executor(
+                None, build_engine)
+            mq_engine_client = MQLLMEngineClient(engine_args)
 
             yield mq_engine_client  # type: ignore[misc]
 
@@ -204,15 +187,12 @@ async def build_async_engine_client_from_engine_args(
             # Close all open connections to the backend
             mq_engine_client.close()
 
-            # Ensure rpc server process was terminated
-            engine_proc_handler.shutdown()
-
             # Lazy import for prometheus multiprocessing.
             # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
             # before prometheus_client is imported.
             # See https://prometheus.github.io/client_python/multiprocess/
             from prometheus_client import multiprocess
-            multiprocess.mark_process_dead(engine_proc_handler.pid)
+            multiprocess.mark_process_dead(mq_engine_client.engine_pid)
 
 
 router = APIRouter()

@@ -2,9 +2,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import suppress
-from multiprocess.connection import Connection
-from typing import (Any, AsyncGenerator, Dict, List, Mapping,
-                    Optional, Union, cast, overload)
+from typing import (AsyncGenerator, Dict, List, Mapping, Optional, Union, cast,
+                    overload)
 
 import cloudpickle
 import zmq
@@ -14,18 +13,17 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.async_llm_engine import (
     build_guided_decoding_logits_processor_async)
-from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR,
-                                         RPC_REQUEST_T,
+from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, RPC_REQUEST_T,
                                          RPCAbortRequest, RPCError,
-                                         RPCProcessRequest,
-                                         RPCUProfileRequest)
+                                         RPCProcessRequest, RPCUProfileRequest)
+from vllm.engine.multiprocessing.engine import MQLLMEngine
 from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -38,7 +36,9 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import deprecate_kwargs, make_zmq_socket
+from vllm.usage.usage_lib import UsageContext
+from vllm.utils import deprecate_kwargs, get_open_zmq_ipc_path, make_zmq_socket
+from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
 
@@ -76,16 +76,37 @@ class MQLLMEngineClient(EngineClient):
             consumed by the .generate() method.
     """
 
-    def __init__(
-        self,
-        input_path: str, 
-        output_path: str,
-        ready_pipe: Connection,
-        engine_config: VllmConfig,
-    ):
+    def __init__(self,
+                 engine_args: AsyncEngineArgs,
+                 usage_context: UsageContext = UsageContext.ENGINE_CONTEXT):
+
         self._errored_with: Optional[BaseException] = None
 
+        # Paths for IO from the ZMQ socket.
+        input_path = get_open_zmq_ipc_path()
+        output_path = get_open_zmq_ipc_path()
+
+        # Start MQLLMEngine in a background process.
+        self.engine_proc_handler = BackgroundProcHandle(
+            input_path=input_path,
+            output_path=output_path,
+            process_name="MQLLMEngine",
+            target_fn=MQLLMEngine.run_mq_llm_engine,
+            process_kwargs={
+                "engine_args": engine_args,
+                "usage_context": usage_context,
+            })
+
+        # Get the tracing flag from the startup RPC.
+        if (self.engine_proc_handler.data is None
+                or "is_tracing_enabled" not in self.engine_proc_handler.data):
+            raise ValueError(
+                "Expected MQLLMEngine to send `is_tracing_enabled: bool` "
+                f"to ready pipe, but got {self.engine_proc_handler.data}")
+        self.tracing_flag = self.engine_proc_handler.data["is_tracing_enabled"]
+
         # Get the configs.
+        engine_config = engine_args.create_engine_config()
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
 
@@ -206,7 +227,6 @@ class MQLLMEngineClient(EngineClient):
         if self._errored_with is None:
             self._errored_with = e
 
-
     @staticmethod
     async def _send_one_way_rpc_request(request: RPC_REQUEST_T,
                                         socket: Socket):
@@ -257,6 +277,10 @@ class MQLLMEngineClient(EngineClient):
         """
         if self._errored_with is not None:
             raise self._errored_with
+
+    @property
+    def engine_pid(self) -> int:
+        return self.engine_proc_handler.pid
 
     @property
     def is_running(self) -> bool:
