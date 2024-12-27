@@ -995,8 +995,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     for sub_name in sub_modules:
                         self.target_modules.append(
                             name.replace(last_name, sub_name))
-                else:
-                    self.target_modules.append(name)
+                self.target_modules.append(name)
         assert (self.target_modules
                 ), "vllm currently does not support BNB quantization for"
         f" {type(model).__name__}"

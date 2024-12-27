@@ -14,7 +14,3 @@ class Phi3ForCausalLM(LlamaForCausalLM):
             "gate_up_proj",
         ],
     }
-
-    # BitandBytes specific attributes
-    # Initialize an empty dict when there is no stacked parameter mapping.
-    bitsandbytes_stacked_params_mapping = {}
