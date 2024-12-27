@@ -153,11 +153,10 @@ class AsyncLLM(EngineClient):
     ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
-        if self.detokenizer.is_request_active(request_id):
-            raise ValueError(f"Request {request_id} already exists.")
-
         # 1) Create a new output queue for the request.
-        q = self._add_request_to_queues(request_id)
+        if request_id in self.rid_to_queue:
+            raise ValueError(f"Request id {request_id} already running.")
+        self.rid_to_queue[request_id] = asyncio.Queue()
 
         # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
         detokenizer_req, engine_core_req = self.processor.process_inputs(
@@ -170,7 +169,10 @@ class AsyncLLM(EngineClient):
         # 4) Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(engine_core_req)
 
-        return q
+        if self.log_requests:
+            logger.info("Added request %s.", request_id)
+
+        return self.rid_to_queue[request_id]
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -242,21 +244,6 @@ class AsyncLLM(EngineClient):
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
-
-    def _add_request_to_queues(
-        self,
-        request_id: str,
-    ) -> asyncio.Queue[RequestOutput]:
-
-        if request_id in self.rid_to_queue:
-            raise ValueError(f"Request id {request_id} already running.")
-
-        self.rid_to_queue[request_id] = asyncio.Queue()
-
-        if self.log_requests:
-            logger.info("Added request %s.", request_id)
-
-        return self.rid_to_queue[request_id]
 
     def _process_request_outputs(self, request_outputs: List[RequestOutput]):
         """Process outputs by putting them into per-request queues."""
