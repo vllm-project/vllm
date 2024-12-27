@@ -9,6 +9,7 @@ from enum import Enum, auto
 from multiprocessing.process import BaseProcess
 from typing import Any, Dict, List, Optional, Tuple
 
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, LayerConfig
 import zmq
 
 from vllm.config import VllmConfig
@@ -77,28 +78,26 @@ class MultiprocExecutor(Executor):
         for w in self.workers:
             w.worker_response_mq.wait_until_ready()
 
-    def initialize(self, num_gpu_blocks: int) -> None:
+    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
+        self.collective_rpc("initialize_cache", args=(kv_cache_config, ))
         self.collective_rpc("compile_or_warm_up_model")
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """
-        Determine the number of available KV blocks by invoking the
-        underlying worker.
-        """
-        num_blocks = self.collective_rpc("determine_num_available_blocks")
+    def get_available_memory(self) -> int:
+        memory_sizes = self.collective_rpc("get_available_memory")
 
         # Since we use a shared centralized controller, we take the minimum
-        # number of blocks across all workers to make sure all the memory
+        # memory size across all workers to make sure all the memory
         # operators can be applied to all workers.
-        num_gpu_blocks = min(b[0] for b in num_blocks)
-        num_cpu_blocks = min(b[1] for b in num_blocks)
+        return min(memory_sizes)
 
-        return num_gpu_blocks, num_cpu_blocks
+    def get_layer_config(self) -> LayerConfig:
+        layer_configs = self.collective_rpc("get_layer_config")
+        assert all(lc == layer_configs[0] for lc in layer_configs)
+        return layer_configs[0]
 
     def collective_rpc(self,
                        method: str,

@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, LayerConfig
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker
@@ -49,20 +50,24 @@ class UniprocExecutor(Executor):
             distributed_init_method=distributed_init_method,
         )
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Determine the number of available KV blocks by invoking the
+    def get_available_memory(self) -> int:
+        """Determine the available memory for KV cache by invoking the
         underlying worker.
         """
-        return self.worker.determine_num_available_blocks()
+        return self.worker.get_available_memory()
 
-    def initialize(self, num_gpu_blocks: int) -> None:
+    def get_layer_config(self) -> LayerConfig:
+        return self.worker.get_layer_config()
+
+    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
+        # TODO (Chen): why do we need this log?
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
-        logger.info("# GPU blocks: %d", num_gpu_blocks)
-        self.worker.initialize_cache(num_gpu_blocks)
+        # logger.info("# GPU blocks: %d", num_gpu_blocks)
+        self.worker.initialize_cache(kv_cache_config)
         self.worker.compile_or_warm_up_model()
 
     def execute_model(

@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, LayerConfig
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -110,13 +111,12 @@ class Worker:
         self.model_runner.load_model()
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def get_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
-        that can be allocated with the remaining free memory.
+        TODO(Chen): update comments
 
         .. tip::
             You may limit the usage of GPU memory
@@ -159,34 +159,18 @@ class Worker:
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
+        print("available kv cache memory", available_kv_cache_memory, "bytes",
+              available_kv_cache_memory / 1024 / 1024 / 1024, "GB")
 
-        # Calculate the number of blocks that can be allocated with the
-        # profiled peak memory.
-        cache_block_size = _get_cache_block_size(self.cache_config,
-                                                 self.model_config,
-                                                 self.parallel_config)
-        num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
-        num_gpu_blocks = max(num_gpu_blocks, 0)
-        return num_gpu_blocks, 0
+        return available_kv_cache_memory
 
-    def initialize_cache(self, num_gpu_blocks: int) -> None:
+    def get_layer_config(self) -> LayerConfig:
+        return self.model_runner.get_layer_config()
+
+    def initialize_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks."""
-        if num_gpu_blocks <= 0:
-            raise ValueError("No available memory for the cache blocks. "
-                             "Try increasing `gpu_memory_utilization` when "
-                             "initializing the engine.")
-
-        max_seq_len = self.cache_config.block_size * num_gpu_blocks
-        max_model_len = self.model_config.max_model_len
-        if max_model_len > max_seq_len:
-            raise ValueError(
-                f"The model's max seq len ({max_model_len}) "
-                "is larger than the maximum number of tokens that can be "
-                f"stored in KV cache ({max_seq_len}). Try increasing "
-                "`gpu_memory_utilization` or decreasing `max_model_len` when "
-                "initializing the engine.")
-
-        self.model_runner.initialize_kv_cache(num_gpu_blocks)
+        # TODO: implement it somewhere
+        self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -251,24 +235,3 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
                 "You can use float16 instead by explicitly setting the"
                 "`dtype` flag in CLI, for example: --dtype=half.")
-
-
-def _get_cache_block_size(
-    cache_config: CacheConfig,
-    model_config: ModelConfig,
-    parallel_config: ParallelConfig,
-) -> int:
-    head_size = model_config.get_head_size()
-    num_heads = model_config.get_num_kv_heads(parallel_config)
-    num_attention_layers = model_config.get_num_layers_by_block_type(
-        parallel_config, LayerBlockType.attention)
-
-    key_cache_block = cache_config.block_size * num_heads * head_size
-    value_cache_block = key_cache_block
-    total = num_attention_layers * (key_cache_block + value_cache_block)
-    if cache_config.cache_dtype == "auto":
-        dtype = model_config.dtype
-    else:
-        dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-    dtype_size = get_dtype_size(dtype)
-    return dtype_size * total

@@ -1,4 +1,5 @@
 import gc
+import re
 import time
 from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
@@ -7,6 +8,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
@@ -16,9 +18,11 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, is_pin_memory_available)
+                        LayerBlockType, cdiv, get_dtype_size,
+                        is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheTensorSeperate, LayerCache, LayerConfig, SelfAttentionCache, SlidingWindowCache
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -717,12 +721,62 @@ class GPUModelRunner:
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
-    def initialize_kv_cache(self, num_blocks: int) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         assert len(self.kv_caches) == 0
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        for _ in range(self.num_attn_layers):
-            self.kv_caches.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device))
+        if kv_cache_config.buffer_size != -1:
+            raise NotImplementedError
+        for layer_cnt in range(self.num_attn_layers):
+            layer_id = kv_cache_config.layer_config.layer_id_mapping[layer_cnt]
+            layer = kv_cache_config.layer_config.layers[layer_id]
+            tensor_config = kv_cache_config.tensors[layer_cnt]
+            assert tensor_config.size % layer.page_size == 0
+            num_blocks = tensor_config.size // layer.page_size
+            if isinstance(layer, (SelfAttentionCache, SlidingWindowCache)):
+                kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+                    num_blocks, layer.block_size, layer.num_kv_heads,
+                    layer.head_size)
+                dtype = layer.dtype
+            else:
+                raise NotImplementedError
+            if isinstance(tensor_config, KVCacheTensorSeperate):
+                tensor = torch.zeros(kv_cache_shape,
+                                     dtype=dtype,
+                                     device=self.device)
+            else:
+                raise NotImplementedError
+            self.kv_caches.append(tensor)
+
+    def get_layer_config(self) -> LayerConfig:
+
+        def parse_layer_cnt(layer_name: str):
+            # layer_name is like "model.decoder.layers.2.self_attn.attn"
+            numbers = re.findall(r'\d+', layer_name)
+            if len(numbers) != 1:
+                raise ValueError(f"Invalid layer name: {layer_name}")
+            return int(numbers[0])
+
+        layer_id_mapping: Dict[int, str] = {}
+        layers: Dict[str, LayerCache] = {}
+
+        attn_layers = self.vllm_config.compilation_config.static_forward_context
+        block_size = self.vllm_config.cache_config.block_size
+        for layer_name, attn_layer in attn_layers.items():
+            assert isinstance(attn_layer, Attention)
+            layer_cnt = parse_layer_cnt(layer_name)
+            layer_id_mapping[layer_cnt] = layer_name
+            if attn_layer.sliding_window is not None:
+                layers[layer_name] = SlidingWindowCache(
+                    block_size=block_size,
+                    num_kv_heads=attn_layer.num_kv_heads,
+                    head_size=attn_layer.head_size,
+                    dtype=attn_layer.dtype,
+                    sliding_window=attn_layer.sliding_window)
+            else:
+                layers[layer_name] = SelfAttentionCache(
+                    block_size=block_size,
+                    num_kv_heads=attn_layer.num_kv_heads,
+                    head_size=attn_layer.head_size,
+                    dtype=attn_layer.dtype,
+                )
+
+        return LayerConfig(layer_id_mapping, layers)
