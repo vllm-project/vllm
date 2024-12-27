@@ -108,10 +108,12 @@ class BackgroundProcHandle:
         # Run Detokenizer busy loop in background process.
         self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
         self.proc.start()
+        self.pid = self.proc.pid
+        assert self.pid is not None, f"{process_name} process failed to start."
 
         # Wait for startup.
         if reader.recv()["status"] != "READY":
-            raise RuntimeError(f"{process_name} initialization failed. "
+            raise RuntimeError(f"{process_name} process initialization failed. "
                                "See root cause above.")
 
     def __del__(self):

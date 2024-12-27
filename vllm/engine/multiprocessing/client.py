@@ -1,12 +1,11 @@
 import asyncio
 import copy
 import pickle
-from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
+from contextlib import suppress
+from typing import (Any, AsyncGenerator, Dict, List, Mapping,
                     Optional, Union, cast, overload)
 
 import cloudpickle
-import psutil
 import zmq
 import zmq.asyncio
 from typing_extensions import deprecated
@@ -21,9 +20,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf: disable
 from vllm.engine.async_llm_engine import (
     build_guided_decoding_logits_processor_async)
-from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
-                                         IPC_HEALTH_EXT, IPC_INPUT_EXT,
-                                         IPC_OUTPUT_EXT, RPC_REQUEST_T,
+from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR,
+                                         RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCProcessRequest,
                                          RPCStartupRequest, RPCStartupResponse,
@@ -40,7 +38,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import deprecate_kwargs
+from vllm.utils import deprecate_kwargs, make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -80,9 +78,12 @@ class MQLLMEngineClient(EngineClient):
             every N seconds, confirming the engine is healthy
     """
 
-    def __init__(self, ipc_path: str, engine_config: VllmConfig,
-                 engine_pid: int):
-        self.context = zmq.asyncio.Context()
+    def __init__(
+        self,
+        input_path: str, 
+        output_path: str,
+        engine_config: VllmConfig,
+    ):
         self._errored_with: Optional[BaseException] = None
 
         # Get the configs.
@@ -98,20 +99,12 @@ class MQLLMEngineClient(EngineClient):
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
 
-        # Send RPCGenerateRequest to the MQLLMEngine.
-        self.input_socket: Socket = self.context.socket(zmq.constants.PUSH)
-        self.input_socket.connect(f"{ipc_path}{IPC_INPUT_EXT}")
-
-        # Receive streams of RequestOutput from the MQLLMEngine.
-        self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
-        self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
-
-        # IPC path for acking heartbeats.
-        self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
-        self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
-
-        # IPC path for the data socket.
-        self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
+        # MQLLMEngine IO.
+        self.context = zmq.asyncio.Context()
+        self.input_socket = make_zmq_socket(self.context, input_path,
+                                            zmq.constants.PUSH)
+        self.input_socket = make_zmq_socket(self.context, output_path,
+                                            zmq.constants.PULL)
 
         # Stream for each individual request.
         self.output_queues: Dict[str, asyncio.Queue] = {}
@@ -121,59 +114,11 @@ class MQLLMEngineClient(EngineClient):
         # build the Client in an executor to enable clean shutdown.
         self.output_loop: Optional[asyncio.Task] = None
 
-        # Loop to check health of the LLMEngine periodically.
-        # Started after the MQLLMEngine is ready.
-        self.health_loop: Optional[asyncio.Task] = None
-        self._engine_process = psutil.Process(engine_pid)
 
     @staticmethod
     def is_unsupported_config(engine_args: AsyncEngineArgs):
         # Pipeline parallel not yet supported
         return engine_args.pipeline_parallel_size > 1
-
-    @contextmanager
-    def get_data_socket(self) -> Iterator[Socket]:
-        socket = self.context.socket(zmq.constants.DEALER)
-        try:
-            socket.connect(self.data_ipc_path)
-            yield socket
-        finally:
-            socket.close(linger=0)
-
-    async def run_heartbeat_loop(self, timeout: int):
-        """Background loop that continually checks to ensure the engine process
-        is still alive.
-        """
-        try:
-            while True:
-                # Check if the engine process is running:
-                if not self._engine_process.is_running() or (
-                        self._engine_process.status() == psutil.STATUS_ZOMBIE):
-                    # NB: is_running() returns True for zombies
-                    self._set_errored(
-                        RuntimeError(
-                            f"Engine process (pid {self._engine_process.pid}) "
-                            "died."))
-                    break
-
-                if await self.heartbeat_socket.poll(timeout=timeout):
-                    # Heartbeat received- check the message
-                    await self._check_success(
-                        error_message="Heartbeat failed.",
-                        socket=self.heartbeat_socket)
-
-                logger.debug("Heartbeat successful.")
-
-        except asyncio.CancelledError:
-            logger.debug("Shutting down MQLLMEngineClient check health loop.")
-
-        except psutil.NoSuchProcess:
-            self._set_errored(
-                RuntimeError(
-                    f"Engine process (pid {self._engine_process.pid}) died."))
-
-        except Exception as e:
-            self._set_errored(e)
 
     async def run_output_handler_loop(self):
         """Get RequestOutputs from Engine and stream to Request Queues"""
@@ -250,22 +195,6 @@ class MQLLMEngineClient(EngineClient):
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient output handler.")
-
-    async def setup(self):
-        """Setup the client before it starts sending server requests."""
-
-        # Start output_loop
-        self.output_loop = asyncio.create_task(self.run_output_handler_loop())
-
-        with self.get_data_socket() as socket:
-            # Wait until server is ready.
-            response = await self._wait_for_server_rpc(socket)
-
-            self.tracing_flag = response.tracing_enabled
-
-            # Start health_loop.
-            self.health_loop = asyncio.create_task(
-                self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
 
     def close(self):
         """Destroy the ZeroMQ Context."""

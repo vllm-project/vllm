@@ -1,4 +1,5 @@
 import pickle
+import psutil
 import signal
 from contextlib import contextmanager
 from typing import Iterator, List, Optional, Union
@@ -22,6 +23,7 @@ from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import kill_process_tree, get_exception_traceback
 
 logger = init_logger(__name__)
 
@@ -352,7 +354,10 @@ def signal_handler(*_) -> None:
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
-                  ipc_path: str, engine_alive):
+                  ipc_path: str):
+
+    parent_process = psutil.Process().parent()
+
     try:
         engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
                                               usage_context=usage_context,
@@ -362,7 +367,7 @@ def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
 
         engine.start()
 
-    except BaseException as e:
-        logger.exception(e)
-        engine_alive.value = False
-        raise e
+    except Exception:
+        traceback = get_exception_traceback()
+        logger.error("EngineCore hit an exception: %s", traceback)
+        parent_process.send_signal(signal.SIGQUIT)

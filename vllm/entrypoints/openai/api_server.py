@@ -69,6 +69,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, kill_process_tree, set_ulimit)
+from vllm.v1.utils import BackgroundProcHandle
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -176,74 +177,45 @@ async def build_async_engine_client_from_engine_args(
                 "and vLLM will properly handle cleanup.")
 
         # Select random path for IPC.
-        ipc_path = get_open_zmq_ipc_path()
-        logger.debug("Multiprocessing frontend to use %s for IPC Path.",
-                     ipc_path)
-
-        # Start RPCServer in separate process (holds the LLMEngine).
-        # the current process might have CUDA context,
-        # so we need to spawn a new process
-        context = multiprocessing.get_context("spawn")
+        input_path = get_open_zmq_ipc_path()
+        output_path = get_open_zmq_ipc_path()
 
         # The Process can raise an exception during startup, which may
         # not actually result in an exitcode being reported. As a result
         # we use a shared variable to communicate the information.
-        engine_alive = multiprocessing.Value('b', True, lock=False)
-        engine_process = context.Process(target=run_mp_engine,
-                                         args=(engine_args,
-                                               UsageContext.OPENAI_API_SERVER,
-                                               ipc_path, engine_alive))
-        engine_process.start()
-        engine_pid = engine_process.pid
-        assert engine_pid is not None, "Engine process failed to start."
-        logger.info("Started engine process with PID %d", engine_pid)
-
-        def _cleanup_ipc_path():
-            socket_path = ipc_path.replace("ipc://", "")
-            if os.path.exists(socket_path):
-                os.remove(socket_path)
-
-        # Ensure we clean up the local IPC socket file on exit.
-        atexit.register(_cleanup_ipc_path)
-
+        engine_proc_handler = BackgroundProcHandle(
+            input_path=input_path,
+            output_path=output_path,
+            process_name="MQLLMEngine",
+            target_fn=run_mp_engine,
+            process_kwargs={
+                "engine_args": engine_args,
+                "usage_context": UsageContext.OPENAI_API_SERVER,
+            }
+        )
+        
         # Build RPCClient, which conforms to EngineClient Protocol.
         engine_config = engine_args.create_engine_config()
-        build_client = partial(MQLLMEngineClient, ipc_path, engine_config,
-                               engine_pid)
+        build_client = partial(MQLLMEngineClient, input_path,
+                               output_path, engine_config)
         mq_engine_client = await asyncio.get_running_loop().run_in_executor(
             None, build_client)
-        try:
-            while True:
-                try:
-                    await mq_engine_client.setup()
-                    break
-                except TimeoutError:
-                    if (not engine_process.is_alive()
-                            or not engine_alive.value):
-                        raise RuntimeError(
-                            "Engine process failed to start. See stack "
-                            "trace for the root cause.") from None
 
             yield mq_engine_client  # type: ignore[misc]
-        finally:
-            # Ensure rpc server process was terminated
-            engine_process.terminate()
 
+        finally:
             # Close all open connections to the backend
             mq_engine_client.close()
 
-            # Wait for engine process to join
-            engine_process.join(4)
-            if engine_process.exitcode is None:
-                # Kill if taking longer than 5 seconds to stop
-                engine_process.kill()
+            # Ensure rpc server process was terminated
+            engine_proc_handler.shutdown()
 
             # Lazy import for prometheus multiprocessing.
             # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
             # before prometheus_client is imported.
             # See https://prometheus.github.io/client_python/multiprocess/
             from prometheus_client import multiprocess
-            multiprocess.mark_process_dead(engine_process.pid)
+            multiprocess.mark_process_dead(engine_proc_handler.pid)
 
 
 router = APIRouter()
