@@ -297,35 +297,37 @@ class MultiModalPlaceholderMap:
         ``MultiModalPlaceholderMap`` that relates the multi-modal embedding
         vectors to their corresponding placeholders.
 
-        Consider the following scenarios:
+        Examples:
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |.................................|
+        .. code-block::
 
-            images      = [A, B]
-            src_ranges  = [(0, 4), (4, 8)]
-            dest_ranges = [(0, 4), (5, 9)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |.................................|
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |  .....                          |
+                images      = [A, B]
+                src_ranges  = [(0, 4), (4, 8)]
+                dest_ranges = [(0, 4), (5, 9)]
 
-            images      = [A, B]
-            src_ranges  = [(2, 4), (4, 6)]
-            dest_ranges = [(0, 2), (3, 5)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |  .....                          |
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |     .........                   |
+                images      = [A, B]
+                src_ranges  = [(2, 4), (4, 6)]
+                dest_ranges = [(0, 2), (3, 5)]
 
-            images      = [B]
-            src_ranges  = [(0, 4)]
-            dest_ranges = [(0, 4)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |     .........                   |
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |          .......................|
+                images      = [B]
+                src_ranges  = [(0, 4)]
+                dest_ranges = [(0, 4)]
 
-            images      = []
-            src_ranges  = []
-            dest_ranges = []
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |          .......................|
+
+                images      = []
+                src_ranges  = []
+                dest_ranges = []
         """
         seq_mm_data = seq_group.multi_modal_data
         seq_mm_placeholders = seq_group.multi_modal_placeholders

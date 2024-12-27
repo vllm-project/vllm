@@ -25,11 +25,11 @@ import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
-                    Dict, Generator, Generic, Hashable, List, Literal,
+                    Dict, Generator, Generic, List, Literal, NamedTuple,
                     Optional, Tuple, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
@@ -194,12 +194,28 @@ class Counter:
         self.counter = 0
 
 
+class CacheInfo(NamedTuple):
+    hits: int
+    total: int
+
+    @property
+    def hit_ratio(self) -> float:
+        if self.total == 0:
+            return 0
+
+        return self.hits / self.total
+
+
 class LRUCache(Generic[_K, _V]):
+    """Note: This class is not thread safe!"""
 
     def __init__(self, capacity: int) -> None:
         self.cache = OrderedDict[_K, _V]()
         self.pinned_items = set[_K]()
         self.capacity = capacity
+
+        self._hits = 0
+        self._total = 0
 
     def __contains__(self, key: _K) -> bool:
         return key in self.cache
@@ -218,6 +234,9 @@ class LRUCache(Generic[_K, _V]):
     def __delitem__(self, key: _K) -> None:
         self.pop(key)
 
+    def stat(self) -> CacheInfo:
+        return CacheInfo(hits=self._hits, total=self._total)
+
     def touch(self, key: _K) -> None:
         self.cache.move_to_end(key)
 
@@ -226,8 +245,12 @@ class LRUCache(Generic[_K, _V]):
         if key in self.cache:
             value = self.cache[key]
             self.cache.move_to_end(key)
+
+            self._hits += 1
         else:
             value = default
+
+        self._total += 1
         return value
 
     def put(self, key: _K, value: _V) -> None:

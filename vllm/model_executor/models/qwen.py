@@ -225,7 +225,7 @@ class VisualAttentionBlock(nn.Module):
         d_model: int,
         n_head: int,
         mlp_ratio: float = 4.0,
-        norm_layer: Callable = nn.LayerNorm,
+        norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -266,7 +266,7 @@ class TransformerBlock(nn.Module):
         layers: int,
         heads: int,
         mlp_ratio: float = 4.0,
-        norm_layer: Callable = nn.LayerNorm,
+        norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
