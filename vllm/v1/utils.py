@@ -102,28 +102,22 @@ class BackgroundProcHandle:
                 os.remove(socket_file)
 
 
-class MPBackgroundProcess:
+class BackgroundProcessHandler:
+    """
+    Utility class to handle creation, readiness, and shutdown
+    of background processes used by the AsyncLLM and LLMEngine.
+    """
 
-    def __init__(self):
-        self.proc_handle: Optional[BackgroundProcHandle]
-        self._finalizer = weakref.finalize(self, self.shutdown)
-
-    def __del__(self):
-        self.shutdown()
-
-    def shutdown(self):
-        if hasattr(self, "proc_handle") and self.proc_handle:
-            self.proc_handle.shutdown()
-            self.proc_handle = None
-
-    @staticmethod
-    def wait_for_startup(
+    def __init__(
+        self,
         input_path: str,
         output_path: str,
         process_name: str,
         target_fn: Callable,
         process_kwargs: Dict[Any, Any],
-    ) -> BackgroundProcHandle:
+    ):
+        self._finalizer = weakref.finalize(self, self.shutdown)
+
         context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)
 
@@ -143,4 +137,13 @@ class MPBackgroundProcess:
             raise RuntimeError(f"{process_name} initialization failed. "
                                "See root cause above.")
 
-        return BackgroundProcHandle(proc, input_path, output_path)
+        self.proc_handle: Optional[BackgroundProcHandle]
+        self.proc_handle = BackgroundProcHandle(proc, input_path, output_path)
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        if hasattr(self, "proc_handle") and self.proc_handle:
+            self.proc_handle.shutdown()
+            self.proc_handle = None

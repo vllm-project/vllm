@@ -3,8 +3,7 @@ import queue
 import signal
 import threading
 import time
-from dataclasses import dataclass
-from multiprocessing.process import BaseProcess
+from multiprocessing.connection import Connection
 from typing import List, Tuple, Type
 
 import zmq
@@ -12,11 +11,9 @@ import zmq.asyncio
 from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.usage.usage_lib import UsageContext
 from vllm.utils import zmq_socket_ctx
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
@@ -42,7 +39,6 @@ class EngineCore:
         self,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        usage_context: UsageContext,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
@@ -134,29 +130,18 @@ class EngineCore:
         self.model_executor.profile(is_start)
 
 
-@dataclass
-class EngineCoreProcHandle:
-    proc: BaseProcess
-    ready_path: str
-    input_path: str
-    output_path: str
-
-
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
-
-    READY_STR = "READY"
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        usage_context: UsageContext,
         input_path: str,
         output_path: str,
-        ready_path: str,
+        ready_pipe: Connection,
     ):
-        super().__init__(vllm_config, executor_class, usage_context)
+        super().__init__(vllm_config, executor_class)
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -173,68 +158,7 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
-            ready_socket.send_string(EngineCoreProc.READY_STR)
-
-    @staticmethod
-    def wait_for_startup(
-        proc: BaseProcess,
-        ready_path: str,
-    ) -> None:
-        """Wait until the EngineCore is ready."""
-
-        try:
-            sync_ctx = zmq.Context()  # type: ignore[attr-defined]
-            socket = sync_ctx.socket(zmq.constants.PULL)
-            socket.connect(ready_path)
-
-            # Wait for EngineCore to send EngineCoreProc.READY_STR.
-            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for EngineCoreProc to startup.")
-
-                if not proc.is_alive():
-                    raise RuntimeError("EngineCoreProc failed to start.")
-
-            message = socket.recv_string()
-            assert message == EngineCoreProc.READY_STR
-
-        except BaseException as e:
-            logger.exception(e)
-            raise e
-
-        finally:
-            sync_ctx.destroy(linger=0)
-
-    @staticmethod
-    def make_engine_core_process(
-        vllm_config: VllmConfig,
-        executor_class: Type[Executor],
-        usage_context: UsageContext,
-        input_path: str,
-        output_path: str,
-        ready_path: str,
-    ) -> EngineCoreProcHandle:
-        context = get_mp_context()
-
-        process_kwargs = {
-            "input_path": input_path,
-            "output_path": output_path,
-            "ready_path": ready_path,
-            "vllm_config": vllm_config,
-            "executor_class": executor_class,
-            "usage_context": usage_context,
-        }
-        # Run EngineCore busy loop in background process.
-        proc = context.Process(target=EngineCoreProc.run_engine_core,
-                               kwargs=process_kwargs)
-        proc.start()
-
-        # Wait for startup
-        EngineCoreProc.wait_for_startup(proc, ready_path)
-        return EngineCoreProcHandle(proc=proc,
-                                    ready_path=ready_path,
-                                    input_path=input_path,
-                                    output_path=output_path)
+        ready_pipe.send({"status": "READY"})
 
     @staticmethod
     def run_engine_core(*args, **kwargs):

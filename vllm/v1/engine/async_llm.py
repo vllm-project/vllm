@@ -80,7 +80,6 @@ class AsyncLLM(EngineClient):
         self.engine_core = EngineCoreClient.make_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
-            usage_context=usage_context,
             multiprocess_mode=True,
             asyncio_mode=True,
         )

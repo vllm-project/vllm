@@ -72,9 +72,8 @@ class LLMEngine:
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            usage_context,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
             multiprocess_mode=multiprocess_mode,
             asyncio_mode=False,
         )
