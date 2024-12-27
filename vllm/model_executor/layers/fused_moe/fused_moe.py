@@ -476,18 +476,29 @@ def fused_topk(
     return topk_weights, topk_ids
 
 
-# This is used by the Deepseek-V2 model
+# This is used by the Deepseek-V2 and Deepseek-V3 model
 def grouped_topk(hidden_states: torch.Tensor,
                  gating_output: torch.Tensor,
                  topk: int,
                  renormalize: bool,
                  num_expert_group: int = 0,
-                 topk_group: int = 0):
+                 topk_group: int = 0,
+                 scoring_func: str = "softmax",
+                 e_score_correction_bias: Optional[torch.Tensor] = None):
 
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
-    scores = torch.softmax(gating_output, dim=-1)
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    if e_score_correction_bias is not None:
+        scores.add_(e_score_correction_bias.unsqueeze(0))
+
     num_token = scores.shape[0]
     group_scores = scores.view(num_token, num_expert_group,
                                -1).max(dim=-1).values  # [n, n_group]
