@@ -155,21 +155,13 @@ class InternParallelAttention(nn.Module):
                                               self.tp_size)
 
         self.scale = self.head_dim**-0.5
-        # self.qkv = QKVParallelLinear(
-        #     self.embed_dim,
-        #     self.head_dim,
-        #     num_dummy_heads + self.num_heads,
-        #     bias=config.qkv_bias,
-        #     quant_config=quant_config,
-        #     prefix=f"{prefix}.qkv",
-        # )
-        self.qkv_proj = QKVParallelLinear(
+        self.qkv = QKVParallelLinear(
             self.embed_dim,
             self.head_dim,
             num_dummy_heads + self.num_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+            prefix=f"{prefix}.qkv",
         )
 
         self.qk_normalization = config.qk_normalization
@@ -207,8 +199,7 @@ class InternParallelAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, _ = x.shape
-        # qkv, _ = self.qkv(x)
-        qkv, _ = self.qkv_proj(x)
+        qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
         if self.qk_normalization:
