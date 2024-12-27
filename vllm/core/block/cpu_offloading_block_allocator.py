@@ -13,12 +13,121 @@ This implementation also allows vLLM to gracefully handle preemption by
 recomputation.
 """
 from collections import deque
-from typing import Deque, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import (Deque, Dict, Generic, Iterator, List, Optional, Tuple,
+                    TypeVar)
 
-from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.cpu_gpu_block_allocator import (CpuGpuBlockAllocator,
+                                                     NullBlock)
 from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
 from vllm.utils import Device
+
+T = TypeVar("T")
+
+
+@dataclass
+class IndexableLinkedListNode(Generic[T]):
+    value: Optional[T]
+    prev_node: Optional["IndexableLinkedListNode[T]"] = None
+    next_node: Optional["IndexableLinkedListNode[T]"] = None
+
+
+class IndexableLinkedListIterator(Iterator[T], Generic[T]):
+
+    def __init__(self, head: IndexableLinkedListNode[T]):
+        self._current = head
+        self.skip_head = True
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> T:
+        if self._current.next_node is None:
+            raise StopIteration
+
+        if self.skip_head:
+            self.skip_head = False
+            self._current = self._current.next_node
+            return self.__next__()
+
+        value = self._current.value
+        self._current = self._current.next_node  # type: ignore
+        assert value is not None
+        return value
+
+
+class IndexableLinkedList(Generic[T]):
+    """
+    A double linked list that supports indexing under O(1) time complexity.
+    It assumes the index space is limited, and will pre-allocate an array
+    to store references.
+
+    This is a helper class for CpuOffloadingBlockAllocator to track uncached 
+    blocks.
+    """
+
+    def __init__(self, max_index: int):
+        self._max_index = max_index
+        self._nodes: List[Optional[IndexableLinkedListNode[T]]] = [
+            None for _ in range(max_index)
+        ]
+        self._head = IndexableLinkedListNode[T](None, None,
+                                                None)  # type: ignore
+        self._tail = IndexableLinkedListNode[T](None, self._head,
+                                                None)  # type: ignore
+        self._head.next_node = self._tail
+        self._num_blocks = 0
+
+    def _insert_before(self, node: IndexableLinkedListNode[T],
+                       next_node: IndexableLinkedListNode[T]) -> None:
+        prev_node = next_node.prev_node
+        assert prev_node is not None
+        prev_node.next_node = node
+        node.prev_node = prev_node
+        node.next_node = next_node
+        next_node.prev_node = node
+        self._num_blocks += 1
+
+    def __getitem__(self, index: int) -> T:
+        assert 0 <= index < self._max_index, "Index out of range"
+        node = self._nodes[index]
+        assert node is not None, f"Index {index} not found"
+        assert node.value is not None
+        return node.value
+
+    def __setitem__(self, index: int, value: T):
+        assert 0 <= index < self._max_index, "Index out of range"
+        node = self._nodes[index]
+        if node is None:
+            node = IndexableLinkedListNode(value, None, None)
+            self._nodes[index] = node
+            self._insert_before(node, self._tail)
+        else:
+            node.value = value
+
+    def __iter__(self):
+        return IndexableLinkedListIterator(self._head)
+
+    def remove(self, index: int):
+        assert 0 <= index < self._max_index, "Index out of range"
+        node = self._nodes[index]
+        if node is None:
+            return
+
+        prev_node = node.prev_node
+        next_node = node.next_node
+
+        # prev and next will be guarded by head and tail, so should not be None
+        assert prev_node is not None
+        assert next_node is not None
+        prev_node.next_node = next_node
+        next_node.prev_node = prev_node
+        self._nodes[index] = None
+        self._num_blocks -= 1
+
+    def __len__(self):
+        return self._num_blocks
 
 
 class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
@@ -106,6 +215,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                                    Device.CPU: cpu_block_allocator,
                                    Device.GPU: gpu_block_allocator
                                }
+        self.num_gpu_blocks = gpu_block_allocator.get_num_total_blocks()
+        self.num_cpu_blocks = cpu_block_allocator.get_num_total_blocks()
         """
         GPU block should only be in one of the following three status:
           uncached: allocated blocks that didn't hit any cache
@@ -117,7 +228,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         As block allocator will automatically track free blocks, and we don't 
         need to specially handle cached blocks. So we only track uncached blocks
         """
-        self._uncached_blocks: Deque[Block] = deque()
+        self._uncached_blocks: IndexableLinkedList[Block] = \
+                IndexableLinkedList(self.num_cpu_blocks + self.num_gpu_blocks)
         """
         We probe CPU cache hit by trying to allocate a CPU 
         block and see if it is computed.
@@ -127,9 +239,6 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         step (i.e. calling `get_and_reset_swaps`).
         """
         self._allocated_cpu_blocks: Deque[Block] = deque()
-
-        self.num_gpu_blocks = gpu_block_allocator.get_num_total_blocks()
-        self.num_cpu_blocks = cpu_block_allocator.get_num_total_blocks()
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
@@ -152,7 +261,9 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
 
         block = self._allocators[device].allocate_mutable_block(
             prev_block, extra_hash=extra_hash)
-        self._uncached_blocks.append(block)
+        assert block.block_id is not None
+        #self._uncached_blocks.append(block)
+        self._uncached_blocks[block.block_id] = block
         return block
 
     def allocate_immutable_blocks(
@@ -248,7 +359,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             else:
                 # No cache hit
                 # mark the GPU block as uncached
-                self._uncached_blocks.append(block)
+                self._uncached_blocks[block_id] = block
                 # and free cpu block
                 self._allocators[Device.CPU].free(cpu_block)
 
@@ -319,16 +430,11 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         allocator = self._allocators[Device.GPU]
         cpu_allocator = self._allocators[Device.CPU]
 
-        new_uncached_blocks: Deque[Block] = deque()
+        #new_uncached_blocks: Deque[Block] = deque()
 
-        while self._uncached_blocks:
-            block = self._uncached_blocks.pop()
+        should_remove_ids = []
+        for block in self._uncached_blocks:
             block_id = block.block_id
-
-            # check if this block is freed
-            if block_id is None:
-                # this block is already freed, no longer need to copy it to CPU
-                continue
 
             refcount = allocator._refcounter.get(block_id)
             assert refcount > 0, "A freed block should have block_id None"
@@ -352,14 +458,11 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 assert cpu_block.block_id is not None
                 self._swap_mapping[block_id] = cpu_block.block_id
 
+                should_remove_ids.append(block_id)
                 continue
 
-            # this block is neither freed nor computed
-            # keep marking it as uncached
-            new_uncached_blocks.append(block)
-
-        # update uncached blocks
-        self._uncached_blocks = new_uncached_blocks
+        for block_id in should_remove_ids:
+            self._uncached_blocks.remove(block_id)
 
         # iterate over allocated CPU blocks, update access time and free them
         # need to update access time so that CPU evictor can work
@@ -398,3 +501,17 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 otherwise.
         """
         return bool(self._swap_mapping)
+
+    def free(self, block: Block) -> None:
+        """Frees the memory occupied by the given block.
+
+        Args:
+            block (Block): The block to be freed.
+        """
+        # Null block should never be freed
+        if isinstance(block, NullBlock):
+            return
+        block_id = block.block_id
+        assert block_id is not None
+        self._uncached_blocks.remove(block_id)
+        super().free(block)
