@@ -190,7 +190,7 @@ spec:
         - name: shm
           mountPath: /dev/shm
 ```
-The full example is at https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve.
+The full example is at <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
 2. **Create a Kubernetes Service for vLLM**
 
