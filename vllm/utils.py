@@ -10,6 +10,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
+import psutil
 import os
 import re
 import resource
@@ -1839,6 +1840,7 @@ def set_ulimit(target_soft_limit=65535):
                 "increasing with ulimit -n", current_soft, e)
 
 
+# Adapted from https://github.com/sgl-project/sglang/blob/f46f394f4d4dbe4aae85403dec006199b34d2840/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
@@ -1846,9 +1848,7 @@ def make_zmq_socket(
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
-    import psutil
     mem = psutil.virtual_memory()
-
     socket = ctx.socket(type)
 
     # Calculate buffer size based on system memory
