@@ -29,6 +29,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
     try_get_generation_config, uses_mrope)
+from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, print_warning_once, random_uuid,
@@ -160,7 +161,7 @@ class ModelConfig:
             override default pooling config for the pooling model.
         logits_processor_pattern: Optional regex pattern specifying valid
             logits processor qualified names that can be passed with the
-            `logits_processors` extra completion argument. Defaults to None, 
+            `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
     """
@@ -363,7 +364,7 @@ class ModelConfig:
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
         """
-        Pull the model config or tokenizer to a temporary 
+        Pull the model config or tokenizer to a temporary
         directory in case of S3.
 
         Args:
@@ -372,15 +373,6 @@ class ModelConfig:
 
         """
         if is_s3(model) or is_s3(tokenizer):
-            try:
-                from vllm.transformers_utils.s3_utils import S3Model
-            except ImportError as err:
-                raise ImportError(
-                    "Please install Run:ai optional dependency "
-                    "to use the S3 capabilities. "
-                    "You can install it with: pip install vllm[runai]"
-                ) from err
-
             if is_s3(model):
                 self.s3_model = S3Model()
                 self.s3_model.pull_files(model, allow_pattern=["*config.json"])
@@ -604,6 +596,12 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
+        if (self.hf_config.model_type == 'deepseek_v3'
+                and not self.enforce_eager):
+            logger.warning("CUDA graph is not supported for Deepseek V3 yet, "
+                           "fallback to the eager mode.")
+            self.enforce_eager = True
+
     def _verify_bnb_config(self) -> None:
         """
         The current version of bitsandbytes (0.44.0) with 8-bit models does not
@@ -720,8 +718,9 @@ class ModelConfig:
 
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config, "model_type"
-                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+        if hasattr(self.hf_text_config,
+                   "model_type") and (self.hf_text_config.model_type
+                                      in ('deepseek_v2', 'deepseek_v3')):
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
             return 256
@@ -874,14 +873,14 @@ class ModelConfig:
 
     def get_diff_sampling_param(self) -> Dict[str, Any]:
         """
-        This method returns a dictionary containing the parameters 
-        that differ from the default sampling parameters, but only 
-        if `generation_config` is set. If `generation_config` is not 
+        This method returns a dictionary containing the parameters
+        that differ from the default sampling parameters, but only
+        if `generation_config` is set. If `generation_config` is not
         set, an empty dictionary is returned.
 
         Returns:
-            Dict[str, Any]: A dictionary with the differing sampling 
-            parameters if `generation_config` is set, otherwise an 
+            Dict[str, Any]: A dictionary with the differing sampling
+            parameters if `generation_config` is set, otherwise an
             empty dictionary.
         """
         if self.generation_config is None:

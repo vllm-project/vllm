@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+import cv2
 import numpy as np
 import numpy.typing as npt
 
@@ -78,19 +79,7 @@ class VideoPlugin(ImagePlugin):
         return 4096
 
 
-def try_import_video_packages() -> tuple[Any, Any]:
-    try:
-        import cv2
-        import decord
-    except ImportError as exc:
-        raise ImportError(
-            "Please install vllm[video] for video support.") from exc
-    return cv2, decord
-
-
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
-    cv2, _ = try_import_video_packages()
-
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
     resized_frames = np.empty((num_frames, new_height, new_width, channels),

@@ -13,10 +13,24 @@ import vllm.envs as envs
 from vllm.connections import global_http_connection
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.utils import PlaceholderModule
 
-from .audio import try_import_audio_packages
 from .inputs import MultiModalDataDict, PlaceholderRange
-from .video import try_import_video_packages
+
+try:
+    import decord
+except ImportError:
+    decord = PlaceholderModule("decord")  # type: ignore[assignment]
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
+
+try:
+    import soundfile
+except ImportError:
+    soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 logger = init_logger(__name__)
 
@@ -128,8 +142,6 @@ async def async_fetch_image(image_url: str,
 
 
 def _load_video_from_bytes(b: bytes, num_frames: int = 32) -> npt.NDArray:
-    _, decord = try_import_video_packages()
-
     video_path = BytesIO(b)
     vr = decord.VideoReader(video_path, num_threads=1)
     total_frame_num = len(vr)
@@ -204,8 +216,6 @@ def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
     """
     Load audio from a URL.
     """
-    librosa, _ = try_import_audio_packages()
-
     if audio_url.startswith("http"):
         audio_bytes = global_http_connection.get_bytes(
             audio_url,
@@ -226,8 +236,6 @@ async def async_fetch_audio(
     """
     Asynchronously fetch audio from a URL.
     """
-    librosa, _ = try_import_audio_packages()
-
     if audio_url.startswith("http"):
         audio_bytes = await global_http_connection.async_get_bytes(
             audio_url,
@@ -286,8 +294,6 @@ def encode_audio_base64(
     sampling_rate: int,
 ) -> str:
     """Encode audio as base64."""
-    _, soundfile = try_import_audio_packages()
-
     buffered = BytesIO()
     soundfile.write(buffered, audio, sampling_rate, format="WAV")
 
