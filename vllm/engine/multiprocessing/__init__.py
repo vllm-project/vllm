@@ -96,7 +96,7 @@ class RPCProcessRequest:
 
 @dataclass
 class RPCError:
-    request_id: Optional[str]
+    request_id: str
     exception: BaseException
 
 

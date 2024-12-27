@@ -155,60 +155,35 @@ class MQLLMEngineClient(EngineClient):
                         return
 
                 message: Frame = await self.output_socket.recv(copy=False)
-                request_outputs = pickle.loads(message.buffer)
+                output = pickle.loads(message.buffer)
 
-                is_error = isinstance(request_outputs,
-                                      (BaseException, RPCError))
-                if is_error:
-                    if isinstance(request_outputs, RPCError):
-                        rpc_error: RPCError = request_outputs
-                        request_id = rpc_error.request_id
-                        exception = rpc_error.exception
-                        is_engine_errored = rpc_error.is_engine_errored
-                    else:
-                        # MPLLMEngine should always return an RPCError to
-                        # the output_socket when an issue arises.
-                        # If we are here, we are in a bad state and
-                        # should shut down the server.
-                        error: BaseException = request_outputs
-                        logger.error(
-                            "Received Exception %s rather than RPCError from "
-                            "MPLLMEngine. This should never happen.", error)
-                        request_id = None
-                        exception = error
-                        is_engine_errored = True
+                # Occurs if there is an error in adding a new request.
+                # Note: the server can keep running if this happens,
+                # it only impacts a specific request.
+                if isinstance(output, RPCError):
+                    
+                    rpc_error: RPCError = output
 
-                    # Set to error state only on engine critical error
-                    # (and record only the first one)
-                    if is_engine_errored and not self._errored_with:
-                        self._errored_with = exception
-                        # If engine is errored, no matter the type of exception
-                        # it will no longer be able to receive new requests,
-                        # therefore we have to inform that the current
-                        # processed requests failed as well. Send back a dead
-                        # engine error give this feedback and also give a
-                        # 'hint' to the server to shutdown next.
-                        exception = self.dead_error
+                    # Put in the queue so it can be raised in generate().
+                    queue = self.output_queues.get(
+                        rpc_error.request_id, None)
+                    if queue is not None:
+                        queue.put_nowait(rpc_error.exception)
+                
+                # One request output for each item in the batch.
+                elif isinstance(output, List):
+                    request_outputs: List[RequestOutput] = output
 
-                    if request_id is None:
-                        # If request_id is None, then the engine raised an
-                        # exception for a batch, and we may not know the
-                        # request that caused it, neither if it was actually
-                        # caused by any of them (e.g. CUDA OOM). Therefore we
-                        # broadcast the same exception for all requests.
-                        for queue_i in tuple(self.output_queues.values()):
-                            queue_i.put_nowait(exception)
-                    else:
-                        queue = self.output_queues.get(request_id)
-                        if queue is not None:
-                            queue.put_nowait(exception)
-                else:
                     # Put each output into the appropriate steam.
                     for request_output in request_outputs:
                         queue = self.output_queues.get(
-                            request_output.request_id)
+                            request_output.request_id, None)
                         if queue is not None:
                             queue.put_nowait(request_output)
+                
+                else:
+                    self._set_errored(ValueError(
+                        f"Unknown output in handler: {output}"))
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient output handler.")

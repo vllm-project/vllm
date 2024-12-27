@@ -96,7 +96,7 @@ class MQLLMEngine:
 
     @classmethod
     def from_engine_args(
-        cls, 
+        cls,
         engine_args: AsyncEngineArgs,
         usage_context: UsageContext,
         input_path: str,
@@ -247,8 +247,11 @@ class MQLLMEngine:
         try:
             engine = MQLLMEngine.from_engine_args(engine_args, usage_context,
                                                   input_path, output_path)
+            assert engine is not None  # mypy
             # Send Readiness signal to EngineClient.
-            tracing_data = {"is_tracing_enabled": engine.engine.is_tracing_enabled()}
+            tracing_data = {
+                "is_tracing_enabled": engine.engine.is_tracing_enabled()
+            }
             ready_pipe.send({"status": "READY", "data": tracing_data})
             engine.run_engine_loop()
 
@@ -261,7 +264,7 @@ class MQLLMEngine:
         # stack trace for both startup time and runtime error.
         except Exception:
             traceback = get_exception_traceback()
-            logger.error("EngineCore hit an exception: %s", traceback)
+            logger.error("MQLLMEngine hit an exception: %s", traceback)
             parent_process.send_signal(signal.SIGQUIT)
 
         finally:

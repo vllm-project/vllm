@@ -178,11 +178,11 @@ async def build_async_engine_client_from_engine_args(
 
         mq_engine_client: Optional[MQLLMEngineClient] = None
         try:
-            mq_engine_client = await asyncio.get_running_loop().run_in_executor(
-                None, build_mq_engine)
+            mq_engine_client = await asyncio.get_running_loop(
+            ).run_in_executor(None, build_mq_engine)
 
             yield mq_engine_client  # type: ignore[misc]
-        
+
         finally:
             # Shutdown background process + connections to backend.
             if mq_engine_client:
