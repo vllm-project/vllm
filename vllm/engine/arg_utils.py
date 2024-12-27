@@ -316,6 +316,8 @@ class EngineArgs:
             '* "tensorizer" will load the weights using tensorizer from '
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
+            '* "runai_streamer" will load the Safetensors weights using Run:ai'
+            'Model Streamer \n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
         parser.add_argument(
@@ -371,7 +373,7 @@ class EngineArgs:
             choices=['outlines', 'lm-format-enforcer', 'xgrammar'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
-            'https://github.com/outlines-dev/outlines,'
+            'https://github.com/outlines-dev/outlines, '
             'https://github.com/mlc-ai/xgrammar, and '
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
@@ -1146,7 +1148,7 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:

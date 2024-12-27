@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.model_executor.layers.utils import apply_penalties
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
@@ -260,11 +261,11 @@ class Sampler(nn.Module):
 
         # Apply presence and frequency penalties.
         if do_penalties:
-            logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
-                                      sampling_tensors.output_tokens,
-                                      sampling_tensors.presence_penalties,
-                                      sampling_tensors.frequency_penalties,
-                                      sampling_tensors.repetition_penalties)
+            logits = apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                     sampling_tensors.output_tokens,
+                                     sampling_tensors.presence_penalties,
+                                     sampling_tensors.frequency_penalties,
+                                     sampling_tensors.repetition_penalties)
 
         if do_dry:
             logits = _apply_dry(logits, sampling_tensors.prompt_tokens,
@@ -345,23 +346,6 @@ class Sampler(nn.Module):
         method be encoded into the probability distribution.
         """
         return self.should_modify_greedy_probs_inplace
-
-
-def _get_bin_counts_and_mask(
-    tokens: torch.Tensor,
-    vocab_size: int,
-    num_seqs: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    # Compute the bin counts for the tokens.
-    # vocab_size + 1 for padding.
-    bin_counts = torch.zeros((num_seqs, vocab_size + 1),
-                             dtype=torch.long,
-                             device=tokens.device)
-    bin_counts.scatter_add_(1, tokens, torch.ones_like(tokens))
-    bin_counts = bin_counts[:, :vocab_size]
-    mask = bin_counts > 0
-
-    return bin_counts, mask
 
 
 def _apply_min_tokens_penalty(

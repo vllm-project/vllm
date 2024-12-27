@@ -464,24 +464,27 @@ class MolmoAttention(nn.Module):
 class MolmoMLP(nn.Module):
     """Molmo's LLM mlp."""
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        input_dim: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self,
+                 config: PretrainedConfig,
+                 input_dim: Optional[int] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 proj_name: str = "gate_up_proj") -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size // 2
 
-        # Feed-forward input projection.
-        self.gate_up_proj = MergedColumnParallelLinear(
-            input_dim or self.hidden_size,
-            [self.intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-        )
-
+        # Molmo's LLM proj weights are already merged into the disk, while
+        # image_projector proj is separate. If the same proj_name were used, it
+        # would create ambiguity and make it difficult to support BNB and LoRA.
+        self.proj_name = proj_name
+        setattr(
+            self, proj_name,
+            MergedColumnParallelLinear(
+                input_dim or self.hidden_size,
+                [self.intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+            ))
         # Activation function.
         self.act_fn = SiluAndMul()
 
@@ -497,7 +500,7 @@ class MolmoMLP(nn.Module):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        gate_up, _ = self.gate_up_proj(x)
+        gate_up, _ = getattr(self, self.proj_name)(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -520,7 +523,9 @@ class MolmoDecoderLayer(nn.Module):
                                         prefix=f"{prefix}.self_attn")
 
         # MLP block.
-        self.mlp = MolmoMLP(config, quant_config=quant_config)
+        self.mlp = MolmoMLP(config,
+                            quant_config=quant_config,
+                            proj_name="gate_up_proj")
 
         # LayerNorm
         assert config.layer_norm_type == "rms"
@@ -616,6 +621,7 @@ class MolmoVisionBackbone(nn.Module):
             config,
             input_dim=vision_config.image_emb_dim,
             quant_config=quant_config,
+            proj_name="merged_linear",
         )
 
         image_dim = vision_config.image_emb_dim * len(self.vit_layers)
@@ -714,8 +720,8 @@ class MolmoVisionBackbone(nn.Module):
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+            ("merged_linear", "gate_proj", 0),
+            ("merged_linear", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
@@ -1123,6 +1129,34 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
 class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            # vision backbone mapping
+            "image_projector.w1.": "image_projector.gate_proj.",
+            "image_projector.w3.": "image_projector.up_proj.",
+            "image_projector.w2.": "image_projector.down_proj.",
+            # language backbone mapping
+            "att_proj": "self_attn.qkv_proj",
+            "attn_out": "self_attn.o_proj",
+            "q_norm": "self_attn.q_norm",
+            "k_norm": "self_attn.k_norm",
+            "ff_proj": "mlp.gate_up_proj",
+            "ff_out": "mlp.down_proj",
+            "attn_norm": "input_layernorm",
+            "ff_norm": "post_attention_layernorm",
+        },
+        orig_to_new_prefix={
+            # vision backbone mapping
+            "model.vision_backbone.": "vision_backbone.",
+            # language backbone mapping
+            "model.transformer.blocks.": "model.layers.",
+            "model.transformer.ln_f.": "model.norm.",
+            # lm_head is renamed to model.transformer.mlp.down_proj firstly,
+            # we need to run a second renaming for it
+            "model.transformer.mlp.down_proj.": "lm_head.",
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1298,36 +1332,10 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_substr={
-                # vision backbone mapping
-                "image_projector.w1.": "image_projector.gate_proj.",
-                "image_projector.w3.": "image_projector.up_proj.",
-                "image_projector.w2.": "image_projector.down_proj.",
-                # language backbone mapping
-                "att_proj": "self_attn.qkv_proj",
-                "attn_out": "self_attn.o_proj",
-                "q_norm": "self_attn.q_norm",
-                "k_norm": "self_attn.k_norm",
-                "ff_proj": "mlp.gate_up_proj",
-                "ff_out": "mlp.down_proj",
-                "attn_norm": "input_layernorm",
-                "ff_norm": "post_attention_layernorm",
-            },
-            orig_to_new_prefix={
-                # vision backbone mapping
-                "model.vision_backbone.": "vision_backbone.",
-                # language backbone mapping
-                "model.transformer.blocks.": "model.layers.",
-                "model.transformer.ln_f.": "model.norm.",
-                # lm_head is renamed to model.transformer.mlp.down_proj firstly,
-                # we need to run a second renaming for it
-                "model.transformer.mlp.down_proj.": "lm_head.",
-            },
-        )
+
         loader = AutoWeightsLoader(self)
         weights = _get_weights_with_merged_embedding(weights)
-        return loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _get_weights_with_merged_embedding(
