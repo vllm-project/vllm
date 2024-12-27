@@ -342,7 +342,8 @@ class Sampler(nn.Module):
             assert not isinstance(maybe_deferred_sample_results,
                                   SampleResultArgsType)
             prompt_logprobs, sample_logprobs = get_logprobs(
-                logprobs, sampling_metadata, maybe_deferred_sample_results)
+                logprobs, sampling_metadata, maybe_deferred_sample_results,
+                self.max_sampling_tokens)
 
         return _build_sampler_output(
             maybe_deferred_sample_results,
@@ -888,7 +889,8 @@ def _sample(
     )
 
 
-def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+def _get_ranks(x: torch.Tensor, indices: torch.Tensor,
+               max_sampling_tokens: int) -> torch.Tensor:
     """
     This function calculates the ranks of the chosen tokens in a logprob tensor.
 
@@ -896,23 +898,36 @@ def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         x (torch.Tensor): 2D logprob tensor of shape (N, M)
                         where N is the no. of tokens and M is the vocab dim.
         indices (torch.Tensor): List of chosen token indices.
+        max_sampling_tokens (int): The maximum number of tokens to calculate
+                         in one kernel launch to control the peak memory usage.
 
     Returns:
         torch.Tensor: 1D tensor of shape (N,) where N is the no. of tokens.
                     Each element in the returned tensor represents the rank
                     of the chosen token in the input logprob tensor.
     """
-    vals = x[torch.arange(0, len(x), device=x.device, dtype=indices.dtype),
-             indices]
-    result = (x > vals[:, None])
-    del vals
-    return result.sum(1).add_(1)
+    N, M = x.shape
+    vals = x[torch.arange(0, N, device=x.device, dtype=indices.dtype), indices]
+    final_result = torch.empty(N, device=x.device, dtype=indices.dtype)
+    result_chunks = torch.chunk(final_result, max_sampling_tokens, dim=0)
+    start_idx = 0
+    for chunk in result_chunks:
+        chunk_size = chunk.size(0)
+        end_idx = start_idx + chunk_size
+        cmp = x[start_idx:end_idx] > vals[start_idx:end_idx, None]
+        # cmp.sum(dim=1, dtype=torch.int32) is the peak memory usage.
+        ranks = cmp.sum(dim=1, dtype=torch.int32).add_(1)
+        chunk.copy_(ranks)
+        del cmp, ranks
+        start_idx = end_idx
+    return final_result
 
 
 def get_logprobs(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     sample_results: SampleResultType,
+    max_sampling_tokens: int,
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
     """Return sample logprobs and prompt logprobs.
 
@@ -1007,6 +1022,7 @@ def get_logprobs(
         ranks = _get_ranks(
             logprobs[query_indices_gpu],
             next_token_ids_gpu,
+            max_sampling_tokens,
         )
         assert selected_logprobs.shape[0] == ranks.shape[0]
 
