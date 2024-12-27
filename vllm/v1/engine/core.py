@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import zmq_socket_ctx
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
@@ -25,7 +26,6 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
-from vllm.utils import zmq_socket_ctx
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)

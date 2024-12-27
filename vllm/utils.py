@@ -10,7 +10,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
-import psutil
+import multiprocessing
 import os
 import re
 import resource
@@ -24,14 +24,13 @@ import time
 import uuid
 import warnings
 import weakref
-import zmq
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
-                    Dict, Generator, Generic, Hashable, Iterable, List,
+                    Dict, Generator, Generic, Hashable, Iterator, List,
                     Literal, Optional, Tuple, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
@@ -41,6 +40,7 @@ import psutil
 import torch
 import torch.types
 import yaml
+import zmq
 from packaging.version import Version
 from torch.library import Library
 from typing_extensions import ParamSpec, TypeIs, assert_never
@@ -1892,3 +1892,21 @@ def zmq_socket_ctx(
 
     finally:
         ctx.destroy(linger=0)
+
+
+def _check_multiproc_method():
+    if (cuda_is_initialized()
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
+        logger.warning("CUDA was previously initialized. We must use "
+                       "the `spawn` multiprocessing start method. Setting "
+                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                       "See https://docs.vllm.ai/en/latest/getting_started/"
+                       "debugging.html#python-multiprocessing "
+                       "for more information.")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+def get_mp_context():
+    _check_multiproc_method()
+    mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+    return multiprocessing.get_context(mp_method)

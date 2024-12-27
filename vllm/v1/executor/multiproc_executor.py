@@ -17,13 +17,12 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.executor.multiproc_worker_utils import (
-    _add_prefix, get_mp_context, set_multiprocessing_worker_envs)
+    _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_open_port,
-                        get_open_zmq_ipc_path)
+from vllm.utils import (get_distributed_init_method, get_mp_context,
+                        get_open_port, get_open_zmq_ipc_path, zmq_socket_ctx)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.utils import zmq_socket_ctx
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
