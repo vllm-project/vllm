@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
-LOGGING_TIME_S = 1
+LOGGING_TIME_S = 5
 
 
 class EngineCore:
@@ -39,8 +39,10 @@ class EngineCore:
         self,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
+        log_stats: bool = False,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
+        self.log_stats = log_stats
 
         logger.info("Initializing an LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
@@ -135,13 +137,14 @@ class EngineCoreProc(EngineCore):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
-        executor_class: Type[Executor],
         input_path: str,
         output_path: str,
         ready_pipe: Connection,
+        vllm_config: VllmConfig,
+        executor_class: Type[Executor],
+        log_stats: bool = False,
     ):
-        super().__init__(vllm_config, executor_class)
+        super().__init__(vllm_config, executor_class, log_stats)
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -232,6 +235,9 @@ class EngineCoreProc(EngineCore):
 
     def _log_stats(self):
         """Log basic stats every LOGGING_TIME_S"""
+
+        if not self.log_stats:
+            return
 
         now = time.time()
 

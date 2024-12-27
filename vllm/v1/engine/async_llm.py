@@ -78,10 +78,11 @@ class AsyncLLM(EngineClient):
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_client(
-            vllm_config=vllm_config,
-            executor_class=executor_class,
             multiprocess_mode=True,
             asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=self.log_stats,
         )
 
         self.output_handler: Optional[asyncio.Task] = None

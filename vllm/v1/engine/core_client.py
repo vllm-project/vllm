@@ -31,10 +31,11 @@ class EngineCoreClient:
 
     @staticmethod
     def make_client(
-        vllm_config: VllmConfig,
-        executor_class: Type[Executor],
         multiprocess_mode: bool,
         asyncio_mode: bool,
+        vllm_config: VllmConfig,
+        executor_class: Type[Executor],
+        log_stats: bool = False,
     ) -> "EngineCoreClient":
 
         # TODO: support this for debugging purposes.
@@ -44,12 +45,12 @@ class EngineCoreClient:
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            return AsyncMPClient(vllm_config, executor_class)
+            return AsyncMPClient(vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
-            return SyncMPClient(vllm_config, executor_class)
+            return SyncMPClient(vllm_config, executor_class, log_stats)
 
-        return InprocClient(vllm_config, executor_class)
+        return InprocClient(vllm_config, executor_class, log_stats)
 
     def shutdown(self):
         pass
@@ -128,9 +129,10 @@ class MPClient(EngineCoreClient):
 
     def __init__(
         self,
+        asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        asyncio_mode: bool,
+        log_stats: bool = False,
     ):
         # Serialization setup.
         self.encoder = PickleEncoder()
@@ -164,6 +166,7 @@ class MPClient(EngineCoreClient):
             process_kwargs={
                 "vllm_config": vllm_config,
                 "executor_class": executor_class,
+                "log_stats": log_stats,
             })
 
     def shutdown(self):
@@ -178,9 +181,16 @@ class MPClient(EngineCoreClient):
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig,
-                 executor_class: Type[Executor]):
-        super().__init__(vllm_config, executor_class, asyncio_mode=False)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 executor_class: Type[Executor],
+                 log_stats: bool = False):
+        super().__init__(
+            asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=log_stats,
+        )
 
     def get_output(self) -> List[EngineCoreOutput]:
 
@@ -209,9 +219,16 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig,
-                 executor_class: Type[Executor]):
-        super().__init__(vllm_config, executor_class, asyncio_mode=True)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 executor_class: Type[Executor],
+                 log_stats: bool = False):
+        super().__init__(
+            asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=log_stats,
+        )
 
     async def get_output_async(self) -> List[EngineCoreOutput]:
 
