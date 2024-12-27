@@ -152,15 +152,17 @@ class LLMEngine:
     ) -> None:
 
         # 1) Process raw inputs into the request.
-        detokenizer_req, engine_core_req = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            trace_headers, prompt_adapter_request, priority)
+        request = self.processor.process_inputs(request_id, prompt, params,
+                                                arrival_time, lora_request,
+                                                trace_headers,
+                                                prompt_adapter_request,
+                                                priority)
 
         # 2) Add the request to Detokenizer.
-        self.detokenizer.add_request(detokenizer_req)
+        self.detokenizer.add_request(request)
 
         # 3) Add the request to EngineCore.
-        self.engine_core.add_request(engine_core_req)
+        self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
 
