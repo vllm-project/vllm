@@ -2,6 +2,7 @@ import asyncio
 import copy
 import pickle
 from contextlib import suppress
+from multiprocess.connection import Connection
 from typing import (Any, AsyncGenerator, Dict, List, Mapping,
                     Optional, Union, cast, overload)
 
@@ -74,14 +75,13 @@ class MQLLMEngineClient(EngineClient):
             the list and pushes individual request_outputs into
             the corresponding output_queue such that they can be
             consumed by the .generate() method.
-        - health_loop: the health loop queries the health socket
-            every N seconds, confirming the engine is healthy
     """
 
     def __init__(
         self,
         input_path: str, 
         output_path: str,
+        ready_pipe: Connection,
         engine_config: VllmConfig,
     ):
         self._errored_with: Optional[BaseException] = None
@@ -100,20 +100,17 @@ class MQLLMEngineClient(EngineClient):
                                                     self.tokenizer)
 
         # MQLLMEngine IO.
-        self.context = zmq.asyncio.Context()
-        self.input_socket = make_zmq_socket(self.context, input_path,
+        self.ctx = zmq.asyncio.Context()
+        self.input_socket = make_zmq_socket(self.ctx, input_path,
                                             zmq.constants.PUSH)
-        self.input_socket = make_zmq_socket(self.context, output_path,
-                                            zmq.constants.PULL)
-
-        # Stream for each individual request.
-        self.output_queues: Dict[str, asyncio.Queue] = {}
+        self.output_socket = make_zmq_socket(self.ctx, output_path,
+                                             zmq.constants.PULL)
 
         # Loop to handle output of the LLMEngine periodically.
         # Started after the MQLLMEngine is ready so that we can
         # build the Client in an executor to enable clean shutdown.
+        self.output_queues: Dict[str, asyncio.Queue] = {}
         self.output_loop: Optional[asyncio.Task] = None
-
 
     @staticmethod
     def is_unsupported_config(engine_args: AsyncEngineArgs):
@@ -199,11 +196,9 @@ class MQLLMEngineClient(EngineClient):
     def close(self):
         """Destroy the ZeroMQ Context."""
         # Close all sockets and terminate the context.
-        self.context.destroy(linger=0)
+        self.ctx.destroy(linger=0)
 
         # Cancel background tasks.
-        if self.health_loop is not None:
-            self.health_loop.cancel()
         if self.output_loop is not None:
             self.output_loop.cancel()
 
@@ -212,31 +207,6 @@ class MQLLMEngineClient(EngineClient):
         if self._errored_with is None:
             self._errored_with = e
 
-    @staticmethod
-    async def _send_get_data_rpc_request(request: RPCStartupRequest,
-                                         expected_type: Any,
-                                         error_message: str,
-                                         socket: Socket) -> Any:
-        """Send an RPC request that is expecting data back."""
-
-        # Ping RPCServer with a request.
-        await socket.send_multipart((pickle.dumps(request), ), copy=False)
-
-        # Make sure the server responds in time.
-        if await socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
-            raise TimeoutError("RPCServer didn't reply within "
-                               f"{VLLM_RPC_TIMEOUT} ms")
-
-        # Await the data from the Server.
-        frame = await socket.recv(copy=False)
-        data = pickle.loads(frame.buffer)
-
-        if isinstance(data, BaseException):
-            raise data
-        elif not isinstance(data, expected_type):
-            raise ValueError(error_message)
-
-        return data
 
     @staticmethod
     async def _send_one_way_rpc_request(request: RPC_REQUEST_T,
@@ -247,35 +217,6 @@ class MQLLMEngineClient(EngineClient):
             raise MQClientClosedError()
 
         await socket.send_multipart((pickle.dumps(request), ))
-
-    async def _await_ack(self, error_message: str, socket: Socket):
-        """Await acknowledgement that a request succeeded."""
-
-        if socket.closed:
-            raise MQClientClosedError()
-
-        if await socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
-            raise TimeoutError("MQLLMEngine didn't reply within "
-                               f"{VLLM_RPC_TIMEOUT}ms")
-
-        await self._check_success(error_message, socket)
-
-    @staticmethod
-    async def _check_success(error_message: str, socket: Socket):
-        """Confirm that socket has a VLLM_RPC_SUCCESS_STR message"""
-
-        if socket.closed:
-            raise MQClientClosedError()
-
-        frame = await socket.recv(copy=False)
-        response = pickle.loads(frame.buffer)
-
-        # Raise error if unsuccessful
-        if isinstance(response, BaseException):
-            raise response
-        elif (not isinstance(response, str)
-              or response != VLLM_RPC_SUCCESS_STR):
-            raise ValueError(error_message)
 
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.input_preprocessor
@@ -291,15 +232,6 @@ class MQLLMEngineClient(EngineClient):
 
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
-
-    async def _wait_for_server_rpc(self, socket: Socket) -> RPCStartupResponse:
-        """Wait for the RPCServer to start up."""
-
-        return await self._send_get_data_rpc_request(
-            request=RPCStartupRequest.IS_SERVER_READY,
-            expected_type=RPCStartupResponse,
-            error_message="Unable to start RPC Server",
-            socket=socket)
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""
@@ -406,6 +338,12 @@ class MQLLMEngineClient(EngineClient):
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
+
+        # Start output handler loop on the first call.
+        if self.output_loop is None:
+            self.output_loop = asyncio.create_task(
+                self.run_output_handler_loop())
+
         if inputs is not None:
             prompt = inputs
         assert (prompt is not None and sampling_params is not None
@@ -474,6 +412,12 @@ class MQLLMEngineClient(EngineClient):
             The output `PoolingRequestOutput` objects from the LLMEngine
             for the request.
         """
+
+        # Start output handler loop on the first call.
+        if self.output_loop is None:
+            self.output_loop = asyncio.create_task(
+                self.run_output_handler_loop())
+
         if inputs is not None:
             prompt = inputs
         assert (prompt is not None and pooling_params is not None

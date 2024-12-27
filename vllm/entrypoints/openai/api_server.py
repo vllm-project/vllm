@@ -180,26 +180,23 @@ async def build_async_engine_client_from_engine_args(
         input_path = get_open_zmq_ipc_path()
         output_path = get_open_zmq_ipc_path()
 
-        # The Process can raise an exception during startup, which may
-        # not actually result in an exitcode being reported. As a result
-        # we use a shared variable to communicate the information.
-        engine_proc_handler = BackgroundProcHandle(
-            input_path=input_path,
-            output_path=output_path,
-            process_name="MQLLMEngine",
-            target_fn=run_mp_engine,
-            process_kwargs={
-                "engine_args": engine_args,
-                "usage_context": UsageContext.OPENAI_API_SERVER,
-            }
-        )
-        
-        # Build RPCClient, which conforms to EngineClient Protocol.
-        engine_config = engine_args.create_engine_config()
-        build_client = partial(MQLLMEngineClient, input_path,
-                               output_path, engine_config)
-        mq_engine_client = await asyncio.get_running_loop().run_in_executor(
-            None, build_client)
+        try:
+            # Start MQLLMEngine in a background process.
+            engine_proc_handler = BackgroundProcHandle(
+                input_path=input_path,
+                output_path=output_path,
+                process_name="MQLLMEngine",
+                target_fn=run_mp_engine,
+                process_kwargs={
+                    "engine_args": engine_args,
+                    "usage_context": UsageContext.OPENAI_API_SERVER,
+                }
+            )
+            
+            # Build the client.
+            engine_config = engine_args.create_engine_config()
+            mq_engine_client = MQLLMEngineClient(
+                input_path, output_path, engine_config)
 
             yield mq_engine_client  # type: ignore[misc]
 
