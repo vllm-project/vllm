@@ -2,7 +2,7 @@
 
 # Structured Outputs
 
-vLLM supports the generation of structured outputs using [outlines](https://github.com/dottxt-ai/outlines) or [lm-format-enforcer](https://github.com/noamgat/lm-format-enforcer) as backends for the guided decoding.
+vLLM supports the generation of structured outputs using [outlines](https://github.com/dottxt-ai/outlines), [lm-format-enforcer](https://github.com/noamgat/lm-format-enforcer), or [xgrammar](https://github.com/mlc-ai/xgrammar) as backends for the guided decoding.
 This document shows you some examples of the different options that are available to generate structured outputs.
 
 ## Online Inference (OpenAI API)
