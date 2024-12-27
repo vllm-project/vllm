@@ -1170,7 +1170,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         "qkv_proj",
         "o_proj",
         "gate_up_proj",
-        "down_proj", # same name with image_projector
+        "down_proj",  # same name with image_projector
         # vision tower
         "wq",
         "wk",
