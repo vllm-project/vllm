@@ -106,7 +106,6 @@ class BackgroundProcHandle:
         self.output_path = output_path
 
         # Run Detokenizer busy loop in background process.
-        # self.proc: Optional[BaseProcess]
         self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
         self.proc.start()
 
