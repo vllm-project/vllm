@@ -2,7 +2,7 @@
 
 # Structured Outputs
 
-vLLM supports the generation of structured outputs using [outlines](https://github.com/dottxt-ai/outlines) or [lm-format-enforcer](https://github.com/noamgat/lm-format-enforcer) as backends for the guided decoding.
+vLLM supports the generation of structured outputs using [outlines](https://github.com/dottxt-ai/outlines), [lm-format-enforcer](https://github.com/noamgat/lm-format-enforcer), or [xgrammar](https://github.com/mlc-ai/xgrammar) as backends for the guided decoding.
 This document shows you some examples of the different options that are available to generate structured outputs.
 
 ## Online Inference (OpenAI API)
@@ -131,7 +131,7 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-The complete code of the examples can be found on [examples/openai_chat_completion_structured_outputs.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_structured_outputs.py).
+Full example: <gh-file:examples/openai_chat_completion_structured_outputs.py>
 
 ## Experimental Automatic Parsing (OpenAI API)
 
@@ -257,4 +257,4 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 ```
 
-A complete example with all options can be found in [examples/offline_inference_structured_outputs.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_structured_outputs.py).
+Full example: <gh-file:examples/offline_inference_structured_outputs.py>

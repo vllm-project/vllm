@@ -24,7 +24,7 @@ $ pip install vllm
 ```
 
 ```{note}
-Although we recommend using `conda` to create and manage Python environments, it is highly recommended to use `pip` to install vLLM. This is because `pip` can install `torch` with separate library packages like `NCCL`, while `conda` installs `torch` with statically linked `NCCL`. This can cause issues when vLLM tries to use `NCCL`. See [this issue](https://github.com/vllm-project/vllm/issues/8420) for more details.
+Although we recommend using `conda` to create and manage Python environments, it is highly recommended to use `pip` to install vLLM. This is because `pip` can install `torch` with separate library packages like `NCCL`, while `conda` installs `torch` with statically linked `NCCL`. This can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
 ```
 
 ````{note}
