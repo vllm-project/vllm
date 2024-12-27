@@ -1,8 +1,6 @@
 import os
 import weakref
 from collections.abc import Sequence
-from dataclasses import dataclass
-from multiprocessing.process import BaseProcess
 from typing import (Any, Callable, Dict, Generic, List, Optional, TypeVar,
                     Union, overload)
 
