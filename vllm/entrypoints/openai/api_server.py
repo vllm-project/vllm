@@ -509,8 +509,7 @@ TASK_HANDLERS = {
         "default": (EmbeddingCompletionRequest, create_embedding),
     },
     "score": {
-        "messages": (PoolingChatRequest, create_score),
-        "default": (PoolingCompletionRequest, create_score),
+        "default": (ScoreRequest, create_score),
     },
 }
 
