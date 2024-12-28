@@ -1,3 +1,7 @@
+# ruff: noqa
+
+# Adapted from
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/cohere2/configuration_cohere2.py
 from transformers import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 
