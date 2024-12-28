@@ -184,6 +184,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
     ) -> BatchFeature:
         if mm_data:
             processed_outputs = {}
+            dtype = torch.get_default_dtype()
             outputs = self.ctx.call_hf_processor(
                 self._get_hf_processor(**mm_kwargs),
                 dict(prompt=prompt, force_batchify=False, **mm_data),
@@ -198,7 +199,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
                     0)
             processed_outputs["num_image_tokens"] = outputs.num_image_tokens
             processed_outputs = BatchFeature(data=dict(processed_outputs),
-                                             tensor_type="pt")
+                                             tensor_type="pt").to(dtype)
         else:
             tokenizer = self._get_tokenizer()
             processed_outputs = tokenizer(prompt,
