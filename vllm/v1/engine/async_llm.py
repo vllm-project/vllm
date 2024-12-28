@@ -158,16 +158,18 @@ class AsyncLLM(EngineClient):
             raise ValueError(f"Request id {request_id} already running.")
         self.rid_to_queue[request_id] = asyncio.Queue()
 
-        # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
-        detokenizer_req, engine_core_req = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            trace_headers, prompt_adapter_request, priority)
+        # 2) Convert Input --> Request.
+        request = self.processor.process_inputs(request_id, prompt, params,
+                                                arrival_time, lora_request,
+                                                trace_headers,
+                                                prompt_adapter_request,
+                                                priority)
 
         # 3) Add the request to Detokenizer (this process).
-        self.detokenizer.add_request(detokenizer_req)
+        self.detokenizer.add_request(request)
 
         # 4) Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(engine_core_req)
+        await self.engine_core.add_request_async(request)
 
         if self.log_requests:
             logger.info("Added request %s.", request_id)

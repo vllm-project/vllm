@@ -8,7 +8,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
 logger = init_logger(__name__)
 
@@ -55,19 +55,19 @@ class IncrementalDetokenizer:
     def from_new_request(
         cls,
         tokenizer: AnyTokenizer,
-        request: DetokenizerRequest,
+        request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,
             prompt_ids=request.prompt_token_ids,
-            skip_special_tokens=request.skip_special_tokens,
+            skip_special_tokens=request.sampling_params.skip_special_tokens,
         )
 
-        stops = request.stop
+        stops = request.sampling_params.stop
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        if stops and not request.include_stop_str_in_output:
+        if stops and not request.sampling_params.include_stop_str_in_output:
             stop_buffer_length = max(len(s) for s in stops) - 1
         else:
             stop_buffer_length = 0
@@ -79,13 +79,14 @@ class IncrementalDetokenizer:
             # NOTE(Nick): could we take ownership of it though?
             token_ids=request.prompt_token_ids.copy(),
             stop=stops,
-            include_stop_str_in_output=request.include_stop_str_in_output,
+            include_stop_str_in_output=request.sampling_params.
+            include_stop_str_in_output,
             prefix_offset=prefix_offset,
             read_offset=read_offset,
-            skip_special_tokens=request.skip_special_tokens,
-            spaces_between_special_tokens=request.
+            skip_special_tokens=request.sampling_params.skip_special_tokens,
+            spaces_between_special_tokens=request.sampling_params.
             spaces_between_special_tokens,
-            output_kind=request.output_kind,
+            output_kind=request.sampling_params.output_kind,
             request_id=request.request_id,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
@@ -227,7 +228,7 @@ class Detokenizer:
 
     def add_request(
         self,
-        request: DetokenizerRequest,
+        request: EngineCoreRequest,
     ):
         """Add new request to the Detokenizer."""
 
