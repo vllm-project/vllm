@@ -33,10 +33,15 @@ from vllm.utils import is_list_of
 from vllm.transformers_utils.configs.deepseek_vl2 import VisionEncoderConfig, MlpProjectorConfig, DeepseekVLV2Config
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
+from .utils import (AutoWeightsLoader, WeightsMapper, merge_multimodal_embeddings,
                     init_vllm_registered_model, maybe_prefix, flatten_bn)
 
 logger = init_logger(__name__)
+
+
+# This token id is only added to processor's tokenizer,
+# and can't be found in hf_config
+_IMAGE_TOKEN_ID = 128815
 
 
 class DeepseekVL2ImagePixelInputs(TypedDict):
@@ -263,6 +268,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.projector_config = config.projector_config
         self.language_config = config.language_config
 
+        self.image_token_id = _IMAGE_TOKEN_ID
+
         self.vision = self._init_vision_module(self.vision_config,
                                                quant_config,
                                                maybe_prefix(prefix, "vision"))
@@ -340,6 +347,25 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 expected_expr = ("num_patches", *map(str, expected_dims))
                 raise ValueError(
                     "The expected shape of pixel values per image per batch "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
+
+        return data
+    
+    def _validate_images_spatial_crop(
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        expected_dims = 2
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = d.size(-1)
+
+            if actual_dims != expected_dims:
+                expected_expr = str(expected_dims)
+                raise ValueError(
+                    f"The expected shape of image sizes per image per batch "
                     f"is {expected_expr}. You supplied {tuple(d.shape)}.")
 
         for d in data:
@@ -525,7 +551,12 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
-        raise NotImplementedError("This method is not implemented.")
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.image_token_id)
+        return inputs_embeds
 
     def forward(self,
                 input_ids: torch.Tensor,
