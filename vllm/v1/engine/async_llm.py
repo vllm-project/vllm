@@ -26,6 +26,7 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
+
 class AsyncLLM(EngineClient):
 
     def __init__(
@@ -354,8 +355,8 @@ class AsyncLLM(EngineClient):
     def is_running(self) -> bool:
         return True
 
-    @property	
-    def is_stopped(self) -> bool:	
+    @property
+    def is_stopped(self) -> bool:
         return False
 
     @property
@@ -364,4 +365,4 @@ class AsyncLLM(EngineClient):
 
     @property
     def dead_error(self) -> BaseException:
-        return Exception() # TODO: implement
+        return Exception()  # TODO: implement
