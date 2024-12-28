@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+import traceback
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -45,6 +46,10 @@ class AsyncLLM(EngineClient):
         # The child processes will send SIGQUIT when unrecoverable
         # errors happen. We kill the process tree here so that the
         # stack trace is very evident.
+        # TODO: rather than killing the main process, we should
+        # figure out how to raise an AsyncEngineDeadError and
+        # handle at the API server level so we can return a better
+        # error code to the clients calling VLLM.
         def sigquit_handler(signum, frame):
             logger.fatal(
                 "AsyncLLM got SIGQUIT from worker processes, shutting "
@@ -226,6 +231,7 @@ class AsyncLLM(EngineClient):
             if self.output_handler is None:
                 self.output_handler = asyncio.create_task(
                     self._run_output_handler())
+                self.output_handler.add_done_callback(self._output_handler_cb)
 
             q = await self.add_request(
                 request_id,
@@ -275,23 +281,29 @@ class AsyncLLM(EngineClient):
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
+        while True:
+            # 1) Pull EngineCoreOutput from the EngineCore.
+            outputs = await self.engine_core.get_output_async()
+
+            # 2) Detokenize based on the output.
+            request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
+
+            # 3) Put the RequestOutputs into the per-request queues.
+            self._process_request_outputs(request_outputs)
+
+            # 4) Abort any requests that finished due to stop strings.
+            await self.engine_core.abort_requests_async(reqs_to_abort)
+            raise ValueError("Hello my name is")
+
+    def _output_handler_cb(self, task: asyncio.Task):
         try:
-            while True:
-                # 1) Pull EngineCoreOutput from the EngineCore.
-                outputs = await self.engine_core.get_output_async()
-
-                # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
-
-                # 3) Put the RequestOutputs into the per-request queues.
-                self._process_request_outputs(request_outputs)
-
-                # 4) Abort any requests that finished due to stop strings.
-                await self.engine_core.abort_requests_async(reqs_to_abort)
-
-        except BaseException as e:
-            logger.error(e)
-            raise e
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.error("Exception in output handler: %s",
+                         traceback.format_exc())
+            kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""
