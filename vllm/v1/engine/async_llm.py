@@ -26,11 +26,6 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
-
-class EngineDeadError(RuntimeError):
-    pass
-
-
 class AsyncLLM(EngineClient):
 
     def __init__(
@@ -45,9 +40,6 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-
-        # Flag for API server to know if we should shutdown.
-        self._errored = False
 
         # The child processes will send SIGQUIT when unrecoverable
         # errors happen. We kill the process tree here so that the
