@@ -348,8 +348,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 qk_nope_head_dim=config.qk_nope_head_dim,
                 qk_rope_head_dim=config.qk_rope_head_dim,
                 v_head_dim=config.v_head_dim,
-                q_lora_rank=config.q_lora_rank
-                if hasattr(config, "q_lora_rank") else None,
+                q_lora_rank=config.q_lora_rank if hasattr(
+                    config, "q_lora_rank") else None,
                 kv_lora_rank=config.kv_lora_rank,
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
@@ -575,6 +575,9 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales

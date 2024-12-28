@@ -125,7 +125,7 @@ class MlpProjector(nn.Module):
 
 def get_max_deepseek_vl2_image_tokens(ctx: InputContext) -> int:
     try:
-        from deepseek_vl2.models import select_best_resolution
+        from deepseek_vl2.models.processing_deepseek_vl_v2 import select_best_resolution
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "You need to `pip install "
@@ -160,8 +160,8 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         num_crops: Optional[int] = None,
     ) -> ProcessorMixin:
         try:
-            from deepseek_vl2.models import (DeepseekVLV2Processor,
-                                             select_best_resolution)
+            from deepseek_vl2.models.processing_deepseek_vl_v2 import (
+                DeepseekVLV2Processor, select_best_resolution)
             AutoProcessor.register("DeepseekVLV2Processor",
                                    DeepseekVLV2Processor)
         except ModuleNotFoundError as exc:
@@ -182,14 +182,28 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+        if mm_data:
+            processed_outputs = {}
+            outputs = self.ctx.call_hf_processor(
+                self._get_hf_processor(**mm_kwargs),
+                dict(prompt=prompt, force_batchify=False, **mm_data),
+                mm_kwargs,
+            )
 
-        # rename `images` to `pixel_values` to avoid confusion
-        processed_outputs["pixel_values"] = processed_outputs.pop("images")
+            # rename `images` -> `pixel_values` to avoid confusion
+            processed_outputs["input_ids"] = outputs.input_ids.unsqueeze(0)
+            processed_outputs["pixel_values"] = outputs.images.unsqueeze(0)
+            processed_outputs[
+                "images_spatial_crop"] = outputs.images_spatial_crop.unsqueeze(
+                    0)
+            processed_outputs["num_image_tokens"] = outputs.num_image_tokens
+            processed_outputs = BatchFeature(data=dict(processed_outputs),
+                                             tensor_type="pt")
+        else:
+            tokenizer = self._get_tokenizer()
+            processed_outputs = tokenizer(prompt,
+                                          add_special_tokens=True,
+                                          return_tensors="pt")
 
         return processed_outputs
 
