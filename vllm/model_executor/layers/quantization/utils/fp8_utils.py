@@ -26,6 +26,7 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+
 def apply_w8a8_block_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -289,9 +290,8 @@ def _w8a8_block_fp8_matmul(
 
 
 @functools.lru_cache
-def get_w8a8_block_fp8_configs(
-    N: int, K: int, block_n: int, block_k: int
-) -> Optional[Dict[int, Any]]:
+def get_w8a8_block_fp8_configs(N: int, K: int, block_n: int,
+                               block_k: int) -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the w8a8 block fp8 kernel.
     The return value will be a dictionary that maps an irregular grid of
@@ -306,8 +306,7 @@ def get_w8a8_block_fp8_configs(
     json_file_name = f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n}, {block_k}].json"
 
     config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
-    )
+        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info(
@@ -320,10 +319,8 @@ def get_w8a8_block_fp8_configs(
     # If no optimized configuration is available, we will use the default
     # configuration
     logger.warning(
-        (
-            "Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! "
-            "Config file not found at %s"
-        ),
+        ("Using default W8A8 Block FP8 kernel config. Performance might be sub-optimal! "
+         "Config file not found at %s"),
         config_file_path,
     )
     return None
@@ -375,8 +372,8 @@ def w8a8_block_fp8_matmul(
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
     else:
         # Default config
-        # Block-wise quant: BLOCK_SIZE_N must be divisable by block_size[0]
-        # BLOCK_SIZE_K must be divisable by block_size[1]
+        # Block-wise quant: BLOCK_SIZE_N must be divisible by block_size[0]
+        # BLOCK_SIZE_K must be divisible by block_size[1]
         config = {
             "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": block_size[0],
