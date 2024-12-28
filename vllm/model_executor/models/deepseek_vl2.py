@@ -4,12 +4,13 @@ from functools import cached_property, partial
 from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, Type, TypedDict, Union)
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from PIL import Image
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+from transformers import AutoProcessor, BatchFeature, PretrainedConfig, ProcessorMixin
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -117,6 +118,36 @@ class MlpProjector(nn.Module):
         return self.layers(x)
 
 
+def get_max_deepseek_vl2_image_tokens(ctx: InputContext) -> int:
+    try:
+        from deepseek_vl2.models import select_best_resolution
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "You need to `pip install "
+            "git+https://github.com/deepseek-ai/DeepSeek-VL2.git` "
+            "to use this model") from exc
+    
+    hf_config = ctx.get_hf_config(DeepseekVLV2Config)
+    vision_config = hf_config.vision_config
+    projector_config = hf_config.projector_config
+
+    candidate_resolutions = hf_config.candidate_resolutions
+    image_size = vision_config.image_size
+    patch_size = vision_config.patch_size
+    downsample_ratio = projector_config.downsample_ratio
+
+    best_width, best_height = select_best_resolution(
+        (99999,99999), candidate_resolutions
+    )
+    num_width_tiles, num_height_tiles = best_width // image_size, best_height // image_size
+    h = w = math.ceil((image_size // patch_size) / downsample_ratio)
+
+    global_views_tokens = h * (w + 1)
+    local_views_tokens = (num_height_tiles * h) * (num_width_tiles * w + 1)
+    max_image_tokens = global_views_tokens + local_views_tokens + 1
+    return max_image_tokens
+
+
 class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
 
     def _get_hf_processor(
@@ -127,15 +158,14 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         try:
             from deepseek_vl2.models import (DeepseekVLV2Processor,
                                              select_best_resolution)
+            AutoProcessor.register("DeepseekVLV2Processor", DeepseekVLV2Processor)
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "You need to `pip install "
                 "git+https://github.com/deepseek-ai/DeepSeek-VL2.git` "
                 "to use this model") from exc
 
-        processor = DeepseekVLV2Processor.from_pretrained(
-            self.ctx.model_config.model)
-        assert isinstance(processor, ProcessorMixin)
+        processor = self.ctx.get_hf_processor()
         processor.select_best_resolution = partial(
             select_best_resolution,
             candidate_resolutions=processor.candidate_resolutions)
@@ -212,6 +242,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_deepseek_vl2_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(DeepseekVL2MultiModalProcessor)
 class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
