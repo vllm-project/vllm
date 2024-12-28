@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Tuple
 
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_interface import KVCacheConfig, LayerConfig
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
 
@@ -23,7 +23,7 @@ class Executor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_layer_config(self) -> LayerConfig:
+    def get_kv_cache_spec(self) -> KVCacheSpec:
         raise NotImplementedError
 
     @abstractmethod

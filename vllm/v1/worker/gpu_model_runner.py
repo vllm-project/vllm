@@ -22,7 +22,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheTensorSeperate, KVCacheTensorShareBuffer, LayerCache, LayerConfig, SelfAttentionCache, SlidingWindowCache
+from vllm.v1.core.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheTensorSeperate, KVCacheTensorShareBuffer, KVCacheSpec, SlidingWindowSpec
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -730,17 +730,33 @@ class GPUModelRunner:
         else:
             buffer = None
 
-        for layer_cnt in range(self.num_attn_layers):
-            layer_id = kv_cache_config.layer_config.layer_id_mapping[layer_cnt]
-            layer = kv_cache_config.layer_config.layers[layer_id]
-            tensor_config = kv_cache_config.tensors[layer_cnt]
-            assert tensor_config.size % layer.page_size == 0
-            num_blocks = tensor_config.size // layer.page_size
-            if isinstance(layer, (SelfAttentionCache, SlidingWindowCache)):
+        def parse_layer_id_from_name(layer_name: str) -> int:
+            # layer_name is like "model.decoder.layers.2.self_attn.attn"
+            numbers = re.findall(r'\d+', layer_name)
+            if len(numbers) != 1:
+                raise ValueError(f"Invalid layer name: {layer_name}")
+            return int(numbers[0])
+
+        if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
+            raise NotImplementedError("When pipeline parallel enabled, " \
+                "layer_name 'layers.i.self_attn.attn' is associated with" \
+                "kv_caches[i - self.start_layer]")
+        layer_names = sorted(kv_cache_config.kv_cache_spec.keys(),
+                             key=parse_layer_id_from_name)
+        print("layer_names", layer_names)
+        assert len(layer_names) == self.num_attn_layers
+
+        for i in range(self.num_attn_layers):
+            layer_name = layer_names[i]
+            layer_spec = kv_cache_config.kv_cache_spec[layer_name]
+            tensor_config = kv_cache_config.tensors[layer_name]
+            assert tensor_config.size % layer_spec.page_size_bytes == 0
+            num_blocks = tensor_config.size // layer_spec.page_size_bytes
+            if isinstance(layer_spec, (FullAttentionSpec, SlidingWindowSpec)):
                 kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-                    num_blocks, layer.block_size, layer.num_kv_heads,
-                    layer.head_size)
-                dtype = layer.dtype
+                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
+                    layer_spec.head_size)
+                dtype = layer_spec.dtype
             else:
                 raise NotImplementedError
             if isinstance(tensor_config, KVCacheTensorSeperate):
@@ -756,37 +772,25 @@ class GPUModelRunner:
                 raise NotImplementedError
             self.kv_caches.append(tensor)
 
-    def get_layer_config(self) -> LayerConfig:
-
-        def parse_layer_cnt(layer_name: str):
-            # layer_name is like "model.decoder.layers.2.self_attn.attn"
-            numbers = re.findall(r'\d+', layer_name)
-            if len(numbers) != 1:
-                raise ValueError(f"Invalid layer name: {layer_name}")
-            return int(numbers[0])
-
-        layer_id_mapping: Dict[int, str] = {}
-        layers: Dict[str, LayerCache] = {}
+    def get_kv_cache_spec(self) -> KVCacheSpec:
 
         attn_layers = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
+        kv_cache_spec: KVCacheSpec = {}
         for layer_name, attn_layer in attn_layers.items():
-            assert isinstance(attn_layer, Attention)
-            layer_cnt = parse_layer_cnt(layer_name)
-            layer_id_mapping[layer_cnt] = layer_name
             if attn_layer.sliding_window is not None:
-                layers[layer_name] = SlidingWindowCache(
+                kv_cache_spec[layer_name] = SlidingWindowSpec(
                     block_size=block_size,
                     num_kv_heads=attn_layer.num_kv_heads,
                     head_size=attn_layer.head_size,
                     dtype=attn_layer.dtype,
                     sliding_window=attn_layer.sliding_window)
             else:
-                layers[layer_name] = SelfAttentionCache(
+                kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_layer.num_kv_heads,
                     head_size=attn_layer.head_size,
                     dtype=attn_layer.dtype,
                 )
 
-        return LayerConfig(layer_id_mapping, layers)
+        return kv_cache_spec

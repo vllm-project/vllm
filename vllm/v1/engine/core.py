@@ -18,6 +18,7 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.hybrid_allocator_compiler import get_kv_cache_config
+from vllm.v1.core.kv_cache_interface import KVCacheConfig
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
@@ -54,7 +55,7 @@ class EngineCore:
         self.model_executor = executor_class(vllm_config)
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
+        num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
             vllm_config)
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -62,28 +63,28 @@ class EngineCore:
         # Setup scheduler.
         self.scheduler = Scheduler(vllm_config.scheduler_config,
                                    vllm_config.cache_config,
-                                   vllm_config.lora_config)
+                                   vllm_config.lora_config, kv_cache_config)
 
         self._last_logging_time = time.time()
 
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
 
-    def _initialize_kv_caches(self,
-                              vllm_config: VllmConfig) -> Tuple[int, int]:
+    def _initialize_kv_caches(
+            self, vllm_config: VllmConfig) -> Tuple[int, int, KVCacheConfig]:
         start = time.time()
-        layer_config = self.model_executor.get_layer_config()
+        kv_cache_spec = self.model_executor.get_kv_cache_spec()
         availble_gpu_memory = self.model_executor.get_available_memory()
-        print("layer_config", layer_config)
+        print("kv_cache_spec", kv_cache_spec)
         kv_cache_config, num_gpu_blocks = get_kv_cache_config(
-            vllm_config, layer_config, availble_gpu_memory)
+            vllm_config, kv_cache_spec, availble_gpu_memory)
 
         num_cpu_blocks = 0
         self.model_executor.initialize(kv_cache_config)
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
-        return num_gpu_blocks, num_cpu_blocks
+        return num_gpu_blocks, num_cpu_blocks, kv_cache_config
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""

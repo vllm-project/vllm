@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
-from vllm.v1.core.kv_cache_interface import KVCacheConfig, LayerConfig
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -164,8 +164,8 @@ class Worker:
 
         return int(available_kv_cache_memory)
 
-    def get_layer_config(self) -> LayerConfig:
-        return self.model_runner.get_layer_config()
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        return self.model_runner.get_kv_cache_spec()
 
     def initialize_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks."""

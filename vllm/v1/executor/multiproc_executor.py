@@ -9,7 +9,7 @@ from enum import Enum, auto
 from multiprocessing.process import BaseProcess
 from typing import Any, Dict, List, Optional, Tuple
 
-from vllm.v1.core.kv_cache_interface import KVCacheConfig, LayerConfig
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheSpec
 import zmq
 
 from vllm.config import VllmConfig
@@ -94,10 +94,10 @@ class MultiprocExecutor(Executor):
         # operators can be applied to all workers.
         return min(memory_sizes)
 
-    def get_layer_config(self) -> LayerConfig:
-        layer_configs = self.collective_rpc("get_layer_config")
-        assert all(lc == layer_configs[0] for lc in layer_configs)
-        return layer_configs[0]
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        kv_cache_specs = self.collective_rpc("get_kv_cache_spec")
+        assert all(lc == kv_cache_specs[0] for lc in kv_cache_specs)
+        return kv_cache_specs[0]
 
     def collective_rpc(self,
                        method: str,

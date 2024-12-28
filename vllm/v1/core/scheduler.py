@@ -9,6 +9,7 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.base import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.kv_cache_interface import KVCacheConfig
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -28,6 +29,7 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        kv_cache_config: KVCacheConfig,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -197,6 +199,7 @@ class Scheduler:
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if num_new_tokens == 0:
+                    # TODO (Chen): remove this constraint inside num_computed_blocks?
                     # The happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
                     # the last block. Note that we have to re-compute an entire

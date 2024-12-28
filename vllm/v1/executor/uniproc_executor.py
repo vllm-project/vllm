@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
-from vllm.v1.core.kv_cache_interface import KVCacheConfig, LayerConfig
+from vllm.v1.core.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker
@@ -56,8 +56,8 @@ class UniprocExecutor(Executor):
         """
         return self.worker.get_available_memory()
 
-    def get_layer_config(self) -> LayerConfig:
-        return self.worker.get_layer_config()
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        return self.worker.get_kv_cache_spec()
 
     def initialize(self, kv_cache_config: KVCacheConfig) -> None:
         """Initialize the KV cache by invoking the underlying worker.
