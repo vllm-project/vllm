@@ -31,11 +31,6 @@ class EngineClient(ABC):
 
     @property
     @abstractmethod
-    def is_stopped(self) -> bool:
-        ...
-
-    @property
-    @abstractmethod
     def errored(self) -> bool:
         ...
 

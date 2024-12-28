@@ -68,7 +68,7 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, kill_process_tree, set_ulimit)
+                        is_valid_ipv6_address, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -142,6 +142,7 @@ async def build_async_engine_client_from_engine_args(
             engine_client = AsyncLLMEngine.from_engine_args(
                 engine_args=engine_args,
                 usage_context=UsageContext.OPENAI_API_SERVER)
+            yield engine_client
         finally:
             if engine_client and hasattr(engine_client, "shutdown"):
                 engine_client.shutdown()

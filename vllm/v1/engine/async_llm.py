@@ -1,4 +1,5 @@
 import asyncio
+import os
 import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
@@ -17,6 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -24,8 +26,10 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
-class AsyncEngineDeadError(RuntimeError):
+
+class EngineDeadError(RuntimeError):
     pass
+
 
 class AsyncLLM(EngineClient):
 
@@ -41,14 +45,18 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-        
-        # The child processes will send SIGQUIT to this process when
-        # any error happens. We raise an error if this happens
-        # so that we can shutdown properly.
+
+        # Flag for API server to know if we should shutdown.
+        self._errored = False
+
+        # The child processes will send SIGQUIT when unrecoverable
+        # errors happen. We kill the process tree here so that the
+        # stack trace is very evident.
         def sigquit_handler(signum, frame):
-            raise AsyncEngineDeadError(
-                "AsyncLLM got a SIGQUIT from background process. "
-                "see stack trace for root cause issue.")
+            logger.fatal(
+                "AsyncLLM got SIGQUIT from worker processes, shutting "
+                "down. See stack trace above for root cause issue.")
+            kill_process_tree(os.getpid())
 
         signal.signal(signal.SIGQUIT, sigquit_handler)
 
@@ -255,7 +263,7 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, the
         # generate() task will be canceled. So, we abort the
         # request if we end up here.
-        except asyncio.CancelledError:
+        except asyncio.exceptions.CancelledError:
             await self.abort(request_id)
             raise
 
@@ -355,13 +363,9 @@ class AsyncLLM(EngineClient):
         return True
 
     @property
-    def is_stopped(self) -> bool:
-        return False
-
-    @property
     def errored(self) -> bool:
         return False
 
     @property
     def dead_error(self) -> BaseException:
-        return Exception()  # TODO: implement
+        return Exception()
