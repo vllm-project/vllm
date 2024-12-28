@@ -98,43 +98,23 @@ class MlpProjector(nn.Module):
         self.layers = modules
 
     def forward(self, x):
-        if self.cfg.token_pooling:
-            batch_size, wxh, channels = x.shape
-            w = h = int(wxh**0.5)
-            x = x.view(batch_size, w, h, channels)
-            x = x.permute(0, 3, 1, 2)
-            # import ipdb; ipdb.set_trace()
-            patches = x.unfold(2, 2, 2).unfold(3, 2, 2)
-            batch_size, channels, h_patches, w_patches, _, _ = patches.size()
-            # 在通道维度上拼接
-            patches = patches.contiguous().view(batch_size, channels,
-                                                h_patches * w_patches, -1)
-
-            # 通过线性层
-            patches = patches.permute(0, 2, 1, 3).contiguous()
-            patches = patches.view(batch_size, h_patches * w_patches,
-                                   channels * 4)
-
-            x = self.token_pooling_layer(patches)
-
-        elif self.cfg.projector_type == 'downsample_mlp_gelu':
-            bs, hw, input_dim = x.shape
-            h = w = int((hw)**0.5)
-            """compute padding"""
-            if h % self.cfg.downsample_ratio:
-                pad = self.cfg.downsample_ratio - h % self.cfg.downsample_ratio
-            else:
-                pad = 0
-            x = x.reshape(bs, h, w, input_dim)
-            if pad > 0:
-                x = F.pad(x, (0, 0, 0, pad, 0, pad), "constant", 0)
-            """4 to 1 concat"""
-            x = x.permute(0, 3, 1, 2)  # B, C, H, W
-            x = F.unfold(x,
-                         kernel_size=self.cfg.downsample_ratio,
-                         stride=self.cfg.downsample_ratio,
-                         padding=0)  # B, C*4, HW // 4
-            x = x.permute(0, 2, 1)
+        bs, hw, input_dim = x.shape
+        h = w = int((hw)**0.5)
+        """compute padding"""
+        if h % self.cfg.downsample_ratio:
+            pad = self.cfg.downsample_ratio - h % self.cfg.downsample_ratio
+        else:
+            pad = 0
+        x = x.reshape(bs, h, w, input_dim)
+        if pad > 0:
+            x = F.pad(x, (0, 0, 0, pad, 0, pad), "constant", 0)
+        """4 to 1 concat"""
+        x = x.permute(0, 3, 1, 2)  # B, C, H, W
+        x = F.unfold(x,
+                     kernel_size=self.cfg.downsample_ratio,
+                     stride=self.cfg.downsample_ratio,
+                     padding=0)  # B, C*4, HW // 4
+        x = x.permute(0, 2, 1)
 
         return self.layers(x)
 
