@@ -527,8 +527,7 @@ async def invocations(raw_request: Request):
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported task: '{task}' for '/invocations'. "
-            f"Expected one of {set(TASK_HANDLERS.keys())}"
-        )
+            f"Expected one of {set(TASK_HANDLERS.keys())}")
 
     handler_config = TASK_HANDLERS[task]
     if "messages" in body:
