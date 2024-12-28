@@ -450,6 +450,11 @@ of the whole prompt are extracted from the normalized hidden state corresponding
     - Example HF Models
     - :ref:`LoRA <lora-adapter>`
     - :ref:`PP <distributed-serving>`
+  * - :code:`InternLM2ForRewardModel`
+    - InternLM2-based
+    - :code:`internlm/internlm2-1_8b-reward`, :code:`internlm/internlm2-7b-reward`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`LlamaForCausalLM`
     - Llama-based
     - :code:`peiyi9979/math-shepherd-mistral-7b-prm`, etc.
