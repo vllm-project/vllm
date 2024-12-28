@@ -1,7 +1,6 @@
 from unittest.mock import patch
 
 import pytest
-import transformers
 from transformers import PretrainedConfig
 
 from vllm import LLM
