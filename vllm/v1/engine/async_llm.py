@@ -292,7 +292,6 @@ class AsyncLLM(EngineClient):
 
                 # 4) Abort any requests that finished due to stop strings.
                 await self.engine_core.abort_requests_async(reqs_to_abort)
-                raise ValueError("my error!")
 
         except Exception:
             traceback = get_exception_traceback()
