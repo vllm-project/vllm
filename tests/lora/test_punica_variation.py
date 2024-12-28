@@ -98,18 +98,18 @@ def test_punica_sgmv(
         # Preventing cache error pointer.
         with _dict_lock:
             _LORA_A_PTR_DICT.clear()
-        sgmv_shrink(
-            inputs_tensor,
-            lora_weights_lst,
-            our_out_tensor,
-            b_seq_start_loc,
-            seq_len_tensor,
-            lora_indices_tensor,
-            batches,
-            max_seq_length,
-            token_nums,
-            scaling,
-        )
+            sgmv_shrink(
+                inputs_tensor,
+                lora_weights_lst,
+                our_out_tensor,
+                b_seq_start_loc,
+                seq_len_tensor,
+                lora_indices_tensor,
+                batches,
+                max_seq_length,
+                token_nums,
+                scaling,
+            )
         for index in range(nslices):
             ref_torch_groupgemm(
                 ref_out_tensor[index],
@@ -124,19 +124,19 @@ def test_punica_sgmv(
     else:
         with _dict_lock:
             _LORA_B_PTR_DICT.clear()
-        sgmv_expand(
-            inputs_tensor,
-            lora_weights_lst,
-            our_out_tensor,
-            b_seq_start_loc,
-            seq_len_tensor,
-            lora_indices_tensor,
-            batches,
-            max_seq_length,
-            token_nums,
-            offset_start=0,
-            add_inputs=True,
-        )
+            sgmv_expand(
+                inputs_tensor,
+                lora_weights_lst,
+                our_out_tensor,
+                b_seq_start_loc,
+                seq_len_tensor,
+                lora_indices_tensor,
+                batches,
+                max_seq_length,
+                token_nums,
+                offset_start=0,
+                add_inputs=True,
+            )
 
         slice_offset = 0
         for index in range(nslices):
