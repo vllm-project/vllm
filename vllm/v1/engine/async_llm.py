@@ -1,7 +1,6 @@
 import asyncio
 import os
 import signal
-import traceback
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -19,7 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import kill_process_tree
+from vllm.utils import get_exception_traceback, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -231,7 +230,6 @@ class AsyncLLM(EngineClient):
             if self.output_handler is None:
                 self.output_handler = asyncio.create_task(
                     self._run_output_handler())
-                self.output_handler.add_done_callback(self._output_handler_cb)
 
             q = await self.add_request(
                 request_id,
@@ -281,28 +279,24 @@ class AsyncLLM(EngineClient):
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
-        while True:
-            # 1) Pull EngineCoreOutput from the EngineCore.
-            outputs = await self.engine_core.get_output_async()
-
-            # 2) Detokenize based on the output.
-            request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
-
-            # 3) Put the RequestOutputs into the per-request queues.
-            self._process_request_outputs(request_outputs)
-
-            # 4) Abort any requests that finished due to stop strings.
-            await self.engine_core.abort_requests_async(reqs_to_abort)
-            raise ValueError("Hello my name is")
-
-    def _output_handler_cb(self, task: asyncio.Task):
         try:
-            task.result()
-        except asyncio.CancelledError:
-            pass
+            while True:
+                # 1) Pull EngineCoreOutput from the EngineCore.
+                outputs = await self.engine_core.get_output_async()
+
+                # 2) Detokenize based on the output.
+                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
+
+                # 3) Put the RequestOutputs into the per-request queues.
+                self._process_request_outputs(request_outputs)
+
+                # 4) Abort any requests that finished due to stop strings.
+                await self.engine_core.abort_requests_async(reqs_to_abort)
+                raise ValueError("my error!")
+
         except Exception:
-            logger.error("Exception in output handler: %s",
-                         traceback.format_exc())
+            traceback = get_exception_traceback()
+            logger.error("EngineCore hit an exception: %s", traceback)
             kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
