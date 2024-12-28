@@ -74,13 +74,13 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind):
         EngineCoreRequest(request_id=f"request-{idx}",
                           prompt=prompt,
                           prompt_token_ids=prompt_tokens,
+                          arrival_time=0,
                           sampling_params=SamplingParams(
                               skip_special_tokens=False,
                               spaces_between_special_tokens=False,
                               output_kind=request_output_kind,
                               stop=[],
-                              include_stop_str_in_output=False,
-                          ))
+                              include_stop_str_in_output=False))
         for idx, (
             prompt,
             prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
@@ -138,6 +138,7 @@ def test_stop_string(include_stop_str_in_output: bool):
             request_id=f"request-{idx}",
             prompt=prompt,
             prompt_token_ids=prompt_tokens,
+            arrival_time=0,
             sampling_params=SamplingParams(
                 skip_special_tokens=False,
                 spaces_between_special_tokens=False,
