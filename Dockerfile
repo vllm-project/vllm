@@ -235,7 +235,9 @@ RUN mv vllm test_docs/
 
 #################### OPENAI API SERVER ####################
 # openai api server alternative
-FROM vllm-base AS vllm-openai
+
+# define sagemaker first, so it is not default from `docker build`
+FROM vllm-base AS vllm-sagemaker
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -246,6 +248,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
+
+# port 8080 required by sagemaker, https://docs.aws.amazon.com/sagemaker/latest/dg/your-algorithms-inference-code.html#your-algorithms-inference-code-container-response
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server", "--port", "8080"]
+
+# the default image is `vllm-openai` which is identical to sagemaker without forcing the port
+from vllm-sagemaker as vllm-openai
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
