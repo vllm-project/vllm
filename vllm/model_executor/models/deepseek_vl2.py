@@ -1,4 +1,5 @@
-"""Inference-only Qwen2-VL model compatible with HuggingFace weights."""
+# adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
+"""Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 from functools import cached_property, partial
 from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, Type, TypedDict, Union)
@@ -21,7 +22,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -282,8 +282,22 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_image_input(
             self, image_input: DeepseekVL2ImageInputs) -> torch.Tensor:
+        if image_input["type"] == "image_embeds":
+            image_data = image_input["data"]
+            if is_list_of(image_data, torch.Tensor):
+                # it's already a list of tensors
+                return image_data
+            if len(image_data.shape) == 3:
+                # 3D tensor
+                return list(torch.unbind(image_data, dim=0))
+            raise ValueError(
+                "We expect batched 2D tensors;"
+                "this can be either a list of 2D tensors or a single 3D tensor."
+            )
+
         pixel_values = image_input["pixel_values"]
         images_spatial_crop = image_input["images_spatial_crop"]
+
         bs, max_n_images, _ = images_spatial_crop.shape
         batch_num_tiles = [0 for _ in range(bs)]
         total_tiles = []
