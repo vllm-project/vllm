@@ -296,6 +296,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
+            hf_config=self.language_config,
             prefix=maybe_prefix(prefix, "language"),
             architectures=["DeepseekV2ForCausalLM"],
         )
@@ -317,7 +318,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         with set_default_torch_dtype(torch.float16):
             model = timm.create_model(
-                vision_config.model_name,
+                "vit_so400m_patch14_siglip_384.webli",
                 pretrained=False,
                 num_classes=0,
                 dynamic_img_size=True,

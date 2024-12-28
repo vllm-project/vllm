@@ -45,6 +45,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.models.llama import LlamaAttention
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
@@ -338,23 +339,40 @@ class DeepseekV2DecoderLayer(nn.Module):
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
-        self.self_attn = DeepseekV2Attention(
-            config=config,
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank
-            if hasattr(config, "q_lora_rank") else None,
-            kv_lora_rank=config.kv_lora_rank,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
+        use_mla = getattr(config, "use_mla", True)
+        if use_mla:
+            self.self_attn = DeepseekV2Attention(
+                config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=config.q_lora_rank
+                if hasattr(config, "q_lora_rank") else None,
+                kv_lora_rank=config.kv_lora_rank,
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling,
+                max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
+        else:
+            # deepseek-ai/deepseek-vl2-tiny use MHA instead of MLA
+            self.self_attn = LlamaAttention(
+                config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                num_kv_heads=config.num_key_value_heads,
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling,
+                max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
+
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
