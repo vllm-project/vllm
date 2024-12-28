@@ -51,6 +51,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponseData,
                                               ErrorResponse,
                                               LoadLoraAdapterRequest,
+                                              PoolingChatRequest,
+                                              PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
                                               ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
@@ -501,13 +503,20 @@ TASK_HANDLERS = {
         "messages": (ChatCompletionRequest, create_chat_completion),
         "default": (CompletionRequest, create_completion),
     },
-    # should `embed` be a pooling task by default?
     "embed": {
         "messages": (EmbeddingChatRequest, create_embedding),
         "default": (EmbeddingCompletionRequest, create_embedding),
     },
     "score": {
         "default": (ScoreRequest, create_score),
+    },
+    "reward": {
+        "messages": (PoolingChatRequest, create_pooling),
+        "default": (PoolingCompletionRequest, create_pooling),
+    },
+    "classify": {
+        "messages": (PoolingChatRequest, create_pooling),
+        "default": (PoolingCompletionRequest, create_pooling),
     },
 }
 
