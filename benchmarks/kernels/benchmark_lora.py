@@ -108,7 +108,7 @@ def make_prompt_lora_mapping(num_prompts: int, num_active_loras: int,
     prompt_lora_mapping = []
     while len(prompt_lora_mapping) < num_prompts:
         prompt_lora_mapping.extend([lora_id] * part_size)
-        lora_id = lora_id + 1 if lora_id < num_active_loras else lora_id
+        lora_id = lora_id + 1 if lora_id + 1 < num_active_loras else lora_id
     return torch.tensor(prompt_lora_mapping[:num_prompts],
                         dtype=torch.long,
                         device=device)
