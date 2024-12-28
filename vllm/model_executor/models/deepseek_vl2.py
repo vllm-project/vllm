@@ -18,22 +18,20 @@ from vllm.distributed import utils as dist_utils
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, NestedTensors
+from vllm.multimodal.inputs import (MultiModalDataItems, MultiModalFieldConfig,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement)
+                                        ProcessorInputs, PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 from vllm.transformers_utils.configs.deepseek_vl2 import VisionEncoderConfig, MlpProjectorConfig, DeepseekVLV2Config
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
                     init_vllm_registered_model, maybe_prefix, flatten_bn)
 
@@ -42,13 +40,13 @@ logger = init_logger(__name__)
 
 class DeepseekVL2ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    pixel_values: Union[torch.Tensor, List[torch.Tensor]]
+    data: Union[torch.Tensor, List[torch.Tensor]]
     """
     Shape: `(batch_size * num_images, num_channels, height, width)`
     """
     images_spatial_crop: torch.Tensor
     """
-    Shape: `(batch_size, num_images, num_crops)`
+    Shape: `(batch_size * num_images, 2)`
     """
 
 
@@ -127,7 +125,8 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         num_crops: Optional[int] = None,
     ) -> ProcessorMixin:
         try:
-            from deepseek_vl2.models import DeepseekVLV2Processor
+            from deepseek_vl2.models import (DeepseekVLV2Processor,
+                                             select_best_resolution)
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "You need to `pip install "
@@ -137,7 +136,80 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         processor = DeepseekVLV2Processor.from_pretrained(
             self.ctx.model_config.model)
         assert isinstance(processor, ProcessorMixin)
+        processor.select_best_resolution = partial(
+            select_best_resolution,
+            candidate_resolutions=processor.candidate_resolutions)
         return processor
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        # rename `images` to `pixel_values` to avoid confusion
+        processed_outputs["pixel_values"] = processed_outputs.pop("images")
+
+        return processed_outputs
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+            num_image_tokens=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        hf_processor = self._get_hf_processor()
+        image_token_id: int = hf_processor.image_token_id
+
+        def get_replacement_deepseek_vl2(item_idx: int):
+            num_tokens = out_mm_kwargs["num_image_tokens"][item_idx]
+            return [image_token_id] * num_tokens
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=get_replacement_deepseek_vl2,
+            )
+        ]
+
+    def _get_dummy_mm_inputs(
+        self,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        hf_processor = self._get_hf_processor()
+        image_token: str = hf_processor.image_token
+
+        data = {}
+        resized_height, resized_width = hf_processor.select_best_resolution(
+            (999999, 999999))
+
+        dummy_image = Image.new("RGB", (resized_width, resized_height),
+                                color=0)
+        data["image"] = [dummy_image] * num_images
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=data,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(DeepseekVL2MultiModalProcessor)
@@ -264,7 +336,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
             return DeepseekVL2ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(flatten_bn(pixel_values)),
+                pixel_values=self._validate_pixel_values(
+                    flatten_bn(pixel_values)),
                 images_spatial_crop=self._validate_images_spatial_crop(
                     flatten_bn(images_spatial_crop, concat=True)))
 
@@ -295,7 +368,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 "this can be either a list of 2D tensors or a single 3D tensor."
             )
 
-        pixel_values = image_input["pixel_values"]
+        pixel_values = image_input["data"]
         images_spatial_crop = image_input["images_spatial_crop"]
 
         bs, max_n_images, _ = images_spatial_crop.shape
@@ -303,10 +376,12 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         total_tiles = []
         for idx in range(bs):
             for jdx in range(max_n_images):
-                num_width_tiles, num_height_tiles = images_spatial_crop[idx, jdx]
+                num_width_tiles, num_height_tiles = images_spatial_crop[idx,
+                                                                        jdx]
                 if num_width_tiles == 0 or num_height_tiles == 0:
                     break
-                batch_num_tiles[idx] += (1 + num_width_tiles * num_height_tiles)
+                batch_num_tiles[idx] += (1 +
+                                         num_width_tiles * num_height_tiles)
 
             total_tiles.append(pixel_values[idx, :batch_num_tiles[idx]])
 
@@ -321,7 +396,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         images_embeds = self.projector(images_feature)
 
         _, hw, n_dim = images_embeds.shape
-        h = w = int(hw ** 0.5)
+        h = w = int(hw**0.5)
 
         # 根据self.tile_tag & self.global_view_pos填充image token sequence
         tile_index = 0
@@ -331,7 +406,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             for jdx in range(images_spatial_crop.shape[1]):
 
                 # extra global & local features
-                num_width_tiles, num_height_tiles = images_spatial_crop[idx, jdx]
+                num_width_tiles, num_height_tiles = images_spatial_crop[idx,
+                                                                        jdx]
                 if num_width_tiles == 0 or num_height_tiles == 0:
                     break
 
@@ -341,7 +417,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 global_features = images_embeds[tile_index]
 
                 # [num_height_tiles * num_width_tiles, hw, D]
-                local_features = images_embeds[tile_index + 1: tile_index + 1 + num_tiles_in_image]
+                local_features = images_embeds[tile_index + 1:tile_index + 1 +
+                                               num_tiles_in_image]
 
                 tile_index += num_tiles_in_image + 1
 
@@ -351,10 +428,13 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 global_features = global_features.view(h, w, n_dim)
 
                 # [D]     -> [h, 1, D]
-                new_lines_in_global = repeat(self.image_newline, "d -> h 1 d", h=h)
+                new_lines_in_global = repeat(self.image_newline,
+                                             "d -> h 1 d",
+                                             h=h)
 
                 # cat([h, w, D], [h, 1, D], dim=1) -> [h, w + 1, D]
-                global_features = torch.cat([global_features, new_lines_in_global], dim=1)
+                global_features = torch.cat(
+                    [global_features, new_lines_in_global], dim=1)
 
                 # [h, w + 1, D] -> [h * (w + 1), D]
                 global_features = global_features.view(-1, n_dim)
@@ -367,19 +447,17 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                     th=num_height_tiles,
                     tw=num_width_tiles,
                     h=h,
-                    w=w
-                )
+                    w=w)
 
                 # [D] -> [num_height_tiles * h, 1, D]
-                new_lines_in_local = repeat(
-                    self.image_newline,
-                    "d -> (th h) 1 d",
-                    th=num_height_tiles,
-                    h=h
-                )
+                new_lines_in_local = repeat(self.image_newline,
+                                            "d -> (th h) 1 d",
+                                            th=num_height_tiles,
+                                            h=h)
 
                 # [num_height_tiles * h, num_width_tiles * w + 1, D]
-                local_features = torch.cat([local_features, new_lines_in_local], dim=1)
+                local_features = torch.cat(
+                    [local_features, new_lines_in_local], dim=1)
 
                 # [num_height_tiles * h, num_width_tiles * w + 1, D]
                 #   --> [(num_height_tiles * h) * (num_width_tiles * w + 1), D]
@@ -387,11 +465,17 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
                 # ----------------- merge global and local tiles -----------------
                 if self.global_view_pos == "head":
-                    global_local_features = torch.cat(
-                        [global_features, self.view_seperator[None, :], local_features], dim=0)
+                    global_local_features = torch.cat([
+                        global_features, self.view_seperator[None, :],
+                        local_features
+                    ],
+                                                      dim=0)
                 else:
-                    global_local_features = torch.cat(
-                        [local_features, self.view_seperator[None, :], global_features], dim=0)
+                    global_local_features = torch.cat([
+                        local_features, self.view_seperator[None, :],
+                        global_features
+                    ],
+                                                      dim=0)
 
                 images_in_this_batch.append(global_local_features)
 
