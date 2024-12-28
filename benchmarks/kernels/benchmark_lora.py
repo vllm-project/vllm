@@ -129,7 +129,7 @@ def make_token_lora_mapping(num_tokens: int, num_prompts: int,
         lora_index = prompt_lora_mapping[b_id].item()
         s = current_offset
         e = s + seq_len_tensor[b_id].item()
-        token_lora_mapping[s:e] = [lora_index] * (e - s) 
+        token_lora_mapping[s:e] = [lora_index] * (e - s)
         current_offset += seq_len_tensor[b_id].item()
 
     return torch.tensor(token_lora_mapping, dtype=torch.long, device=device)
@@ -623,6 +623,7 @@ def print_timers(timers: List[TMeasurement]):
     compare = TBenchmark.Compare(timers)
     compare.print()
 
+
 def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
 
     timers = []
@@ -657,7 +658,7 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
     # Result file dump
     timestamp = int(time.time())
     pkl_file = f"lora_bench-{timestamp}.pkl"
-    print (f"Writing benchmarks to {pkl_file}")
+    print(f"Writing benchmarks to {pkl_file}")
     with open(pkl_file, "wb") as f:
         pickle.dump(timers, f)
 
