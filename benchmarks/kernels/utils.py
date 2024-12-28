@@ -145,8 +145,10 @@ class Bench:
         return TBenchmark.Timer(
             stmt="g.replay()",
             globals=globals,
-            label=(f"{self.label}"
-                   f" | cugraph {self.cuda_graph_params.num_ops_in_cuda_graph} ops"),
+            label=(
+                f"{self.label}"
+                f" | cugraph {self.cuda_graph_params.num_ops_in_cuda_graph} ops"
+            ),
             sub_label=self.sub_label,
             description=self.description,
         ).blocked_autorange(min_run_time=self.min_run_time)
