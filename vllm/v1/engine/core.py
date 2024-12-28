@@ -158,11 +158,15 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+        print("async_engine_core", async_engine_core)
+        self.async_engine_core = async_engine_core
         if async_engine_core:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self.loop.set_debug(True)
             self.input_queue: asyncio.Queue[
-                EngineCoreRequestUnion] = asyncio.Queue(
-                    vllm_config.parallel_config.pipeline_parallel_size)
-            self.microbatch_queue = asyncio.Queue()
+                EngineCoreRequestUnion] = asyncio.Queue()
+            self.microbatch_queue = asyncio.Queue(vllm_config.parallel_config.pipeline_parallel_size)
         else:
             self.input_queue: queue.Queue[
                 EngineCoreRequestUnion] = queue.Queue()
@@ -267,7 +271,7 @@ class EngineCoreProc(EngineCore):
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
             if kwargs["async_engine_core"]:
-                asyncio.run(engine_core.engine_main())
+                engine_core.loop.run_until_complete(engine_core.engine_main())
             else:
                 engine_core.run_busy_loop()
 
@@ -284,28 +288,38 @@ class EngineCoreProc(EngineCore):
                 engine_core = None
 
     async def engine_main(self):
+        print("engine_main")
         producer = asyncio.create_task(self.submit_microbatch())
         consumer = asyncio.create_task(self.finish_microbatch())
         await asyncio.gather(producer, consumer)
 
     async def submit_microbatch(self):
+        print("submit_microbatch")
         while True:
             if not self.scheduler.has_unfinished_requests():
+                print("submit_microbatch: no unfinished requests")
                 req = await self.input_queue.get()
+                print("submit_microbatch: got req")
                 self._handle_client_request(req)
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
+                print("submit_microbatch: got req")
                 self._handle_client_request(req)
+            print("submit_microbatch: scheduler.schedule")
             scheduler_output = self.scheduler.schedule()
+            print("submit_microbatch: scheduler.schedule: got scheduler_output")
             microbatch_future = await self.model_executor.submit_microbatch(
                 scheduler_output)
+            print("submit_microbatch: scheduler.schedule: got microbatch_future")
             await self.microbatch_queue.put(
                 (microbatch_future, scheduler_output))
 
     async def finish_microbatch(self):
+        print("finish_microbatch")
         while True:
             microbatch_future, scheduler_output = await self.microbatch_queue.get(
             )
+            print("finish_microbatch: got microbatch_future, scheduler_output")
             model_output = await microbatch_future
             engine_core_outputs = self.scheduler.update_from_output(
                 scheduler_output, model_output)
@@ -392,8 +406,13 @@ class EngineCoreProc(EngineCore):
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
 
+                print("process_input_socket: got request")
                 # Push to input queue for core busy loop.
-                self.input_queue.put_nowait(request)
+                if self.async_engine_core:
+                    self.loop.call_soon_threadsafe(self.input_queue.put_nowait, request)
+                else:
+                    self.input_queue.put_nowait(request)
+                print("process_input_socket: put request")
 
     def process_output_socket(self, output_path: str):
         """Output socket IO thread."""

@@ -412,7 +412,7 @@ class RayExecutor(Executor):
 
             forward_dag = MultiOutputNode(outputs)
 
-        return forward_dag.experimental_compile()
+        return forward_dag.experimental_compile(enable_asyncio=True)
 
     def __del__(self):
         self.shutdown()
