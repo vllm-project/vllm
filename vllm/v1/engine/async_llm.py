@@ -1,4 +1,5 @@
 import asyncio
+import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -23,6 +24,8 @@ from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
+class AsyncEngineDeadError(RuntimeError):
+    pass
 
 class AsyncLLM(EngineClient):
 
@@ -38,6 +41,17 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+        
+        # The child processes will send SIGQUIT to this process when
+        # any error happens. We raise an error if this happens
+        # so that we can shutdown properly.
+        def sigquit_handler(signum, frame):
+            raise AsyncEngineDeadError(
+                "AsyncLLM got a SIGQUIT from background process. "
+                "see stack trace for root cause issue.")
+
+        signal.signal(signal.SIGQUIT, sigquit_handler)
+
         assert start_engine_loop
 
         self.log_requests = log_requests
