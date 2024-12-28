@@ -103,7 +103,7 @@ Connect to your TPU using SSH:
 gcloud compute tpus tpu-vm ssh TPU_NAME --zone ZONE
 ```
 
-Install Miniconda
+Install Miniconda:
 
 ```bash
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh

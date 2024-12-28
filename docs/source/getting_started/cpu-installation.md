@@ -24,7 +24,7 @@ Table of contents:
 ## Requirements
 
 - OS: Linux
-- Compiler: gcc/g++>=12.3.0 (optional, recommended)
+- Compiler: `gcc/g++>=12.3.0` (optional, recommended)
 - Instruction set architecture (ISA) requirement: AVX512 (optional, recommended)
 
 (cpu-backend-quick-start-dockerfile)=
@@ -69,7 +69,7 @@ $ VLLM_TARGET_DEVICE=cpu python setup.py install
 
 ```{note}
 - AVX512_BF16 is an extension ISA provides native BF16 data type conversion and vector product instructions, will brings some performance improvement compared with pure AVX512. The CPU backend build script will check the host CPU flags to determine whether to enable AVX512_BF16.
-- If you want to force enable AVX512_BF16 for the cross-compilation, please set environment variable VLLM_CPU_AVX512BF16=1 before the building.
+- If you want to force enable AVX512_BF16 for the cross-compilation, please set environment variable `VLLM_CPU_AVX512BF16=1` before the building.
 ```
 
 (env-intro)=
