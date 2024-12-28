@@ -354,10 +354,14 @@ class AsyncLLM(EngineClient):
     def is_running(self) -> bool:
         return True
 
+    @property	
+    def is_stopped(self) -> bool:	
+        return False
+
     @property
     def errored(self) -> bool:
         return False
 
     @property
     def dead_error(self) -> BaseException:
-        return Exception()
+        return Exception() # TODO: implement
