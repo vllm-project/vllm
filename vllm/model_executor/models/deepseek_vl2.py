@@ -281,7 +281,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.vision_config = config.vision_config
         self.projector_config = config.projector_config
-        self.language_config = config.language_config
+        self.text_config = config.text_config
 
         self.image_token_id = _IMAGE_TOKEN_ID
 
@@ -310,7 +310,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=self.language_config,
+            hf_config=self.text_config,
             prefix=maybe_prefix(prefix, "language"),
             architectures=["DeepseekV2ForCausalLM"],
         )

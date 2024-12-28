@@ -205,9 +205,9 @@ class DeepseekVLV2Config(PretrainedConfig):
         self.projector_config = MlpProjectorConfig(**projector_config)
 
         language_config = kwargs.get("language_config", {})
-        self.language_config = DeepseekV2Config(**language_config)
+        self.text_config = DeepseekV2Config(**language_config)
 
         self.tile_tag = tile_tag
         self.global_view_pos = global_view_pos
         self.candidate_resolutions = candidate_resolutions
-        self.vocab_size = self.language_config.vocab_size
+        self.vocab_size = self.text_config.vocab_size
