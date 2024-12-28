@@ -71,12 +71,14 @@ def _sgmv_expand_kernel(
     offset_k = tl.arange(0, BLOCK_K)
     ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
-
+    # ls_d*_ptr can be either an integer or a pointer
     if SAME_STRIDE:
+        # integer
         cur_lora_d0_stride = ls_d0_ptr
         cur_lora_d1_stride = ls_d1_ptr
         cur_lora_d2_stride = ls_d2_ptr
     else:
+        # pointer
         cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
         cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
         cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
@@ -175,10 +177,8 @@ def _sgmv_expand(
             output tensor. Defaults to False.
     """
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
-    assert lora_b_weights[0].dtype in [
-        torch.float16,
-        torch.bfloat16,
-    ]
+    for weight in lora_b_weights:
+        assert weight.dtype in [torch.float16, torch.bfloat16]
 
     assert inputs.size(1) == token_nums
     assert inputs.size(0) == len(lora_b_weights)

@@ -77,11 +77,14 @@ def _sgmv_shrink_kernel(
     # input ptr
     a_ptr = (input_ptr + cur_seq_start * xm_stride + ram[:, None] * xm_stride +
              offset_k[None, :] * xk_stride)
+    # ls_d*_ptr can be either an integer or a pointer
     if SAME_STRIDE:
+        # integer
         cur_lora_d0_stride = ls_d0_ptr
         cur_lora_d1_stride = ls_d1_ptr
         cur_lora_d2_stride = ls_d2_ptr
     else:
+        # pointer
         cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
         cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
         cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
@@ -167,10 +170,9 @@ def _sgmv_shrink(
     """
     assert inputs.dtype == lora_a_weights[0].dtype
     assert inputs.dtype in [torch.float16, torch.bfloat16]
-    assert lora_a_weights[0].dtype in [
-        torch.float16,
-        torch.bfloat16,
-    ]
+    for weight in lora_a_weights:
+        assert weight.dtype in [torch.float16, torch.bfloat16]
+
     assert inputs.size(0) == token_nums
     assert inputs.size(1) == lora_a_weights[0].size(-1)
     assert b_seq_start_loc.size(0) == batches

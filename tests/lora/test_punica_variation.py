@@ -3,6 +3,8 @@ This script is mainly used to test whether trtion kernels can run normally
 under different conditions, including various batches, numbers of LoRA , and
 maximum ranks.
 """
+from threading import Lock
+
 import pytest
 import torch
 
@@ -36,6 +38,8 @@ bgmv_expand_slice = torch.ops.vllm.bgmv_expand_slice
 bgmv_shrink = torch.ops.vllm.bgmv_shrink
 sgmv_expand = torch.ops.vllm.sgmv_expand
 sgmv_shrink = torch.ops.vllm.sgmv_shrink
+
+_dict_lock = Lock()
 
 
 @pytest.mark.parametrize("batches", BATCHES)
@@ -92,7 +96,8 @@ def test_punica_sgmv(
         max_seq_length = max_seq_length.item()
     if op_type == "shrink":
         # Preventing cache error pointer.
-        _LORA_A_PTR_DICT.clear()
+        with _dict_lock:
+            _LORA_A_PTR_DICT.clear()
         sgmv_shrink(
             inputs_tensor,
             lora_weights_lst,
@@ -117,7 +122,8 @@ def test_punica_sgmv(
                 op_type,
             )
     else:
-        _LORA_B_PTR_DICT.clear()
+        with _dict_lock:
+            _LORA_B_PTR_DICT.clear()
         sgmv_expand(
             inputs_tensor,
             lora_weights_lst,

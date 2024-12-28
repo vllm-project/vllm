@@ -4,6 +4,8 @@ hidden_sizes included in the LoRA models currently supported by vLLM. It tests
 whether the corresponding Triton kernel can run normally when tensor parallelism
 is set to [1, 2, 4, 8, 16, 32, 64].
 """
+from threading import Lock
+
 import pytest
 import torch
 
@@ -113,6 +115,8 @@ SCALES = [0.5]
 SEED = [0]
 CUDA_DEVICES = [f"cuda:{0}"]
 
+_dict_lock = Lock()
+
 
 @pytest.mark.parametrize("batches", BATCHES)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
@@ -168,7 +172,8 @@ def test_punica_sgmv(
         max_seq_length = max_seq_length.item()
     if op_type == "shrink":
         # Preventing cache error pointer.
-        _LORA_A_PTR_DICT.clear()
+        with _dict_lock:
+            _LORA_A_PTR_DICT.clear()
         sgmv_shrink(
             inputs_tensor,
             lora_weights_lst,
@@ -193,7 +198,8 @@ def test_punica_sgmv(
                 op_type,
             )
     else:
-        _LORA_B_PTR_DICT.clear()
+        with _dict_lock:
+            _LORA_B_PTR_DICT.clear()
         sgmv_expand(
             inputs_tensor,
             lora_weights_lst,
