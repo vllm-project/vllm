@@ -112,7 +112,7 @@ See [this page](#generative-models) for more information on how to use generativ
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
     - ✅︎
     - ✅︎
-  * - :code:`CohereForCausalLM`,:code:`Cohere2ForCausalLM`
+  * - :code:`CohereForCausalLM`, :code:`Cohere2ForCausalLM`
     - Command-R
     - :code:`CohereForAI/c4ai-command-r-v01`, :code:`CohereForAI/c4ai-command-r7b-12-2024`, etc.
     - ✅︎
