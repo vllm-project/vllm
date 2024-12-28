@@ -11,11 +11,11 @@ Below is a visual representation of the multi-stage Dockerfile. The build graph 
 
 The edges of the build graph represent:
 
-- FROM ... dependencies (with a solid line and a full arrow head)
+- `FROM ...` dependencies (with a solid line and a full arrow head)
 
-- COPY --from=... dependencies (with a dashed line and an empty arrow head)
+- `COPY --from=...` dependencies (with a dashed line and an empty arrow head)
 
-- RUN --mount=(.\*)from=... dependencies (with a dotted line and an empty diamond arrow head)
+- `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
   > ```{figure} ../../assets/dev/dockerfile-stages-dependency.png
   > :align: center
