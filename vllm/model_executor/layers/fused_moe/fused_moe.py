@@ -342,7 +342,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 def get_config_file_name(E: int,
                          N: int,
                          dtype: Optional[str],
-                         block_shape: List[Optional[int]] = None) -> str:
+                         block_shape: Optional[List[int]] = None) -> str:
     device_name = current_platform.get_device_name().replace(" ", "_")
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     block_shape_selector = ("" if not block_shape or not all(block_shape) else
@@ -356,8 +356,8 @@ def get_moe_configs(
     E: int,
     N: int,
     dtype: Optional[str],
-    block_n: Optional[int] = 0,
-    block_k: Optional[int] = 0,
+    block_n: Optional[int] = None,
+    block_k: Optional[int] = None,
 ) -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
@@ -370,7 +370,8 @@ def get_moe_configs(
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    json_file_name = get_config_file_name(E, N, dtype, [block_n, block_k])
+    block_shape = [block_n, block_k] if block_n and block_k else None
+    json_file_name = get_config_file_name(E, N, dtype, block_shape)
 
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
