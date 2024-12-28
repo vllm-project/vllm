@@ -75,6 +75,11 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind):
                           prompt=prompt,
                           prompt_token_ids=prompt_tokens,
                           arrival_time=0,
+                          mm_inputs=None,
+                          mm_hashes=None,
+                          mm_placeholders=None,
+                          eos_token_id=None,
+                          lora_request=None,
                           sampling_params=SamplingParams(
                               skip_special_tokens=False,
                               spaces_between_special_tokens=False,
@@ -139,6 +144,11 @@ def test_stop_string(include_stop_str_in_output: bool):
             prompt=prompt,
             prompt_token_ids=prompt_tokens,
             arrival_time=0,
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            eos_token_id=None,
+            lora_request=None,
             sampling_params=SamplingParams(
                 skip_special_tokens=False,
                 spaces_between_special_tokens=False,
