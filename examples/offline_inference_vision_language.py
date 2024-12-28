@@ -308,7 +308,20 @@ def run_mllama(question: str, modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    prompt = f"<|image|><|begin_of_text|>{question}"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [{
+        "role":
+        "user",
+        "content": [{
+            "type": "image"
+        }, {
+            "type": "text",
+            "text": f"{question}"
+        }]
+    }]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           add_generation_prompt=True,
+                                           tokenize=False)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
