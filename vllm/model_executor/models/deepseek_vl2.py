@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from PIL import Image
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -139,6 +139,28 @@ class MlpProjector(nn.Module):
         return self.layers(x)
 
 
+class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
+
+    def _get_hf_processor(
+        self,
+        *,
+        num_crops: Optional[int] = None,
+    ) -> ProcessorMixin:
+        try:
+            from deepseek_vl2.models import DeepseekVLV2Processor
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "You need to `pip install "
+                "git+https://github.com/deepseek-ai/DeepSeek-VL2.git` "
+                "to use this model") from exc
+
+        processor = DeepseekVLV2Processor.from_pretrained(
+            self.ctx.model_config.model)
+        assert isinstance(processor, ProcessorMixin)
+        return processor
+
+
+@MULTIMODAL_REGISTRY.register_processor(DeepseekVL2MultiModalProcessor)
 class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
@@ -245,7 +267,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[DeepseekVL2ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        image_sizes = kwargs.pop("image_sizes", None)
+        images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is None and image_embeds is None:
@@ -256,13 +278,15 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            if not isinstance(image_sizes, (torch.Tensor, list)):
+            if not isinstance(images_spatial_crop, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image sizes. "
-                                 f"Got type: {type(image_sizes)}")
+                                 f"Got type: {type(images_spatial_crop)}")
 
             return DeepseekVL2ImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(flatten_bn(pixel_values)))
+                pixel_values=self._validate_pixel_values(flatten_bn(pixel_values)),
+                images_spatial_crop=self._validate_images_spatial_crop(
+                    flatten_bn(images_spatial_crop, concat=True)))
 
         if image_embeds is not None:
             if not isinstance(image_embeds, torch.Tensor):
