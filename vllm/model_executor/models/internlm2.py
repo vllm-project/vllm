@@ -444,7 +444,7 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        model_type=InternLM2Model,
+        model_type: Type[InternLM2Model] = InternLM2Model,
     ):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
