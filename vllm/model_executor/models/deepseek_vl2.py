@@ -410,7 +410,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
             return DeepseekVL2ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(
+                data=self._validate_pixel_values(
                     flatten_bn(pixel_values)),
                 images_spatial_crop=self._validate_images_spatial_crop(
                     flatten_bn(images_spatial_crop, concat=True)))
