@@ -41,7 +41,7 @@ For reading from S3, it will be the number of client instances the host is openi
 $ vllm serve /home/meta-llama/Llama-3.2-3B-Instruct --load-format runai_streamer --model-loader-extra-config '{"concurrency":16}'
 ```
 
-You can controls the size of the CPU Memory buffer to which tensors are read from the file, and limit this size.
+You can control the size of the CPU Memory buffer to which tensors are read from the file, and limit this size.
 You can read further about CPU buffer memory limiting [here](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md#runai_streamer_memory_limit).
 
 ```console

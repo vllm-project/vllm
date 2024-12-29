@@ -3,9 +3,9 @@ from typing import List
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.sampling_params import RequestOutputKind
-from vllm.v1.engine import EngineCoreOutput
-from vllm.v1.engine.detokenizer import Detokenizer, DetokenizerRequest
+from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine.detokenizer import Detokenizer
 
 TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
@@ -71,16 +71,22 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind):
 
     # Make N requests.
     requests = [
-        DetokenizerRequest(
-            request_id=f"request-{idx}",
-            prompt=prompt,
-            prompt_token_ids=prompt_tokens,
-            skip_special_tokens=False,
-            spaces_between_special_tokens=False,
-            output_kind=request_output_kind,
-            stop=[],
-            include_stop_str_in_output=False,
-        ) for idx, (
+        EngineCoreRequest(request_id=f"request-{idx}",
+                          prompt=prompt,
+                          prompt_token_ids=prompt_tokens,
+                          arrival_time=0,
+                          mm_inputs=None,
+                          mm_hashes=None,
+                          mm_placeholders=None,
+                          eos_token_id=None,
+                          lora_request=None,
+                          sampling_params=SamplingParams(
+                              skip_special_tokens=False,
+                              spaces_between_special_tokens=False,
+                              output_kind=request_output_kind,
+                              stop=[],
+                              include_stop_str_in_output=False))
+        for idx, (
             prompt,
             prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
@@ -133,18 +139,25 @@ def test_stop_string(include_stop_str_in_output: bool):
 
     # Make N requests.
     requests = [
-        DetokenizerRequest(
+        EngineCoreRequest(
             request_id=f"request-{idx}",
             prompt=prompt,
             prompt_token_ids=prompt_tokens,
-            skip_special_tokens=False,
-            spaces_between_special_tokens=False,
-            output_kind=RequestOutputKind.DELTA,
-            stop=STOP_STRINGS,
-            include_stop_str_in_output=include_stop_str_in_output,
-        ) for idx, (
-            prompt,
-            prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+            arrival_time=0,
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            eos_token_id=None,
+            lora_request=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=RequestOutputKind.DELTA,
+                stop=STOP_STRINGS,
+                include_stop_str_in_output=include_stop_str_in_output,
+            )) for idx, (
+                prompt,
+                prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
 
     # Add requests to the detokenizer.

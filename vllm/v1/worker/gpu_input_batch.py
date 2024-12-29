@@ -57,11 +57,13 @@ class InputBatch:
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.
+        # This buffer is not directly transferred to the GPU, so it does not
+        # need to be pinned.
         self.token_ids_cpu_tensor = torch.zeros(
             (max_num_reqs, max_model_len),
             device="cpu",
             dtype=torch.int32,
-            pin_memory=pin_memory,
+            pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
