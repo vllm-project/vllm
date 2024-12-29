@@ -1,4 +1,5 @@
 import logging
+import traceback
 from itertools import chain
 from typing import TYPE_CHECKING, Tuple
 
@@ -183,6 +184,7 @@ def resolve_current_platform_cls_qualname() -> str:
 
 
 _current_platform = None
+_init_trace: str = ''
 
 if TYPE_CHECKING:
     current_platform: Platform
@@ -197,9 +199,14 @@ def __getattr__(name: str):
             platform_cls_qualname = resolve_current_platform_cls_qualname()
             _current_platform = resolve_obj_by_qualname(
                 platform_cls_qualname)()
+            global _init_trace
+            _init_trace = "".join(traceback.format_stack())
         return _current_platform
     else:
         return globals()[name]
 
 
-__all__ = ['Platform', 'PlatformEnum', 'current_platform', 'CpuArchEnum']
+__all__ = [
+    'Platform', 'PlatformEnum', 'current_platform', 'CpuArchEnum',
+    "_init_trace"
+]
