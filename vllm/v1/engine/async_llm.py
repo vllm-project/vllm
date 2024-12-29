@@ -18,7 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_exception_traceback, kill_process_tree
+from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -293,9 +293,8 @@ class AsyncLLM(EngineClient):
                 # 4) Abort any requests that finished due to stop strings.
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
-        except Exception:
-            traceback = get_exception_traceback()
-            logger.error("EngineCore hit an exception: %s", traceback)
+        except Exception as e:
+            logger.error(e)
             kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
