@@ -1,6 +1,6 @@
 import logging
 from itertools import chain
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 from vllm.plugins import load_plugins_by_group
 from vllm.utils import resolve_obj_by_qualname
@@ -139,42 +139,67 @@ builtin_platform_plugins = {
     'openvino': openvino_platform_plugin,
 }
 
-platform_plugins = load_plugins_by_group('vllm.platform_plugins')
 
-activated_plugins = []
+def resolve_current_platform_cls_qualname() -> str:
+    platform_plugins = load_plugins_by_group('vllm.platform_plugins')
 
-for name, func in chain(builtin_platform_plugins.items(),
-                        platform_plugins.items()):
-    try:
-        is_platform, platform_cls_qualname = func()
-        if is_platform:
-            activated_plugins.append(name)
-    except Exception:
-        pass
+    activated_plugins = []
 
-activated_builtin_plugins = list(
-    set(activated_plugins) & set(builtin_platform_plugins.keys()))
-activated_oot_plugins = list(
-    set(activated_plugins) & set(platform_plugins.keys()))
+    for name, func in chain(builtin_platform_plugins.items(),
+                            platform_plugins.items()):
+        try:
+            is_platform, platform_cls_qualname = func()
+            if is_platform:
+                activated_plugins.append(name)
+        except Exception:
+            pass
 
-if len(activated_oot_plugins) >= 2:
-    raise RuntimeError("Only one platform plugin can be activated, but got: "
-                       f"{activated_oot_plugins}")
-elif len(activated_oot_plugins) == 1:
-    platform_cls_qualname = platform_plugins[activated_oot_plugins[0]]()[1]
-    logger.info("Platform plugin %s is activated", activated_plugins[0])
-elif len(activated_builtin_plugins) >= 2:
-    raise RuntimeError("Only one platform plugin can be activated, but got: "
-                       f"{activated_builtin_plugins}")
-elif len(activated_builtin_plugins) == 1:
-    platform_cls_qualname = builtin_platform_plugins[
-        activated_builtin_plugins[0]]()[1]
-    logger.info("Automatically detected platform %s.",
-                activated_builtin_plugins[0])
-else:
-    platform_cls_qualname = "vllm.interface.UnspecifiedPlatform"
-    logger.info("No platform detected, vLLM is running on UnspecifiedPlatform")
+    activated_builtin_plugins = list(
+        set(activated_plugins) & set(builtin_platform_plugins.keys()))
+    activated_oot_plugins = list(
+        set(activated_plugins) & set(platform_plugins.keys()))
 
-current_platform: Platform = resolve_obj_by_qualname(platform_cls_qualname)()
+    if len(activated_oot_plugins) >= 2:
+        raise RuntimeError(
+            "Only one platform plugin can be activated, but got: "
+            f"{activated_oot_plugins}")
+    elif len(activated_oot_plugins) == 1:
+        platform_cls_qualname = platform_plugins[activated_oot_plugins[0]]()[1]
+        logger.info("Platform plugin %s is activated", activated_plugins[0])
+    elif len(activated_builtin_plugins) >= 2:
+        raise RuntimeError(
+            "Only one platform plugin can be activated, but got: "
+            f"{activated_builtin_plugins}")
+    elif len(activated_builtin_plugins) == 1:
+        platform_cls_qualname = builtin_platform_plugins[
+            activated_builtin_plugins[0]]()[1]
+        logger.info("Automatically detected platform %s.",
+                    activated_builtin_plugins[0])
+    else:
+        platform_cls_qualname = "vllm.interface.UnspecifiedPlatform"
+        logger.info(
+            "No platform detected, vLLM is running on UnspecifiedPlatform")
+    return platform_cls_qualname
+
+
+_current_platform = None
+
+if TYPE_CHECKING:
+    current_platform: Platform
+
+
+def __getattr__(name: str):
+    if name == 'current_platform':
+        # lazy init current_platform so that plugins can import vllm.platforms
+        # to inherit Platform without circular imports
+        global _current_platform
+        if _current_platform is None:
+            platform_cls_qualname = resolve_current_platform_cls_qualname()
+            _current_platform = resolve_obj_by_qualname(
+                platform_cls_qualname)()
+        return _current_platform
+    else:
+        return globals()[name]
+
 
 __all__ = ['Platform', 'PlatformEnum', 'current_platform', 'CpuArchEnum']
