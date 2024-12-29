@@ -75,7 +75,7 @@ def run_deepseek_vl2(question: str, modality: str):
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
               hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]})
 
-    prompt = f"<|User|>: <image>\n<|ref|>{question}<|/ref|>.\n\n<|Assistant|>:"
+    prompt = f"<|User|>: <image>\n{question}\n\n<|Assistant|>:"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
