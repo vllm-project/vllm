@@ -1,7 +1,7 @@
 import logging
 import traceback
 from itertools import chain
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Optional
 
 from vllm.plugins import load_plugins_by_group
 from vllm.utils import resolve_obj_by_qualname
@@ -12,7 +12,7 @@ from .interface import CpuArchEnum, Platform, PlatformEnum
 logger = logging.getLogger(__name__)
 
 
-def tpu_platform_plugin() -> Tuple[bool, str]:
+def tpu_platform_plugin() -> Optional[str]:
     is_tpu = False
     try:
         # While it's technically possible to install libtpu on a
@@ -24,10 +24,10 @@ def tpu_platform_plugin() -> Tuple[bool, str]:
     except Exception:
         pass
 
-    return is_tpu, "vllm.platforms.tpu.TpuPlatform"
+    return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None
 
 
-def cuda_platform_plugin() -> Tuple[bool, str]:
+def cuda_platform_plugin() -> Optional[str]:
     is_cuda = False
 
     try:
@@ -49,10 +49,10 @@ def cuda_platform_plugin() -> Tuple[bool, str]:
         if cuda_is_jetson():
             is_cuda = True
 
-    return is_cuda, "vllm.platforms.cuda.CudaPlatform"
+    return "vllm.platforms.cuda.CudaPlatform" if is_cuda else None
 
 
-def rocm_platform_plugin() -> Tuple[bool, str]:
+def rocm_platform_plugin() -> Optional[str]:
     is_rocm = False
 
     try:
@@ -66,10 +66,10 @@ def rocm_platform_plugin() -> Tuple[bool, str]:
     except Exception:
         pass
 
-    return is_rocm, "vllm.platforms.rocm.RocmPlatform"
+    return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
 
-def hpu_platform_plugin() -> Tuple[bool, str]:
+def hpu_platform_plugin() -> Optional[str]:
     is_hpu = False
     try:
         from importlib import util
@@ -77,10 +77,10 @@ def hpu_platform_plugin() -> Tuple[bool, str]:
     except Exception:
         pass
 
-    return is_hpu, "vllm.platforms.hpu.HpuPlatform"
+    return "vllm.platforms.hpu.HpuPlatform" if is_hpu else None
 
 
-def xpu_platform_plugin() -> Tuple[bool, str]:
+def xpu_platform_plugin() -> Optional[str]:
     is_xpu = False
 
     try:
@@ -93,10 +93,10 @@ def xpu_platform_plugin() -> Tuple[bool, str]:
     except Exception:
         pass
 
-    return is_xpu, "vllm.platforms.xpu.XPUPlatform"
+    return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
 
-def cpu_platform_plugin() -> Tuple[bool, str]:
+def cpu_platform_plugin() -> Optional[str]:
     is_cpu = False
     try:
         from importlib.metadata import version
@@ -104,10 +104,10 @@ def cpu_platform_plugin() -> Tuple[bool, str]:
     except Exception:
         pass
 
-    return is_cpu, "vllm.platforms.cpu.CpuPlatform"
+    return "vllm.platforms.cpu.CpuPlatform" if is_cpu else None
 
 
-def neuron_platform_plugin() -> Tuple[bool, str]:
+def neuron_platform_plugin() -> Optional[str]:
     is_neuron = False
     try:
         import transformers_neuronx  # noqa: F401
@@ -115,10 +115,10 @@ def neuron_platform_plugin() -> Tuple[bool, str]:
     except ImportError:
         pass
 
-    return is_neuron, "vllm.platforms.neuron.NeuronPlatform"
+    return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 
-def openvino_platform_plugin() -> Tuple[bool, str]:
+def openvino_platform_plugin() -> Optional[str]:
     is_openvino = False
     try:
         from importlib.metadata import version
@@ -126,7 +126,7 @@ def openvino_platform_plugin() -> Tuple[bool, str]:
     except Exception:
         pass
 
-    return is_openvino, "vllm.platforms.openvino.OpenVinoPlatform"
+    return "vllm.platforms.openvino.OpenVinoPlatform" if is_openvino else None
 
 
 builtin_platform_plugins = {
@@ -150,8 +150,8 @@ def resolve_current_platform_cls_qualname() -> str:
                             platform_plugins.items()):
         try:
             assert callable(func)
-            is_platform, platform_cls_qualname = func()
-            if is_platform:
+            platform_cls_qualname = func()
+            if platform_cls_qualname is not None:
                 activated_plugins.append(name)
         except Exception:
             pass
@@ -166,7 +166,7 @@ def resolve_current_platform_cls_qualname() -> str:
             "Only one platform plugin can be activated, but got: "
             f"{activated_oot_plugins}")
     elif len(activated_oot_plugins) == 1:
-        platform_cls_qualname = platform_plugins[activated_oot_plugins[0]]()[1]
+        platform_cls_qualname = platform_plugins[activated_oot_plugins[0]]()
         logger.info("Platform plugin %s is activated",
                     activated_oot_plugins[0])
     elif len(activated_builtin_plugins) >= 2:
@@ -175,7 +175,7 @@ def resolve_current_platform_cls_qualname() -> str:
             f"{activated_builtin_plugins}")
     elif len(activated_builtin_plugins) == 1:
         platform_cls_qualname = builtin_platform_plugins[
-            activated_builtin_plugins[0]]()[1]
+            activated_builtin_plugins[0]]()
         logger.info("Automatically detected platform %s.",
                     activated_builtin_plugins[0])
     else:

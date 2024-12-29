@@ -1,6 +1,5 @@
-from typing import Tuple
+from typing import Optional
 
 
-def dummy_platform_plugin() -> Tuple[bool, str]:
-    is_dummy = True
-    return is_dummy, "vllm_add_dummy_platform.dummy_platform.DummyPlatform"
+def dummy_platform_plugin() -> Optional[str]:
+    return "vllm_add_dummy_platform.dummy_platform.DummyPlatform"
