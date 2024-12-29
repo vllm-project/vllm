@@ -1,9 +1,5 @@
-from vllm.platforms import Platform, PlatformEnum
+from vllm.platforms.cuda import CudaPlatform
 
 
-class DummyPlatform(Platform):
-    _enum = PlatformEnum.UNSPECIFIED
+class DummyPlatform(CudaPlatform):
     device_name = "DummyDevice"
-    device_type = "DummyType"
-    dispatch_key = "DUMMY"
-    supported_quantization = ["dummy_quantization"]
