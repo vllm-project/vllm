@@ -214,7 +214,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_ids: List[int],
             is_prompt: bool,
             block_tables: Optional[Dict[int, List[int]]],
-            slot_mappings: Optional[Dict[int, List[List[int]]]],
+            slot_mappings: Optional[Dict[int, List[int]]],
             computed_block_nums: List[int],
             n_seqs: int = 0,
 
@@ -602,14 +602,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if not inter_data.is_prompt and self.sliding_window is not None:
             # TODO(sang): This is a hack to make sliding window work with
             # paged attn. We can remove it if we make paged attn kernel
-            # to properly handle slinding window attn.
+            # to properly handle sliding window attn.
             curr_sliding_window_block = self.sliding_window_blocks
-            # number of elements in last block
-            suff_len = inter_data.seq_lens[seq_idx] % self.block_size
             sliding_seq_len = min(inter_data.seq_lens[seq_idx],
-                                  self.block_aligned_sliding_window + suff_len)
-            if suff_len > 0:
-                curr_sliding_window_block += 1
+                                  self.block_aligned_sliding_window)
 
         inter_data.curr_sliding_window_blocks[
             seq_idx] = curr_sliding_window_block

@@ -602,6 +602,9 @@ class Sequence:
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
 
+    def is_decode(self) -> bool:
+        return self.data.stage == SequenceStage.DECODE
+
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
                 f"status={self.status.name}, "
@@ -868,6 +871,9 @@ class SequenceGroup:
     def is_prefill(self) -> bool:
         return self.first_seq.is_prefill()
 
+    def is_decode(self) -> bool:
+        return self.first_seq.is_decode()
+
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
                 f"sampling_params={self.sampling_params}, "
@@ -887,7 +893,7 @@ class SequenceGroupMetadataDelta(
     seq_data_delta: Dict[int, SequenceDataDelta]
     request_id: str
     block_tables: Dict[int, List[int]]
-    slot_mappings: Dict[int, List[List[int]]]
+    slot_mappings: Dict[int, List[int]]
     is_prompt: bool
     do_sample: bool = True
     token_chunk_size: Optional[int] = None
@@ -911,7 +917,7 @@ class SequenceGroupMetadata(
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
         slot_mappings: The token to slot mappings. (Seq id -> list of slot
-            mapping of each token grouped in block_size)
+            mapping of each token)
         do_sample: True if sampling is required. Sampling is not required when
             e.g., prefill is chunked, and the current iteration only computes
             query tokens for prefill, we don't need sampling.
@@ -940,7 +946,7 @@ class SequenceGroupMetadata(
     seq_data: Dict[int, SequenceData]
     sampling_params: Optional[SamplingParams]
     block_tables: Dict[int, List[int]]
-    slot_mappings: Dict[int, List[List[int]]]
+    slot_mappings: Dict[int, List[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
     lora_request: Optional[LoRARequest] = None

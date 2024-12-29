@@ -1,12 +1,15 @@
-from collections import deque
+from collections import deque, defaultdict
+import copy
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple
+from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple, DefaultDict
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
 BlockId = int
 RefCount = int
-BlockSlotMapping = List[int]
+SlotMappings = List[int]
+TokenMappings = DefaultDict[int, List[int]]
+EVICTED_SLOT_ID = -2
 
 
 class RefCounterProtocol(Protocol):
@@ -226,49 +229,131 @@ class BlockPool:
         self._free_ids.appendleft(block.pool_id)  # type: ignore[attr-defined]
 
 
-class BlockList:
+class VirtualBlockTable:
+    """
+    """
+
+    def __init__(
+        self,
+        block_size: int,
+        slot_mappings: Optional[SlotMappings] = None,
+        token_mappings: Optional[TokenMappings] = None
+    ):
+        self._block_size = block_size
+        if slot_mappings is None:
+            slot_mappings = []
+        self._slot_mappings: SlotMappings = slot_mappings
+        if token_mappings is None:
+            token_mappings = (
+                defaultdict(lambda: [EVICTED_SLOT_ID] * self._block_size))
+        self._token_mappings: TokenMappings = token_mappings
+
+    def append_tokens(
+        self,
+        blocks: List[Block],
+        num_new_tokens: int,
+        evicted: bool = False
+    ) -> None:
+        first_chunk_size = self._block_size - (self.num_tokens %
+                                               self._block_size)
+        if first_chunk_size < num_new_tokens:
+            last_chunk_size = (self.num_tokens + num_new_tokens) % self._block_size
+            num_middle_chunks = ((num_new_tokens - first_chunk_size) //
+                                 self._block_size)
+            middle_chunk_sizes = [(0, self._block_size)] * num_middle_chunks
+            chunk_list = [(self._block_size - first_chunk_size, first_chunk_size)]
+            chunk_list.extend(middle_chunk_sizes)
+            if last_chunk_size > 0:
+                chunk_list.append((0, last_chunk_size))
+        else:
+            chunk_list = [(self._block_size - first_chunk_size, num_new_tokens)]
+        assert len(chunk_list) == len(blocks)
+
+        for (slot_offset, chunk_size), block in zip(chunk_list, blocks):
+            if not evicted:
+                block_token_mappings = self._token_mappings[block.block_id]
+                block_token_mappings[slot_offset:slot_offset+chunk_size] = (
+                    range(self.num_tokens, self.num_tokens+chunk_size))
+
+                slot_start = block.block_id * self._block_size + slot_offset
+                slot_end = slot_start + chunk_size
+                slots = range(slot_start, slot_end)
+            else:
+                slots = [EVICTED_SLOT_ID] * chunk_size
+            self._slot_mappings.extend(slots)
+
+    def insert_tokens(
+        self,
+        block: Block,
+        slot_offset: int,
+        num_new_tokens: int
+    ) -> None:
+        # If evict previous tokens from physical blocks and replace with new tokens,
+        # update the slot_mappings
+        block_slot_start = slot_offset
+        block_slot_end = slot_offset + num_new_tokens
+        block_token_mappings = self._token_mappings[block.block_id]
+        for token_idx in block_token_mappings[block_slot_start:block_slot_end]:
+            if token_idx != EVICTED_SLOT_ID:
+                self._slot_mappings[token_idx] = EVICTED_SLOT_ID
+
+        # Replace with new tokens in the physical blocks, update both
+        # token_mappings and slot_mappings
+        slot_start = (block.block_id * self._block_size) + slot_offset
+        slot_end = slot_start + num_new_tokens
+        self._slot_mappings.extend(range(slot_start, slot_end))
+
+        token_start = self.num_tokens - num_new_tokens
+        block_token_mappings[block_slot_start:block_slot_end] = range(
+            token_start, self.num_tokens)
+
+    def reset(self):
+        self._slot_mappings = []
+        self._token_mappings = defaultdict(
+            lambda: [EVICTED_SLOT_ID] * self._block_size)
+
+    @property
+    def num_tokens(self) -> int:
+        return len(self._slot_mappings)
+
+    @property
+    def slot_mappings(self) -> SlotMappings:
+        return self._slot_mappings
+
+    @property
+    def token_mappings(self) -> TokenMappings:
+        return self._token_mappings
+
+    def fork(self) -> "VirtualBlockTable":
+        return VirtualBlockTable(self._block_size,
+                                 self._slot_mappings.copy(),
+                                 copy.deepcopy(self._token_mappings))
+
+
+class PhysicalBlockTable:
     """This class is an optimization to allow fast-access to physical 
     block ids. It maintains a block id list that is updated with the 
     block list and this avoids the need to reconstruct the block id 
     list on every iteration of the block manager
     """
 
-    def __init__(self, blocks: List[Block]):
+    def __init__(self, blocks: Optional[List[Block]] = None):
+        if blocks is None:
+            blocks = []
         self._blocks: List[Block] = []
         self._block_ids: List[int] = []
-        self._block_slot_mappings: List[List[int]] = []
 
         self.update(blocks)
 
-    def _add_block_id(self, block_id: Optional[BlockId]) -> None:
-        assert block_id is not None
-        self._block_ids.append(block_id)
-
-    def _add_block_slot_mapping(
-            self,
-            block_slot_mapping: Optional[BlockSlotMapping]) -> None:
-        assert block_slot_mapping is not None
-        self._block_slot_mappings.append(block_slot_mapping)
-
-    def _update_block_id(self, block_index: int,
-                         new_block_id: Optional[BlockId]) -> None:
-        assert new_block_id is not None
-        self._block_ids[block_index] = new_block_id
-
     def update(self, blocks: List[Block]):
-        self._blocks = blocks
-
+        self._blocks = blocks.copy()
         # Cache block ids for fast query
         self._block_ids = []
+
         for block in self._blocks:
             self._add_block_id(block.block_id)
 
-        # Cache block slot mappings for fast query
-        self._block_slot_mappings = []
-        for block in self._blocks:
-            self._add_block_slot_mapping(block.block_slot_mapping)
-
-    def append_token_ids(self, block_index: int, token_ids: List[int]) -> None:
+    def append_tokens(self, block_index: int, token_ids: List[int]) -> Block:
         block = self._blocks[block_index]
         prev_block_id = block.block_id
 
@@ -278,10 +363,38 @@ class BlockList:
         if prev_block_id != block.block_id:
             self._update_block_id(block_index, block.block_id)
 
+        return block
+
+    def insert_tokens(
+        self,
+        block_index: int,
+        slot_offset: int,
+        token_ids: List[int]
+    ) -> Block:
+        block = self._blocks[block_index]
+        prev_block_id = block.block_id
+
+        block.insert_token_ids(slot_offset, token_ids)
+
+        # CoW or promotion may update the internal block_id
+        if prev_block_id != block.block_id:
+            self._update_block_id(block_index, block.block_id)
+
+        return block
+
     def append(self, new_block: Block):
         self._blocks.append(new_block)
         self._add_block_id(new_block.block_id)
-        self._add_block_slot_mapping(new_block.block_slot_mapping)
+
+    def reset(self):
+        self._blocks = []
+        self._block_ids = []
+
+    def list(self) -> List[Block]:
+        return self._blocks
+
+    def ids(self) -> List[int]:
+        return self._block_ids
 
     def __len__(self) -> int:
         return len(self._blocks)
@@ -293,19 +406,14 @@ class BlockList:
         self._blocks[block_index] = new_block
         self._update_block_id(block_index, new_block.block_id)
 
-    def reset(self):
-        self._blocks = []
-        self._block_ids = []
-        self._block_slot_mappings = []
+    def _add_block_id(self, block_id: BlockId) -> None:
+        assert block_id is not None
+        self._block_ids.append(block_id)
 
-    def list(self) -> List[Block]:
-        return self._blocks
-
-    def ids(self) -> List[int]:
-        return self._block_ids
-
-    def block_slot_mappings(self) -> List[List[int]]:
-        return self._block_slot_mappings
+    def _update_block_id(self, block_index: int,
+                         new_block_id: Optional[BlockId]) -> None:
+        assert new_block_id is not None
+        self._block_ids[block_index] = new_block_id
 
 
 @dataclass

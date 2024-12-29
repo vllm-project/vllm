@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
 
-from vllm.utils import Device
+from vllm.utils import Device, cdiv
 
 BlockId = int
 
@@ -10,6 +10,10 @@ class Block(ABC):
 
     @abstractmethod
     def append_token_ids(self, token_ids: List[int]) -> None:
+        pass
+
+    @abstractmethod
+    def insert_token_ids(self, slot_offset: int, token_ids: List[int]) -> None:
         pass
 
     @property
@@ -101,11 +105,6 @@ class Block(ABC):
         full.
         """
         return None
-
-    @property
-    @abstractmethod
-    def block_slot_mapping(self) -> List[int]:
-        pass
 
 
 class BlockAllocator(ABC):
@@ -309,3 +308,91 @@ class DeviceAwareBlockAllocator(ABC):
         device: Device = Device.GPU,
     ) -> List[int]:
         pass
+
+
+class CachePolicy(ABC):
+    @abstractmethod
+    def add_tokens_prefill(
+        self,
+        token_ids: List[int],
+        device: Device = Device.GPU
+    ) -> None:
+        pass
+
+    @abstractmethod
+    def update_blocks(self, blocks: List[Block]) -> None:
+        pass
+
+    @abstractmethod
+    def add_tokens_decode(
+        self,
+        token_ids: List[int],
+        num_lookahead_slots: int = 0
+    ) -> None:
+        pass
+
+    @abstractmethod
+    def fork(self) -> "CachePolicy":
+        pass
+
+    @abstractmethod
+    def free(self) -> None:
+        pass
+
+    @property
+    @abstractmethod
+    def physical_block_ids(self) -> List[int]:
+        pass
+
+    @property
+    @abstractmethod
+    def slot_mappings(self) -> List[int]:
+        pass
+
+    @property
+    @abstractmethod
+    def num_tokens(self) -> int:
+        pass
+
+    @abstractmethod
+    def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
+        pass
+
+    @property
+    @abstractmethod
+    def blocks(self) -> List[Block]:
+        pass
+
+    @property
+    @abstractmethod
+    def num_full_slots(self) -> int:
+        pass
+
+    @abstractmethod
+    def get_num_blocks_touched_by_append_slots(
+            self, token_ids: List[int], num_lookahead_slots: int) -> int:
+        pass
+
+    @staticmethod
+    def get_num_required_blocks(token_ids: List[int],
+                                block_size: int,
+                                num_lookahead_slots: int = 0) -> int:
+        """Calculates the minimum number of blocks required to store a given
+        sequence of token IDs along with any look-ahead slots that may be
+        required (like in multi-step + chunked-prefill).
+
+        This assumes worst-case scenario, where every block requires a new
+        allocation (e.g. ignoring prefix caching).
+
+        Args:
+            token_ids (List[int]): The sequence of token IDs to be stored.
+            block_size (int): The maximum number of tokens that can be stored in
+                a single block.
+            num_lookahead_slots (int): look-ahead slots that the sequence may
+                require.
+
+        Returns:
+            int: The minimum number of blocks required to store the given
+                sequence of token IDs along with any required look-ahead slots.
+        """
+        return cdiv(len(token_ids) + num_lookahead_slots, block_size)

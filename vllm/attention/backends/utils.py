@@ -22,7 +22,6 @@ STR_NOT_IMPL_ENC_DEC_ROCM_HIP = ("ROCm/HIP is not currently supported "
                                  "with encoder/decoder models.")
 
 PAD_SLOT_ID = -1
-EVICTED_SLOT_ID = -2
 
 # Switch to numpy implementation of compute_slot_mapping
 # if we have at least this many elements. Could be tuned further.
@@ -43,30 +42,21 @@ def is_block_tables_empty(block_tables: Union[None, Dict]):
 
 
 def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
-                                   sliding_window: int):
+                                   block_size: int, sliding_window: int):
     """
     Compute the start index of slot mapping.
     """
     start_idx = 0
     if is_prompt and sliding_window is not None:
-        start_idx = max(0, query_len - sliding_window)
+        num_blocks = (sliding_window + block_size - 1) // block_size
+        start_idx = max(0, query_len - num_blocks * block_size)
     return start_idx
-
-
-def _compute_slot_mapping(slot_mapping: List[int], seq_slot_mapping: List[List[int]],
-                          range_start: int, range_end: int, block_size: int):
-    block_idx = range_start // block_size
-    range_start -= block_idx * block_size
-    range_end -= block_idx * block_size
-    seq_slot_mapping_array = np.array(seq_slot_mapping[block_idx:]).ravel()
-    seq_slot_mapping_array = seq_slot_mapping_array[range_start:range_end]
-    slot_mapping.extend(seq_slot_mapping_array)
 
 
 def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
                          seq_id: int, seq_len: int, context_len: int,
                          start_idx: int, block_size: int,
-                         slot_mappings: Dict[int, List[List[int]]]):
+                         slot_mappings: Dict[int, List[int]]):
     """
     Compute slot mapping.
     """
@@ -89,18 +79,8 @@ def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
 
     range_start = max(start_idx, context_len)
     range_end = seq_len
-    numel = range_end - range_start
     seq_slot_mapping = slot_mappings[seq_id]
-
-    if numel == 1:
-        block_slot_mapping = seq_slot_mapping[range_start // block_size]
-        slot_offset = range_start % block_size
-        slot = block_slot_mapping[slot_offset]
-        slot_mapping.append(slot)
-    else:
-        # Only prompt needs to compute slot mapping.
-        _compute_slot_mapping(slot_mapping, seq_slot_mapping, range_start,
-                              range_end, block_size)
+    slot_mapping.extend(seq_slot_mapping[range_start:range_end])
 
 
 TAttentionMetadata = TypeVar("TAttentionMetadata", bound='AttentionMetadata')
@@ -179,6 +159,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
+                                                       self.block_size,
                                                        self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,

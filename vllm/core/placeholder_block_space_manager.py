@@ -32,11 +32,11 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
         # No actual allocation logic needed
         pass
 
-    def can_append_slots(self, seq_group: SequenceGroup,
-                         num_lookahead_slots: int) -> bool:
+    def can_add_slots(self, seq_group: SequenceGroup,
+                      num_lookahead_slots: int) -> bool:
         return True
 
-    def append_slots(
+    def add_slots(
         self,
         seq: Sequence,
         num_lookahead_slots: int,
