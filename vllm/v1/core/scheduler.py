@@ -160,6 +160,7 @@ class Scheduler:
             token_budget -= num_new_tokens
             if (request.num_computed_tokens + num_new_tokens <
                     request.num_tokens):
+                assert partial_req_index is None
                 partial_req_index = req_index
             req_index += 1
 
