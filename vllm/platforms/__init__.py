@@ -166,7 +166,8 @@ def resolve_current_platform_cls_qualname() -> str:
             f"{activated_oot_plugins}")
     elif len(activated_oot_plugins) == 1:
         platform_cls_qualname = platform_plugins[activated_oot_plugins[0]]()[1]
-        logger.info("Platform plugin %s is activated", activated_oot_plugins[0])
+        logger.info("Platform plugin %s is activated",
+                    activated_oot_plugins[0])
     elif len(activated_builtin_plugins) >= 2:
         raise RuntimeError(
             "Only one platform plugin can be activated, but got: "
