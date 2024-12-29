@@ -668,7 +668,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         cos = (freqs.cos() * self.mscale)
         sin = (freqs.sin() * self.mscale)
         cache = torch.cat((cos, sin), dim=-1)
-        print("Cache shape", cache.shape)
         return cache
 
     def forward(
