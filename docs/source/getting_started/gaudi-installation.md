@@ -145,8 +145,8 @@ Currently in vLLM for HPU we support four execution modes, depending on selected
 :widths: 25 25 50
 :header-rows: 1
 
-* - ``PT_HPU_LAZY_MODE``
-  - ``enforce_eager``
+* - `PT_HPU_LAZY_MODE`
+  - `enforce_eager`
   - execution mode
 * - 0
   - 0
