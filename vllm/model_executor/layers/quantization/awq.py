@@ -7,8 +7,10 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.parameter import (GroupQuantScaleParameter,
-                                           PackedvLLMParameter)
+# from vllm.model_executor.parameter import (GroupQuantScaleParameter,
+#                                            PackedvLLMParameter)
+from vllm.model_executor.parameter import (construct_group_quant_scale_parameter,
+                                             construct_packed_vllm_parameter)
 
 
 class AWQConfig(QuantizationConfig):
@@ -111,7 +113,7 @@ class AWQLinearMethod(LinearMethodBase):
                 "tensor parallel size.")
 
         weight_loader = extra_weight_attrs.get("weight_loader")
-        qweight = PackedvLLMParameter(
+        qweight = construct_packed_vllm_parameter(
             data=torch.empty(
                 input_size_per_partition,
                 output_size_per_partition // self.quant_config.pack_factor,
@@ -123,7 +125,7 @@ class AWQLinearMethod(LinearMethodBase):
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
-        qzeros = PackedvLLMParameter(
+        qzeros = construct_packed_vllm_parameter(
             data=torch.empty(
                 input_size_per_partition // self.quant_config.group_size,
                 output_size_per_partition // self.quant_config.pack_factor,
@@ -135,26 +137,28 @@ class AWQLinearMethod(LinearMethodBase):
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
-        scales = GroupQuantScaleParameter(data=torch.empty(
-            input_size_per_partition // self.quant_config.group_size,
-            output_size_per_partition,
-            dtype=params_dtype,
-        ),
-                                          input_dim=0,
-                                          output_dim=1,
-                                          weight_loader=weight_loader)
+        scales = construct_group_quant_scale_parameter(
+            data=torch.empty(
+                input_size_per_partition // self.quant_config.group_size,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=weight_loader)
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("qzeros", qzeros)
         layer.register_parameter("scales", scales)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.qweight = torch.nn.Parameter(layer.qweight.data,
-                                           requires_grad=False)
-        layer.qzeros = torch.nn.Parameter(layer.qzeros.data,
-                                          requires_grad=False)
-        layer.scales = torch.nn.Parameter(layer.scales.data,
-                                          requires_grad=False)
+        # layer.qweight = torch.nn.Parameter(layer.qweight.data,
+        #                                    requires_grad=False)
+        # layer.qzeros = torch.nn.Parameter(layer.qzeros.data,
+        #                                   requires_grad=False)
+        # layer.scales = torch.nn.Parameter(layer.scales.data,
+        #                                   requires_grad=False)
+        pass
 
     def apply(self,
               layer: torch.nn.Module,

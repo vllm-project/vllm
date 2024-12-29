@@ -9,9 +9,13 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise)
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
-                                           ModelWeightParameter,
-                                           PerTensorScaleParameter)
+# from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+#                                            ModelWeightParameter,
+#                                            PerTensorScaleParameter)
+from vllm.model_executor.parameter import (construct_channel_quant_scale_parameter,
+                                           construct_model_weight_parameter,
+                                           construct_per_tensor_scale_parameter)
+
 
 __all__ = ["CompressedTensorsW8A16Fp8"]
 
@@ -40,19 +44,18 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                                                     layer.logical_widths)
             layer.weight_scale = torch.nn.Parameter(ws_channelwise,
                                                     requires_grad=False)
-        else:
-            # required by torch.compile to be torch.nn.Parameter
-            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
-                                                    requires_grad=False)
+        # else:
+        #     # required by torch.compile to be torch.nn.Parameter
+        #     layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
 
         # Weights must be transposed for marlin
         layer.weight = torch.nn.Parameter(layer.weight.t(),
                                           requires_grad=False)
 
-        if self.is_static_input_scheme:
-            # required by torch.compile to be torch.nn.Parameter
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
-                                                   requires_grad=False)
+        # if self.is_static_input_scheme:
+        #     # required by torch.compile to be torch.nn.Parameter
+        #     layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
+
         prepare_fp8_layer_for_marlin(layer, strategy="channel")
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
@@ -68,26 +71,28 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         layer.orig_dtype = params_dtype
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.float8_e4m3fn),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = construct_model_weight_parameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
         if self.strategy == QuantizationStrategy.CHANNEL:
-            weight_scale = ChannelQuantScaleParameter(
+            weight_scale = construct_channel_quant_scale_parameter(
                 data=torch.empty((sum(output_partition_sizes), 1),
                                  dtype=torch.float32),
                 output_dim=0,
                 weight_loader=weight_loader)
         elif self.strategy == QuantizationStrategy.TENSOR:
-            weight_scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                                   weight_loader=weight_loader)
+            weight_scale = construct_per_tensor_scale_parameter(
+                data=torch.empty(len(output_partition_sizes),
+                                 dtype=torch.float32),
+                weight_loader=weight_loader)
         else:
             raise ValueError(
                 f"Unsupported weight strategy={self.strategy}, "
@@ -98,9 +103,10 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
         # INPUT SCALE (to deal with converted checkpoints)
         if self.is_static_input_scheme:
-            input_scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                                  weight_loader=weight_loader)
+            input_scale = construct_per_tensor_scale_parameter(
+                data=torch.empty(len(output_partition_sizes),
+                                 dtype=torch.float32),
+                weight_loader=weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self,

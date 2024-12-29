@@ -8,10 +8,14 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.parameter import (BasevLLMParameter,
-                                           ChannelQuantScaleParameter,
-                                           GroupQuantScaleParameter,
-                                           PackedvLLMParameter)
+# from vllm.model_executor.parameter import (BasevLLMParameter,
+#                                            ChannelQuantScaleParameter,
+#                                            GroupQuantScaleParameter,
+#                                            PackedvLLMParameter)
+from vllm.model_executor.parameter import (construct_base_vllm_parameter,
+                                           construct_channel_quant_scale_parameter,
+                                           construct_group_quant_scale_parameter,
+                                           construct_packed_vllm_parameter)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -187,7 +191,7 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
                 "Each permutation group must reside on the same gpu")
 
         # Quantized 4Bit weights packed into Int32.
-        qweight = PackedvLLMParameter(
+        qweight = construct_packed_vllm_parameter(
             data=torch.empty(
                 input_size_per_partition // self.quant_config.tile_size // 2,
                 output_size_per_partition * self.quant_config.tile_size //
@@ -203,18 +207,19 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
             weight_loader=weight_loader)
 
         # Meta
-        meta = PackedvLLMParameter(data=torch.empty(
-            input_size_per_partition // 8 // 2 // 2,
-            output_size_per_partition * 2,
-            device="cuda",
-            dtype=torch.int16,
-        ),
-                                   input_dim=0,
-                                   output_dim=1,
-                                   packed_dim=1,
-                                   packed_factor=1,
-                                   marlin_tile_size=2,
-                                   weight_loader=weight_loader)
+        meta = construct_packed_vllm_parameter(
+            data=torch.empty(
+                input_size_per_partition // 8 // 2 // 2,
+                output_size_per_partition * 2,
+                device="cuda",
+                dtype=torch.int16,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=1,
+            marlin_tile_size=2,
+            weight_loader=weight_loader)
 
         # Determine if channelwise or not
         input_groups = (1 if self.quant_config.group_size == -1 else
@@ -233,22 +238,25 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
             weight_loader
         }
         if input_groups == 1:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
+            scales = construct_channel_quant_scale_parameter(
+                output_dim=1,
+                **weight_scale_args)
         else:
-            scales = GroupQuantScaleParameter(output_dim=1,
-                                              input_dim=0,
-                                              **weight_scale_args)
+            scales = construct_group_quant_scale_parameter(
+                output_dim=1,
+                input_dim=0,
+                **weight_scale_args)
 
         # Allocate workspace (Used for internal locking mechanism)
         max_workspace_size = (
             output_size_per_partition //
             self.quant_config.min_n_threads) * self.quant_config.max_parallel
 
-        workspace = BasevLLMParameter(data=torch.zeros(max_workspace_size,
-                                                       device="cuda",
-                                                       dtype=torch.int),
-                                      weight_loader=weight_loader)
+        workspace = construct_base_vllm_parameter(
+            data=torch.zeros(max_workspace_size,
+                             device="cuda",
+                             dtype=torch.int),
+            weight_loader=weight_loader)
 
         layer.register_parameter("B_24", qweight)
         layer.register_parameter("B_meta", meta)
@@ -257,10 +265,11 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # required by torch.compile
-        layer.B_24 = Parameter(layer.B_24.data, requires_grad=False)
-        layer.s = Parameter(layer.s.data, requires_grad=False)
-        layer.B_meta = Parameter(layer.B_meta.data, requires_grad=False)
-        layer.workspace = Parameter(layer.workspace.data, requires_grad=False)
+        # layer.B_24 = Parameter(layer.B_24.data, requires_grad=False)
+        # layer.s = Parameter(layer.s.data, requires_grad=False)
+        # layer.B_meta = Parameter(layer.B_meta.data, requires_grad=False)
+        # layer.workspace = Parameter(layer.workspace.data, requires_grad=False)
+        pass
 
     def apply(
         self,

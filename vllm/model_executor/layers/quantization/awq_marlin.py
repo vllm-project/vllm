@@ -21,8 +21,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_scales, moe_awq_to_marlin_zero_points,
     verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.parameter import (GroupQuantScaleParameter,
-                                           PackedvLLMParameter)
+# from vllm.model_executor.parameter import (GroupQuantScaleParameter,
+#                                            PackedvLLMParameter)
+from vllm.model_executor.parameter import (construct_group_quant_scale_parameter,
+                                           construct_packed_vllm_parameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -189,7 +191,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             input_size=input_size,
             group_size=group_size)
 
-        qweight = PackedvLLMParameter(
+        qweight = construct_packed_vllm_parameter(
             data=torch.empty(
                 input_size_per_partition,
                 output_size_per_partition // self.quant_config.pack_factor,
@@ -203,7 +205,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 
         num_groups = input_size_per_partition // group_size
 
-        qzeros = PackedvLLMParameter(
+        qzeros = construct_packed_vllm_parameter(
             data=torch.empty(
                 num_groups,
                 output_size_per_partition // self.quant_config.pack_factor,
@@ -215,14 +217,15 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
-        scales = GroupQuantScaleParameter(data=torch.empty(
-            num_groups,
-            output_size_per_partition,
-            dtype=params_dtype,
-        ),
-                                          input_dim=0,
-                                          output_dim=1,
-                                          weight_loader=weight_loader)
+        scales = construct_group_quant_scale_parameter(
+            data=torch.empty(
+                num_groups,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=weight_loader)
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("qzeros", qzeros)
@@ -238,12 +241,12 @@ class AWQMarlinLinearMethod(LinearMethodBase):
     # Here, we handle the repacking
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
-        layer.qweight = torch.nn.Parameter(layer.qweight.data,
-                                           requires_grad=False)
-        layer.qzeros = torch.nn.Parameter(layer.qzeros.data,
-                                          requires_grad=False)
-        layer.scales = torch.nn.Parameter(layer.scales.data,
-                                          requires_grad=False)
+        # layer.qweight = torch.nn.Parameter(layer.qweight.data,
+        #                                    requires_grad=False)
+        # layer.qzeros = torch.nn.Parameter(layer.qzeros.data,
+        #                                   requires_grad=False)
+        # layer.scales = torch.nn.Parameter(layer.scales.data,
+        #                                   requires_grad=False)
 
         # Allocate marlin workspace
         layer.workspace = marlin_make_workspace(

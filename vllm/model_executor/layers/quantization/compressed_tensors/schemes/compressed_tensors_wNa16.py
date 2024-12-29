@@ -10,11 +10,16 @@ from vllm.model_executor.layers.quantization.kernels import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks)
-from vllm.model_executor.parameter import (BasevLLMParameter,
-                                           ChannelQuantScaleParameter,
-                                           GroupQuantScaleParameter,
-                                           PackedvLLMParameter,
-                                           RowvLLMParameter)
+# from vllm.model_executor.parameter import (BasevLLMParameter,
+#                                            ChannelQuantScaleParameter,
+#                                            GroupQuantScaleParameter,
+#                                            PackedvLLMParameter,
+#                                            RowvLLMParameter)
+from vllm.model_executor.parameter import (construct_base_vllm_parameter,
+                                           construct_channel_quant_scale_parameter,
+                                           construct_group_quant_scale_parameter,
+                                           construct_packed_vllm_parameter,
+                                           construct_row_vllm_parameter)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -96,17 +101,18 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             assert input_size_per_partition % group_size == 0
             scales_and_zp_size = input_size_per_partition // group_size
 
-        weight = PackedvLLMParameter(input_dim=1,
-                                     output_dim=0,
-                                     weight_loader=weight_loader,
-                                     packed_factor=self.pack_factor,
-                                     packed_dim=1,
-                                     data=torch.empty(
-                                         output_size_per_partition,
-                                         input_size_per_partition //
-                                         self.pack_factor,
-                                         dtype=torch.int32,
-                                     ))
+        weight = construct_packed_vllm_parameter(
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+            packed_factor=self.pack_factor,
+            packed_dim=1,
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition //
+                self.pack_factor,
+                dtype=torch.int32,
+            ))
 
         weight_scale_args = {
             "weight_loader":
@@ -119,18 +125,20 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             )
         }
         if not partition_scales:
-            weight_scale = ChannelQuantScaleParameter(output_dim=0,
-                                                      **weight_scale_args)
+            weight_scale = construct_channel_quant_scale_parameter(
+                output_dim=0,
+                **weight_scale_args)
         else:
-            weight_scale = GroupQuantScaleParameter(output_dim=0,
-                                                    input_dim=1,
-                                                    **weight_scale_args)
+            weight_scale = construct_group_quant_scale_parameter(
+                output_dim=0,
+                input_dim=1,
+                **weight_scale_args)
 
         # A 2D array defining the original shape of the weights
         # before packing
-        weight_shape = BasevLLMParameter(data=torch.empty(2,
-                                                          dtype=torch.int64),
-                                         weight_loader=weight_loader)
+        weight_shape = construct_base_vllm_parameter(
+            data=torch.empty(2,dtype=torch.int64),
+            weight_loader=weight_loader)
 
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
@@ -138,12 +146,13 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # group index (for activation reordering)
         if self.has_g_idx:
-            weight_g_idx = RowvLLMParameter(data=torch.empty(
-                input_size_per_partition,
-                dtype=torch.int32,
-            ),
-                                            input_dim=0,
-                                            weight_loader=weight_loader)
+            weight_g_idx = construct_row_vllm_parameter(
+                data=torch.empty(
+                    input_size_per_partition,
+                    dtype=torch.int32,
+                ),
+                input_dim=0,
+                weight_loader=weight_loader)
             layer.register_parameter("weight_g_idx", weight_g_idx)
 
         self.kernel = kernel_type(mp_linear_kernel_config,

@@ -18,11 +18,16 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, marlin_moe_permute_scales,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
-                                           GroupQuantScaleParameter,
-                                           PackedColumnParameter,
-                                           PackedvLLMParameter,
-                                           RowvLLMParameter)
+# from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+#                                            GroupQuantScaleParameter,
+#                                            PackedColumnParameter,
+#                                            PackedvLLMParameter,
+#                                            RowvLLMParameter)
+from vllm.model_executor.parameter import (construct_packed_vllm_parameter,
+                                           construct_row_vllm_parameter,
+                                           construct_channel_quant_scale_parameter,
+                                           construct_group_quant_scale_parameter,
+                                           construct_packed_column_parameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -222,7 +227,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             scales_and_zp_size = input_size_per_partition // group_size
 
         # Quantized weights
-        qweight = PackedvLLMParameter(
+        qweight = construct_packed_vllm_parameter(
             data=torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
                 output_size_per_partition,
@@ -235,12 +240,13 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             weight_loader=weight_loader)
 
         # Activation order
-        g_idx = RowvLLMParameter(data=torch.empty(
-            input_size_per_partition,
-            dtype=torch.int32,
-        ),
-                                 input_dim=0,
-                                 weight_loader=weight_loader)
+        g_idx = construct_row_vllm_parameter(
+            data=torch.empty(
+                input_size_per_partition,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            weight_loader=weight_loader)
 
         qzeros_args = {
             "data":
@@ -264,19 +270,21 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         }
 
         if scales_and_zp_input_dim is None:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
-            qzeros = PackedColumnParameter(
+            scales = construct_channel_quant_scale_parameter(
+                output_dim=1,
+                **weight_scale_args)
+            qzeros = construct_packed_column_parameter(
                 output_dim=1,
                 packed_dim=1,
                 packed_factor=self.quant_config.pack_factor,
                 **qzeros_args)
 
         else:
-            scales = GroupQuantScaleParameter(output_dim=1,
-                                              input_dim=0,
-                                              **weight_scale_args)
-            qzeros = PackedvLLMParameter(
+            scales = construct_group_quant_scale_parameter(
+                output_dim=1,
+                input_dim=0,
+                **weight_scale_args)
+            qzeros = construct_packed_column_parameter(
                 input_dim=0,
                 output_dim=1,
                 packed_dim=1,

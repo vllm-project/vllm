@@ -22,8 +22,10 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
     cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize,
     requantize_with_max_scale)
-from vllm.model_executor.parameter import (ModelWeightParameter,
-                                           PerTensorScaleParameter)
+# from vllm.model_executor.parameter import (ModelWeightParameter,
+#                                            PerTensorScaleParameter)
+from vllm.model_executor.parameter import (construct_model_weight_parameter,
+                                           construct_per_tensor_scale_parameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
@@ -148,31 +150,32 @@ class Fp8LinearMethod(LinearMethodBase):
                         if self.quant_config.is_checkpoint_fp8_serialized else
                         params_dtype)
 
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=weight_dtype),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = construct_model_weight_parameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=weight_dtype),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
         # If checkpoint is serialized fp8, load them.
         # Otherwise, wait until process_weights_after_loading.
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
-            scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                            weight_loader=weight_loader)
+            scale = construct_per_tensor_scale_parameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader)
 
             scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("weight_scale", scale)
 
             # INPUT ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
-                scale = PerTensorScaleParameter(data=torch.empty(
-                    len(output_partition_sizes), dtype=torch.float32),
-                                                weight_loader=weight_loader)
+                scale = construct_per_tensor_scale_parameter(
+                    data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                    weight_loader=weight_loader)
 
                 scale[:] = torch.finfo(torch.float32).min
                 layer.register_parameter("input_scale", scale)
@@ -180,8 +183,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data,
-                                          requires_grad=False)
+        # layer.weight = torch.nn.Parameter(layer.weight.data,
+        #                                   requires_grad=False)
         # If checkpoint not serialized fp8, quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,

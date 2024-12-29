@@ -9,9 +9,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear, cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale)
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
-                                           ModelWeightParameter,
-                                           PerTensorScaleParameter)
+# from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+#                                            ModelWeightParameter,
+#                                            PerTensorScaleParameter)
+from vllm.model_executor.parameter import (construct_channel_quant_scale_parameter,
+                                           construct_model_weight_parameter,
+                                           construct_per_tensor_scale_parameter)
 from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
@@ -70,7 +73,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
             layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            # layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
         else:
             raise ValueError(f"Unknown quantization strategy {self.strategy}")
@@ -91,29 +94,31 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         layer.logical_widths = output_partition_sizes
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.float8_e4m3fn),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = construct_model_weight_parameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
         # TODO: update create_xxx_parameter functions to return
         # the newly added parameters
         if self.strategy == QuantizationStrategy.CHANNEL:
-            weight_scale = ChannelQuantScaleParameter(
+            weight_scale = construct_channel_quant_scale_parameter(
                 data=torch.empty((sum(output_partition_sizes), 1),
                                  dtype=torch.float32),
                 output_dim=0,
                 weight_loader=weight_loader)
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
-            weight_scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                                   weight_loader=weight_loader)
+            weight_scale = construct_per_tensor_scale_parameter(
+                data=torch.empty(len(output_partition_sizes),
+                                 dtype=torch.float32),
+                weight_loader=weight_loader)
 
         # min requirement for fp8 kernels
         weight_scale[:] = torch.finfo(torch.float32).min
@@ -121,9 +126,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            input_scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                                  weight_loader=weight_loader)
+            input_scale = construct_per_tensor_scale_parameter(
+                data=torch.empty(len(output_partition_sizes),
+                                 dtype=torch.float32),
+                weight_loader=weight_loader)
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 

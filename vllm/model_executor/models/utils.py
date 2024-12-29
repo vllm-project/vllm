@@ -244,9 +244,9 @@ class OffloadedTensorMode(TorchDispatchMode):
         kwargs = {} if kwargs is None else kwargs
         tensor = func(*args, **kwargs)
 
-        if (func is torch.ops.aten.empty.memory_format
-                and tensor.device != "cpu"):
-            global _CPU_OFFLOAD_BYTES, _CPU_OFFLOAD_MAX_BYTES
+        global _CPU_OFFLOAD_BYTES, _CPU_OFFLOAD_MAX_BYTES
+        if ("aten.empty" in str(func) and isinstance(tensor, torch.Tensor)
+                and tensor.device != torch.device("cpu")):
             if _CPU_OFFLOAD_BYTES < _CPU_OFFLOAD_MAX_BYTES:
                 _CPU_OFFLOAD_BYTES += tensor.numel() * tensor.element_size()
                 return OffloadedTensor(tensor)
@@ -309,6 +309,14 @@ class OffloadedTensor(torch.Tensor):
             res = func(*tree_map(load, args), **tree_map(load, kwargs))
             args[0].offloaded_tensor = res.cpu()
             return args[0]
+        if str(func) == "aten.as_strided_.default":
+            res = func(*tree_map(load, args), **tree_map(load, kwargs))
+            args[0].offloaded_tensor = res.cpu()
+            return args[0]
+        if str(func) == "_C.gptq_shuffle.default":
+            func(*tree_map(load, args), **tree_map(load, kwargs))
+            args[0].offloaded_tensor = args[0].cpu()
+            return
         if func._schema.is_mutable:
             # the behavior of mutable ops for offloaded tensor
             # is not well-defined and needs case-by-case discussion

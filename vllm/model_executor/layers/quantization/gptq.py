@@ -16,6 +16,11 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
+from vllm.model_executor.parameter import (construct_packed_vllm_parameter,
+                                           construct_row_vllm_parameter,
+                                           construct_channel_quant_scale_parameter,
+                                           construct_group_quant_scale_parameter,
+                                           construct_packed_column_parameter)
 
 
 class GPTQConfig(QuantizationConfig):
@@ -140,7 +145,7 @@ class GPTQLinearMethod(LinearMethodBase):
                 scale_and_zero_size = input_size_per_partition // group_size
                 scale_and_zero_input_dim = 0
 
-        qweight = PackedvLLMParameter(
+        qweight = construct_packed_vllm_parameter(
             data=torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
                 output_size_per_partition,
@@ -152,49 +157,52 @@ class GPTQLinearMethod(LinearMethodBase):
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
-        g_idx = RowvLLMParameter(data=torch.tensor(
-            [
-                i // self.quant_config.group_size
-                for i in range(input_size_per_partition)
-            ],
-            dtype=torch.int32,
-        ),
-                                 input_dim=0,
-                                 weight_loader=weight_loader)
-        qzeros_args = {
-            "data":
-            torch.empty(
-                scale_and_zero_size,
-                output_size_per_partition // self.quant_config.pack_factor,
+        g_idx = construct_row_vllm_parameter(
+            data=torch.tensor(
+                [
+                    i // self.quant_config.group_size
+                    for i in range(input_size_per_partition)
+                ],
                 dtype=torch.int32,
             ),
+            input_dim=0,
+            weight_loader=weight_loader)
+        qzeros_args = {
+            "data":
+                torch.empty(
+                    scale_and_zero_size,
+                    output_size_per_partition // self.quant_config.pack_factor,
+                    dtype=torch.int32,
+                ),
             "weight_loader":
-            weight_loader
+                weight_loader
         }
         weight_scale_args = {
             "data":
-            torch.empty(
-                scale_and_zero_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
+                torch.empty(
+                    scale_and_zero_size,
+                    output_size_per_partition,
+                    dtype=params_dtype,
+                ),
             "weight_loader":
-            weight_loader
+                weight_loader
         }
         if scale_and_zero_input_dim is None:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
-            qzeros = PackedColumnParameter(
+            scales = construct_channel_quant_scale_parameter(
+                output_dim=1,
+                **weight_scale_args)
+            qzeros = construct_packed_column_parameter(
                 output_dim=1,
                 packed_dim=1,
                 packed_factor=self.quant_config.pack_factor,
                 **qzeros_args)
 
         else:
-            scales = GroupQuantScaleParameter(output_dim=1,
-                                              input_dim=0,
-                                              **weight_scale_args)
-            qzeros = PackedvLLMParameter(
+            scales = construct_group_quant_scale_parameter(
+                output_dim=1,
+                input_dim=0,
+                **weight_scale_args)
+            qzeros = construct_packed_vllm_parameter(
                 input_dim=0,
                 output_dim=1,
                 packed_dim=1,
@@ -210,10 +218,10 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # for torch.compile
-        layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
-        layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
-        layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
-        layer.scales = Parameter(layer.scales.data, requires_grad=False)
+        # layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
+        # layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
+        # layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
+        # layer.scales = Parameter(layer.scales.data, requires_grad=False)
 
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
