@@ -87,7 +87,7 @@ class TorchCompileWrapperWithCustomDispatcher:
             "update" in new_code.co_names:
             import depyf
             src = depyf.decompile(new_code)
-            msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified:\n" + src  # noqa
+            msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified:\n" + src  # noqa
             raise RuntimeError(msg)
 
     @contextmanager
