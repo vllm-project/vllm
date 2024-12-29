@@ -149,6 +149,7 @@ def resolve_current_platform_cls_qualname() -> str:
     for name, func in chain(builtin_platform_plugins.items(),
                             platform_plugins.items()):
         try:
+            assert callable(func)
             is_platform, platform_cls_qualname = func()
             if is_platform:
                 activated_plugins.append(name)
