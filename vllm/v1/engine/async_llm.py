@@ -294,7 +294,7 @@ class AsyncLLM(EngineClient):
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
         except Exception as e:
-            logger.error(e)
+            logger.exception("EngineCore output handler hit an error: %s", e)
             kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
