@@ -281,7 +281,6 @@ class Scheduler:
                 req.num_computed_tokens) for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
-
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_resumed_reqs=resumed_reqs_data,
