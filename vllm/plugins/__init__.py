@@ -12,8 +12,7 @@ logger = logging.getLogger(__name__)
 plugins_loaded = False
 
 
-def load_plugins_by_group(
-        group: str = 'vllm.general_plugins') -> Dict[str, Callable]:
+def load_plugins_by_group(group: str) -> Dict[str, Callable]:
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
