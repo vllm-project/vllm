@@ -465,10 +465,10 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         assert total_tiles.shape[0] == sum(batch_num_tiles)
 
         # [batch_all_tiles, vit_seq_len, c]
-        images_feature = self.vision(total_tiles)
+        images_feature = self.vision.forward_features(total_tiles)
 
         # [batch_all_tiles, hw, D]
-        images_embeds = self.projector.forward_features(images_feature)
+        images_embeds = self.projector(images_feature)
 
         _, hw, n_dim = images_embeds.shape
         h = w = int(hw**0.5)
