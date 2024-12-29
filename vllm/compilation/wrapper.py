@@ -8,7 +8,7 @@ from typing import Callable, List, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.config import CompilationLevel
+from vllm.config import CompilationLevel, get_current_vllm_config
 
 
 class TorchCompileWrapperWithCustomDispatcher:
@@ -32,9 +32,8 @@ class TorchCompileWrapperWithCustomDispatcher:
             # default compilation settings
             # compiling the forward method
 
-            from vllm.plugins import get_current_vllm_config
-            backend = get_current_vllm_config(
-            ).compilation_config.init_backend()
+            vllm_config = get_current_vllm_config()
+            backend = vllm_config.compilation_config.init_backend(vllm_config)
 
             compiled_callable = torch.compile(
                 self.forward,

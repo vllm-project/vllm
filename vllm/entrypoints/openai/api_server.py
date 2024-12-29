@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import importlib
 import inspect
 import multiprocessing
@@ -26,6 +27,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
@@ -43,8 +45,12 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest,
-                                              EmbeddingResponse, ErrorResponse,
+                                              EmbeddingResponse,
+                                              EmbeddingResponseData,
+                                              ErrorResponse,
                                               LoadLoraAdapterRequest,
+                                              PoolingRequest, PoolingResponse,
+                                              ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
                                               UnloadLoraAdapterRequest)
@@ -53,19 +59,17 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
+from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address)
+                        is_valid_ipv6_address, kill_process_tree, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
-
-if envs.VLLM_USE_V1:
-    from vllm.v1.engine.async_llm import AsyncLLMEngine  # type: ignore
-else:
-    from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -133,8 +137,8 @@ async def build_async_engine_client_from_engine_args(
     # TODO: fill out feature matrix.
     if (MQLLMEngineClient.is_unsupported_config(engine_args)
             or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
-
-        engine_config = engine_args.create_engine_config()
+        engine_config = engine_args.create_engine_config(
+            UsageContext.OPENAI_API_SERVER)
         uses_ray = getattr(AsyncLLMEngine._get_executor_cls(engine_config),
                            "uses_ray", False)
 
@@ -173,8 +177,8 @@ async def build_async_engine_client_from_engine_args(
 
         # Select random path for IPC.
         ipc_path = get_open_zmq_ipc_path()
-        logger.info("Multiprocessing frontend to use %s for IPC Path.",
-                    ipc_path)
+        logger.debug("Multiprocessing frontend to use %s for IPC Path.",
+                     ipc_path)
 
         # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
@@ -193,6 +197,14 @@ async def build_async_engine_client_from_engine_args(
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
         logger.info("Started engine process with PID %d", engine_pid)
+
+        def _cleanup_ipc_path():
+            socket_path = ipc_path.replace("ipc://", "")
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
+
+        # Ensure we clean up the local IPC socket file on exit.
+        atexit.register(_cleanup_ipc_path)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
         engine_config = engine_args.create_engine_config()
@@ -247,8 +259,8 @@ def mount_metrics(app: FastAPI):
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
-        logger.info("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
-                    prometheus_multiproc_dir_path)
+        logger.debug("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
+                     prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
 
@@ -276,8 +288,16 @@ def completion(request: Request) -> Optional[OpenAIServingCompletion]:
     return request.app.state.openai_serving_completion
 
 
+def pooling(request: Request) -> Optional[OpenAIServingPooling]:
+    return request.app.state.openai_serving_pooling
+
+
 def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
     return request.app.state.openai_serving_embedding
+
+
+def score(request: Request) -> Optional[OpenAIServingScores]:
+    return request.app.state.openai_serving_scores
 
 
 def tokenization(request: Request) -> OpenAIServingTokenization:
@@ -296,10 +316,11 @@ async def health(raw_request: Request) -> Response:
 
 
 @router.post("/tokenize")
+@with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_tokenize(request)
+    generator = await handler.create_tokenize(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -310,10 +331,11 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 
 
 @router.post("/detokenize")
+@with_cancellation
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_detokenize(request)
+    generator = await handler.create_detokenize(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -338,6 +360,7 @@ async def show_version():
 
 
 @router.post("/v1/chat/completions")
+@with_cancellation
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -358,6 +381,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 
 @router.post("/v1/completions")
+@with_cancellation
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -375,13 +399,40 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 @router.post("/v1/embeddings")
+@with_cancellation
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Embeddings API")
+        fallback_handler = pooling(raw_request)
+        if fallback_handler is None:
+            return base(raw_request).create_error_response(
+                message="The model does not support Embeddings API")
 
-    generator = await handler.create_embedding(request, raw_request)
+        logger.warning(
+            "Embeddings API will become exclusive to embedding models "
+            "in a future release. To return the hidden states directly, "
+            "use the Pooling API (`/pooling`) instead.")
+
+        res = await fallback_handler.create_pooling(request, raw_request)
+        if isinstance(res, PoolingResponse):
+            generator = EmbeddingResponse(
+                id=res.id,
+                object=res.object,
+                created=res.created,
+                model=res.model,
+                data=[
+                    EmbeddingResponseData(
+                        index=d.index,
+                        embedding=d.data,  # type: ignore
+                    ) for d in res.data
+                ],
+                usage=res.usage,
+            )
+        else:
+            generator = res
+    else:
+        generator = await handler.create_embedding(request, raw_request)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -389,6 +440,52 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
+
+
+@router.post("/pooling")
+@with_cancellation
+async def create_pooling(request: PoolingRequest, raw_request: Request):
+    handler = pooling(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Pooling API")
+
+    generator = await handler.create_pooling(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, PoolingResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+@router.post("/score")
+@with_cancellation
+async def create_score(request: ScoreRequest, raw_request: Request):
+    handler = score(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Score API")
+
+    generator = await handler.create_score(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, ScoreResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+@router.post("/v1/score")
+@with_cancellation
+async def create_score_v1(request: ScoreRequest, raw_request: Request):
+    logger.warning(
+        "To indicate that Score API is not part of standard OpenAI API, we "
+        "have moved it to `/score`. Please update your client accordingly.")
+
+    return await create_score(request, raw_request)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -466,8 +563,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_, exc):
-        chat = app.state.openai_serving_chat
-        err = chat.create_error_response(message=str(exc))
+        err = ErrorResponse(message=str(exc),
+                            type="BadRequestError",
+                            code=HTTPStatus.BAD_REQUEST)
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
@@ -475,22 +573,30 @@ def build_app(args: Namespace) -> FastAPI:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
-            root_path = "" if args.root_path is None else args.root_path
             if request.method == "OPTIONS":
                 return await call_next(request)
-            if not request.url.path.startswith(f"{root_path}/v1"):
+            url_path = request.url.path
+            if app.root_path and url_path.startswith(app.root_path):
+                url_path = url_path[len(app.root_path):]
+            if not url_path.startswith("/v1"):
                 return await call_next(request)
             if request.headers.get("Authorization") != "Bearer " + token:
                 return JSONResponse(content={"error": "Unauthorized"},
                                     status_code=401)
             return await call_next(request)
 
-    @app.middleware("http")
-    async def add_request_id(request: Request, call_next):
-        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
-        response = await call_next(request)
-        response.headers["X-Request-Id"] = request_id
-        return response
+    if args.enable_request_id_headers:
+        logger.warning(
+            "CAUTION: Enabling X-Request-Id headers in the API Server. "
+            "This can harm performance at high QPS.")
+
+        @app.middleware("http")
+        async def add_request_id(request: Request, call_next):
+            request_id = request.headers.get(
+                "X-Request-Id") or uuid.uuid4().hex
+            response = await call_next(request)
+            response.headers["X-Request-Id"] = request_id
+            return response
 
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)
@@ -547,7 +653,7 @@ def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -556,7 +662,15 @@ def init_app_state(
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
+    state.openai_serving_pooling = OpenAIServingPooling(
+        engine_client,
+        model_config,
+        base_model_paths,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+    ) if model_config.runner_type == "pooling" else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -564,7 +678,13 @@ def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embedding" else None
+    ) if model_config.task == "embed" else None
+    state.openai_serving_scores = OpenAIServingScores(
+        engine_client,
+        model_config,
+        base_model_paths,
+        request_logger=request_logger
+    ) if model_config.task == "score" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
@@ -607,11 +727,24 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     sock_addr = (args.host or "", args.port)
     sock = create_server_socket(sock_addr)
 
+    # workaround to avoid footguns where uvicorn drops requests with too
+    # many concurrent requests active
+    set_ulimit()
+
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
         raise KeyboardInterrupt("terminated")
 
     signal.signal(signal.SIGTERM, signal_handler)
+
+    # The child processes will send SIGQUIT to this process when
+    # any error happens. This process then clean up the whole tree.
+    # TODO(rob): move this into AsyncLLM.__init__ once we remove
+    # the context manager below.
+    def sigquit_handler(signum, frame):
+        kill_process_tree(os.getpid())
+
+    signal.signal(signal.SIGQUIT, sigquit_handler)
 
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)

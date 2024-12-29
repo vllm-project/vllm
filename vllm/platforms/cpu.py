@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import psutil
 import torch
@@ -19,6 +19,7 @@ logger = init_logger(__name__)
 
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
+    device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
 
@@ -37,6 +38,10 @@ class CpuPlatform(Platform):
         return psutil.virtual_memory().total
 
     @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return False
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
@@ -45,7 +50,7 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
             logger.warning(
@@ -54,6 +59,9 @@ class CpuPlatform(Platform):
             model_config.enforce_eager = True
 
         cache_config = vllm_config.cache_config
+
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
@@ -86,4 +94,15 @@ class CpuPlatform(Platform):
                            parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+            if vllm_config.speculative_config:
+                parallel_config.worker_cls = \
+                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = \
+                    "vllm.worker.cpu_worker.CPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        logger.warning("Pin memory is not supported on CPU.")
+        return False

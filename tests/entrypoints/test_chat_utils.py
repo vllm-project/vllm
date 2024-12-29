@@ -2,7 +2,6 @@ import warnings
 from typing import Optional
 
 import pytest
-from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -91,10 +90,7 @@ def _assert_mm_data_is_image_input(
     image_data = mm_data.get("image")
     assert image_data is not None
 
-    if image_count == 1:
-        assert isinstance(image_data, Image.Image)
-    else:
-        assert isinstance(image_data, list) and len(image_data) == image_count
+    assert isinstance(image_data, list) and len(image_data) == image_count
 
 
 def test_parse_chat_messages_single_image(
@@ -766,8 +762,8 @@ def test_resolve_content_format_hf_defined(model, expected_format):
      ("tool_chat_template_granite_20b_fc.jinja", "string"),
      ("tool_chat_template_hermes.jinja", "string"),
      ("tool_chat_template_internlm2_tool.jinja", "string"),
-     ("tool_chat_template_llama3.1_json.jinja", "string"),
-     ("tool_chat_template_llama3.2_json.jinja", "string"),
+     ("tool_chat_template_llama3.1_json.jinja", "openai"),
+     ("tool_chat_template_llama3.2_json.jinja", "openai"),
      ("tool_chat_template_mistral_parallel.jinja", "string"),
      ("tool_chat_template_mistral.jinja", "string")],
 )
