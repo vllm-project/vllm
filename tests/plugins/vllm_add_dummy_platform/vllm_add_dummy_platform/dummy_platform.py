@@ -1,5 +1,6 @@
 from vllm.platforms import Platform, PlatformEnum
 
+
 class DummyPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
     device_name = "DummyDevice"
