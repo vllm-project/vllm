@@ -191,6 +191,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
                 mm_kwargs,
             )
 
+            # FIXME(Isotr0py): refactor this part
             # rename `images` -> `pixel_values` to avoid confusion
             processed_outputs["input_ids"] = outputs.input_ids.unsqueeze(0)
             processed_outputs["pixel_values"] = outputs.images.unsqueeze(0)
@@ -199,7 +200,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
                     0)
             processed_outputs["num_image_tokens"] = outputs.num_image_tokens
             processed_outputs = BatchFeature(data=dict(processed_outputs),
-                                             tensor_type="pt").to(dtype)
+                                             tensor_type="pt").to(torch.float16)
         else:
             tokenizer = self._get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -467,7 +468,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         images_feature = self.vision(total_tiles)
 
         # [batch_all_tiles, hw, D]
-        images_embeds = self.projector(images_feature)
+        images_embeds = self.projector.forward_features(images_feature)
 
         _, hw, n_dim = images_embeds.shape
         h = w = int(hw**0.5)
