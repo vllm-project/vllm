@@ -180,7 +180,8 @@ class Scheduler:
             while self.waiting:
                 if has_partial_request:
                     break
-                if len(self.running + self.running_pipelined) == self.max_num_running_reqs:
+                if len(self.running +
+                       self.running_pipelined) == self.max_num_running_reqs:
                     break
                 if token_budget == 0:
                     break
@@ -261,7 +262,8 @@ class Scheduler:
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         self.running = self.running[len(scheduled_running_reqs):]
-        assert len(self.running + self.running_pipelined) <= self.max_num_running_reqs
+        assert len(self.running +
+                   self.running_pipelined) <= self.max_num_running_reqs
         # assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
         #         len(scheduled_running_reqs) == len(self.running))
 
@@ -441,6 +443,9 @@ class Scheduler:
                 if stopped:
                     continue
 
+            logger.info(
+                f"update_from_output: appending request to running: {request.request_id}"
+            )
             self.running.append(request)
         return engine_core_outputs
 
@@ -506,10 +511,14 @@ class Scheduler:
         self.finished_req_ids.add(request.request_id)
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running)
+        return len(self.waiting) + len(self.running) + len(
+            self.running_pipelined)
 
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
+
+    def has_schedulable_requests(self) -> bool:
+        return len(self.waiting) + len(self.running) > 0
 
 
 @dataclass

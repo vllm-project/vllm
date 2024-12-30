@@ -296,11 +296,21 @@ class EngineCoreProc(EngineCore):
     async def submit_microbatch(self):
         print("submit_microbatch")
         while True:
-            if not self.scheduler.has_unfinished_requests():
+            if not self.scheduler.has_schedulable_requests():
                 logger.info("submit_microbatch: no unfinished requests")
-                req = await self.input_queue.get()
-                logger.info("submit_microbatch: got req")
-                self._handle_client_request(req)
+                try:
+                    req = await asyncio.wait_for(self.input_queue.get(),
+                                                 timeout=1)
+                    logger.info("submit_microbatch: got req")
+                    self._handle_client_request(req)
+                except asyncio.TimeoutError:
+                    logger.info("submit_microbatch: no req")
+                    continue
+                except BaseException as e:
+                    logger.exception(e)
+                    raise e
+            else:
+                logger.info("submit_microbatch: got schedulable requests")
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
                 logger.info("submit_microbatch: got req")
@@ -321,7 +331,8 @@ class EngineCoreProc(EngineCore):
         while True:
             microbatch_future, scheduler_output = await self.microbatch_queue.get(
             )
-            logger.info("finish_microbatch: got microbatch_future, scheduler_output")
+            logger.info(
+                "finish_microbatch: got microbatch_future, scheduler_output")
             model_output = await microbatch_future
             engine_core_outputs = self.scheduler.update_from_output(
                 scheduler_output, model_output)
