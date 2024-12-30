@@ -13,7 +13,7 @@ from vllm.transformers_utils.processor import get_image_processor
 from vllm.utils import is_list_of
 
 from .base import MediaIO, MultiModalPlugin
-from .inputs import ImageItem, MultiModalData, MultiModalKwargs
+from .inputs import ImageItem, ModalityData, MultiModalKwargs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -44,7 +44,7 @@ class ImagePlugin(MultiModalPlugin):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[ImageItem],
+        data: ModalityData[ImageItem],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         model_config = ctx.model_config
