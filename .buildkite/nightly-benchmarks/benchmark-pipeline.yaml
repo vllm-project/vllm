@@ -14,6 +14,7 @@ steps:
 
   - label: "A100"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    priority: 1
     agents:
       queue: A100
     plugins:
@@ -31,6 +32,8 @@ steps:
             - name: devshm
               mountPath: /dev/shm
             env:
+            - name: VLLM_USE_V1
+              value: 1
             - name: VLLM_USAGE_SOURCE
               value: ci-test
             - name: HF_TOKEN
@@ -46,6 +49,7 @@ steps:
               medium: Memory
 
   - label: "H200"
+    priority: 1
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H200
@@ -58,12 +62,14 @@ steps:
         mount-buildkite-agent: true
         propagate-environment: true
         ipc: host
-        gpus: 4,5,6,7
+        gpus: all # see CUDA_VISIBLE_DEVICES for actual GPUs used
         volumes:
           - /data/benchmark-hf-cache:/root/.cache/huggingface
         environment:
+        - CUDA_VISIBLE_DEVICES=4,5,6,7
         - VLLM_USAGE_SOURCE
         - HF_TOKEN
+        - VLLM_USE_V1=1
 
   #- block: "Run H100 Benchmark"
     #key: block-h100
@@ -71,6 +77,7 @@ steps:
 
   - label: "H100"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    priority: 1
     agents:
       queue: H100
     depends_on: block-h100
@@ -89,3 +96,4 @@ steps:
         environment:
         - VLLM_USAGE_SOURCE
         - HF_TOKEN
+        - VLLM_USE_V1=1
