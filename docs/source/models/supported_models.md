@@ -591,7 +591,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `adept/fuyu-8b` etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `ChatGLMModel`
   - GLM-4V
   - T + I

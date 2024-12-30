@@ -35,7 +35,7 @@ from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges)
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -61,6 +61,7 @@ class FuyuImagePixelInputs(TypedDict):
     Shape: 
     (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)
     """
+    image_input_ids: torch.Tensor
 
 
 def _calculate_num_image_tokens(
@@ -177,7 +178,14 @@ def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
             image_patch[0]
             for image_patch in model_image_input["image_patches"]
         ])
-        new_multi_modal_data["image"] = image_patches
+        # dim0 is batch_size, dim1 is subseq_size which will always be 1
+        image_input_ids: List[List[
+            torch.Tensor]] = model_image_input["image_input_ids"]
+        image_input_ids = image_input_ids[0][0].tolist()
+        new_multi_modal_data["image"] = {
+            "image_patches": image_patches,
+            "image_input_ids": image_input_ids
+        }
 
     elif is_list_of(image_list, torch.Tensor):
         raise NotImplementedError("Embeddings input is not supported yet")
@@ -188,10 +196,6 @@ def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
     prompt = inputs.get("prompt")
     prompt_token_ids = inputs["prompt_token_ids"]
     tokenizer = cached_get_tokenizer(model_config.model)
-    # dim0 is batch_size, dim1 is subseq_size which will always be 1
-    image_input_ids: List[List[
-        torch.Tensor]] = model_image_input["image_input_ids"]
-    image_input_ids = image_input_ids[0][0].tolist()
     bos_token = tokenizer.encode("<s>", add_special_tokens=False)[1:]
     boa_token = tokenizer.encode("\x04", add_special_tokens=False)[1:]
 
@@ -199,14 +203,21 @@ def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
     new_prompt_token_ids = image_input_ids + bos_token + prompt_token_ids[
         1:] + boa_token
 
+    placeholder_ranges = [
+        PlaceholderRange(offset=0, length=len(image_input_ids))
+    ]
+
     return token_inputs(prompt=new_prompt,
                         prompt_token_ids=new_prompt_token_ids,
-                        multi_modal_data=new_multi_modal_data)
+                        multi_modal_data=new_multi_modal_data,
+                        multi_modal_placeholders={"image": placeholder_ranges})
 
 
 def input_mapper_for_fuyu(ctx: InputContext, data: object):
     model_config = ctx.model_config
     data_list = data if isinstance(data, list) else [data]
+
+    # For profiling with dummy image data
     if is_list_of(data_list, Image.Image):
         # Fuyu's image_processor can also finish token padding
         image_processor: FuyuImageProcessor = cached_get_image_processor(
@@ -217,9 +228,18 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
             image_patch[0]
             for image_patch in model_image_input["image_patches"]
         ])
+        image_input_ids = model_image_input["image_input_ids"][0][0]
+        return MultiModalKwargs({
+            "pixel_values": data,
+            "image_input_ids": image_input_ids,
+        })
 
-    # image has been processed with prompt in input processor
-    return MultiModalKwargs({"pixel_values": data})
+    # For actual inference when image has been processed with
+    # prompt in input processor
+    return MultiModalKwargs({
+        "pixel_values": data[0]["image_patches"],
+        "image_input_ids": data[0]["image_input_ids"],
+    })
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)
@@ -282,7 +302,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[FuyuImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-
+        image_input_ids = kwargs.pop("image_input_ids", None)
         if pixel_values is not None:
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image patches. "
@@ -292,6 +312,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 type="pixel_values",
                 data=self._validate_pixel_values(
                     flatten_bn(pixel_values, concat=True)),
+                image_input_ids=image_input_ids,
             )
 
         return None
@@ -301,7 +322,23 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         assert self.vision_embed_tokens is not None
         vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
-        return vision_embeddings
+        hidden_size = vision_embeddings.shape[-1]
+        vision_embeddings = vision_embeddings.reshape(-1, hidden_size)
+
+        # NOTE: image_input_ids contains both image placeholder tokens and
+        # newline tokens.
+        image_input_ids = image_input["image_input_ids"]
+        image_sizes = [
+            len(input_ids_per_image) for input_ids_per_image in image_input_ids
+        ]
+        image_input_ids = torch.flatten(image_input_ids)
+
+        image_token_mask = image_input_ids == _IMAGE_TOKEN_ID
+        full_vision_embeddings = self.language_model.get_input_embeddings(
+            image_input_ids)
+        full_vision_embeddings[image_token_mask] = vision_embeddings
+
+        return torch.split(full_vision_embeddings, image_sizes)
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -319,7 +356,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
-                _IMAGE_TOKEN_ID)
+                [_IMAGE_TOKEN_ID, _NEWLINE_TOKEN_ID])
         return inputs_embeds
 
     def forward(
