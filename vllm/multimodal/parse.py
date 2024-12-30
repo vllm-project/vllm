@@ -323,21 +323,22 @@ class MultiModalDataParser:
 
         return VideoProcessorInput(data_items)
 
-    def _get_mm_data_parsers(self) -> Mapping[str, ModalityDataParser]:
+    def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
             "audio": self._parse_audio_data,
             "image": self._parse_image_data,
             "video": self._parse_video_data,
         }
 
-    def parse_mm_data(self,mm_data: MultiModalDataDict) -> MultiModalDataItems:
-        parsers = self._get_mm_data_parsers()
+    def parse_mm_data(self,
+                      mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        subparsers = self._get_subparsers()
 
         mm_items = MultiModalDataItems()
         for k, v in mm_data.items():
-            if k not in parsers:
+            if k not in subparsers:
                 raise ValueError(f"Unsupported modality: {k}")
 
-            mm_items[k] = parsers[k](v)
+            mm_items[k] = subparsers[k](v)
 
         return mm_items

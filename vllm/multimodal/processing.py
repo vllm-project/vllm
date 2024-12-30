@@ -626,6 +626,9 @@ class BaseMultiModalProcessor(ABC):
         """
         Construct a data parser to preprocess multi-modal data items
         before passing them to :meth:`_get_hf_mm_data`.
+
+        You can support additional modalities by creating a subclass
+        of :class:`MultiModalDataParser` that has additional subparsers.
         """
         return MultiModalDataParser()
 
