@@ -20,7 +20,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
-                                           RowvLLMParameter)
+                                           RowvLLMParameter, has_any_param_feature, Features)
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -627,7 +627,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         tp_size = get_tensor_model_parallel_world_size()
 
-        if isinstance(param, BlockQuantScaleParameter):
+        if has_any_param_feature(param, Features.BlockQuantScale):
             from vllm.model_executor.layers.quantization.fp8 import (
                 Fp8LinearMethod, Fp8MoEMethod)
             assert self.quant_method is not None
