@@ -1,8 +1,9 @@
 """Custom input builders for edge-cases in different models."""
 from typing import Callable
 
-from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
-                                   resize_video, sample_frames_from_video)
+from vllm.multimodal.image import rescale_image_size
+from vllm.multimodal.video import (rescale_video_size, resize_video,
+                                   sample_frames_from_video)
 
 from .....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from .builders import build_multi_image_inputs, build_single_image_inputs

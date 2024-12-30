@@ -308,7 +308,20 @@ def run_mllama(question: str, modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    prompt = f"<|image|><|begin_of_text|>{question}"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [{
+        "role":
+        "user",
+        "content": [{
+            "type": "image"
+        }, {
+            "type": "text",
+            "text": f"{question}"
+        }]
+    }]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           add_generation_prompt=True,
+                                           tokenize=False)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -447,7 +460,6 @@ def run_qwen_vl(question: str, modality: str):
 
 # Qwen2-VL
 def run_qwen2_vl(question: str, modality: str):
-    assert modality == "image"
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
@@ -463,8 +475,13 @@ def run_qwen2_vl(question: str, modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+              f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
               f"{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
     stop_token_ids = None

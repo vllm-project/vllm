@@ -461,8 +461,54 @@ class MolmoAttention(nn.Module):
         return output
 
 
-class MolmoMLP(nn.Module):
+class SwiGLU(nn.Module):
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, gate = x.chunk(2, dim=-1)
+        # Note that the order is reversed compared to
+        # SiluAndMul.
+        return x * F.silu(gate)
+
+
+class LanuageModelMLP(nn.Module):
     """Molmo's LLM mlp."""
+
+    def __init__(self,
+                 config: PretrainedConfig,
+                 input_dim: Optional[int] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size // 2
+
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_dim or self.hidden_size,
+            [self.intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+        )
+        # Activation function.
+        self.act_fn = SwiGLU()
+        # Feed-forward output projection.
+        self.down_proj = RowParallelLinear(
+            self.intermediate_size,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class ImageProjectorMLP(nn.Module):
+    """Molmo's image_projector mlp."""
 
     def __init__(
         self,
@@ -474,14 +520,12 @@ class MolmoMLP(nn.Module):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size // 2
 
-        # Feed-forward input projection.
-        self.gate_up_proj = MergedColumnParallelLinear(
+        self.merged_linear = MergedColumnParallelLinear(
             input_dim or self.hidden_size,
             [self.intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
         )
-
         # Activation function.
         self.act_fn = SiluAndMul()
 
@@ -497,7 +541,7 @@ class MolmoMLP(nn.Module):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        gate_up, _ = self.gate_up_proj(x)
+        gate_up, _ = self.merged_linear(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -520,7 +564,7 @@ class MolmoDecoderLayer(nn.Module):
                                         prefix=f"{prefix}.self_attn")
 
         # MLP block.
-        self.mlp = MolmoMLP(config, quant_config=quant_config)
+        self.mlp = LanuageModelMLP(config, quant_config=quant_config)
 
         # LayerNorm
         assert config.layer_norm_type == "rms"
@@ -612,7 +656,7 @@ class MolmoVisionBackbone(nn.Module):
             vision_config,
             nlayers=len(self.vit_layers),
             quant_config=quant_config)
-        self.image_projector = MolmoMLP(
+        self.image_projector = ImageProjectorMLP(
             config,
             input_dim=vision_config.image_emb_dim,
             quant_config=quant_config,
@@ -714,8 +758,8 @@ class MolmoVisionBackbone(nn.Module):
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+            ("merged_linear", "gate_proj", 0),
+            ("merged_linear", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
@@ -836,10 +880,6 @@ class MolmoModel(nn.Module):
         loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
-            if "gate_up_proj" in name:
-                up_proj, gate_proj = loaded_weight.chunk(2, dim=0)
-                loaded_weight = torch.cat([gate_proj, up_proj], dim=0)
-
             if name.endswith(".bias") and name not in params_dict:
                 continue
             if is_pp_missing_parameter(name, self):
@@ -928,7 +968,11 @@ def image_input_mapper_for_molmo(
     data: object,
 ):
     if isinstance(data, list):
+        assert len(data) == 1, "Molmo supports only one image per prompt."
         data = data[0]
+
+    # Remove unused dummy PIL image
+    data.pop('raw_mm_data', None)
     return MultiModalKwargs(data)
 
 
@@ -974,6 +1018,7 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     dummy_imgdata = {
         "images": out["images"],
         "image_input_idx": out["image_input_idx"],
+        "raw_mm_data": dummy_image,
     }
     if "image_masks" in out:
         dummy_imgdata["image_masks"] = out["image_masks"]
@@ -1117,6 +1162,40 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_molmo)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
 class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            # vision backbone mapping
+            "image_projector.w1.": "image_projector.gate_proj.",
+            "image_projector.w3.": "image_projector.up_proj.",
+            "image_projector.w2.": "image_projector.down_proj.",
+            # language backbone mapping
+            "att_proj": "self_attn.qkv_proj",
+            "attn_out": "self_attn.o_proj",
+            "q_norm": "self_attn.q_norm",
+            "k_norm": "self_attn.k_norm",
+            "ff_proj": "mlp.gate_up_proj",
+            "ff_out": "mlp.down_proj",
+            "attn_norm": "input_layernorm",
+            "ff_norm": "post_attention_layernorm",
+        },
+        orig_to_new_prefix={
+            # vision backbone mapping
+            "model.vision_backbone.": "vision_backbone.",
+            # language backbone mapping
+            "model.transformer.blocks.": "model.layers.",
+            "model.transformer.ln_f.": "model.norm.",
+            # lm_head is renamed to model.transformer.mlp.down_proj firstly,
+            # we need to run a second renaming for it
+            "model.transformer.mlp.down_proj.": "lm_head.",
+        },
+    )
+
+    # BitandBytes specific attributes
+    bitsandbytes_stacked_params_mapping = {
+        "gate_proj": ("merged_linear", 0),
+        "up_proj": ("merged_linear", 1),
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1293,36 +1372,10 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_substr={
-                # vision backbone mapping
-                "image_projector.w1.": "image_projector.gate_proj.",
-                "image_projector.w3.": "image_projector.up_proj.",
-                "image_projector.w2.": "image_projector.down_proj.",
-                # language backbone mapping
-                "att_proj": "self_attn.qkv_proj",
-                "attn_out": "self_attn.o_proj",
-                "q_norm": "self_attn.q_norm",
-                "k_norm": "self_attn.k_norm",
-                "ff_proj": "mlp.gate_up_proj",
-                "ff_out": "mlp.down_proj",
-                "attn_norm": "input_layernorm",
-                "ff_norm": "post_attention_layernorm",
-            },
-            orig_to_new_prefix={
-                # vision backbone mapping
-                "model.vision_backbone.": "vision_backbone.",
-                # language backbone mapping
-                "model.transformer.blocks.": "model.layers.",
-                "model.transformer.ln_f.": "model.norm.",
-                # lm_head is renamed to model.transformer.mlp.down_proj firstly,
-                # we need to run a second renaming for it
-                "model.transformer.mlp.down_proj.": "lm_head.",
-            },
-        )
+
         loader = AutoWeightsLoader(self)
         weights = _get_weights_with_merged_embedding(weights)
-        return loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _get_weights_with_merged_embedding(

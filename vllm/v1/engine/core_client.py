@@ -1,19 +1,19 @@
-import os
-import weakref
-from typing import List, Optional
+from typing import List, Optional, Type
 
 import msgspec
 import zmq
 import zmq.asyncio
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import get_open_zmq_ipc_path, kill_process_tree
+from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
-from vllm.v1.engine.core import (EngineCore, EngineCoreProc,
-                                 EngineCoreProcHandle)
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
 
@@ -31,10 +31,11 @@ class EngineCoreClient:
 
     @staticmethod
     def make_client(
-        *args,
         multiprocess_mode: bool,
         asyncio_mode: bool,
-        **kwargs,
+        vllm_config: VllmConfig,
+        executor_class: Type[Executor],
+        log_stats: bool = False,
     ) -> "EngineCoreClient":
 
         # TODO: support this for debugging purposes.
@@ -44,12 +45,12 @@ class EngineCoreClient:
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            return AsyncMPClient(*args, **kwargs)
+            return AsyncMPClient(vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
-            return SyncMPClient(*args, **kwargs)
+            return SyncMPClient(vllm_config, executor_class, log_stats)
 
-        return InprocClient(*args, **kwargs)
+        return InprocClient(vllm_config, executor_class, log_stats)
 
     def shutdown(self):
         pass
@@ -128,9 +129,10 @@ class MPClient(EngineCoreClient):
 
     def __init__(
         self,
-        *args,
         asyncio_mode: bool,
-        **kwargs,
+        vllm_config: VllmConfig,
+        executor_class: Type[Executor],
+        log_stats: bool = False,
     ):
         # Serialization setup.
         self.encoder = PickleEncoder()
@@ -143,7 +145,6 @@ class MPClient(EngineCoreClient):
             self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
         # Path for IPC.
-        ready_path = get_open_zmq_ipc_path()
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
 
@@ -156,47 +157,40 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
-        self.proc_handle: Optional[EngineCoreProcHandle]
-        self.proc_handle = EngineCoreProc.make_engine_core_process(
-            *args,
-            input_path=
-            input_path,  # type: ignore[misc]  # MyPy incorrectly flags duplicate keywords
-            output_path=output_path,  # type: ignore[misc]
-            ready_path=ready_path,  # type: ignore[misc]
-            **kwargs,
-        )
-        self._finalizer = weakref.finalize(self, self.shutdown)
+        self.proc_handle: Optional[BackgroundProcHandle]
+        self.proc_handle = BackgroundProcHandle(
+            input_path=input_path,
+            output_path=output_path,
+            process_name="EngineCore",
+            target_fn=EngineCoreProc.run_engine_core,
+            process_kwargs={
+                "vllm_config": vllm_config,
+                "executor_class": executor_class,
+                "log_stats": log_stats,
+            })
 
     def shutdown(self):
         # Shut down the zmq context.
         self.ctx.destroy(linger=0)
 
         if hasattr(self, "proc_handle") and self.proc_handle:
-            # Shutdown the process if needed.
-            if self.proc_handle.proc.is_alive():
-                self.proc_handle.proc.terminate()
-                self.proc_handle.proc.join(5)
-
-                if self.proc_handle.proc.is_alive():
-                    kill_process_tree(self.proc_handle.proc.pid)
-
-            # Remove zmq ipc socket files
-            ipc_sockets = [
-                self.proc_handle.ready_path, self.proc_handle.output_path,
-                self.proc_handle.input_path
-            ]
-            for ipc_socket in ipc_sockets:
-                socket_file = ipc_socket.replace("ipc://", "")
-                if os and os.path.exists(socket_file):
-                    os.remove(socket_file)
+            self.proc_handle.shutdown()
             self.proc_handle = None
 
 
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, asyncio_mode=False, **kwargs)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 executor_class: Type[Executor],
+                 log_stats: bool = False):
+        super().__init__(
+            asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=log_stats,
+        )
 
     def get_output(self) -> List[EngineCoreOutput]:
 
@@ -225,8 +219,16 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, asyncio_mode=True, **kwargs)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 executor_class: Type[Executor],
+                 log_stats: bool = False):
+        super().__init__(
+            asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=log_stats,
+        )
 
     async def get_output_async(self) -> List[EngineCoreOutput]:
 

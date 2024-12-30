@@ -141,14 +141,14 @@ class AlwaysHitShapeEnv:
         return ""
 
 
-def wrap_inductor(graph,
+def wrap_inductor(graph: fx.GraphModule,
                   example_inputs,
                   additional_inductor_config,
                   compilation_config: CompilationConfig,
                   graph_index: int = 0,
                   num_graphs: int = 1,
                   runtime_shape: Optional[int] = None,
-                  use_inductor: bool = True):
+                  use_inductor: bool = True) -> Any:
     if graph_index == 0:
         # before compiling the first graph, record the start time
         global compilation_start_time
@@ -208,7 +208,7 @@ def wrap_inductor(graph,
         from torch._inductor.compile_fx import graph_returns_tuple
         returns_tuple = graph_returns_tuple(graph)
 
-        # this is the graph we return to Dynamo to run
+        # this is the callable we return to Dynamo to run
         def compiled_graph(*args):
             # convert args to list
             list_args = list(args)
@@ -247,7 +247,7 @@ def wrap_inductor(graph,
             # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221 # noqa
             return
 
-        def _get_shape_env():
+        def _get_shape_env() -> AlwaysHitShapeEnv:
             return AlwaysHitShapeEnv()
 
         with patch(# for hijacking the hash of the compiled graph
@@ -537,6 +537,7 @@ class VllmBackend:
             example_inputs[x].clone() for x in self.sym_tensor_indices
         ]
 
+        # this is the callable we return to Dynamo to run
         def copy_and_call(*args):
             list_args = list(args)
             for i, index in enumerate(self.sym_tensor_indices):

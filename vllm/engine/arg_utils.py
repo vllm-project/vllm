@@ -197,6 +197,8 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
+    generation_config: Optional[str] = None
+
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
@@ -314,6 +316,8 @@ class EngineArgs:
             '* "tensorizer" will load the weights using tensorizer from '
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
+            '* "runai_streamer" will load the Safetensors weights using Run:ai'
+            'Model Streamer \n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
         parser.add_argument(
@@ -369,7 +373,7 @@ class EngineArgs:
             choices=['outlines', 'lm-format-enforcer', 'xgrammar'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
-            'https://github.com/outlines-dev/outlines,'
+            'https://github.com/outlines-dev/outlines, '
             'https://github.com/mlc-ai/xgrammar, and '
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
@@ -942,6 +946,16 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
 
+        parser.add_argument(
+            "--generation-config",
+            type=nullable_str,
+            default=None,
+            help="The folder path to the generation config. "
+            "Defaults to None, will use the default generation config in vLLM. "
+            "If set to 'auto', the generation config will be automatically "
+            "loaded from model. If set to a folder path, the generation config "
+            "will be loaded from the specified folder path.")
+
         return parser
 
     @classmethod
@@ -985,7 +999,8 @@ class EngineArgs:
             disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
-            logits_processor_pattern=self.logits_processor_pattern)
+            logits_processor_pattern=self.logits_processor_pattern,
+            generation_config=self.generation_config)
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(
@@ -1133,7 +1148,7 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:

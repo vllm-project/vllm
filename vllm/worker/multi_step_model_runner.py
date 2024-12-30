@@ -406,8 +406,9 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             if not cont:
                 break
 
-    def _final_process_outputs(self, model_input: StatefulModelInput,
-                               output_proc_callback: Optional[Callable]):
+    def _final_process_outputs(
+            self, model_input: StatefulModelInput,
+            output_proc_callback: Optional[Callable]) -> List[SamplerOutput]:
         assert model_input.frozen_model_input is not None
 
         has_async_callback = output_proc_callback is not None
@@ -594,8 +595,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # should be [SamplerOutput]
         return output
 
-    def _update_sampling_metadata(self, sampling_metadata, num_seqs,
-                                  num_queries):
+    def _update_sampling_metadata(self, sampling_metadata: SamplingMetadata,
+                                  num_seqs: Optional[int], num_queries: int):
 
         assert sampling_metadata.num_prompts == 0
         assert len(sampling_metadata.seq_groups) == num_queries
@@ -820,7 +821,7 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/usage/compatibility_matrix.md
         # If the feature combo become valid
         # (Check for Guided Decoding)
         if seq_group.sampling_params.logits_processors:
@@ -850,13 +851,13 @@ def _pythonize_sampler_output(
         seq_ids = seq_group.seq_ids
         next_token_ids = sample_result
         parent_ids = [0]
+        seq_outputs: List[SequenceOutput]
 
         if cache is not None:
             completion_seq_group_output: CompletionSequenceGroupOutput = \
                 cache.cached_completion_seq_group_output.get_object()
             completion_seq_group_output.samples.clear()
-            seq_outputs: List[
-                SequenceOutput] = completion_seq_group_output.samples
+            seq_outputs = completion_seq_group_output.samples
         else:
             seq_outputs = []
 
