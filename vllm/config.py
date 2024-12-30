@@ -3,7 +3,6 @@ import copy
 import enum
 import hashlib
 import json
-import os
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -2880,29 +2879,6 @@ class CompilationConfig(BaseModel):
         # TODO: pass user-specified backend to piecewise compilation
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
-
-        if not self.cache_dir:
-            # no provided cache dir, generate one based on the known factors
-            # that affects the compilation. if none of the factors change,
-            # the cache dir will be the same so that we can reuse the compiled
-            # graph.
-            hash_key = vllm_config.compute_hash()
-            cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key,
-                f"rank_{vllm_config.parallel_config.rank}")
-            os.makedirs(cache_dir, exist_ok=True)
-            self.cache_dir = cache_dir
-
-            disabled = envs.VLLM_DISABLE_COMPILE_CACHE
-            from vllm.compilation.backends import InductorHashCache
-            self.inductor_hash_cache: InductorHashCache = InductorHashCache(
-                self.cache_dir, disabled=disabled)
-            if disabled:
-                logger.info("vLLM's torch.compile cache is disabled.")
-            else:
-                logger.info(
-                    "Using cache directory: %s for vLLM's torch.compile",
-                    self.cache_dir)
 
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
