@@ -493,8 +493,8 @@ class VllmBackend:
                 sorted(self.compilation_config.traced_files))
             self.compilation_config.traced_files.clear()
             logger.debug(
-                "Traced files: %s (to be considered for compilation cache)",
-                forward_code_files)
+                "Traced files (to be considered for compilation cache):\n%s",
+                "\n".join(forward_code_files))
             hash_content = []
             for filepath in forward_code_files:
                 hash_content.append(filepath)
