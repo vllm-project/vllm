@@ -1,4 +1,11 @@
+import msgspec
+import pickle
+import psutil
+import signal
+import zmq
+
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -8,7 +15,10 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.utils import get_exception_traceback, make_zmq_socket
+from vllm.v1.engine import (EngineCoreAbort, EngineCoreOutput,
+                            EngineCoreOutputs, EngineCoreRequest,
+                            EngineCoreRequestType)
 
 logger = init_logger(__name__)
 
@@ -271,3 +281,143 @@ class Detokenizer:
 
         # Return to EngineClient.
         return request_outputs, requests_to_abort
+
+
+class DetokenizerProc(Detokenizer):
+    """ZMQ-wrapper for running Detokenizer in background process."""
+
+    def __init__(
+        self,
+        *args,
+        input_path: str,
+        output_path: str,
+        to_engine_core_path: str,
+        ready_pipe: Connection,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.input_path = input_path
+        self.output_path = output_path
+        self.to_engine_core_path = to_engine_core_path
+
+        # Send Readiness signal to DetokenizerClient.
+        ready_pipe.send({"status": "READY"})
+
+    @staticmethod
+    def run_detokenizer(*args, **kwargs):
+        """Launch Detokenizer busy loop in background process."""
+
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
+
+        def signal_handler(signum, frame):
+            nonlocal shutdown_requested
+            if not shutdown_requested:
+                shutdown_requested = True
+                raise SystemExit()
+
+        # Either SIGTERM or SIGINT will terminate the engine_core
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        parent_process = psutil.Process().parent()
+
+        detokenizer = None
+        try:
+            detokenizer = DetokenizerProc(*args, **kwargs)
+            detokenizer.run_busy_loop()
+
+        except SystemExit:
+            logger.debug("Detokenizer interrupted.")
+
+        except Exception:
+            traceback = get_exception_traceback()
+            logger.error("Detokenizer hit an exception: %s", traceback)
+            parent_process.send_signal(signal.SIGQUIT)
+
+        finally:
+            if detokenizer is not None:
+                detokenizer = None
+
+    def _handle_from_llm_engine(
+            self,
+            request_bytes: bytes,
+            to_engine_core: zmq.Socket,  # type: ignore[name-defined]
+    ) -> None:
+        """Handle inputs from the LLM Engine."""
+
+        req = pickle.loads(request_bytes)
+
+        if isinstance(req, EngineCoreRequest):
+            self.add_request(req)
+        elif isinstance(req, EngineCoreAbort):
+            self.abort_requests(req.request_ids)
+        else:
+            raise ValueError(f"Unknown type: {req}")
+
+        # Forward to EngineCore.
+        to_engine_core.send(request_bytes)
+
+    def _handle_from_engine_core(
+        self,
+        output_bytes: bytes,
+        to_engine_core: zmq.Socket,  # type: ignore[name-defined]
+        to_llm_engine: zmq.Socket,  # type: ignore[name-defined]
+        decoder: msgspec.msgpack.Decoder,
+    ) -> None:
+        """Handle Outputs from the EngineCore."""
+
+        # Deserialize the EngineOutput (use msgpack for performance).
+        outputs: List[EngineCoreOutput] = decoder.decode(output_bytes).outputs
+
+        # Detokenize.
+        request_outputs, requests_to_abort = self.step(outputs)
+
+        # Send request outputs back to LLMEngine.
+        if request_outputs:
+            to_llm_engine.send_pyobj(request_outputs)
+
+        # Abort requests that finished due to stop strings in EngineCore.
+        if requests_to_abort:
+            to_engine_core.send_pyobj(EngineCoreAbort(requests_to_abort))
+
+    def run_busy_loop(self):
+        """Core busy loop of the Detokenizer."""
+
+        decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+
+        ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+        try:
+            input_socket = make_zmq_socket(ctx, self.input_path,
+                                           zmq.constants.PULL)
+            to_llm_engine = make_zmq_socket(ctx, self.output_path,
+                                            zmq.constants.PUSH)
+            to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path,
+                                             zmq.constants.PUSH)
+
+            while True:
+                (msg_type, msg_bytes) = input_socket.recv_multipart()
+
+                # Handle message from LLMEngine (Abort or New Request).
+                if msg_type == EngineCoreRequestType.FROM_ENGINE.value:
+                    self._handle_from_llm_engine(msg_bytes, to_engine_core)
+
+                # Handle message from EngineCore (EngineCoreOutputs).
+                elif msg_type == EngineCoreRequestType.FROM_ENGINE_CORE.value:
+                    self._handle_from_engine_core(
+                        output_bytes=msg_bytes,
+                        to_engine_core=to_engine_core,
+                        to_llm_engine=to_llm_engine,
+                        decoder=decoder,
+                    )
+                else:
+                    raise ValueError(f"Unknown Message Type: {msg_type}")
+
+        except KeyboardInterrupt:
+            logger.debug("Got Keyboard Interrupt.")
+
+        finally:
+            ctx.destroy(linger=0)

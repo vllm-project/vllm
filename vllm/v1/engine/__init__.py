@@ -57,6 +57,11 @@ class EngineCoreOutputs(
 
 
 @dataclass
+class EngineCoreAbort:
+    request_ids: List[str]
+
+
+@dataclass
 class EngineCoreProfile:
     is_start: bool
 
@@ -66,9 +71,9 @@ class EngineCoreRequestType(enum.Enum):
     Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
     """
-    ADD = b'\x00'
-    ABORT = b'\x01'
-    PROFILE = b'\x02'
+    FROM_ENGINE_CORE = b'\x00'
+    FROM_ENGINE = b'\x01'
 
 
-EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, List[str]]
+EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile,
+                               EngineCoreAbort]
