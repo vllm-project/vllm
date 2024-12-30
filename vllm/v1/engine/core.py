@@ -166,12 +166,12 @@ class EngineCoreProc(EngineCore):
             self.loop.set_debug(True)
             self.input_queue: asyncio.Queue[
                 EngineCoreRequestUnion] = asyncio.Queue()
-            self.microbatch_queue = asyncio.Queue(vllm_config.parallel_config.pipeline_parallel_size)
+            self.microbatch_queue = asyncio.Queue(
+                vllm_config.parallel_config.pipeline_parallel_size)
         else:
             self.input_queue: queue.Queue[
                 EngineCoreRequestUnion] = queue.Queue()
-        self.output_queue: queue.Queue[
-            List[EngineCoreOutput]] = queue.Queue()
+        self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
                          daemon=True).start()
@@ -297,33 +297,37 @@ class EngineCoreProc(EngineCore):
         print("submit_microbatch")
         while True:
             if not self.scheduler.has_unfinished_requests():
-                print("submit_microbatch: no unfinished requests")
+                logger.info("submit_microbatch: no unfinished requests")
                 req = await self.input_queue.get()
-                print("submit_microbatch: got req")
+                logger.info("submit_microbatch: got req")
                 self._handle_client_request(req)
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
-                print("submit_microbatch: got req")
+                logger.info("submit_microbatch: got req")
                 self._handle_client_request(req)
-            print("submit_microbatch: scheduler.schedule")
+            logger.info("submit_microbatch: scheduler.schedule")
             scheduler_output = self.scheduler.schedule()
-            print("submit_microbatch: scheduler.schedule: got scheduler_output")
+            logger.info(
+                "submit_microbatch: scheduler.schedule: got scheduler_output")
             microbatch_future = await self.model_executor.submit_microbatch(
                 scheduler_output)
-            print("submit_microbatch: scheduler.schedule: got microbatch_future")
+            logger.info(
+                "submit_microbatch: scheduler.schedule: got microbatch_future")
             await self.microbatch_queue.put(
                 (microbatch_future, scheduler_output))
 
     async def finish_microbatch(self):
-        print("finish_microbatch")
+        logger.info("finish_microbatch")
         while True:
             microbatch_future, scheduler_output = await self.microbatch_queue.get(
             )
-            print("finish_microbatch: got microbatch_future, scheduler_output")
+            logger.info("finish_microbatch: got microbatch_future, scheduler_output")
             model_output = await microbatch_future
             engine_core_outputs = self.scheduler.update_from_output(
                 scheduler_output, model_output)
+            logger.info("finish_microbatch: scheduler.update_from_output")
             self.output_queue.put_nowait(engine_core_outputs)
+            logger.info("finish_microbatch: put engine_core_outputs")
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
@@ -409,7 +413,8 @@ class EngineCoreProc(EngineCore):
                 print("process_input_socket: got request")
                 # Push to input queue for core busy loop.
                 if self.async_engine_core:
-                    self.loop.call_soon_threadsafe(self.input_queue.put_nowait, request)
+                    self.loop.call_soon_threadsafe(self.input_queue.put_nowait,
+                                                   request)
                 else:
                     self.input_queue.put_nowait(request)
                 print("process_input_socket: put request")
