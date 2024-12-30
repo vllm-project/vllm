@@ -633,7 +633,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `llava-hf/llava-v1.6-mistral-7b-hf`, `llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `LlavaNextVideoForConditionalGeneration`
   - LLaVA-NeXT-Video
   - T + V
