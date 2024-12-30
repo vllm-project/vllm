@@ -271,6 +271,20 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
+    def get_num_common_prefix_blocks(
+        self,
+        request: Request,
+        num_requests: int,
+    ) -> int:
+        blocks = self.req_to_blocks[request.request_id]
+        num_common_blocks = 0
+        for block in blocks:
+            if block.ref_cnt >= num_requests:
+                num_common_blocks += 1
+            else:
+                break
+        return num_common_blocks
+
     def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
