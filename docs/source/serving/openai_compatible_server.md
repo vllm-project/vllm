@@ -2,7 +2,7 @@
 
 vLLM provides an HTTP server that implements OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API, and more!
 
-You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](deploying_with_docker.rst):
+You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](deploying_with_docker.md):
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
@@ -30,20 +30,22 @@ print(completion.choices[0].message)
 We currently support the following OpenAI APIs:
 
 - [Completions API](#completions-api) (`/v1/completions`)
-  - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`).
+  - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`).
   - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
-  - Only applicable to [text generation models](../models/generative_models.rst) (`--task generate`) with a [chat template](#chat-template).
+  - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`) with a [chat template](#chat-template).
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
-  - Only applicable to [embedding models](../models/pooling_models.rst) (`--task embed`).
+  - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
 
 In addition, we have the following custom APIs:
 
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
   - Applicable to any model with a tokenizer.
+- [Pooling API](#pooling-api) (`/pooling`)
+  - Applicable to all [pooling models](../models/pooling_models.md).
 - [Score API](#score-api) (`/score`)
-  - Only applicable to [cross-encoder models](../models/pooling_models.rst) (`--task score`).
+  - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
 
 (chat-template)=
 ## Chat Template
@@ -63,8 +65,7 @@ and all chat requests will error.
 vllm serve <model> --chat-template ./path-to-chat-template.jinja
 ```
 
-vLLM community provides a set of chat templates for popular models. You can find them in the examples
-directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
+vLLM community provides a set of chat templates for popular models. You can find them under the <gh-dir:examples> directory.
 
 With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
 both a `type` and a `text` field. An example is provided below:
@@ -111,7 +112,13 @@ completion = client.chat.completions.create(
 
 ## Extra HTTP Headers
 
-Only `X-Request-Id` HTTP request header is supported for now.
+Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
+with `--enable-request-id-headers`. 
+
+> Note that enablement of the headers can impact performance significantly at high QPS
+> rates. We recommend implementing HTTP headers at the router level (e.g. via Istio),
+> rather than within the vLLM layer for this reason.
+> See https://github.com/vllm-project/vllm/pull/11529 for more details.
 
 ```python
 completion = client.chat.completions.create(
@@ -179,11 +186,14 @@ The order of priorities is `command line > config file values > defaults`.
 (completions-api)=
 ### Completions API
 
-Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/completions) for more details.
+Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+Code example: <gh-file:examples/openai_completion_client.py>
 
 #### Extra parameters
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -200,18 +210,21 @@ The following extra parameters are supported:
 ```
 
 (chat-api)=
-### Chat Completions API
+### Chat API
 
-Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/chat) for more details.
+Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
-see our [Multimodal Inputs](../usage/multimodal_inputs.rst) guide for more information.
+see our [Multimodal Inputs](../usage/multimodal_inputs.md) guide for more information.
 - *Note: `image_url.detail` parameter is not supported.*
+
+Code example: <gh-file:examples/openai_chat_completion_client.py>
 
 #### Extra parameters
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -230,18 +243,21 @@ The following extra parameters are supported:
 (embeddings-api)=
 ### Embeddings API
 
-Refer to [OpenAI's API reference](https://platform.openai.com/docs/api-reference/embeddings) for more details.
+Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat Completions API](#chat-api))
+If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
 which will be treated as a single prompt to the model.
 
 ```{tip}
-This enables multi-modal inputs to be passed to embedding models, see [this page](../usage/multimodal_inputs.rst) for details.
+This enables multi-modal inputs to be passed to embedding models, see [this page](#multimodal-inputs) for details.
 ```
+
+Code example: <gh-file:examples/openai_embedding_client.py>
 
 #### Extra parameters
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -268,19 +284,30 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 (tokenizer-api)=
 ### Tokenizer API
 
-The Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
+Our Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
 It consists of two endpoints:
 
 - `/tokenize` corresponds to calling `tokenizer.encode()`.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
+(pooling-api)=
+### Pooling API
+
+Our Pooling API encodes input prompts using a [pooling model](../models/pooling_models.md) and returns the corresponding hidden states.
+
+The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
+
+Code example: <gh-file:examples/openai_pooling_client.py>
+
 (score-api)=
 ### Score API
 
-The Score API applies a cross-encoder model to predict scores for sentence pairs.
+Our Score API applies a cross-encoder model to predict scores for sentence pairs.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
 You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+
+Code example: <gh-file:examples/openai_cross_encoder_score.py>
 
 #### Single inference
 
@@ -418,7 +445,7 @@ Response:
 
 #### Extra parameters
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python

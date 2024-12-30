@@ -33,6 +33,7 @@ class MockModelConfig:
     hf_config = MockHFConfig()
     logits_processor_pattern = None
     diff_sampling_param: Optional[dict] = None
+    allowed_local_media_path: str = ""
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}

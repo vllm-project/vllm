@@ -45,8 +45,11 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest,
-                                              EmbeddingResponse, ErrorResponse,
+                                              EmbeddingResponse,
+                                              EmbeddingResponseData,
+                                              ErrorResponse,
                                               LoadLoraAdapterRequest,
+                                              PoolingRequest, PoolingResponse,
                                               ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
@@ -56,6 +59,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
@@ -64,7 +68,7 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address)
+                        is_valid_ipv6_address, kill_process_tree, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -284,6 +288,10 @@ def completion(request: Request) -> Optional[OpenAIServingCompletion]:
     return request.app.state.openai_serving_completion
 
 
+def pooling(request: Request) -> Optional[OpenAIServingPooling]:
+    return request.app.state.openai_serving_pooling
+
+
 def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
     return request.app.state.openai_serving_embedding
 
@@ -395,14 +403,58 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Embeddings API")
+        fallback_handler = pooling(raw_request)
+        if fallback_handler is None:
+            return base(raw_request).create_error_response(
+                message="The model does not support Embeddings API")
 
-    generator = await handler.create_embedding(request, raw_request)
+        logger.warning(
+            "Embeddings API will become exclusive to embedding models "
+            "in a future release. To return the hidden states directly, "
+            "use the Pooling API (`/pooling`) instead.")
+
+        res = await fallback_handler.create_pooling(request, raw_request)
+        if isinstance(res, PoolingResponse):
+            generator = EmbeddingResponse(
+                id=res.id,
+                object=res.object,
+                created=res.created,
+                model=res.model,
+                data=[
+                    EmbeddingResponseData(
+                        index=d.index,
+                        embedding=d.data,  # type: ignore
+                    ) for d in res.data
+                ],
+                usage=res.usage,
+            )
+        else:
+            generator = res
+    else:
+        generator = await handler.create_embedding(request, raw_request)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     elif isinstance(generator, EmbeddingResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+@router.post("/pooling")
+@with_cancellation
+async def create_pooling(request: PoolingRequest, raw_request: Request):
+    handler = pooling(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Pooling API")
+
+    generator = await handler.create_pooling(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, PoolingResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -533,12 +585,18 @@ def build_app(args: Namespace) -> FastAPI:
                                     status_code=401)
             return await call_next(request)
 
-    @app.middleware("http")
-    async def add_request_id(request: Request, call_next):
-        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
-        response = await call_next(request)
-        response.headers["X-Request-Id"] = request_id
-        return response
+    if args.enable_request_id_headers:
+        logger.warning(
+            "CAUTION: Enabling X-Request-Id headers in the API Server. "
+            "This can harm performance at high QPS.")
+
+        @app.middleware("http")
+        async def add_request_id(request: Request, call_next):
+            request_id = request.headers.get(
+                "X-Request-Id") or uuid.uuid4().hex
+            response = await call_next(request)
+            response.headers["X-Request-Id"] = request_id
+            return response
 
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)
@@ -605,7 +663,7 @@ def init_app_state(
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     ) if model_config.runner_type == "generate" else None
-    state.openai_serving_embedding = OpenAIServingEmbedding(
+    state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
         base_model_paths,
@@ -613,13 +671,20 @@ def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.runner_type == "pooling" else None
+    state.openai_serving_embedding = OpenAIServingEmbedding(
+        engine_client,
+        model_config,
+        base_model_paths,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+    ) if model_config.task == "embed" else None
     state.openai_serving_scores = OpenAIServingScores(
         engine_client,
         model_config,
         base_model_paths,
         request_logger=request_logger
-    ) if (model_config.runner_type == "pooling" \
-          and model_config.is_cross_encoder) else None
+    ) if model_config.task == "score" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
@@ -662,11 +727,24 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     sock_addr = (args.host or "", args.port)
     sock = create_server_socket(sock_addr)
 
+    # workaround to avoid footguns where uvicorn drops requests with too
+    # many concurrent requests active
+    set_ulimit()
+
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
         raise KeyboardInterrupt("terminated")
 
     signal.signal(signal.SIGTERM, signal_handler)
+
+    # The child processes will send SIGQUIT to this process when
+    # any error happens. This process then clean up the whole tree.
+    # TODO(rob): move this into AsyncLLM.__init__ once we remove
+    # the context manager below.
+    def sigquit_handler(signum, frame):
+        kill_process_tree(os.getpid())
+
+    signal.signal(signal.SIGQUIT, sigquit_handler)
 
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)

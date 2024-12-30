@@ -1,6 +1,6 @@
-"""Compare the embedding outputs of HF and vLLM models.
+"""Compare the scoring outputs of HF and vLLM models.
 
-Run `pytest tests/models/embedding/language/test_embedding.py`.
+Run `pytest tests/models/embedding/language/test_scoring.py`.
 """
 import math
 
