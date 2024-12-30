@@ -1,7 +1,12 @@
 import asyncio
 import os
+import pickle
 import signal
-from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
+from typing import (Any, AsyncGenerator, Dict, List, Mapping, Optional, Type,
+                    Union)
+
+import zmq
+import zmq.asyncio
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -18,11 +23,15 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import kill_process_tree
-from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.utils import (kill_process_tree, get_open_zmq_ipc_path,
+                        make_zmq_socket)
+from vllm.v1.engine import (EngineCoreRequestType, EngineCoreAbort,
+                            EngineCoreProfile)
+from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.engine.detokenizer import DetokenizerProc
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
 
@@ -84,22 +93,48 @@ class AsyncLLM(EngineClient):
             input_registry=input_registry,
         )
 
+        # Setup zmq ipc.
+        to_detokenizer_path = get_open_zmq_ipc_path()
+        to_engine_core_path = get_open_zmq_ipc_path()
+        from_detokenizer_path = get_open_zmq_ipc_path()
+        self.ctx = zmq.asyncio.Context(io_threads=2)
+        self.to_detokenizer = make_zmq_socket(self.ctx, to_detokenizer_path,
+                                              zmq.constants.PUSH)
+        self.from_detokenizer = make_zmq_socket(self.ctx,
+                                                from_detokenizer_path,
+                                                zmq.constants.PULL)
+        # The flow is typically AsyncLLM -> Detokenizer -> EngineCore,
+        # but we use this path for starting and stopping the profiler.
+        self.to_engine_core = make_zmq_socket(self.ctx, to_detokenizer_path,
+                                              zmq.constants.PUSH)
+
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
-        self.detokenizer = Detokenizer(
-            tokenizer_name=vllm_config.model_config.tokenizer,
-            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-            revision=vllm_config.model_config.tokenizer_revision,
-        )
+        self.detokenizer_handle: Optional[BackgroundProcHandle]
+        self.detokenizer_handle = BackgroundProcHandle(
+            input_path=to_detokenizer_path,
+            output_path=from_detokenizer_path,
+            process_name="Detokenizer",
+            target_fn=DetokenizerProc.run_detokenizer,
+            process_kwargs={
+                "to_engine_core_path": to_engine_core_path,
+                "tokenizer_name": self.model_config.tokenizer,
+                "tokenizer_mode": self.model_config.tokenizer_mode,
+                "trust_remote_code": self.model_config.trust_remote_code,
+                "revision": self.model_config.revision,
+            })
 
         # EngineCore (starts the engine in background process).
-        self.engine_core = EngineCoreClient.make_client(
-            multiprocess_mode=True,
-            asyncio_mode=True,
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            log_stats=self.log_stats,
-        )
+        self.engine_core_handle: Optional[BackgroundProcHandle]
+        self.engine_core_handle = BackgroundProcHandle(
+            input_path=from_detokenizer_path,
+            output_path=to_detokenizer_path,
+            process_name="EngineCore",
+            target_fn=EngineCoreProc.run_engine_core,
+            process_kwargs={
+                "vllm_config": vllm_config,
+                "executor_class": executor_class,
+                "log_stats": log_stats,
+            })
 
         self.output_handler: Optional[asyncio.Task] = None
 
@@ -184,11 +219,10 @@ class AsyncLLM(EngineClient):
                                                 prompt_adapter_request,
                                                 priority)
 
-        # 3) Add the request to Detokenizer (this process).
-        self.detokenizer.add_request(request)
-
-        # 4) Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        # 3) Send to Detokenizer (which forwards to EngineCore).
+        # Note: we forward the request rather than sending to each
+        # process separately to avoid race conditions).
+        await self._send_pyobj(self.to_detokenizer, request)
 
         if self.log_requests:
             logger.info("Added request %s.", request_id)
@@ -283,17 +317,16 @@ class AsyncLLM(EngineClient):
 
         try:
             while True:
-                # 1) Pull EngineCoreOutput from the EngineCore.
-                outputs = await self.engine_core.get_output_async()
+                # Note(rob: use socket directly to avoid calling await multiple
+                # times, which causes too much task switching at high QPS.
+                outputs: List[RequestOutput] = []
+                outputs = await self.from_detokenizer.recv_pyobj()
 
-                # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
-
-                # 3) Put the RequestOutputs into the per-request queues.
-                self._process_request_outputs(request_outputs)
-
-                # 4) Abort any requests that finished due to stop strings.
-                await self.engine_core.abort_requests_async(reqs_to_abort)
+                for out in outputs:
+                    # Note(rob): it is possible that a request was aborted
+                    # due to cancellation, so we just skip if not found.
+                    if out.request_id in self.rid_to_queue:
+                        self.rid_to_queue[out.request_id].put_nowait(out)
 
         except Exception as e:
             logger.exception("EngineCore output handler hit an error: %s", e)
@@ -302,14 +335,22 @@ class AsyncLLM(EngineClient):
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""
 
-        request_ids = [request_id]
-        await self.engine_core.abort_requests_async(request_ids)
-        self.detokenizer.abort_requests(request_ids)
+        # Alert detokenizer that we have an abort (message is forwarded
+        # to the EngineCore).
+        await self._send_pyobj(self.to_detokenizer,
+                               EngineCoreAbort([request_id]))
 
         # If a request finishes while we await then the request_id
         # will be removed from the tracked queues before we get here.
         if request_id in self.rid_to_queue:
             del self.rid_to_queue[request_id]
+
+    @staticmethod
+    async def _send_pyobj(socket: zmq.asyncio.Socket, obj: Any):
+        """Send object to Detokenizer with a FROM_ENGINE flag."""
+
+        msg = (EngineCoreRequestType.FROM_ENGINE.value, pickle.dumps(obj))
+        await socket.send_multipart(msg, copy=False)
 
     def encode(
         self,
@@ -335,8 +376,7 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        assert lora_request is None
-        return self.detokenizer.tokenizer
+        return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
         return False
@@ -352,10 +392,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        await self.engine_core.profile_async(True)
+        await self._send_pyobj(self.to_engine_core, EngineCoreProfile(True))
 
     async def stop_profile(self) -> None:
-        await self.engine_core.profile_async(False)
+        await self._send_pyobj(self.to_engine_core, EngineCoreProfile(False))
 
     @property
     def is_running(self) -> bool:

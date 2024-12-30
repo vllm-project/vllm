@@ -179,8 +179,6 @@ class LLMEngine:
 
         return request_outputs
 
-    # TODO(rob): Can we get rid of these?
-
     def get_model_config(self):
         return self.model_config
 
