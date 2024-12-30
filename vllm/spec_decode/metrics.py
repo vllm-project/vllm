@@ -6,7 +6,6 @@ import torch
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
-from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 
 
@@ -94,6 +93,7 @@ class AsyncMetricsCollector:
     def maybe_collect_rejsample_metrics(
             self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
         # currently using cuda.Event, skip for any non_cuda_alike platform
+        from vllm.platforms import current_platform
         if not current_platform.is_cuda_alike():
             return None
 

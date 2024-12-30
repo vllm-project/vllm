@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.utils import (
     convert_lark_to_gbnf, grammar_is_likely_lark,
     has_lmf_unsupported_json_features, has_xgrammar_unsupported_json_features)
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import CpuArchEnum
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -39,6 +39,7 @@ def maybe_backend_fallback(
 
     if guided_params.backend == "xgrammar":
         # xgrammar only has x86 wheels for linux, fallback to outlines
+        from vllm.platforms import current_platform
         if current_platform.get_cpu_architecture() is not CpuArchEnum.X86:
             logger.warning("xgrammar is only supported on x86 CPUs. "
                            "Falling back to use outlines instead.")
