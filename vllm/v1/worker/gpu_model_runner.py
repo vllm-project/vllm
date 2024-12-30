@@ -651,6 +651,8 @@ class GPUModelRunner:
                 self.max_num_encoder_input_tokens,
                 self.encoder_cache_size) // max_tokens_per_mm_item
 
+            max_num_mm_items = min(self.max_num_reqs, max_num_mm_items)
+
             # Dummy data definition in V0 may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
