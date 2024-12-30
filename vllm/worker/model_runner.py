@@ -436,7 +436,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     def __init__(self,
                  runner: "GPUModelRunnerBase",
                  finished_requests_ids: Optional[List[str]] = None,
-                 kv_caches: Optional[List[torch.Tensor]] = []):
+                 kv_caches: Optional[List[torch.Tensor]] = None):
         super().__init__()
         # Compute functions for each sequence in a sequence group.
         # WARNING: The order of the functions matters!
@@ -1246,7 +1246,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         finished_requests_ids: Optional[List[str]] = None,
-        kv_caches: Optional[List[torch.Tensor]] = [],
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -1621,7 +1621,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
-        kv_caches: Optional[List[torch.Tensor]] = [],
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.

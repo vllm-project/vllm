@@ -259,7 +259,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest, 
-        kv_caches: Optional[List[torch.Tensor]] = [],
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
@@ -291,7 +291,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-        kv_caches: Optional[List[torch.Tensor]] = [],
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
             str, torch.Tensor]]]:
         """
