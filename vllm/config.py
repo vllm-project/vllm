@@ -2792,6 +2792,7 @@ class CompilationConfig(BaseModel):
             "compilation_time",
             "bs_to_padded_graph_size",
             "pass_config",
+            "traced_files",
         }
         return self.model_dump_json(exclude=exclude, exclude_unset=True)
 
@@ -2851,6 +2852,7 @@ class CompilationConfig(BaseModel):
 
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
+        self.traced_files = set()
         self.static_forward_context = {}
         self.compilation_time = 0.0
 
