@@ -655,9 +655,9 @@ class GPUModelRunner:
                 self.mm_registry.get_mm_limits_per_prompt(
                     self.model_config).values())
 
-            # NOTE: We do not consider max_num_batched_tokens on
-            # purpose because the image embeddings can be generated in
-            # advanced and chunked prefilled.
+            # NOTE: We do not consider max_num_batched_tokens on purpose
+            # because the multimodal embeddings can be generated in advance
+            # and chunked prefilled.
             max_num_mm_items_decoder_budget = self.max_num_reqs * \
                 max_mm_items_per_req
 
