@@ -55,8 +55,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
-                                    MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors, VideoItem)
+                                    MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors, VideoItem)
 from vllm.multimodal.parse import ModalityDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
@@ -792,11 +792,8 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
-    def _to_mm_items(
-        self,
-        mm_data: MultiModalDataDict,
-    ) -> MultiModalDataItems:
-        return Qwen2MultiModalDataParser().parse_mm_data(mm_data)
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return Qwen2MultiModalDataParser()
 
     def _get_hf_processor(
         self,

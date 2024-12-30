@@ -622,6 +622,13 @@ class BaseMultiModalProcessor(ABC):
     ) -> MultiModalInputsV2:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
+    def _get_data_parser(self) -> MultiModalDataParser:
+        """
+        Construct a data parser to preprocess multi-modal data items
+        before passing them to :meth:`_get_hf_mm_data`.
+        """
+        return MultiModalDataParser()
+
     def _get_hf_processor(self) -> ProcessorMixin:
         """
         Subclasses can add keyword arguments to this method to accept
@@ -637,9 +644,11 @@ class BaseMultiModalProcessor(ABC):
         mm_data: MultiModalDataDict,
     ) -> MultiModalDataItems:
         """
-        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`.
+        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`
+        before passing them to :meth:`_get_hf_mm_data`.
         """
-        return MultiModalDataParser().parse_mm_data(mm_data)
+        parser = self._get_data_parser()
+        return parser.parse_mm_data(mm_data)
 
     @abstractmethod
     def _get_mm_fields_config(

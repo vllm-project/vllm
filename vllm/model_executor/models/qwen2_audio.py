@@ -38,8 +38,8 @@ from vllm.inputs import InputContext
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
@@ -101,14 +101,9 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
     def _get_feature_extractor(self) -> WhisperFeatureExtractor:
         return self._get_hf_processor().feature_extractor  # type: ignore
 
-    def _to_mm_items(
-        self,
-        mm_data: MultiModalDataDict,
-    ) -> MultiModalDataItems:
+    def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self._get_feature_extractor()
-        parser = MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate)
-        return parser.parse_mm_data(mm_data)
+        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
     def _call_hf_processor(
         self,
