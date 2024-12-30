@@ -58,6 +58,7 @@ def run_chameleon(question: str, modality: str):
     prompt = f"{question}<image>"
     llm = LLM(model="facebook/chameleon-7b",
               max_model_len=4096,
+              max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
