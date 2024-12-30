@@ -1002,6 +1002,7 @@ if __name__ == "__main__":
         required=True,
         help="Name of the model.",
     )
+
     parser.add_argument(
         "--api-key",
         type=str,
