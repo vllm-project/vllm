@@ -66,13 +66,13 @@ struct MacheteCollectiveMma {
   using Schedule = KernelScheduleType;
   static_assert(
       cute::is_same_v<Schedule, KernelTmaWarpSpecialized> ||
-          cute::is_same_v<Schedule, KernelTmaWarpSpecializedMixedInput> ||
+          cute::is_same_v<Schedule, KernelTmaWarpSpecialized> ||
           cute::is_same_v<Schedule, KernelTmaWarpSpecializedPingpong> ||
           cute::is_same_v<Schedule,
-                          KernelTmaWarpSpecializedPingpongMixedInput> ||
+                          KernelTmaWarpSpecializedPingpong> ||
           cute::is_same_v<Schedule, KernelTmaWarpSpecializedCooperative> ||
           cute::is_same_v<Schedule,
-                          KernelTmaWarpSpecializedCooperativeMixedInput>,
+                          KernelTmaWarpSpecializedCooperative>,
       "KernelSchedule must be one of the warp specialized policies");
 
  public:
@@ -114,7 +114,7 @@ struct MacheteCollectiveMma {
   // instructions so we use 2 atoms along the M dim (one for each warpgroup)
   using AtomLayoutMNK = cute::conditional_t<
       cute::is_same_v<KernelScheduleType,
-                      KernelTmaWarpSpecializedCooperativeMixedInput>,
+                      KernelTmaWarpSpecializedCooperative>,
       Layout<Shape<_2, _1, _1>>, Layout<Shape<_1, _1, _1>>>;
 
   using TiledMma = decltype(cute::make_tiled_mma(
