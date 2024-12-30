@@ -417,8 +417,5 @@ class DetokenizerProc(Detokenizer):
                 else:
                     raise ValueError(f"Unknown Message Type: {msg_type}")
 
-        except KeyboardInterrupt:
-            logger.debug("Got Keyboard Interrupt.")
-
         finally:
             ctx.destroy(linger=0)
