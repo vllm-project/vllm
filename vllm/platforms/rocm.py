@@ -70,7 +70,8 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
+                             kv_cache_dtype, block_size, use_v1) -> str:
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:
@@ -79,7 +80,8 @@ class RocmPlatform(Platform):
                 logger.info("flash_attn is not supported on NAVI GPUs.")
         else:
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
-        return _Backend.ROCM_FLASH
+        logger.info("Using ROCmFlashAttention backend.")
+        return "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend"  # noqa: E501
 
     @classmethod
     @lru_cache(maxsize=8)

@@ -21,10 +21,13 @@ class XPUPlatform(Platform):
     dispatch_key: str = "XPU"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
-        return _Backend.IPEX
+        logger.info("Using IPEX attention backend.")
+        return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @staticmethod
     def get_device_capability(device_id: int = 0) -> DeviceCapability:
