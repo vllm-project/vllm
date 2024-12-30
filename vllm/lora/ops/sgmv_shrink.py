@@ -27,14 +27,14 @@ def _sgmv_shrink_kernel(
         seq_lens,
         lora_indices,
         scaling,
-        xm_stride,  # hidden_size
-        xk_stride,  # 1
-        ls_d0_ptr,  # hidden_size*max_rank
+        input_d0_stride,
+        input_d1_stride,  # 1
+        ls_d0_ptr,
         ls_d1_ptr,
-        ls_d2_ptr,
-        c0_stride,
-        cm_stride,
-        cn_stride,
+        ls_d2_ptr,  # 1
+        output_d0_stride,
+        output_d1_stride,
+        output_d2_stride,  # 1 
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -75,8 +75,9 @@ def _sgmv_shrink_kernel(
     ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
     # input ptr
-    a_ptr = (input_ptr + cur_seq_start * xm_stride + ram[:, None] * xm_stride +
-             offset_k[None, :] * xk_stride)
+    a_ptr = (input_ptr + cur_seq_start * input_d0_stride +
+             ram[:, None] * input_d0_stride +
+             offset_k[None, :] * input_d1_stride)
     # ls_d*_ptr can be either an integer or a pointer
     if SAME_STRIDE:
         # integer
@@ -116,14 +117,15 @@ def _sgmv_shrink_kernel(
                               other=0.0)
         accumulator += tl.dot(tiled_a, tiled_b)
 
-        a_ptr += BLOCK_K * SPLIT_K * xk_stride
+        a_ptr += BLOCK_K * SPLIT_K * input_d1_stride
         b_ptr += BLOCK_K * SPLIT_K * cur_lora_d2_stride
     offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
 
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    cur_out_ptr = out_ptr if SLICE_NUM == 1 else out_ptr + slice_id * c0_stride
-    c_ptr = cur_out_ptr + offset_cm[:, None] * cm_stride + offset_cn[
-        None, :] * cn_stride
+    cur_out_ptr = (out_ptr if SLICE_NUM == 1 else out_ptr +
+                   slice_id * output_d0_stride)
+    c_ptr = cur_out_ptr + offset_cm[:, None] * output_d1_stride + offset_cn[
+        None, :] * output_d2_stride
     c_mask = (offset_cm[:, None] <
               (cur_seq_start + M)) & (offset_cn[None, :] < N)
     accumulator *= scaling

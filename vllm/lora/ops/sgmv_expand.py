@@ -30,11 +30,11 @@ def _sgmv_expand_kernel(
         input_d0_stride,
         input_d1_stride,
         input_d2_stride,  # 1
-        ls_d0_ptr,  # lora stride(0)
+        ls_d0_ptr,
         ls_d1_ptr,
-        ls_d2_ptr,
-        cm_stride,
-        cn_stride,
+        ls_d2_ptr,  # 1
+        output_d0_stride,
+        output_d1_stride,  # 1
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -126,8 +126,8 @@ def _sgmv_expand_kernel(
 
     offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N + cur_slice_start
-    c_ptr = (out_ptr + offset_cm[:, None] * cm_stride +
-             offset_cn[None, :] * cn_stride)
+    c_ptr = (out_ptr + offset_cm[:, None] * output_d0_stride +
+             offset_cn[None, :] * output_d1_stride)
     M = tl.load(seq_lens + cur_batch)
     c_mask = (offset_cm[:, None] <
               (cur_seq_start + M)) & (offset_cn[None, :] <
