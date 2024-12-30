@@ -1,12 +1,12 @@
-import msgspec
 import pickle
-import psutil
 import signal
-import zmq
-
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from typing import Dict, Iterable, List, Optional, Tuple, Union
+
+import msgspec
+import psutil
+import zmq
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger

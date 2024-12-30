@@ -2,6 +2,7 @@ import asyncio
 import os
 import pickle
 import signal
+import weakref
 from typing import (Any, AsyncGenerator, Dict, List, Mapping, Optional, Type,
                     Union)
 
@@ -23,10 +24,10 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (kill_process_tree, get_open_zmq_ipc_path,
+from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
-from vllm.v1.engine import (EngineCoreRequestType, EngineCoreAbort,
-                            EngineCoreProfile)
+from vllm.v1.engine import (EngineCoreAbort, EngineCoreProfile,
+                            EngineCoreRequestType)
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.detokenizer import DetokenizerProc
 from vllm.v1.engine.processor import Processor
@@ -50,6 +51,9 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+        # Call self.shutdown at exit to clean up
+        # and ensure workers will be terminated.
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
         # The child processes will send SIGQUIT when unrecoverable
         # errors happen. We kill the process tree here so that the
@@ -124,7 +128,6 @@ class AsyncLLM(EngineClient):
             })
 
         # EngineCore (starts the engine in background process).
-        self.engine_core_handle: Optional[BackgroundProcHandle]
         self.engine_core_handle = BackgroundProcHandle(
             input_path=from_detokenizer_path,
             output_path=to_detokenizer_path,
@@ -137,9 +140,6 @@ class AsyncLLM(EngineClient):
             })
 
         self.output_handler: Optional[asyncio.Task] = None
-
-    def __del__(self):
-        self.shutdown()
 
     @classmethod
     def from_engine_args(

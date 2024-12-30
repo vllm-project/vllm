@@ -1,5 +1,7 @@
+import weakref
 from typing import Dict, List, Mapping, Optional, Type, Union
 
+import zmq
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
@@ -17,7 +19,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.utils import get_open_zmq_ipc_path, make_zmq_socket
+from vllm.v1.engine.core import (EngineCore, EngineCoreClient, EngineCoreProc,
+                                 InprocEngineCoreClient, MpEngineCoreClient)
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
@@ -28,7 +32,6 @@ _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 
 
 class LLMEngine:
-    """Legacy LLMEngine for backwards compatibility."""
 
     def __init__(
         self,
@@ -42,8 +45,10 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        # Call self.shutdown at exit to clean up
+        # and ensure workers will be terminated.
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
-        # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -62,7 +67,8 @@ class LLMEngine:
                                    input_registry=input_registry,
                                    mm_registry=mm_registry)
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
+        # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
+        # Note(rob): does it ever make sense to run this in background?
         self.detokenizer = Detokenizer(
             tokenizer_name=vllm_config.model_config.tokenizer,
             tokenizer_mode=vllm_config.model_config.tokenizer_mode,
@@ -70,14 +76,42 @@ class LLMEngine:
             revision=vllm_config.model_config.tokenizer_revision,
         )
 
-        # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
-        self.engine_core = EngineCoreClient.make_client(
-            multiprocess_mode=multiprocess_mode,
-            asyncio_mode=False,
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            log_stats=False,
-        )
+        self.engine_core_client: EngineCoreClient
+
+        # EngineCore (converts EngineCoreRequests --> EngineCoreOutputs)
+        if multiprocess_mode:
+            # Setup ZMQ for IPC.
+            input_path = get_open_zmq_ipc_path()
+            output_path = get_open_zmq_ipc_path()
+            self.ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+            self.to_engine_core = make_zmq_socket(self.ctx, input_path,
+                                                  zmq.constants.PUSH)
+            self.from_engine_core = make_zmq_socket(self.ctx, output_path,
+                                                    zmq.constants.PULL)
+
+            # Make EngineCore in background process + make client.
+            handle = self.engine_core_handle = EngineCoreProc.make_process(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                input_path=input_path,
+                output_path=output_path,
+                log_stats=log_stats,
+            )
+            self.engine_core_client = MpEngineCoreClient(
+                input_socket=self.to_engine_core,
+                output_socket=self.from_engine_core,
+                proc_handle=handle,
+            )
+
+        else:
+            # Make EngineCore in process + make client.
+            self.engine_core = EngineCore(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=log_stats,
+            )
+            self.engine_core_client = InprocEngineCoreClient(
+                engine_core=self.engine_core)
 
     @classmethod
     def from_engine_args(
@@ -167,7 +201,7 @@ class LLMEngine:
     def step(self) -> List[RequestOutput]:
 
         # 1) Get EngineCoreOutput from the EngineCore.
-        engine_core_outputs = self.engine_core.get_output()
+        engine_core_outputs = self.engine_core_client.get_output()
 
         # 2) Detokenizer the EngineCoreOutput.
         request_outputs, requests_to_abort = self.detokenizer.step(
@@ -183,10 +217,10 @@ class LLMEngine:
         return self.model_config
 
     def start_profile(self):
-        self.engine_core.profile(True)
+        self.engine_core_client.profile(True)
 
     def stop_profile(self):
-        self.engine_core.profile(False)
+        self.engine_core_client.profile(False)
 
     def get_tokenizer_group(
         self,
@@ -204,9 +238,14 @@ class LLMEngine:
 
         return tokenizer_group
 
-    def __del__(self):
-        self.shutdown()
-
     def shutdown(self):
+        """Shutdown EngineCore."""
+
+        if engine_core_client := getattr(self, "engine_core_client", None):
+            engine_core_client.shutdown()
+
+        if engine_core_handle := getattr(self, "engine_core_handle", None):
+            engine_core_handle.shutdown()
+
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
