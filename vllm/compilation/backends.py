@@ -431,6 +431,7 @@ class VllmBackend:
     post_grad_passes: Sequence[Callable]
     sym_tensor_indices: List[int]
     input_buffers: List[torch.Tensor]
+    inductor_hash_cache: InductorHashCache
 
     def __init__(
         self,
@@ -684,7 +685,7 @@ class PiecewiseBackend:
         if self.is_last_graph and not self.to_be_compiled_sizes:
             # no specific sizes to compile
             # save the hash of the inductor graph for the next run
-            self.compilation_config.inductor_hash_cache.save_to_file()
+            self.vllm_backend.inductor_hash_cache.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
     def __call__(self, *args) -> Any:

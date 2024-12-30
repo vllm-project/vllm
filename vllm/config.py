@@ -2758,8 +2758,6 @@ class CompilationConfig(BaseModel):
     disabled_custom_ops: Counter[str] = PrivateAttr
     traced_files: Set[str] = PrivateAttr
     compilation_time: float = PrivateAttr
-    # should be InductorHashCache, but Pydantic does not support it
-    inductor_hash_cache: Any = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
