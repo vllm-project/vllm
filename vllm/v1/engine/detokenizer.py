@@ -378,6 +378,7 @@ class DetokenizerProc(Detokenizer):
 
         # Send request outputs back to LLMEngine.
         if request_outputs:
+            # TODO: check whether faster to send this copy free?
             to_llm_engine.send_pyobj(request_outputs)
 
         # Abort requests that finished due to stop strings in EngineCore.

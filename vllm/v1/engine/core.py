@@ -19,7 +19,8 @@ from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion)
+                            EngineCoreAbort, EngineCoreRequestType,
+                            EngineCoreRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -260,36 +261,18 @@ class EngineCoreProc(EngineCore):
             self.add_request(request)
         elif isinstance(request, EngineCoreProfile):
             self.model_executor.profile(request.is_start)
+        elif isinstance(request, EngineCoreAbort):
+            self.abort_requests(request.request_ids)
         else:
-            # TODO: make an EngineCoreAbort wrapper
-            assert isinstance(request, list)
-            self.abort_requests(request)
+            raise ValueError("Unknown request type: {request}")
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding.
-        decoder_add_req = PickleEncoder()
-        decoder_abort_req = PickleEncoder()
-
         with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
             while True:
-                # (RequestType, RequestData)
-                type_frame, data_frame = socket.recv_multipart(copy=False)
-                request_type = type_frame.buffer
-                request_data = data_frame.buffer
-
-                # Deserialize the request data.
-                if request_type == EngineCoreRequestType.ADD.value:
-                    request = decoder_add_req.decode(request_data)
-                elif request_type == EngineCoreRequestType.ABORT.value:
-                    request = decoder_abort_req.decode(request_data)
-                elif request_type == EngineCoreRequestType.PROFILE.value:
-                    request = pickle.loads(request_data)
-                else:
-                    raise ValueError(f"Unknown RequestType: {request_type}")
-
                 # Push to input queue for core busy loop.
+                request = socket.recv_pyobj()
                 self.input_queue.put_nowait(request)
 
     def process_output_socket(self, output_path: str):
@@ -305,4 +288,5 @@ class EngineCoreProc(EngineCore):
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ), copy=False)
+                msg = (EngineCoreRequestType.FROM_ENGINE_CORE.value, buffer)
+                socket.send_multipart(msg, copy=False)
