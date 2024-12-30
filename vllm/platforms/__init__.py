@@ -194,8 +194,17 @@ if TYPE_CHECKING:
 
 def __getattr__(name: str):
     if name == 'current_platform':
-        # lazy init current_platform so that plugins can import vllm.platforms
-        # to inherit Platform without circular imports
+        # lazy init current_platform.
+        # 1. out-of-tree platform plugins need `from vllm.platforms import
+        #    Platform` so that they can inherit `Platform` class. Therefore,
+        #    we cannot resolve `current_platform` during the import of
+        #    `vllm.platforms`.
+        # 2. when users use out-of-tree platform plugins, they might run
+        #    `import vllm`, some vllm internal code might access
+        #    `current_platform` during the import, and we need to make sure
+        #    `current_platform` is only resolved after the plugins are loaded
+        #    (we have tests for this, if any developer violate this, they will
+        #    see the test failures).
         global _current_platform
         if _current_platform is None:
             platform_cls_qualname = resolve_current_platform_cls_qualname()
