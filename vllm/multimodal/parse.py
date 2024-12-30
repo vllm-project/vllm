@@ -20,6 +20,7 @@ _I = TypeVar("_I")
 
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
+
     def __init__(self, data: _T) -> None:
         super().__init__()
 
@@ -62,7 +63,7 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 
 
 class ProcessorBatchInput(ModalityDataItems[Sequence[_T], _T]):
-    
+
     def __init__(self, data: Sequence[_T], modality: str) -> None:
         super().__init__(data)
 
@@ -85,7 +86,7 @@ class ProcessorBatchInput(ModalityDataItems[Sequence[_T], _T]):
 
 
 class EmbeddingsInput(ModalityDataItems[NestedTensors, torch.Tensor]):
-    
+
     def __init__(self, data: NestedTensors, modality: str) -> None:
         super().__init__(data)
 
@@ -167,17 +168,42 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     As :class:`MultiModalDataDict`, but normalized such that each entry
     corresponds to a list.
     """
-    
+
+    def get_item_count(self, modality: str, *, strict: bool = True) -> int:
+        """
+        Get the number of data items belonging to a modality.
+        
+        If `strict=False`, return `0` instead of raising :exc:`KeyError`
+        even if the modality is not found.
+        """
+        if modality not in self:
+            if strict:
+                available_modalities = set(self.keys())
+                raise KeyError(f"Modality {modality!r} not found. "
+                               f"Available modalities: {available_modalities}")
+
+            return 0
+
+        return self[modality].get_count()
+
+    def get_item_counts(self) -> Mapping[str, int]:
+        """Get the number of items belonging to each modality."""
+        return {m: items.get_count() for m, items in self.items()}
+
     def get_items(
         self,
         modality: str,
         typ: type[_D],
     ) -> _D:
-        if modality not in self.keys():
+        """
+        Get the data items belonging to a modality,
+        requiring that they belong to a certain type.
+        """
+        if modality not in self:
             available_modalities = set(self.keys())
             raise KeyError(f"Modality {modality!r} not found. "
                            f"Available modalities: {available_modalities}")
-    
+
         items = self[modality]
         if not isinstance(items, typ):
             raise TypeError(f"Invalid type of data items for {modality=}. "
@@ -185,15 +211,6 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
                             f"found type: {type(items)}")
 
         return items
-    
-    def get_item_count(self, modality: str) -> int:
-        if modality not in self.keys():
-            return 0
-
-        return self[modality].get_count()
-
-    def get_item_counts(self) -> Mapping[str, int]:
-        return {m: items.get_count() for m, items in self.items()}
 
 
 ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
@@ -240,11 +257,10 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return AudioEmbeddingsInput(data)
 
-        if (
-            is_list_of(data, float)
-            or isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1
-            or isinstance(data, tuple)
-        ):
+        if (is_list_of(data, float)
+                or isinstance(data,
+                              (np.ndarray, torch.Tensor)) and data.ndim == 1
+                or isinstance(data, tuple)):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
@@ -259,8 +275,9 @@ class MultiModalDataParser:
             else:
                 target_sr = self.target_sr
                 if target_sr is None:
-                    raise RuntimeError("Audio resampling is not supported when "
-                                       "`target_sr` is not provided")
+                    raise RuntimeError(
+                        "Audio resampling is not supported when "
+                        "`target_sr` is not provided")
 
                 new_audio = resample_audio(audio,
                                            orig_sr=orig_sr,
@@ -277,10 +294,9 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return ImageEmbeddingsInput(data)
 
-        if (
-            isinstance(data, Image)
-            or isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 3
-        ):
+        if (isinstance(data, Image)
+                or isinstance(data,
+                              (np.ndarray, torch.Tensor)) and data.ndim == 3):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
@@ -296,10 +312,9 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return VideoEmbeddingsInput(data)
 
-        if (
-            is_list_of(data, Image)
-            or isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4
-        ):
+        if (is_list_of(data, Image)
+                or isinstance(data,
+                              (np.ndarray, torch.Tensor)) and data.ndim == 4):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]

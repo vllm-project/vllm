@@ -92,7 +92,8 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
     ) -> MultiModalDataItems:
         feature_extractor = self._get_feature_extractor()
-        parser = MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        parser = MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate)
         return parser.parse_mm_data(mm_data)
 
     def _call_hf_processor(
