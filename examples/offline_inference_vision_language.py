@@ -24,7 +24,7 @@ def run_aria(question: str, modality: str):
     assert modality == "image"
     model_name = "rhymes-ai/Aria"
 
-    # NOTE: Need L40 to run this
+    # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(model=model_name,
               tokenizer_mode="slow",
               dtype="bfloat16",
@@ -434,7 +434,7 @@ def run_pixtral_hf(question: str, modality: str):
 
     model_name = "mistral-community/pixtral-12b"
 
-    # NOTE: Need L40 to run this
+    # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(
         model=model_name,
         max_model_len=8192,
