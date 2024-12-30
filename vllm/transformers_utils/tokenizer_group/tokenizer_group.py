@@ -57,9 +57,7 @@ class TokenizerGroup(BaseTokenizerGroup):
                request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
-        print(f"{prompt=}")
         ret = tokenizer.encode(prompt)
-        print(f"{ret=}")
         self._raise_if_input_too_long(ret, lora_request)
         return ret
 
