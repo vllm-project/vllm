@@ -596,7 +596,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
 
         mm_items = self._to_mm_items(mm_data)
-        mm_item_counts = mm_items.get_item_counts()
+        mm_item_counts = mm_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
 
         # We reimplement the functionality of MLlavaProcessor from

@@ -747,7 +747,7 @@ class BaseMultiModalProcessor(ABC):
         cached items; instead, we rely on our own prompt replacement logic
         for the full text.
         """
-        mm_missing_counts = mm_missing_data_items.get_item_counts()
+        mm_missing_counts = mm_missing_data_items.get_all_counts()
 
         prompt_ids, _ = self._apply_hf_processor(
             prompt_text=prompt_text,
@@ -844,7 +844,7 @@ class BaseMultiModalProcessor(ABC):
             mm_merged_field_items[modality] = merged_modal_items_lst
 
         if self.enable_sanity_checks:
-            mm_missing_counts = mm_missing_data_items.get_item_counts()
+            mm_missing_counts = mm_missing_data_items.get_all_counts()
             assert all(
                 item_count == mm_missing_counts[modality]
                 for modality, item_count in mm_missing_next_idx.items()), dict(
@@ -857,7 +857,7 @@ class BaseMultiModalProcessor(ABC):
         )
 
         if self.enable_sanity_checks:
-            mm_item_counts = mm_data_items.get_item_counts()
+            mm_item_counts = mm_data_items.get_all_counts()
 
             for modality, item_count in mm_item_counts.items():
                 for item_idx in range(item_count):
@@ -967,7 +967,7 @@ class BaseMultiModalProcessor(ABC):
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        mm_item_counts = mm_items.get_item_counts()
+        mm_item_counts = mm_items.get_all_counts()
         all_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
                                                    mm_item_counts)
 

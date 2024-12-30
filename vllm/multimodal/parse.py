@@ -169,7 +169,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     corresponds to a list.
     """
 
-    def get_item_count(self, modality: str, *, strict: bool = True) -> int:
+    def get_count(self, modality: str, *, strict: bool = True) -> int:
         """
         Get the number of data items belonging to a modality.
         
@@ -186,7 +186,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
 
         return self[modality].get_count()
 
-    def get_item_counts(self) -> Mapping[str, int]:
+    def get_all_counts(self) -> Mapping[str, int]:
         """Get the number of items belonging to each modality."""
         return {m: items.get_count() for m, items in self.items()}
 

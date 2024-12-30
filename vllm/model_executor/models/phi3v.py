@@ -392,7 +392,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
 
             return [_IMAGE_TOKEN_ID] * num_tokens + [bos_token_id]
 
-        num_images = mm_items.get_item_count("image", strict=False)
+        num_images = mm_items.get_count("image", strict=False)
 
         return [
             PromptReplacement(
