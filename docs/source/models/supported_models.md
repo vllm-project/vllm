@@ -585,6 +585,13 @@ See [this page](#generative-models) for more information on how to use generativ
   -
   - ✅︎
   -
+* - `DeepseekVLV2ForCausalLM`
+  - DeepSeek-VL2
+  - T + I
+  - `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
+  -
+  - ✅︎
+  -
 * - `FuyuForCausalLM`
   - Fuyu
   - T + I
