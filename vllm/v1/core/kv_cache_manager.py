@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -69,21 +69,30 @@ class KVCacheManager:
         # is finished.
         self.req_to_blocks: Dict[str, List[KVCacheBlock]] = {}
 
-    def get_computed_blocks(self, request: Request) -> List[KVCacheBlock]:
+    def get_computed_blocks(
+            self, request: Request) -> Tuple[List[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
+
+        When prompt length is divisible by the block size and all blocks
+        are computed, we force to recompute the last block. Note that we
+        have to re-compute an entire block because allocate_slots()
+        assumes num_computed_tokens is always a multiple of the block size.
+        This limitation can potentially be removed in the future to slightly
+        improve the performance.
 
         Args:
             request: The request to get the computed blocks.
 
         Returns:
-            A list of blocks that are computed for the request.
+            A list of blocks that are computed for the request, and the number
+            of free blocks (eviction candidates).
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
-            return []
+            return [], 0
 
-        computed_blocks = []
+        computed_blocks, num_free_blocks = [], 0
 
         # The block hashes for the request may already be computed
         # if the request was preempted and resumed.
@@ -98,10 +107,17 @@ class KVCacheManager:
             # not computed yet for sure.
             if cached_block := self._get_cached_block(block_hash):
                 computed_blocks.append(cached_block)
+                num_free_blocks += cached_block.ref_cnt == 0
             else:
                 break
 
-        return computed_blocks
+        # Remove the last computed block if all blocks are computed.
+        num_new_tokens = (request.num_tokens -
+                          len(computed_blocks) * self.block_size)
+        if num_new_tokens == 0:
+            num_free_blocks -= computed_blocks.pop().ref_cnt == 0
+
+        return computed_blocks, num_free_blocks
 
     def append_slots(
         self,
@@ -183,7 +199,7 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        computed_blocks: List[KVCacheBlock],
+        computed_blocks_and_num_evictable: Tuple[List[KVCacheBlock], int],
     ) -> Optional[List[KVCacheBlock]]:
         """Allocate slots for a new request.
 
@@ -191,7 +207,8 @@ class KVCacheManager:
             request: The request to allocate slots.
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
-            computed_blocks: The blocks that have already been computed.
+            computed_blocks_and_num_evictable: A tuple of computed blocks
+                and the number of them that are currently in the free queue.
 
         Returns:
             A list of new allocated blocks.
@@ -200,15 +217,10 @@ class KVCacheManager:
             raise ValueError(
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
-        # If a computed block of a request is an eviction candidate (in the
-        # free queue and ref_cnt == 0), it cannot be counted as a free block
-        # when allocating this request.
-        num_evictable_computed_blocks = len(
-            [blk for blk in computed_blocks if blk.ref_cnt == 0])
-
+        computed_blocks, num_evictable = computed_blocks_and_num_evictable
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        if (num_required_blocks > self.free_block_queue.num_free_blocks -
-                num_evictable_computed_blocks):
+        if (num_required_blocks >
+                self.free_block_queue.num_free_blocks - num_evictable):
             # Cannot allocate new blocks.
             return None
 
