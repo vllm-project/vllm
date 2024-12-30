@@ -68,7 +68,7 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, kill_process_tree, set_ulimit)
+                        is_valid_ipv6_address, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -133,32 +133,21 @@ async def build_async_engine_client_from_engine_args(
     Returns the Client or None if the creation failed.
     """
 
-    # Fall back
-    # TODO: fill out feature matrix.
+    # AsyncLLMEngine.
     if (MQLLMEngineClient.is_unsupported_config(engine_args)
             or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
-        engine_config = engine_args.create_engine_config(
-            UsageContext.OPENAI_API_SERVER)
-        uses_ray = getattr(AsyncLLMEngine._get_executor_cls(engine_config),
-                           "uses_ray", False)
 
-        build_engine = partial(AsyncLLMEngine.from_engine_args,
-                               engine_args=engine_args,
-                               engine_config=engine_config,
-                               usage_context=UsageContext.OPENAI_API_SERVER)
-        if uses_ray:
-            # Must run in main thread with ray for its signal handlers to work
-            engine_client = build_engine()
-        else:
-            engine_client = await asyncio.get_running_loop().run_in_executor(
-                None, build_engine)
+        engine_client: Optional[EngineClient] = None
+        try:
+            engine_client = AsyncLLMEngine.from_engine_args(
+                engine_args=engine_args,
+                usage_context=UsageContext.OPENAI_API_SERVER)
+            yield engine_client
+        finally:
+            if engine_client and hasattr(engine_client, "shutdown"):
+                engine_client.shutdown()
 
-        yield engine_client
-        if hasattr(engine_client, "shutdown"):
-            engine_client.shutdown()
-        return
-
-    # Otherwise, use the multiprocessing AsyncLLMEngine.
+    # MQLLMEngine.
     else:
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             # Make TemporaryDirectory for prometheus multiprocessing
@@ -736,15 +725,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         raise KeyboardInterrupt("terminated")
 
     signal.signal(signal.SIGTERM, signal_handler)
-
-    # The child processes will send SIGQUIT to this process when
-    # any error happens. This process then clean up the whole tree.
-    # TODO(rob): move this into AsyncLLM.__init__ once we remove
-    # the context manager below.
-    def sigquit_handler(signum, frame):
-        kill_process_tree(os.getpid())
-
-    signal.signal(signal.SIGQUIT, sigquit_handler)
 
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
