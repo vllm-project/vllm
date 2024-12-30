@@ -1336,19 +1336,22 @@ class Scheduler:
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
 
-                if self.cache_config.enable_prefix_caching and self.cache_config.num_global_cache_blocks > 0 and seq_group.is_prefill():
+                if (self.cache_config.enable_prefix_caching and 
+                    self.cache_config.num_global_cache_blocks > 0 and 
+                    seq_group.is_prefill()):
                     global_computed_list = []
-                    block_hash_dict = {}
+                    block_h_dict = {}
                     for block_id in block_tables[seq_id]:
-                        for block in self.block_manager.block_tables[seq_id].blocks:
+                        for block in \
+                            self.block_manager.block_tables[seq_id].blocks:
                             if block.block_id == block_id:
                                 if block.global_computed:
                                     global_computed_list.append(block_id)
                                 if block.content_hash is not None:
-                                    block_hash_dict[block_id] = block.content_hash
+                                    block_h_dict[block_id] = block.content_hash
                                 break
                     block_global_computed_tables[seq_id] = global_computed_list
-                    block_hash_map[seq_id] = block_hash_dict
+                    block_hash_map[seq_id] = block_h_dict
                 
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 

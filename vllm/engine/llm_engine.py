@@ -371,8 +371,12 @@ class LLMEngine:
                 if self.model_config.use_async_output_proc else None)
             for v_id in range(self.parallel_config.pipeline_parallel_size)
         ]
-        if self.cache_config.enable_prefix_caching and self.cache_config.num_global_cache_blocks > 0:
-            global_cache_instance.setGlabalCacheBlockNum(self.model_config, self.cache_config, self.model_executor.driver_worker.cache_engine[0].dtype)
+        if (self.cache_config.enable_prefix_caching and 
+            self.cache_config.num_global_cache_blocks > 0):
+            global_cache_instance.setGlabalCacheBlockNum(
+                self.model_config, 
+                self.cache_config, 
+                self.model_executor.driver_worker.cache_engine[0].dtype)
 
         # Metric Logging.
         if self.log_stats:

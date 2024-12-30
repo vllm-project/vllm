@@ -85,8 +85,10 @@ print(f"Generated answers are the same: {generated_same}")
 
 """
 We can simulate the global prefix cache this way:
-1. Run the vllm instance with APC for some time, so some prompts may not hit APC as they are old and evicted
-2. Delete the first vllm instance and start a new one. In this case, global kv cache can be hit directly
+1. Run the vllm instance with APC for some time, so some prompts may not 
+hit APC as they are old and evicted
+2. Delete the first vllm instance and start a new one. In this case, 
+global kv cache can be hit directly
 Here we demo the second option.
 """
 # Destroy the LLM object and free up the GPU memory.
