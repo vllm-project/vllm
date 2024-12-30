@@ -22,9 +22,9 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, ExaoneConfig,
-                                             H2OVLChatConfig,
+from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             DeepseekVLV2Config, EAGLEConfig,
+                                             ExaoneConfig, H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,

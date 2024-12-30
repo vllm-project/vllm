@@ -45,7 +45,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.llama import LlamaAttention
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
@@ -314,7 +313,7 @@ class DeepseekV2Attention(nn.Module):
 
         if self.use_normal_rope:
             q_pe, k_pe = q_pe.view(ori_q_pe_shape), k_pe.view(ori_k_pe_shape)
-        
+
         q[..., self.qk_nope_head_dim:] = q_pe
         k = torch.empty_like(q)
         k[..., :self.qk_nope_head_dim] = k_nope
@@ -361,8 +360,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             qk_nope_head_dim=config.qk_nope_head_dim,
             qk_rope_head_dim=config.qk_rope_head_dim,
             v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank if hasattr(
-                config, "q_lora_rank") else None,
+            q_lora_rank=config.q_lora_rank
+            if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=config.kv_lora_rank,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,

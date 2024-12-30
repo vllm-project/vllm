@@ -66,7 +66,7 @@ def run_chameleon(question: str, modality: str):
 def run_deepseek_vl2(question: str, modality: str):
     assert modality == "image"
 
-    model_name = "deepseek-ai/deepseek-vl2-tiny"
+    model_name = "deepseek-ai/deepseek-vl2-small"
 
     llm = LLM(model=model_name,
               max_model_len=4096,
