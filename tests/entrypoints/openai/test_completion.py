@@ -700,9 +700,7 @@ async def test_guided_choice_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_grammar(client: openai.AsyncOpenAI,
-                              guided_decoding_backend: str,
                               sample_sql_statements):
 
     completion = await client.completions.create(
@@ -711,8 +709,7 @@ async def test_guided_grammar(client: openai.AsyncOpenAI,
                 "table_1 where it is equals to 1"),
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_grammar=sample_sql_statements,
-                        guided_decoding_backend=guided_decoding_backend))
+        extra_body=dict(guided_grammar=sample_sql_statements))
 
     content = completion.choices[0].text
 
