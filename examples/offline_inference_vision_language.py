@@ -192,10 +192,8 @@ def run_llava_next(question: str, modality: str):
 
     prompt = f"[INST] <image>\n{question} [/INST]"
     llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf",
-              max_num_batched_tokens=32768,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
-              limit_mm_per_prompt={"image": 4},
-              enable_prefix_caching=False)
+              max_model_len=8192,
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
