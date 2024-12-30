@@ -279,6 +279,8 @@ class KVCacheManager:
         blocks = self.req_to_blocks[request.request_id]
         num_common_blocks = 0
         for block in blocks:
+            # FIXME(woosuk): For some reason, sometimes the ref_cnt is greater
+            # than the number of running requests. DEBUG this.
             if block.ref_cnt >= num_requests:
                 num_common_blocks += 1
             else:
