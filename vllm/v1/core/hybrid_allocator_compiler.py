@@ -12,7 +12,7 @@ def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
                         available_memory: int) -> Tuple[KVCacheConfig, int]:
     check_enough_memory(vllm_config, kv_cache_spec, available_memory)
     if is_same_type(kv_cache_spec):
-        # TODO (Chen): improve the readability of default path (self attn only models)
+        # TODO(Chen): improve the readability of default path (self attn only models)
         return _get_kv_cache_config_same_type(vllm_config, kv_cache_spec,
                                               available_memory)
     elif is_same_hidden_size(kv_cache_spec):
@@ -53,7 +53,7 @@ def _get_kv_cache_config_same_type(
             "default": [layer_name for layer_name in kv_cache_spec.keys()]
         },
         kv_cache_spec=kv_cache_spec)
-    # TODO (Chen): KVCacheTensorSeperate can be removed
+    # TODO(Chen): KVCacheTensorSeperate can be removed
     print("kv_cache_config", kv_cache_config)
     return kv_cache_config, num_gpu_blocks
 
@@ -62,7 +62,7 @@ def _get_kv_cache_config_same_size(
         vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
         available_memory: int) -> Tuple[KVCacheConfig, int]:
     # Grouped allocation
-    # TODO (Chen): explain it, need test
+    # TODO(Chen): explain it, need test
 
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     assert len(page_sizes) == 1
@@ -86,7 +86,7 @@ def _get_kv_cache_config_same_size(
         logger.info(
             "Overriding num_gpu_blocks=%d with "
             "num_gpu_blocks_override=%d", num_pages, num_gpu_blocks_override)
-        # TODO (Chen): num_page and num_block has different meaning
+        # TODO(Chen): num_page and num_block has different meaning
         num_pages = num_gpu_blocks_override
 
     groups = {}
@@ -121,7 +121,7 @@ def is_same_type(kv_cache_spec: KVCacheSpec) -> bool:
 
 
 def is_same_hidden_size(kv_cache_spec: KVCacheSpec):
-    # TODO (Chen): needs more accurate check
+    # TODO(Chen): needs more accurate check
     return all(
         isinstance(layer, (FullAttentionSpec, SlidingWindowSpec))
         for layer in kv_cache_spec.values())
@@ -140,7 +140,7 @@ def check_enough_memory(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
         needed_memory += layer_spec.bytes_for_tokens(max_model_len)
 
     if needed_memory > available_memory:
-        # TODO (Chen): need unit test
+        # TODO(Chen): need unit test
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
             f"({max_model_len}), ({needed_memory/1024/1024/1024} GB KV cache is"

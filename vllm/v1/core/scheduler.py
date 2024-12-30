@@ -47,10 +47,9 @@ class Scheduler:
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
-            block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
             max_model_len=self.max_model_len,
-            sliding_window=self.cache_config.sliding_window,
+            kv_cache_config=kv_cache_config,
             enable_caching=self.cache_config.enable_prefix_caching)
         self.block_size = self.cache_config.block_size
 
@@ -98,7 +97,8 @@ class Scheduler:
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
 
-        req_to_new_block_ids: Dict[str, List[int]] = {}
+        req_to_new_block_ids: Dict[str, Dict[str, List[int]]] = {
+        }  # req_id -> group_name-> block_id
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -157,9 +157,11 @@ class Scheduler:
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            req_to_new_block_ids[request.request_id] = [
-                b.block_id for b in new_blocks
-            ]
+            req_to_new_block_ids[request.request_id] = {
+                group_name: [b.block_id for b in new_block_list]
+                for group_name, new_block_list in new_blocks.items()
+            }
+
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -187,29 +189,14 @@ class Scheduler:
 
                 request = self.waiting[0]
                 # Get already-cached tokens.
-                computed_blocks = self.kv_cache_manager.get_computed_blocks(
-                    request)
-                # NOTE(woosuk): Since incomplete blocks are not eligible for
-                # sharing, `num_computed_tokens` is always a multiple of
-                # `block_size`.
-                num_computed_tokens = len(computed_blocks) * self.block_size
+                num_computed_tokens, computed_blocks = self.kv_cache_manager.\
+                    get_computed_tokens(request)
+
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
-                if num_new_tokens == 0:
-                    # TODO (Chen): remove this constraint inside num_computed_blocks?
-                    # The happens when prompt length is divisible by the block
-                    # size and all blocks are cached. Now we force to recompute
-                    # the last block. Note that we have to re-compute an entire
-                    # block because allocate_slots() assumes num_computed_tokens
-                    # is always a multiple of the block size. This limitation
-                    # can potentially be removed in the future to slightly
-                    # improve the performance.
-                    num_computed_tokens -= self.block_size
-                    num_new_tokens = self.block_size
-                    computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
@@ -238,9 +225,13 @@ class Scheduler:
                     raise RuntimeError(
                         f"Invalid request status: {request.status}")
 
-                req_to_new_block_ids[request.request_id] = [
-                    b.block_id for b in computed_blocks + new_blocks
-                ]
+                req_to_new_block_ids[request.request_id] = {
+                    group_name: [
+                        b.block_id for b in computed_blocks[group_name] +
+                        new_blocks[group_name]
+                    ]
+                    for group_name in new_blocks.keys()
+                }
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -522,14 +513,14 @@ class NewRequestData:
     mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
-    block_ids: List[int]
+    block_ids: Dict[str, List[int]]  # group_name -> block_ids
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: List[int],
+        block_ids: Dict[str, List[int]],
         num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
@@ -549,14 +540,14 @@ class NewRequestData:
 class ResumedRequestData:
 
     req_id: str
-    block_ids: List[int]
+    block_ids: Dict[str, List[int]]  # group_name -> block_ids
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: List[int],
+        block_ids: Dict[str, List[int]],
         num_computed_tokens: int,
     ) -> "ResumedRequestData":
         return cls(
@@ -570,14 +561,14 @@ class ResumedRequestData:
 class RunningRequestData:
 
     req_id: str
-    new_block_ids: List[int]
+    new_block_ids: Dict[str, List[int]]
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        new_block_ids: List[int],
+        new_block_ids: Dict[str, List[int]],
         num_computed_tokens: int,
     ) -> "RunningRequestData":
         return cls(

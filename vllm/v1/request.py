@@ -1,5 +1,6 @@
+from collections import defaultdict
 import enum
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from vllm.inputs import DecoderOnlyInputs, SingletonInputsAdapter, token_inputs
 from vllm.lora.request import LoRARequest
@@ -64,7 +65,8 @@ class Request:
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
-        self._kv_block_hashes: List[BlockHashType] = []
+        self._kv_block_hashes: Dict[str,
+                                    List[BlockHashType]] = defaultdict(list)
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -133,15 +135,20 @@ class Request:
         return num_tokens
 
     @property
-    def kv_block_hashes(self) -> ConstantList["BlockHashType"]:
+    def kv_block_hashes(self) -> Dict[str, ConstantList["BlockHashType"]]:
         # Prevent directly appending to the kv_block_hashes.
-        return ConstantList(self._kv_block_hashes)
+        return {
+            group_name: ConstantList(block_hashes)
+            for group_name, block_hashes in self._kv_block_hashes.items()
+        }
 
-    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
+    def set_kv_block_hashes(self, value: Dict[str,
+                                              List["BlockHashType"]]) -> None:
         self._kv_block_hashes = value
 
-    def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
-        self._kv_block_hashes.append(block_hash)
+    def append_kv_block_hashes(self, group_name: str,
+                               block_hash: "BlockHashType") -> None:
+        self._kv_block_hashes[group_name].append(block_hash)
 
 
 class RequestStatus(enum.IntEnum):

@@ -16,6 +16,7 @@ from vllm.utils import get_dtype_size
 # TODO(Chen): find a better name
 @dataclass
 class KVCacheSpecBase:
+    block_size: int
 
     @property
     def key(self) -> str:
@@ -31,7 +32,6 @@ class KVCacheSpecBase:
 
 @dataclass
 class FullAttentionSpec(KVCacheSpecBase):
-    block_size: int
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -51,7 +51,6 @@ class FullAttentionSpec(KVCacheSpecBase):
 
 @dataclass
 class SlidingWindowSpec(KVCacheSpecBase):
-    block_size: int
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype

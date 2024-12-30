@@ -1,7 +1,7 @@
 """KV-Cache Utilities."""
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple, TypedDict
 
 from vllm.logger import init_logger
 from vllm.v1.request import Request
@@ -261,8 +261,8 @@ def hash_block_tokens(
                          tuple(curr_block_token_ids), extra_keys)
 
 
-def hash_request_tokens(block_size: int,
-                        request: Request) -> List[BlockHashType]:
+def hash_request_tokens(block_size: int, request: Request,
+                        group_name: str) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
@@ -279,9 +279,6 @@ def hash_request_tokens(block_size: int,
         raise ValueError(
             "The number of multi-modal positions and hashes must match.")
 
-    # TODO: Extend this to support other features such as LoRA.
-    need_extra_keys = bool(mm_positions)
-    extra_keys = None
     curr_mm_idx = 0
 
     ret = []
@@ -293,13 +290,105 @@ def hash_request_tokens(block_size: int,
         if len(block_token_ids) < block_size:
             break
 
+        extra_keys = [group_name]
         # Add extra keys if the block is a multi-modal block.
-        if need_extra_keys:
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start, end, curr_mm_idx)
+        extra_keys_mm, curr_mm_idx = generate_block_hash_extra_keys(
+            request, start, end, curr_mm_idx)
+        if extra_keys_mm is not None:
+            extra_keys.extend(extra_keys_mm)
 
         block_hash = hash_block_tokens(parent_block_hash_value,
                                        block_token_ids, extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
     return ret
+
+
+@dataclass
+class ComputedTokenRange:
+    """
+    [start, end)
+    """
+    start: int
+    end: int
+
+
+ComputedTokens = List[ComputedTokenRange]
+
+
+def intersect_two_ranges(
+        a: List[ComputedTokenRange],
+        b: List[ComputedTokenRange]) -> List[ComputedTokenRange]:
+    """
+    Intersect two sorted lists of ComputedTokenRange intervals.
+    
+    Args:
+        a: List of intervals
+        b: List of intervals
+    Returns:
+        List of intervals that are intersections of a and b
+    """
+    i, j = 0, 0
+    result = []
+
+    while i < len(a) and j < len(b):
+        overlap_start = max(a[i].start, b[j].start)
+        overlap_end = min(a[i].end, )
+
+        if overlap_start <= overlap_end:
+            result.append(ComputedTokenRange(overlap_start, overlap_end))
+
+        if a[i].end < b[j].end:
+            i += 1
+        else:
+            j += 1
+
+    return result
+
+
+def intersect_ranges(
+        ranges: List[List[ComputedTokenRange]]) -> List[ComputedTokenRange]:
+    """
+    Intersect multiple lists of ComputedTokenRange intervals, each is sorted.
+    
+    Args:
+        ranges: A list of lists of intervals 
+    Returns:
+        A list of intervals representing the intersection of all ranges
+    """
+    if not ranges:
+        return []
+
+    current_intersection = ranges[0]
+    for i in range(1, len(ranges)):
+        current_intersection = intersect_two_ranges(current_intersection,
+                                                    ranges[i])
+        if not current_intersection:
+            break
+
+    return current_intersection
+
+
+# move to unit test
+# if __name__ == "__main__":
+#     sets = [[
+#         ComputedTokenRange(1, 5),
+#         ComputedTokenRange(10, 14),
+#         ComputedTokenRange(16, 18)
+#     ],
+#             [
+#                 ComputedTokenRange(2, 6),
+#                 ComputedTokenRange(8, 12),
+#                 ComputedTokenRange(15, 17)
+#             ],
+#             [
+#                 ComputedTokenRange(3, 7),
+#                 ComputedTokenRange(9, 11),
+#                 ComputedTokenRange(13, 19)
+#             ]]
+
+#     intersection = intersect_multiple_sets(sets)
+#     print(intersection)
+#     # Expected: [ComputedTokenRange(start=3, end=5),
+#     #            ComputedTokenRange(start=10, end=11),
+#     #            ComputedTokenRange(start=16, end=17)]
