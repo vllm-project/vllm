@@ -73,7 +73,7 @@ steps:
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H100
-    depends_on: block-h100
+    depends_on: ~
     plugins:
     - docker#v5.12.0:
         image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
