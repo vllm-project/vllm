@@ -3,8 +3,6 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.logger import init_logger
-from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
-from vllm.lora.punica_wrapper.punica_hpu import PunicaWrapperHPU
 
 from .interface import Platform, PlatformEnum, _Backend
 
@@ -65,6 +63,5 @@ class HpuPlatform(Platform):
         return False
 
     @classmethod
-    def get_punica_wrapper(cls, *args, **kwargs) -> PunicaWrapperBase:
-        logger.info_once("Using PunicaWrapperHPU.")
-        return PunicaWrapperHPU(*args, **kwargs)
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"

@@ -8,7 +8,6 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
-from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -264,7 +263,7 @@ class Platform:
         return True
 
     @classmethod
-    def get_punica_wrapper(cls, *args, **kwargs) -> PunicaWrapperBase:
+    def get_punica_wrapper(cls) -> str:
         """
         Return the punica wrapper for current platform.
         """
