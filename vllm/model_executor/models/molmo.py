@@ -23,11 +23,8 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.activation import (
-    QuickGELU,
-    SiluAndMul,
-    MulAndAndSilu,
-)
+from vllm.model_executor.layers.activation import (MulAndAndSilu, QuickGELU,
+                                                   SiluAndMul)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
