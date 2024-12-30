@@ -570,7 +570,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `rhymes-ai/Aria`
   -
   - ✅︎
-  -
+  - ✅︎
 * - `Blip2ForConditionalGeneration`
   - BLIP-2
   - T + I<sup>E</sup>
