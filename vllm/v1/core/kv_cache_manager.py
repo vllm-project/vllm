@@ -16,7 +16,7 @@ from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
-KVCacheBlocks = Dict[str, List[KVCacheBlock]]  # group_name -> blocks
+KVCacheBlocks = List[List[KVCacheBlock]]  # group_id -> [blocks]
 
 
 class KVCacheManager:
@@ -55,7 +55,7 @@ class KVCacheManager:
         # TODO(Chen): add comments
         self.num_preallocate_blocks = cdiv(
             num_preallocate_tokens,
-            max(manager.block_size for manager in self.managers.values()))
+            max(manager.block_size for manager in self.managers))
 
         # A Block pool of all kv-cache blocks.
         self.block_pool: List[KVCacheBlock] = [
@@ -98,21 +98,20 @@ class KVCacheManager:
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
-            return 0, {group_name: [] for group_name in self.managers}
+            return 0, [[] for _ in self.managers]
 
         # The block hashes for the request may already be computed
         # if the request was preempted and resumed.
         if not request.kv_block_hashes:
-            request.set_kv_block_hashes({
-                group_name: hash_request_tokens(manager.block_size, request,
-                                                group_name)
-                for group_name, manager in self.managers.items()
-            })
+            request.set_kv_block_hashes([
+                hash_request_tokens(manager.block_size, request, i)
+                for i, manager in enumerate(self.managers)
+            ])
         request.kv_block_hashes
-        block_hashes = {}
+        block_hashes = []
 
-        for group_name in self.managers:
-            if request.num_tokens % self.managers[group_name].block_size == 0:
+        for i, manager in enumerate(self.managers):
+            if request.num_tokens % manager.block_size == 0:
                 # When prompt length is divisible by the block size and all
                 # blocks are cached, we need to force the recomputation of
                 # the last block. We remove the hash of the last block so that
@@ -121,25 +120,27 @@ class KVCacheManager:
                 # assumes num_computed_tokens is always a multiple of the block
                 # size. This limitation can potentially be removed in the future
                 # to slightly improve the performance.
-                block_hashes[group_name] = request.kv_block_hashes[
-                    group_name][:-1]
+                block_hashes.append(request.kv_block_hashes[i][:-1])
             else:
-                block_hashes[group_name] = request.kv_block_hashes[group_name]
+                block_hashes.append(request.kv_block_hashes[i])
 
-        computed_blocks: KVCacheBlocks = {}
-        computed_tokens: Dict[str, ComputedTokens] = {}
-        for group_name, manager in self.managers.items():
-            computed_tokens[group_name], computed_blocks[group_name] = (
-                manager.get_computed_tokens(block_hashes[group_name]))
+        computed_blocks: KVCacheBlocks = []  # group_id->[blocks]
+        computed_tokens: List[ComputedTokens] = []  # group_id->ComputedTokens
+        for i, manager in enumerate(self.managers):
+            computed_tokens_i, computed_blocks_i = (
+                manager.get_computed_tokens(block_hashes[i]))
+            computed_blocks.append(computed_blocks_i)
+            computed_tokens.append(computed_tokens_i)
 
         # find the common cached prefix of all groups
         num_computed_tokens = self.get_common_computed_tokens(computed_tokens)
 
-        for group_name, blocks in computed_blocks.items():
+        for i, blocks in enumerate(computed_blocks):
             blocks = blocks[:num_computed_tokens //
-                            self.managers[group_name].block_size]
-            self.managers[group_name].remove_useless_blocks(
-                blocks, num_computed_tokens, call_free=True)
+                            self.managers[i].block_size]
+            self.managers[i].remove_useless_blocks(blocks,
+                                                   num_computed_tokens,
+                                                   call_free=True)
 
         return num_computed_tokens, computed_blocks
 
@@ -161,16 +162,14 @@ class KVCacheManager:
             if new blocks are required but cannot be allocated.
         """
         req_blocks = self.req_to_blocks[request.request_id]
-        num_new_blocks_of_group = {
-            group_name: manager.get_num_new_blocks(request.num_computed_tokens,
-                                                   num_tokens,
-                                                   len(req_blocks[group_name]))
-            for group_name, manager in self.managers.items()
-        }
+        num_new_blocks = [
+            manager.get_num_new_blocks(request.num_computed_tokens, num_tokens,
+                                       len(req_blocks_of_group))
+            for manager, req_blocks_of_group in zip(self.managers, req_blocks)
+        ]
 
-        num_new_blocks = sum(
-            max(x, 0) for x in num_new_blocks_of_group.values())
-        if num_new_blocks > self.free_block_queue.num_free_blocks:
+        total_new_blocks = sum(max(x, 0) for x in num_new_blocks)
+        if total_new_blocks > self.free_block_queue.num_free_blocks:
             # Need to allocate new blocks due to insufficient pre-allocated
             # slots, but we cannot allocate new blocks due to the limit.
             return None
@@ -178,44 +177,45 @@ class KVCacheManager:
         # TODO(Chen): add comments
         num_preallocate_blocks = min(
             self.num_preallocate_blocks,
-            (self.free_block_queue.num_free_blocks - num_new_blocks) //
+            (self.free_block_queue.num_free_blocks - total_new_blocks) //
             len(self.managers))
 
-        for group_name, manager in self.managers.items():
+        for manager, req_blocks_of_group in zip(self.managers, req_blocks):
             # NOTE(Chen): do all free before allocation to make less eviction
             manager.remove_useless_blocks(request.num_computed_tokens,
-                                          req_blocks[group_name],
+                                          req_blocks_of_group,
                                           call_free=True)
-        new_blocks = {}
+        new_blocks = []
 
-        for group_name in self.managers:
-            if num_new_blocks[group_name] <= 0:
+        for i in range(len(self.managers)):
+            if num_new_blocks[i] <= 0:
                 # No new block is needed.
-                new_blocks[group_name] = []
+                new_blocks.append([])
             else:
                 # Get new blocks from the free block pool considering
                 # preallocated blocks.
                 num_block_to_allocate = min(
-                    num_new_blocks[group_name] + num_preallocate_blocks,
+                    num_new_blocks[i] + num_preallocate_blocks,
                     # Should not exceed the maximum number of blocks per request.
                     # This is especially because the block table has the shape
                     # [..., max_num_blocks_per_req].
                     # TODO(woosuk): Check and reject requests if
                     # num_prompt_tokens + max_tokens > max_model_len.
                     # TODO(Chen): update comments about max_num_blocks_per_req
-                    cdiv(self.max_model_len, manager.block_size) -
-                    len(req_blocks[group_name]),
+                    cdiv(self.max_model_len, self.managers[i].block_size) -
+                    len(req_blocks[i]),
                 )
-                assert num_new_blocks > 0
+                assert total_new_blocks > 0
 
-                new_blocks[group_name] = self._get_new_blocks(
+                new_blocks_of_group = self._get_new_blocks(
                     num_block_to_allocate)
-                req_blocks[group_name].extend(new_blocks[group_name])
+                new_blocks.append(new_blocks_of_group)
+                req_blocks[i].extend(new_blocks_of_group)
 
         if not self.enable_caching:
             return new_blocks
 
-        for group_name, manager in self.managers.items():
+        for i, manager in enumerate(self.managers):
             num_computed_full_blocks = (request.num_computed_tokens //
                                         manager.block_size)
 
@@ -226,18 +226,18 @@ class KVCacheManager:
             # full after appending the actual tokens.
             num_full_blocks_after_append = (request.num_computed_tokens +
                                             num_tokens) // manager.block_size
-            assert num_full_blocks_after_append <= len(req_blocks)
+            assert num_full_blocks_after_append <= len(req_blocks[i])
 
-            new_full_blocks = req_blocks[
+            new_full_blocks = req_blocks[i][
                 num_computed_full_blocks:num_full_blocks_after_append]
             if new_full_blocks:
                 self._cache_full_blocks(
                     request=request,
                     blk_start_idx=num_computed_full_blocks,
                     full_blocks=new_full_blocks,
-                    prev_block=req_blocks[num_computed_full_blocks - 1]
+                    prev_block=req_blocks[i][num_computed_full_blocks - 1]
                     if num_computed_full_blocks >= 1 else None,
-                    group_name=group_name)
+                    group_id=i)
 
         return new_blocks
 
@@ -270,71 +270,68 @@ class KVCacheManager:
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
-        num_new_blocks_of_group = {
-            group_name:
+        num_new_blocks = [
             manager.get_num_new_blocks(request.num_computed_tokens, num_tokens,
-                                       len(computed_blocks[group_name]))
-            for group_name, manager in self.managers.items()
-        }
+                                       len(computed_blocks_of_group))
+            for manager, computed_blocks_of_group in zip(
+                self.managers, computed_blocks)
+        ]
 
-        num_new_blocks = sum(
-            max(x, 0) for x in num_new_blocks_of_group.values())
-        if num_new_blocks > self.free_block_queue.num_free_blocks:
+        total_new_blocks = sum(max(x, 0) for x in num_new_blocks)
+        if total_new_blocks > self.free_block_queue.num_free_blocks:
             # Cannot allocate new blocks.
             return None
 
         # TODO(Chen): add comments
         num_preallocate_blocks = min(
             self.num_preallocate_blocks,
-            (self.free_block_queue.num_free_blocks - num_new_blocks) //
+            (self.free_block_queue.num_free_blocks - total_new_blocks) //
             len(self.managers))
 
-        new_blocks = {}
-        req_to_blocks = {}
+        new_blocks = []
+        req_to_blocks = []
 
-        for group_name, manager in self.managers.items():
+        for i in range(len(self.managers)):
             # Determine the number of new blocks to allocate considering
             # preallocated blocks.
             num_block_to_allocate = min(
-                num_new_blocks_of_group[group_name] + num_preallocate_blocks,
+                num_new_blocks[i] + num_preallocate_blocks,
                 # Should not exceed the maximum number of blocks per request.
                 # This is especially because the block table has the shape
                 # [..., max_num_blocks_per_req].
                 # TODO(woosuk): Check and reject requests if
                 # num_prompt_tokens + max_tokens > max_model_len.
                 # TODO(Chen): update comments about max_num_blocks_per_req
-                cdiv(self.max_model_len, manager.block_size) -
-                len(computed_blocks[group_name]),
+                cdiv(self.max_model_len, self.managers[i].block_size) -
+                len(computed_blocks[i]),
             )
             assert num_block_to_allocate > 0
 
+            new_blocks_of_group = self._get_new_blocks(num_block_to_allocate)
+            new_blocks.append(new_blocks_of_group)
             # Concatenate the computed block IDs and the new block IDs.
-            new_blocks[group_name] = self._get_new_blocks(
-                num_block_to_allocate)
-            req_to_blocks[group_name] = \
-                computed_blocks[group_name] + new_blocks[group_name]
+            req_to_blocks.append(computed_blocks[i] + new_blocks_of_group)
 
         self.req_to_blocks[request.request_id] = req_to_blocks
 
         if not self.enable_caching:
             return new_blocks
 
-        for group_name, manager in self.managers.items():
-            num_computed_tokens = len(
-                computed_blocks[group_name]) * manager.block_size
+        for i, manager in enumerate(self.managers):
+            num_computed_tokens = len(computed_blocks[i]) * manager.block_size
             num_full_blocks = (num_computed_tokens +
                                num_tokens) // manager.block_size
 
-            new_full_blocks = self.req_to_blocks[request.request_id][
-                group_name][len(computed_blocks):num_full_blocks]
+            new_full_blocks = self.req_to_blocks[
+                request.request_id][i][len(computed_blocks):num_full_blocks]
             if new_full_blocks:
                 self._cache_full_blocks(
                     request=request,
                     blk_start_idx=len(computed_blocks),
-                    # The new full blocks are the full blocks that are not computed.
+                    # new_full_blocks are the full blocks that are not computed.
                     full_blocks=new_full_blocks,
-                    prev_block=computed_blocks[group_name][-1]
-                    if computed_blocks else None,
+                    prev_block=computed_blocks[i][-1]
+                    if computed_blocks[i] else None,
                 )
 
         return new_blocks
@@ -353,8 +350,7 @@ class KVCacheManager:
             # This request is freed before alloc. just return
             return
         elif len(blocks) == 1:
-            ordered_blocks: Iterable[KVCacheBlock] = iter(
-                blocks.values()).__next__()
+            ordered_blocks = blocks[0]
             if self.enable_caching:
                 # Free blocks in reverse order so that the tail blocks are
                 # freed first.
@@ -448,8 +444,8 @@ class KVCacheManager:
         Args:
             blocks: A list of blocks to touch.
         """
-        for block_list in blocks.values():
-            for block in block_list:
+        for blocks_of_group in blocks:
+            for block in blocks_of_group:
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
                 if block.ref_cnt == 0 and block != self.null_block:
@@ -459,7 +455,7 @@ class KVCacheManager:
     def _cache_full_blocks(self, request: Request, blk_start_idx: int,
                            full_blocks: List[KVCacheBlock],
                            prev_block: Optional[KVCacheBlock],
-                           group_name: str) -> None:
+                           group_id: int) -> None:
         """Cache a list of full blocks for prefix caching.
 
         This function takes a list of blocks that will have their block hash
@@ -476,9 +472,9 @@ class KVCacheManager:
             prev_block: The previous block in the chain.
             group_name: TODO(Chen): add comments
         """
-        kv_block_hashes = request.kv_block_hashes[group_name]
+        kv_block_hashes = request.kv_block_hashes[group_id]
         num_cached_block_hashes = len(kv_block_hashes)
-        block_size = self.managers[group_name].block_size
+        block_size = self.managers[group_id].block_size
 
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash_value = None
@@ -510,7 +506,7 @@ class KVCacheManager:
                     f"{len(block_tokens)} at {blk_idx}th block for request "
                     f"{request.request_id}({request})")
 
-                extra_keys = [group_name]
+                extra_keys = [group_id]
 
                 # Generate extra keys for multi-modal inputs. Note that since
                 # we reach to this branch only when the block is completed with
@@ -533,23 +529,21 @@ class KVCacheManager:
     def _merge_blocks_by_length_reversed(
             self, blocks: KVCacheBlocks) -> List[KVCacheBlock]:
         # merge blocks from different groups based on the block size
-        block_size_set = set(manager.block_size
-                             for manager in self.managers.values())
+        block_size_set = set(manager.block_size for manager in self.managers)
         if len(block_size_set) == 1:
-            # O(n) time complexity if all block sizes are the same
+            # O(n) time complexity if block_size of all groups are the same
             ordered_blocks = []
-            group_name = iter(self.managers).next()
-            for i in range(len(blocks[group_name]) - 1, -1, -1):
-                for block_list in blocks.values():
-                    ordered_blocks.append(block_list[i])
+            for i in range(len(blocks[0]) - 1, -1, -1):
+                for blocks_of_group in blocks.values():
+                    ordered_blocks.append(blocks_of_group)
         else:
             # O(n * log(n)) time complexity
-            # TODO: optimize it to O(n*len(self.managers)) time complexity
+            # TODO(Chen): optimize it to O(n*len(self.managers)) time complexity
             ordered_blocks_with_key = []
 
-            for group_name, block_list in blocks.items():
-                block_size = self.managers[group_name].block_size
-                for i, block in enumerate(block_list):
+            for i, blocks_of_group in enumerate(blocks):
+                block_size = self.managers[i].block_size
+                for i, block in enumerate(blocks_of_group):
                     ordered_blocks_with_key.append((block_size * i, block))
 
             ordered_blocks_with_key.sort(reverse=True)
@@ -560,13 +554,13 @@ class KVCacheManager:
     def get_common_computed_tokens(self,
                                    computed_tokens: KVCacheBlocks) -> int:
         # TODO: add comments: the largest in the intersection, and alignment
-        intersection = intersect_ranges(list(computed_tokens.values()))
+        intersection = intersect_ranges(computed_tokens)
 
         # Since incomplete blocks are not eligible for sharing,
         # `num_computed_tokens` should be a multiple of `block_size` of
         # all managers, so we take the least common multiple (LCM) of them
         alignment = math.lcm(
-            *[manager.block_size for manager in self.managers.values()])
+            *[manager.block_size for manager in self.managers])
 
         num_computed_tokens = 0
         for range_ in intersection:

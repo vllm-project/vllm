@@ -262,7 +262,7 @@ def hash_block_tokens(
 
 
 def hash_request_tokens(block_size: int, request: Request,
-                        group_name: str) -> List[BlockHashType]:
+                        group_id: int) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
@@ -290,7 +290,7 @@ def hash_request_tokens(block_size: int, request: Request,
         if len(block_token_ids) < block_size:
             break
 
-        extra_keys = [group_name]
+        extra_keys = [group_id]
         # Add extra keys if the block is a multi-modal block.
         extra_keys_mm, curr_mm_idx = generate_block_hash_extra_keys(
             request, start, end, curr_mm_idx)

@@ -93,5 +93,5 @@ class KVCacheTensorSeperate(KVCacheTensor):
 class KVCacheConfig:
     buffer_size: int  # -1 if do not need a global buffer
     tensors: Dict[str, KVCacheTensor]  # layer_name -> KVCacheTensor
-    groups: Dict[str, List[str]]  # group_id -> List[layer_name]
+    groups: List[List[str]]  # group_id -> [layer_name in the group]
     kv_cache_spec: KVCacheSpec

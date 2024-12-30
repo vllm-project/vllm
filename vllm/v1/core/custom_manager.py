@@ -91,13 +91,13 @@ spec_manager_map = {
 
 
 def get_managers(
-    kv_cache_config: KVCacheConfig,
-    cached_block_hash_to_block: Dict[BlockHashType, Dict[int, KVCacheBlock]]
-) -> Dict[str, CustomManager]:
-    managers: Dict[str, CustomManager] = {}
-    for group_id, layer_ids in kv_cache_config.groups.items():
+        kv_cache_config: KVCacheConfig,
+        memory_pool_operations: MemoryPoolOperations) -> List[CustomManager]:
+    managers: List[CustomManager] = []
+    for layer_ids in kv_cache_config.groups:
+        # All layers in the same group have the same spec, choose arbitrary one
         group_spec = kv_cache_config.kv_cache_spec[layer_ids[0]]
         manager_class = spec_manager_map[type(group_spec)]
-        managers[group_id] = manager_class(group_spec,
-                                           cached_block_hash_to_block)
+        manager = manager_class(group_spec, memory_pool_operations)
+        managers.append(manager)
     return managers

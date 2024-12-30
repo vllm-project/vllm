@@ -97,8 +97,8 @@ class Scheduler:
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
 
-        req_to_new_block_ids: Dict[str, Dict[str, List[int]]] = {
-        }  # req_id -> group_name-> block_id
+        req_to_new_block_ids: Dict[str, List[List[int]]] = {
+        }  # req_id -> group_id-> block_id
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -157,10 +157,9 @@ class Scheduler:
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            req_to_new_block_ids[request.request_id] = {
-                group_name: [b.block_id for b in new_block_list]
-                for group_name, new_block_list in new_blocks.items()
-            }
+            req_to_new_block_ids[request.request_id] = [[
+                b.block_id for b in new_blocks_of_group
+            ] for new_blocks_of_group in new_blocks]
 
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -225,13 +224,11 @@ class Scheduler:
                     raise RuntimeError(
                         f"Invalid request status: {request.status}")
 
-                req_to_new_block_ids[request.request_id] = {
-                    group_name: [
-                        b.block_id for b in computed_blocks[group_name] +
-                        new_blocks[group_name]
-                    ]
-                    for group_name in new_blocks.keys()
-                }
+                req_to_new_block_ids[request.request_id] = [[
+                    b.block_id
+                    for b in computed_blocks_of_group + new_blocks_of_group
+                ] for computed_blocks_of_group, new_blocks_of_group in zip(
+                    computed_blocks, new_blocks)]
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -513,14 +510,14 @@ class NewRequestData:
     mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
-    block_ids: Dict[str, List[int]]  # group_name -> block_ids
+    block_ids: List[List[int]]  # group_id -> block_ids
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: Dict[str, List[int]],
+        block_ids: List[List[int]],
         num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
@@ -540,14 +537,14 @@ class NewRequestData:
 class ResumedRequestData:
 
     req_id: str
-    block_ids: Dict[str, List[int]]  # group_name -> block_ids
+    block_ids: List[List[int]]  # group_id -> block_ids
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: Dict[str, List[int]],
+        block_ids: List[List[int]],
         num_computed_tokens: int,
     ) -> "ResumedRequestData":
         return cls(
@@ -561,14 +558,14 @@ class ResumedRequestData:
 class RunningRequestData:
 
     req_id: str
-    new_block_ids: Dict[str, List[int]]
+    new_block_ids: List[List[int]]  # group_id -> block_ids
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        new_block_ids: Dict[str, List[int]],
+        new_block_ids: List[List[int]],
         num_computed_tokens: int,
     ) -> "RunningRequestData":
         return cls(

@@ -49,9 +49,7 @@ def _get_kv_cache_config_same_type(
             layer_name: KVCacheTensorSeperate(size=per_layer_size)
             for layer_name in kv_cache_spec.keys()
         },
-        groups={
-            "default": [layer_name for layer_name in kv_cache_spec.keys()]
-        },
+        groups=[[layer_name for layer_name in kv_cache_spec.keys()]],
         kv_cache_spec=kv_cache_spec)
     # TODO(Chen): KVCacheTensorSeperate can be removed
     print("kv_cache_config", kv_cache_config)
@@ -89,20 +87,20 @@ def _get_kv_cache_config_same_size(
         # TODO(Chen): num_page and num_block has different meaning
         num_pages = num_gpu_blocks_override
 
-    groups = {}
+    groups = []
     tensors: Dict[int, KVCacheTensor] = {}
 
-    for group_key, layers in grouped_layers.items():
+    for layers in grouped_layers.values():
         for i in range(0, len(layers), group_size_gcd):
-            group_id = f"{group_key}_{i // group_size_gcd}"
-            groups[group_id] = []
+            new_group = []
             for idx_in_group, layer_name in enumerate(layers[i:i +
                                                              group_size_gcd]):
-                groups[group_id].append(layer_name)
+                new_group.append(layer_name)
                 tensors[layer_name] = KVCacheTensorShareBuffer(
                     size=buffer_size - idx_in_group * page_size,
                     start_bias=idx_in_group * page_size,
                 )
+            groups.append(new_group)
 
     kv_cache_config = KVCacheConfig(
         buffer_size=num_pages * allocator_page_size,
