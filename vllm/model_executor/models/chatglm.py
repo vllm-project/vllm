@@ -33,7 +33,7 @@ from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalData, MultiModalKwargs,
+from vllm.multimodal.inputs import (ModalityData, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -54,7 +54,7 @@ def calculate_image_placeholder(vision_config):
 
 def mm_input_mapper_for_glmv(
     ctx: InputContext,
-    data: MultiModalData[object],
+    data: ModalityData[object],
 ) -> Dict:
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(

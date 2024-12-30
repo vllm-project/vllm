@@ -2,53 +2,74 @@ from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import (Any, Literal, NamedTuple, TypedDict, TypeVar, Union, cast,
-                    final)
+from typing import Any, Literal, TypedDict, TypeVar, Union, cast, final
 
 import numpy as np
 import torch
 import torch.types
 from PIL.Image import Image
 from transformers import BatchFeature
-from typing_extensions import NotRequired, TypeAlias, assert_never
+from typing_extensions import NotRequired, TypeAlias
 
 from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
 _T = TypeVar("_T")
 
-# yapf: disable
-ImageItem: TypeAlias = Union[Image, np.ndarray, torch.Tensor]
+HfImageItem: TypeAlias = Union[Image, np.ndarray, torch.Tensor]
 """
 A :class:`transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace :code:`ImageProcessor`.
 """
 
-VideoItem: TypeAlias = Union[
-    list[Image],
-    np.ndarray,
-    torch.Tensor,
-    list[np.ndarray],
-    list[torch.Tensor],
-]
+HfVideoItem: TypeAlias = Union[list[Image], np.ndarray, torch.Tensor,
+                               list[np.ndarray], list[torch.Tensor]]
 """
 A :class:`transformers.image_utils.VideoInput` representing a single video
 item, which can be passed to a HuggingFace :code:`VideoProcessor`.
 """
 
-AudioItem: TypeAlias = Union[
-    np.ndarray,
-    list[float],
-    # `(audio, sampling_rate)`: If the audio's sampling rate is different
-    # from that expected by the model, we need to resample it.
-    tuple[np.ndarray, float],
-]
+HfAudioItem: TypeAlias = Union[list[float], np.ndarray, torch.Tensor]
 """
 Represents a single audio
 item, which can be passed to a HuggingFace :code:`AudioProcessor`.
 """
-# yapf: enable
 
-MultiModalData: TypeAlias = Union[_T, list[_T]]
+ImageItem: TypeAlias = Union[HfImageItem, torch.Tensor]
+"""
+A :class:`transformers.image_utils.ImageInput` representing a single image
+item, which can be passed to a HuggingFace :code:`ImageProcessor`.
+
+Alternatively, a 3-D tensor or batch of 2-D tensors,
+which are treated as image embeddings;
+these are directly passed to the model without HF processing.
+"""
+
+VideoItem: TypeAlias = Union[HfVideoItem, torch.Tensor]
+"""
+A :class:`transformers.image_utils.VideoInput` representing a single video
+item, which can be passed to a HuggingFace :code:`VideoProcessor`.
+
+Alternatively, a 3-D tensor or batch of 2-D tensors,
+which are treated as video embeddings;
+these are directly passed to the model without HF processing.
+"""
+
+AudioItem: TypeAlias = Union[HfAudioItem, tuple[np.ndarray, float],
+                             torch.Tensor]
+"""
+Represents a single audio
+item, which can be passed to a HuggingFace :code:`AudioProcessor`.
+
+Alternatively, a tuple `(audio, sampling_rate)`, where the sampling rate
+is different from that expected by the model;
+these are resampled to the model's sampling rate before being processed by HF.
+
+Alternatively, a 3-D tensor or batch of 2-D tensors,
+which are treated as audio embeddings;
+these are directly passed to the model without HF processing.
+"""
+
+ModalityData: TypeAlias = Union[_T, list[_T]]
 """
 Either a single data item, or a list of data items.
 
@@ -61,17 +82,17 @@ The number of data items allowed per modality is restricted by
 class MultiModalDataBuiltins(TypedDict, total=False):
     """Type annotations for modality types predefined by vLLM."""
 
-    image: MultiModalData[ImageItem]
+    image: ModalityData[ImageItem]
     """The input image(s)."""
 
-    video: MultiModalData[VideoItem]
+    video: ModalityData[VideoItem]
     """The input video(s)."""
 
-    audio: MultiModalData[AudioItem]
+    audio: ModalityData[AudioItem]
     """The input audio(s)."""
 
 
-MultiModalDataDict: TypeAlias = Mapping[str, MultiModalData[Any]]
+MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
 """
 A dictionary containing an entry for each modality type to input.
 
@@ -81,123 +102,6 @@ Note:
     is registered through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
     Read more on that :ref:`here <adding-multimodal-plugin>`.
 """
-
-
-class ImageSize(NamedTuple):
-    width: int
-    height: int
-
-
-class MultiModalDataItems(UserDict[str, list[Any]]):
-    """
-    As :class:`MultiModalDataDict`, but normalized such that each entry
-    corresponds to a list.
-    """
-
-    @staticmethod
-    def from_dict(data: MultiModalDataDict) -> "MultiModalDataItems":
-        """
-        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`.
-        """
-        multi_data = MultiModalDataItems()
-
-        for k, v in data.items():
-            # TODO: Make a separate modality for embedding inputs
-            # to avoid confusion
-            # yapf: disable
-            if k == "video":
-                # Special case since even a single item can be a list
-                multi_data[k] = (  # type: ignore[index]
-                    v if (
-                        isinstance(v, torch.Tensor)
-                        or is_list_of(v, list)
-                        or isinstance(v[0], (np.ndarray, torch.Tensor))
-                           and v[0].ndim == 4
-                    ) else [v]
-                )
-            elif k in ("image", "audio"):
-                multi_data[k] = (  # type: ignore[index]
-                    v if isinstance(v, (torch.Tensor, list)) else [v]
-                )
-            else:
-                multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
-            # yapf: enable
-
-        return multi_data
-
-    # NOTE: When a field (e.g. `images`) doesn't exist, directly appending to
-    # `self.images` doesn't update this dictionary, which may be confusing
-    # We annotate the getter methods as `Sequence` to prevent others from
-    # trying to update the list in this way
-    @property
-    def images(self) -> Sequence[ImageItem]:
-        return self.get("image", [])
-
-    @property
-    def videos(self) -> Sequence[VideoItem]:
-        return self.get("video", [])
-
-    @property
-    def audios(self) -> Sequence[AudioItem]:
-        return self.get("audio", [])
-
-    def get_item_counts(self) -> Mapping[str, int]:
-        return {m: len(items) for m, items in self.items()}
-
-    def has_embedding_inputs(self) -> bool:
-        return any(
-            any(isinstance(item, torch.Tensor) for item in items)
-            for items in self.values())
-
-    def get_image_size(self, item_idx: int) -> ImageSize:
-        image = self.images[item_idx]
-
-        if isinstance(image, Image):
-            return ImageSize(*image.size)
-        if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
-            return ImageSize(w, h)
-
-        assert_never(image)
-
-    def get_audio_with_sr(
-        self,
-        item_idx: int,
-        *,
-        default_sr: float,
-    ) -> tuple[np.ndarray, float]:
-        audio = self.audios[item_idx]
-
-        if isinstance(audio, tuple):
-            return audio
-        if isinstance(audio, list):
-            return np.array(audio), default_sr
-        if isinstance(audio, np.ndarray):
-            return audio, default_sr
-
-        assert_never(audio)
-
-    def resample_audios(self, new_sr: float, *, drop_sr: bool = True) -> None:
-        """
-        If :code:`drop_sr=True`, the audio items in this dictionary are updated
-        to be NumPy arrays which implicitly means that their sampling rate is
-        the same as the model's expected sampling rate; otherwise, they remain
-        as :code:`(audio, new_sr)` tuples.
-        """
-        # Avoid circular import
-        from .audio import resample_audio
-
-        if not self.audios:
-            return
-
-        new_audios = []
-        for item_idx in range(len(self.audios)):
-            audio, sr = self.get_audio_with_sr(item_idx, default_sr=new_sr)
-            audio = resample_audio(audio, orig_sr=sr, target_sr=new_sr)
-
-            new_audios.append(audio if drop_sr else (audio, new_sr))
-
-        self["audio"] = new_audios
 
 
 class PlaceholderRange(TypedDict):
@@ -436,7 +340,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     ) -> "MultiModalKwargs":
         data = {
             key: items[0].field.reduce(items).data
-            for key, items in items_by_key.items()
+            for key, items in items_by_key.items() if len(items) > 0
         }
 
         return MultiModalKwargs(data,
@@ -567,6 +471,11 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         Get the keyword arguments corresponding to an item identified by
         its modality and index.
         """
+        if modality not in self._keys_by_modality:
+            available_modalities = set(self._keys_by_modality.keys())
+            raise KeyError(f"Modality {modality!r} not found. "
+                           f"Available modalities: {available_modalities}")
+
         keys_to_gather = self._keys_by_modality[modality]
 
         return {

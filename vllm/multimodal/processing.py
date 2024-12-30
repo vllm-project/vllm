@@ -15,11 +15,12 @@ from transformers import BatchFeature, ProcessorMixin
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import LRUCache, flatten_2d_lists, full_groupby, is_list_of
+from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
-from .inputs import (MultiModalDataDict, MultiModalDataItems,
-                     MultiModalFieldConfig, MultiModalFieldItem,
-                     MultiModalInputsV2, MultiModalKwargs, PlaceholderRange)
+from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                     MultiModalFieldItem, MultiModalInputsV2, MultiModalKwargs,
+                     PlaceholderRange)
+from .parse import MultiModalDataItems, MultiModalDataParser
 
 logger = init_logger(__name__)
 
@@ -621,6 +622,16 @@ class BaseMultiModalProcessor(ABC):
     ) -> MultiModalInputsV2:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
+    def _get_data_parser(self) -> MultiModalDataParser:
+        """
+        Construct a data parser to preprocess multi-modal data items
+        before passing them to :meth:`_get_hf_mm_data`.
+
+        You can support additional modalities by creating a subclass
+        of :class:`MultiModalDataParser` that has additional subparsers.
+        """
+        return MultiModalDataParser()
+
     def _get_hf_processor(self) -> ProcessorMixin:
         """
         Subclasses can add keyword arguments to this method to accept
@@ -631,11 +642,16 @@ class BaseMultiModalProcessor(ABC):
     def _get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
-    def _get_mm_items(
+    def _to_mm_items(
         self,
         mm_data: MultiModalDataDict,
     ) -> MultiModalDataItems:
-        return MultiModalDataItems.from_dict(mm_data)
+        """
+        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`
+        before passing them to :meth:`_get_hf_mm_data`.
+        """
+        parser = self._get_data_parser()
+        return parser.parse_mm_data(mm_data)
 
     @abstractmethod
     def _get_mm_fields_config(
@@ -680,22 +696,9 @@ class BaseMultiModalProcessor(ABC):
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
 
-        for k, v in mm_items.items():
-            # TODO: Make a separate modality for embedding inputs
-            # to avoid confusion
-            if k in ("image", "video", "audio"):
-                if isinstance(v, torch.Tensor) and v.ndim == 3:
-                    # Pass through embedding inputs (single)
-                    passthrough_data[f"{k}_embeds"] = [v]
-                elif (is_list_of(v, torch.Tensor) and len(v) > 0
-                      and v[0].ndim == 2):
-                    # Pass through embedding inputs (multi)
-                    passthrough_data[f"{k}_embeds"] = v
-                elif len(v) > 0:
-                    # Map keys to plural form, e.g.: image -> images
-                    processor_data[f"{k}s"] = v
-            else:
-                processor_data[k] = v
+        for items in mm_items.values():
+            processor_data.update(items.get_processor_data())
+            passthrough_data.update(items.get_passthrough_data())
 
         return processor_data, passthrough_data
 
@@ -756,7 +759,7 @@ class BaseMultiModalProcessor(ABC):
         cached items; instead, we rely on our own prompt replacement logic
         for the full text.
         """
-        mm_missing_counts = mm_missing_data_items.get_item_counts()
+        mm_missing_counts = mm_missing_data_items.get_all_counts()
 
         prompt_ids, _ = self._apply_hf_processor(
             prompt_text=prompt_text,
@@ -789,7 +792,8 @@ class BaseMultiModalProcessor(ABC):
         cache = self.cache
         model_id = self.ctx.model_config.model
 
-        if cache is None or mm_data_items.has_embedding_inputs():
+        _, passthrough_data = self._get_hf_mm_data(mm_data_items)
+        if cache is None or passthrough_data:
             return self._apply_hf_processor(
                 prompt_text=prompt_text,
                 mm_items=mm_data_items,
@@ -812,7 +816,7 @@ class BaseMultiModalProcessor(ABC):
             modality: [mm_data_items[modality][idx] for idx in idxs]
             for modality, idxs in mm_missing_idxs.items()
         }
-        mm_missing_data_items = self._get_mm_items(mm_missing_data)
+        mm_missing_data_items = self._to_mm_items(mm_missing_data)
 
         prompt_ids, mm_missing_kwargs = self._apply_hf_processor_missing(
             prompt_text=prompt_text,
@@ -852,7 +856,7 @@ class BaseMultiModalProcessor(ABC):
             mm_merged_field_items[modality] = merged_modal_items_lst
 
         if self.enable_sanity_checks:
-            mm_missing_counts = mm_missing_data_items.get_item_counts()
+            mm_missing_counts = mm_missing_data_items.get_all_counts()
             assert all(
                 item_count == mm_missing_counts[modality]
                 for modality, item_count in mm_missing_next_idx.items()), dict(
@@ -865,7 +869,7 @@ class BaseMultiModalProcessor(ABC):
         )
 
         if self.enable_sanity_checks:
-            mm_item_counts = mm_data_items.get_item_counts()
+            mm_item_counts = mm_data_items.get_all_counts()
 
             for modality, item_count in mm_item_counts.items():
                 for item_idx in range(item_count):
@@ -958,7 +962,7 @@ class BaseMultiModalProcessor(ABC):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        mm_items = self._get_mm_items(mm_data)
+        mm_items = self._to_mm_items(mm_data)
 
         prompt_ids, mm_kwargs = self._cached_apply_hf_processor(
             prompt_text,
@@ -975,7 +979,7 @@ class BaseMultiModalProcessor(ABC):
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        mm_item_counts = mm_items.get_item_counts()
+        mm_item_counts = mm_items.get_all_counts()
         all_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
                                                    mm_item_counts)
 
