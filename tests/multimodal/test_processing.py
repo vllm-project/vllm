@@ -624,6 +624,10 @@ def _test_processing_cache_correctness(
 
 # yapf: disable
 @pytest.mark.parametrize(("model_id", "modalities"), [
+    ("rhymes-ai/Aria", {"image"}),
+    ("Salesforce/blip2-opt-2.7b", {"image"}),
+    ("facebook/chameleon-7b", {"image"}),
+    ("adept/fuyu-8b", {"image"}),
     ("llava-hf/llava-1.5-7b-hf", {"image"}),
     ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image"}),
     ("mistral-community/pixtral-12b", {"image"}),

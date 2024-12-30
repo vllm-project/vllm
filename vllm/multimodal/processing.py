@@ -1,6 +1,7 @@
 import pickle
 import re
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from collections.abc import Callable, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -352,13 +353,13 @@ def _replace_matches(
 ) -> list[_S]:
     out_seqs = list[_S]()
     prev_end_idx = 0
-    next_idx_by_modality = {modality: 0 for modality in mm_item_counts}
+    next_idx_by_modality = defaultdict[str, int](lambda: 0)
 
     for match in _resolve_matches(prompt, matches):
         modality = match.modality
 
         item_idx = next_idx_by_modality[modality]
-        if item_idx >= mm_item_counts[modality]:
+        if item_idx >= mm_item_counts.get(modality, 0):
             continue
 
         start_idx = match.start_idx
