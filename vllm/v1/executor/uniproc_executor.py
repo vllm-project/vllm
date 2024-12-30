@@ -62,7 +62,7 @@ class UniprocExecutor(Executor):
     def initialize(self, kv_cache_config: KVCacheConfig) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
-        # TODO (Chen): why do we need this log?
+        # TODO(Chen): why do we need this log?
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.

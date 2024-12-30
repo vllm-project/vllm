@@ -25,7 +25,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: List[int]
+    block_ids: List[List[int]]  # group_id -> block_ids
     num_computed_tokens: int
     output_token_ids: List[int]
 
@@ -43,6 +43,7 @@ class InputBatch:
         max_num_blocks_per_req: int,
         device: torch.device,
         pin_memory: bool,
+        num_block_table_groups: int,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -66,12 +67,12 @@ class InputBatch:
 
         # Attention-related.
         self.block_table = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
+            (num_block_table_groups, max_num_reqs, max_num_blocks_per_req),
             device=self.device,
             dtype=torch.int32,
         )
         self.block_table_cpu_tensor = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
+            (num_block_table_groups, max_num_reqs, max_num_blocks_per_req),
             device="cpu",
             dtype=torch.int32,
             pin_memory=pin_memory,
@@ -141,8 +142,8 @@ class InputBatch:
                            start_idx:end_idx] = request.output_token_ids
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        num_blocks = len(request.block_ids)
-        self.block_table_cpu[req_index, :num_blocks] = request.block_ids
+        for i, block_ids in enumerate(request.block_ids):
+            self.block_table_cpu[i, req_index, :len(block_ids)] = block_ids
 
         sampling_params = request.sampling_params
         self.temperature_cpu[req_index] = sampling_params.temperature
@@ -226,8 +227,8 @@ class InputBatch:
                 last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
-            self.block_table_cpu[empty_index] = self.block_table_cpu[
-                last_req_index]
+            self.block_table_cpu[:, empty_index] = \
+                self.block_table_cpu[:, last_req_index]
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]

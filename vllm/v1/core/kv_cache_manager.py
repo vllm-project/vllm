@@ -354,7 +354,7 @@ class KVCacheManager:
             if self.enable_caching:
                 # Free blocks in reverse order so that the tail blocks are
                 # freed first.
-                ordered_blocks = reversed(blocks)
+                ordered_blocks = reversed(ordered_blocks)
         else:
             if self.enable_caching:
                 # TODO(Chen): add comments
@@ -506,7 +506,7 @@ class KVCacheManager:
                     f"{len(block_tokens)} at {blk_idx}th block for request "
                     f"{request.request_id}({request})")
 
-                extra_keys = [group_id]
+                extra_keys = (group_id, )
 
                 # Generate extra keys for multi-modal inputs. Note that since
                 # we reach to this branch only when the block is completed with
@@ -514,12 +514,12 @@ class KVCacheManager:
                 extra_mm_keys, _ = generate_block_hash_extra_keys(
                     request, start_token_idx, end_token_idx, -1)
                 if extra_mm_keys is not None:
-                    extra_keys.extend(extra_mm_keys)
+                    extra_keys += extra_mm_keys
 
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(prev_block_hash_value,
                                                block_tokens, extra_keys)
-                request.append_kv_block_hashes(block_hash)
+                request.append_kv_block_hashes(group_id, block_hash)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
@@ -534,8 +534,8 @@ class KVCacheManager:
             # O(n) time complexity if block_size of all groups are the same
             ordered_blocks = []
             for i in range(len(blocks[0]) - 1, -1, -1):
-                for blocks_of_group in blocks.values():
-                    ordered_blocks.append(blocks_of_group)
+                for blocks_of_group in blocks:
+                    ordered_blocks.append(blocks_of_group[i])
         else:
             # O(n * log(n)) time complexity
             # TODO(Chen): optimize it to O(n*len(self.managers)) time complexity

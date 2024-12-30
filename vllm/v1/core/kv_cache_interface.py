@@ -58,7 +58,7 @@ class SlidingWindowSpec(KVCacheSpecBase):
 
     @property
     def key(self) -> str:
-        return f"sliding_window_{self.sliding_window}_{self.bytes_for_tokens(1)}"
+        return f"sliding_window_{self.sliding_window}_{self.block_size}_{self.bytes_for_tokens(1)}"
 
     @property
     def page_size_bytes(self) -> int:

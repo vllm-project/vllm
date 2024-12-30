@@ -244,6 +244,8 @@ def unified_attention(
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.dynamic_forward_context
     self = forward_context.static_forward_context[layer_name]
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
     return self.impl.forward(query,
                              key,
                              value,
@@ -286,6 +288,8 @@ def unified_attention_with_output(
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.dynamic_forward_context
     self = forward_context.static_forward_context[layer_name]
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
     self.impl.forward(query,
                       key,
                       value,

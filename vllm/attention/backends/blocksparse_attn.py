@@ -300,6 +300,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        layer_name: str = "",
     ) -> None:
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(

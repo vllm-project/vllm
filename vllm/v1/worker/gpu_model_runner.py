@@ -15,6 +15,7 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
@@ -69,7 +70,6 @@ class GPUModelRunner:
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
-        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -103,13 +103,9 @@ class GPUModelRunner:
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            device=self.device,
-            pin_memory=self.pin_memory,
-        )
+        # self.input_batch: InputBatch # Set by initialize_kv_cache
+        # self.kv_cache_config: KVCacheConfig # Set by initialize_kv_cache
+        # self.max_num_blocks_per_req: int # Set by initialize_kv_cache
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -149,11 +145,14 @@ class GPUModelRunner:
                                          device="cpu",
                                          pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+        # Set by initialize_kv_cache
+        # self.slot_mapping_cpu = torch.zeros(
+        #                                     len(kv_cache_config.groups),
+        #                                     self.max_num_tokens,
+        #                                     dtype=torch.int32,
+        #                                     device="cpu",
+        #                                     pin_memory=self.pin_memory)
+        # self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device="cpu",
@@ -203,14 +202,15 @@ class GPUModelRunner:
                 req_data.num_computed_tokens)
 
             # Update the block table.
-            num_new_blocks = len(req_data.new_block_ids)
-            if num_new_blocks == 0:
-                continue
-            start_index = len(req_state.block_ids)
-            end_index = start_index + num_new_blocks
-            req_state.block_ids.extend(req_data.new_block_ids)
-            self.input_batch.block_table_cpu[
-                req_index, start_index:end_index] = req_data.new_block_ids
+            for group_id, new_block_ids in enumerate(req_data.new_block_ids):
+                num_new_blocks = len(new_block_ids)
+                if num_new_blocks == 0:
+                    continue
+                start_index = len(req_state.block_ids)
+                end_index = start_index + num_new_blocks
+                req_state.block_ids[group_id].extend(new_block_ids)
+                self.input_batch.block_table_cpu[
+                    group_id, req_index, start_index:end_index] = new_block_ids
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -271,8 +271,8 @@ class GPUModelRunner:
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table[:num_reqs].copy_(
-            self.input_batch.block_table_cpu_tensor[:num_reqs],
+        self.input_batch.block_table[:, :num_reqs].copy_(
+            self.input_batch.block_table_cpu_tensor[:, :num_reqs],
             non_blocking=True)
 
         # Get the number of scheduled tokens for each request.
@@ -306,7 +306,7 @@ class GPUModelRunner:
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
+        # ->  [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
@@ -319,22 +319,27 @@ class GPUModelRunner:
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
         # Calculate the slot mapping.
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
-        # where K is the max_num_blocks_per_req and the block size is 2.
-        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
-        # because M (max_model_len) is not necessarily divisible by block_size.
-        block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                               positions_np // self.block_size)
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
-        block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
-                         [block_table_indices].numpy())
-        block_offsets = positions_np % self.block_size
-        np.add(block_numbers * self.block_size,
-               block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+        for i in range(len(self.kv_cache_config.groups)):
+            group_spec = self.kv_cache_config.kv_cache_spec[
+                self.kv_cache_config.groups[i][0]]
+            block_size = group_spec.block_size
+            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+            # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+            # where K is the max_num_blocks_per_req and the block size is 2.
+            # NOTE(woosuk): We can't simply use `token_indices // block_size`
+            # here because M (max_model_len) is not necessarily divisible by
+            # block_size.
+            block_table_indices = (req_indices * self.max_num_blocks_per_req +
+                                   positions_np // block_size)
+            # NOTE(woosuk): We use torch.index_select instead of np.take here
+            # because torch.index_select is much faster than np.take for large
+            # tensors.
+            block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
+                             [block_table_indices].numpy())
+            block_offsets = positions_np % block_size
+            np.add(block_numbers * block_size,
+                   block_offsets,
+                   out=self.slot_mapping_np[i][:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -356,17 +361,22 @@ class GPUModelRunner:
             self.device, non_blocking=True)
         seq_start_loc = self.seq_start_loc_cpu[:num_reqs + 1].to(
             self.device, non_blocking=True)
-        slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
-            self.device, non_blocking=True).long()
-        attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            query_start_loc=query_start_loc,
-            max_seq_len=max_seq_len,
-            seq_start_loc=seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
-            slot_mapping=slot_mapping,
-        )
+        slot_mapping = self.slot_mapping_cpu[:, :total_num_scheduled_tokens]. \
+            to(self.device, non_blocking=True).long()
+        # layer_name -> AttentionMetadata
+        attn_metadata: Dict[str, FlashAttentionMetadata] = {}
+        for i, layer_ids in enumerate(self.kv_cache_config.groups):
+            attn_metadata_of_group = FlashAttentionMetadata(
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                query_start_loc=query_start_loc,
+                max_seq_len=max_seq_len,
+                seq_start_loc=seq_start_loc,
+                block_table=self.input_batch.block_table[i, :num_reqs],
+                slot_mapping=slot_mapping[i],
+            )
+            for layer_id in layer_ids:
+                attn_metadata[layer_id] = attn_metadata_of_group
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled
@@ -489,7 +499,8 @@ class GPUModelRunner:
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
+        for layer_ids in self.kv_cache_config.groups:
+            attn_metadata[layer_ids[0]].num_input_tokens = num_input_tokens
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -730,19 +741,12 @@ class GPUModelRunner:
         else:
             buffer = None
 
-        def parse_layer_id_from_name(layer_name: str) -> int:
-            # layer_name is like "model.decoder.layers.2.self_attn.attn"
-            numbers = re.findall(r'\d+', layer_name)
-            if len(numbers) != 1:
-                raise ValueError(f"Invalid layer name: {layer_name}")
-            return int(numbers[0])
-
         if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError("When pipeline parallel enabled, " \
                 "layer_name 'layers.i.self_attn.attn' is associated with" \
                 "kv_caches[i - self.start_layer]")
         layer_names = sorted(kv_cache_config.kv_cache_spec.keys(),
-                             key=parse_layer_id_from_name)
+                             key=extract_layer_index)
         print("layer_names", layer_names)
         assert len(layer_names) == self.num_attn_layers
 
@@ -772,8 +776,33 @@ class GPUModelRunner:
                 raise NotImplementedError
             self.kv_caches.append(tensor)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+        self.kv_cache_config = kv_cache_config
 
+        # Set max_num_blocks_per_req to the largest number among all groups,
+        # allowing them to share one tensor. Otherwise, each group would need
+        # its own block_table tensor and multiple GPU kernels are needed to
+        # copy them to GPU.
+        min_block_size = min(
+            layer_spec.block_size
+            for layer_spec in kv_cache_config.kv_cache_spec.values())
+        self.max_num_blocks_per_req = cdiv(self.max_model_len, min_block_size)
+
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            num_block_table_groups=len(kv_cache_config.groups))
+
+        self.slot_mapping_cpu = torch.zeros(len(kv_cache_config.groups),
+                                            self.max_num_tokens,
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+
+    def get_kv_cache_spec(self) -> KVCacheSpec:
         attn_layers = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: KVCacheSpec = {}
