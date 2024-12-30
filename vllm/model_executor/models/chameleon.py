@@ -153,7 +153,8 @@ def input_processor_for_chameleon(ctx: InputContext,
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": ranges})
 
 
 class ChameleonLayerNorm(nn.LayerNorm):

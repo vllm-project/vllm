@@ -577,14 +577,14 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Salesforce/blip2-opt-2.7b`, `Salesforce/blip2-opt-6.7b`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `ChameleonForConditionalGeneration`
   - Chameleon
   - T + I
   - `facebook/chameleon-7b` etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `FuyuForCausalLM`
   - Fuyu
   - T + I
