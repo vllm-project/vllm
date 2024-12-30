@@ -19,6 +19,7 @@ from vllm.utils import get_exception_traceback, make_zmq_socket
 from vllm.v1.engine import (EngineCoreAbort, EngineCoreOutput,
                             EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType)
+from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
 
@@ -305,6 +306,31 @@ class DetokenizerProc(Detokenizer):
         ready_pipe.send({"status": "READY"})
 
     @staticmethod
+    def make_process(
+        input_path: str,
+        output_path: str,
+        to_engine_core_path: str,
+        tokenizer_name: str,
+        tokenizer_mode: str,
+        trust_remote_code: bool,
+        revision: str,
+    ) -> BackgroundProcHandle:
+        """Make background process and return handle."""
+
+        return BackgroundProcHandle(
+            input_path=input_path,
+            output_path=output_path,
+            process_name="Detokenizer",
+            target_fn=DetokenizerProc.run_detokenizer,
+            process_kwargs={
+                "to_engine_core_path": to_engine_core_path,
+                "tokenizer_name": tokenizer_name,
+                "tokenizer_mode": tokenizer_mode,
+                "trust_remote_code": trust_remote_code,
+                "revision": revision,
+            })
+
+    @staticmethod
     def run_detokenizer(*args, **kwargs):
         """Launch Detokenizer busy loop in background process."""
 
@@ -343,9 +369,9 @@ class DetokenizerProc(Detokenizer):
                 detokenizer = None
 
     def _handle_from_llm_engine(
-            self,
-            request_bytes: bytes,
-            to_engine_core: zmq.Socket,  # type: ignore[name-defined]
+        self,
+        request_bytes: bytes,
+        to_engine_core: zmq.Socket,  # type: ignore[name-defined]
     ) -> None:
         """Handle inputs from the LLM Engine."""
 

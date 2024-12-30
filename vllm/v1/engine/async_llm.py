@@ -26,8 +26,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
-from vllm.v1.engine import (EngineCoreAbort, EngineCoreProfile,
-                            EngineCoreRequestType)
+from vllm.v1.engine import EngineCoreAbort, EngineCoreRequestType
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.detokenizer import DetokenizerProc
 from vllm.v1.engine.processor import Processor
@@ -97,47 +96,33 @@ class AsyncLLM(EngineClient):
             input_registry=input_registry,
         )
 
-        # Setup zmq ipc.
+        # Setup ZMQ IPC.
         to_detokenizer_path = get_open_zmq_ipc_path()
         to_engine_core_path = get_open_zmq_ipc_path()
         from_detokenizer_path = get_open_zmq_ipc_path()
         self.ctx = zmq.asyncio.Context(io_threads=2)
-        self.to_detokenizer = make_zmq_socket(self.ctx, to_detokenizer_path,
-                                              zmq.constants.PUSH)
-        self.from_detokenizer = make_zmq_socket(self.ctx,
-                                                from_detokenizer_path,
-                                                zmq.constants.PULL)
-        # The flow is typically AsyncLLM -> Detokenizer -> EngineCore,
-        # but we use this path for starting and stopping the profiler.
-        self.to_engine_core = make_zmq_socket(self.ctx, to_detokenizer_path,
-                                              zmq.constants.PUSH)
+        self.to_detokenizer = make_zmq_socket(
+            self.ctx, to_detokenizer_path, zmq.constants.PUSH)
+        self.from_detokenizer = make_zmq_socket(
+            self.ctx, from_detokenizer_path, zmq.constants.PULL)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
-        self.detokenizer_handle: Optional[BackgroundProcHandle]
-        self.detokenizer_handle = BackgroundProcHandle(
+        self.detokenizer_handle = DetokenizerProc.make_process(
             input_path=to_detokenizer_path,
             output_path=from_detokenizer_path,
-            process_name="Detokenizer",
-            target_fn=DetokenizerProc.run_detokenizer,
-            process_kwargs={
-                "to_engine_core_path": to_engine_core_path,
-                "tokenizer_name": self.model_config.tokenizer,
-                "tokenizer_mode": self.model_config.tokenizer_mode,
-                "trust_remote_code": self.model_config.trust_remote_code,
-                "revision": self.model_config.revision,
-            })
+            to_engine_core_path=to_engine_core_path,
+            model_config=self.model_config,
+        )
 
         # EngineCore (starts the engine in background process).
-        self.engine_core_handle = BackgroundProcHandle(
+        # (Gets input from Detokenizer, sends outputs to Detokenizer).
+        self.engine_core_handle = EngineCoreProc.make_process(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
             input_path=from_detokenizer_path,
             output_path=to_detokenizer_path,
-            process_name="EngineCore",
-            target_fn=EngineCoreProc.run_engine_core,
-            process_kwargs={
-                "vllm_config": vllm_config,
-                "executor_class": executor_class,
-                "log_stats": log_stats,
-            })
+            log_stats=log_stats,
+        )
 
         self.output_handler: Optional[asyncio.Task] = None
 
@@ -172,16 +157,25 @@ class AsyncLLM(EngineClient):
         )
 
     def shutdown(self):
-        """Shutdown, cleaning up the background proc and IPC."""
+        """Shutdown, cleaning up the background procs and IPC."""
+        # ZMQ.
+        self.ctx.destroy(linger=0)
 
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+        # EngineCore background process.
+        if hasattr(self, "engine_core_handle"):
+            self.engine_core_handle.shutdown()
 
-        if handler := getattr(self, "output_handler", None):
-            handler.cancel()
+        # Detokenizer background process.
+        if hasattr(self, "engine_core_handle"):
+            self.engine_core_handle.shutdown()
 
-    @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
+        # Output handler background task.
+        if hasattr(self, "output_handler") and self.output_handler:
+            self.output_handler.cancel()
+
+
+    @staticmethod
+    def _get_executor_cls(vllm_config: VllmConfig) -> Type[Executor]:
         executor_class: Type[Executor]
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
@@ -220,8 +214,8 @@ class AsyncLLM(EngineClient):
                                                 priority)
 
         # 3) Send to Detokenizer (which forwards to EngineCore).
-        # Note: we forward the request rather than sending to each
-        # process separately to avoid race conditions).
+        # note(rob): we forward the request rather than sending to each
+        # process separately to avoid race conditions.
         await self._send_pyobj(self.to_detokenizer, request)
 
         if self.log_requests:
@@ -280,12 +274,12 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             while True:
-                # Note: drain queue without await if possible (avoids
-                # task switching under load which helps performance).
+                # note(rob): drain queue without await if possible 
+                # (avoids task switching under load for performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
-                # Note: both Detokenizer and EngineCore handle their
-                # own request cleanup based on finished.
+                # notte(rob): both Detokenizer and EngineCore handle 
+                # their own request cleanup based on finished.
                 if out.finished:
                     del self.rid_to_queue[request_id]
                     yield out
@@ -317,7 +311,7 @@ class AsyncLLM(EngineClient):
 
         try:
             while True:
-                # Note(rob: use socket directly to avoid calling await multiple
+                # note(rob): use socket directly to avoid calling await multiple
                 # times, which causes too much task switching at high QPS.
                 outputs: List[RequestOutput] = []
                 outputs = await self.from_detokenizer.recv_pyobj()
@@ -392,10 +386,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        await self._send_pyobj(self.to_engine_core, EngineCoreProfile(True))
+        pass
 
     async def stop_profile(self) -> None:
-        await self._send_pyobj(self.to_engine_core, EngineCoreProfile(False))
+        pass
 
     @property
     def is_running(self) -> bool:
