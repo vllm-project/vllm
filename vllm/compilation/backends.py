@@ -145,6 +145,7 @@ def wrap_inductor(graph: fx.GraphModule,
                   example_inputs,
                   additional_inductor_config,
                   compilation_config: CompilationConfig,
+                  vllm_backend: "VllmBackend",
                   graph_index: int = 0,
                   num_graphs: int = 1,
                   runtime_shape: Optional[int] = None,
@@ -176,7 +177,7 @@ def wrap_inductor(graph: fx.GraphModule,
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
 
-    cache_data = compilation_config.inductor_hash_cache
+    cache_data = vllm_backend.inductor_hash_cache
     if (runtime_shape, graph_index) in cache_data:
         # we compiled this graph before
         # so we can directly lookup the compiled graph via hash
@@ -196,7 +197,7 @@ def wrap_inductor(graph: fx.GraphModule,
                 hash_str, example_inputs, True, False)
             assert inductor_compiled_graph is not None, (
                 "Inductor cache lookup failed. Please remove"
-                f"the cache file {compilation_config.inductor_hash_cache.cache_file_path} and try again."  # noqa
+                f"the cache file {cache_data.cache_file_path} and try again."  # noqa
             )
 
         # Inductor calling convention (function signature):
@@ -390,6 +391,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 args,
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
+                self.vllm_backend,
                 graph_index=index,
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
@@ -713,6 +715,7 @@ class PiecewiseBackend:
                 args,
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
+                self.vllm_backend,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
                 runtime_shape=runtime_shape,
