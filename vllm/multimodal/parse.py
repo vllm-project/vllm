@@ -330,16 +330,8 @@ class MultiModalDataParser:
             "video": self._parse_video_data,
         }
 
-    def parse_mm_data(
-        self,
-        mm_data: MultiModalDataDict,
-        *,
-        extra_parsers: Mapping[str, ModalityDataParser] = {},
-    ) -> MultiModalDataItems:
-        parsers = {
-            **self._get_mm_data_parsers(),
-            **extra_parsers,
-        }
+    def parse_mm_data(self,mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        parsers = self._get_mm_data_parsers()
 
         mm_items = MultiModalDataItems()
         for k, v in mm_data.items():
