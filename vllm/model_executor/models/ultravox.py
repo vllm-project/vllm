@@ -18,7 +18,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.inputs import InputContext
-from vllm.model_executor.layers.activation import MulAndAndSilu, get_act_fn
+from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
@@ -238,7 +238,7 @@ class UltravoxProjector(nn.Module):
         dim = self.hidden_dim
 
         if config.projector_act == "swiglu":
-            self.act = MulAndAndSilu()
+            self.act = MulAndSilu()
             dim = dim // 2
         else:
             self.act = get_act_fn(config.projector_act)

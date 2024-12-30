@@ -83,7 +83,7 @@ class SiluAndMul(CustomOp):
 
 
 @CustomOp.register("mul_and_silu")
-class MulAndAndSilu(CustomOp):
+class MulAndSilu(CustomOp):
     """An activation function for SwiGLU.
 
     The function computes x -> x[:d] * silu(x[d:]) where d = x.shape[-1] // 2.
@@ -107,7 +107,7 @@ class MulAndAndSilu(CustomOp):
         ops.mul_and_silu(out, x)
         return out
 
-    # TODO implement forward_xpu for MulAndAndSilu
+    # TODO implement forward_xpu for MulAndSilu
     # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
 
 

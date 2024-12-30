@@ -6,7 +6,7 @@ import torch
 
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import (FastGELU, FatreluAndMul,
-                                                   GeluAndMul, MulAndAndSilu,
+                                                   GeluAndMul, MulAndSilu,
                                                    NewGELU, QuickGELU,
                                                    SiluAndMul)
 from vllm.platforms import current_platform
@@ -46,7 +46,7 @@ def test_act_and_mul(
         layer = SiluAndMul()
         fn = torch.ops._C.silu_and_mul
     if activation == "mul_and_silu":
-        layer = MulAndAndSilu()
+        layer = MulAndSilu()
         fn = torch.ops._C.mul_and_silu
     elif activation == "gelu":
         layer = GeluAndMul(approximate="none")
@@ -60,7 +60,7 @@ def test_act_and_mul(
         fn = torch.ops._C.fatrelu_and_mul
     out = layer(x)
     ref_out = layer.forward_native(x)
-    # The SiluAndMul, MulAndAndSilu, GELU and FatReLU implementations are
+    # The SiluAndMul, MulAndSilu, GELU and FatReLU implementations are
     # equivalent to the native PyTorch implementations, so we can do exact
     # comparison.
     torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
