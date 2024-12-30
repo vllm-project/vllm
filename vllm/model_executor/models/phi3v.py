@@ -32,12 +32,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalDataItems,
-                                    MultiModalFieldConfig, MultiModalInputsV2,
-                                    MultiModalKwargs, NestedTensors,
-                                    PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputsV2, MultiModalKwargs,
+                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        ProcessorInputs, PromptReplacement,
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement,
                                         _BoundPromptReplacement,
                                         _PlaceholderInfo)
 from vllm.sequence import IntermediateTensors
@@ -381,7 +382,9 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         assert isinstance(bos_token_id, int)
 
         def get_replacement_phi3v(item_idx: int):
-            image_size = mm_items.get_image_size(item_idx)
+            images = mm_items.get_items("image", ImageProcessorItems)
+            image_size = images.get_image_size(item_idx)
+
             num_tokens = image_processor.calc_num_image_tokens_from_image_size(
                 width=image_size.width,
                 height=image_size.height,
@@ -389,12 +392,14 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
 
             return [_IMAGE_TOKEN_ID] * num_tokens + [bos_token_id]
 
+        num_images = mm_items.get_count("image", strict=False)
+
         return [
             PromptReplacement(
                 modality="image",
                 target=image_token,
                 replacement=get_replacement_phi3v,
-            ) for image_token in image_tokens[:len(mm_items.images)]
+            ) for image_token in image_tokens[:num_images]
         ]
 
     def _apply_prompt_replacements(

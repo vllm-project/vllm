@@ -356,7 +356,7 @@ steps:
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/language -m 'not core_model'
 
-- label: Multi-Modal Models Test (Standard) # 28min
+- label: Multi-Modal Models Test (Standard) # 40min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -372,7 +372,7 @@ steps:
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
-- label: Multi-Modal Models Test (Extended) 1 # 1h16m
+- label: Multi-Modal Models Test (Extended) 1 # 48m
   optional: true
   source_file_dependencies:
   - vllm/
