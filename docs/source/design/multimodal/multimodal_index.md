@@ -45,31 +45,23 @@ adding_multimodal_plugin
 ### Base Classes
 
 ```{eval-rst}
-.. autodata:: vllm.multimodal.NestedTensors
-```
-
-```{eval-rst}
-.. autodata:: vllm.multimodal.BatchedTensorInputs
-```
-
-```{eval-rst}
-.. autoclass:: vllm.multimodal.MultiModalDataBuiltins
+.. automodule:: vllm.multimodal.base
     :members:
     :show-inheritance:
 ```
 
-```{eval-rst}
-.. autodata:: vllm.multimodal.MultiModalDataDict
-```
+### Input Classes
 
 ```{eval-rst}
-.. autoclass:: vllm.multimodal.MultiModalKwargs
+.. automodule:: vllm.multimodal.inputs
     :members:
     :show-inheritance:
 ```
 
+### Audio Classes
+
 ```{eval-rst}
-.. autoclass:: vllm.multimodal.MultiModalPlugin
+.. automodule:: vllm.multimodal.audio
     :members:
     :show-inheritance:
 ```
@@ -78,6 +70,14 @@ adding_multimodal_plugin
 
 ```{eval-rst}
 .. automodule:: vllm.multimodal.image
+    :members:
+    :show-inheritance:
+```
+
+### Video Classes
+
+```{eval-rst}
+.. automodule:: vllm.multimodal.video
     :members:
     :show-inheritance:
 ```

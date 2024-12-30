@@ -22,9 +22,10 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import cached_property, partial
-from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, Type, TypedDict, Union)
+from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
+                    Set, Tuple, Type, TypedDict, Union)
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -54,10 +55,11 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, NestedTensors
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalDataItems,
+                                    MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement)
+                                        ProcessorInputs, PromptReplacement)
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -229,9 +231,9 @@ class Qwen2VisionAttention(nn.Module):
 
     def __init__(
         self,
-        embed_dim: Optional[int] = None,
-        num_heads: Optional[int] = None,
-        projection_size: Optional[int] = None,
+        embed_dim: int,
+        num_heads: int,
+        projection_size: int,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -264,7 +266,7 @@ class Qwen2VisionAttention(nn.Module):
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor = None,
+        rotary_pos_emb: torch.Tensor,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -347,7 +349,7 @@ class Qwen2VisionBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         act_layer: Type[nn.Module] = QuickGELU,
-        norm_layer: Type[nn.Module] = None,
+        norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -384,7 +386,7 @@ class Qwen2VisionPatchEmbed(nn.Module):
         self,
         patch_size: int = 14,
         temporal_patch_size: int = 2,
-        in_chans: int = 3,
+        in_channels: int = 3,
         embed_dim: int = 1152,
     ) -> None:
         super().__init__()
@@ -392,8 +394,8 @@ class Qwen2VisionPatchEmbed(nn.Module):
         self.temporal_patch_size = temporal_patch_size
         self.embed_dim = embed_dim
 
-        kernel_size = [temporal_patch_size, patch_size, patch_size]
-        self.proj = nn.Conv3d(in_chans,
+        kernel_size = (temporal_patch_size, patch_size, patch_size)
+        self.proj = nn.Conv3d(in_channels,
                               embed_dim,
                               kernel_size=kernel_size,
                               stride=kernel_size,
@@ -413,7 +415,7 @@ class Qwen2VisionPatchMerger(nn.Module):
         self,
         d_model: int,
         context_dim: int,
-        norm_layer: Type[nn.Module] = None,
+        norm_layer: Optional[Callable[[int], nn.Module]] = None,
         spatial_merge_size: int = 2,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -489,15 +491,15 @@ class Qwen2VisionTransformer(nn.Module):
     ) -> None:
         super().__init__()
 
-        patch_size: int = vision_config.patch_size
-        temporal_patch_size: int = vision_config.temporal_patch_size
-        spatial_merge_size: int = vision_config.spatial_merge_size
-        in_chans: int = vision_config.in_chans
-        hidden_size: int = vision_config.hidden_size
-        embed_dim: int = vision_config.embed_dim
-        depth: int = vision_config.depth
-        num_heads: int = vision_config.num_heads
-        mlp_ratio: float = vision_config.mlp_ratio
+        patch_size = vision_config.patch_size
+        temporal_patch_size = vision_config.temporal_patch_size
+        spatial_merge_size = vision_config.spatial_merge_size
+        in_channels = vision_config.in_channels
+        hidden_size = vision_config.hidden_size
+        embed_dim = vision_config.embed_dim
+        depth = vision_config.depth
+        num_heads = vision_config.num_heads
+        mlp_ratio = vision_config.mlp_ratio
 
         self.spatial_merge_size = spatial_merge_size
         self.num_heads = num_heads
@@ -506,7 +508,7 @@ class Qwen2VisionTransformer(nn.Module):
         self.patch_embed = Qwen2VisionPatchEmbed(
             patch_size=patch_size,
             temporal_patch_size=temporal_patch_size,
-            in_chans=in_chans,
+            in_channels=in_channels,
             embed_dim=embed_dim,
         )
 
@@ -733,8 +735,12 @@ class Qwen2VLMultiModalDataItems(MultiModalDataItems):
             if k == "video":
                 # Special case since even a single item can be a list
                 multi_data[k] = (  # type: ignore[index]
-                    v if (isinstance(v, (dict, torch.Tensor))  # type: ignore[assignment]
-                          or is_list_of(v, list)) else [v]
+                    v if (
+                        isinstance(v, (dict, torch.Tensor))  # type: ignore[assignment]
+                        or is_list_of(v, list)
+                        or isinstance(v[0], (np.ndarray, torch.Tensor))
+                           and v[0].ndim == 4
+                    ) else [v]
                 )
             elif k in ("image", "audio"):
                 multi_data[k] = (  # type: ignore[index]
@@ -753,6 +759,12 @@ class Qwen2VLMultiModalDataItems(MultiModalDataItems):
                 if isinstance(items, dict) else len(items))
             for m, items in self.items()
         }
+
+    def has_embedding_inputs(self) -> bool:
+        return any(
+            isinstance(items, dict) or any(
+                isinstance(item, torch.Tensor) for item in items)
+            for items in self.values())
 
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
@@ -784,7 +796,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
         return hf_processor
 
-    def _get_processor_data(
+    def _get_hf_mm_data(
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -805,7 +817,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
                       and v[0].ndim == 2):
                     # Pass through embedding inputs (multi)
                     passthrough_data[f"{k}_embeds"] = v
-                else:
+                elif len(v) > 0:
                     # Map keys to plural form, e.g.: image -> images
                     processor_data[f"{k}s"] = v
             else:
@@ -816,8 +828,8 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         hf_processor = self._get_hf_processor()
         image_processor = _get_image_processor(hf_processor)
@@ -831,7 +843,9 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         merge_length = image_processor.merge_size**2
 
         def get_replacement_qwen2vl(item_idx: int, modality: str):
-            grid_thw = hf_inputs[f"{modality}_grid_thw"][item_idx]
+            grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
+            assert isinstance(grid_thw, torch.Tensor)
+
             num_tokens = grid_thw.prod() // merge_length
             return placeholder[modality] * num_tokens
 
@@ -844,11 +858,40 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
             ) for modality in ("image", "video")
         ]
 
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+        image_slice_idxs = [0] + image_grid_thw.prod(-1).cumsum_(0).tolist()
+        image_slices = [
+            slice(image_slice_idxs[i], image_slice_idxs[i + 1])
+            for i in range(len(image_grid_thw))
+        ]
+
+        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
+        video_slice_idxs = [0] + video_grid_thw.prod(-1).cumsum_(0).tolist()
+        video_slices = [
+            slice(video_slice_idxs[i], video_slice_idxs[i + 1])
+            for i in range(len(video_grid_thw))
+        ]
+
+        return dict(
+            pixel_values=MultiModalFieldConfig.flat("image", image_slices),
+            image_embeds=MultiModalFieldConfig.flat("image", image_slices),
+            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            pixel_values_videos=MultiModalFieldConfig.flat(
+                "video", video_slices),
+            video_embeds=MultiModalFieldConfig.flat("video", video_slices),
+            video_grid_thw=MultiModalFieldConfig.batched("video"),
+        )
+
     def _get_dummy_mm_inputs(
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_images = mm_counts["image"]
+        num_images = mm_counts.get("image", 0)
         hf_processor = self._get_hf_processor()
         image_token: str = hf_processor.image_token
         image_processor = _get_image_processor(hf_processor)
@@ -869,7 +912,6 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         return ProcessorInputs(
             prompt_text=image_token * num_images,
             mm_data=data,
-            mm_processor_kwargs={},
         )
 
 
@@ -950,9 +992,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
         return quant_config
 
-    def _validate_and_reshape_mm_tensor(self,
-                                        mm_input: Union[torch.Tensor,
-                                                        List[torch.Tensor]],
+    def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
             raise ValueError(f"Incorrect type of {name}. "
@@ -962,7 +1002,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 return mm_input
             if mm_input.ndim != 3:
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim}")
+                                 f"Got ndim: {mm_input.ndim} "
+                                 f"(shape={mm_input.shape})")
             return torch.concat(list(mm_input))
         else:
             return torch.concat(mm_input)
