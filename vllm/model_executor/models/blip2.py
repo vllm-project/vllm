@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
 
@@ -468,6 +468,9 @@ def input_processor_for_blip2(ctx: InputContext, inputs: DecoderOnlyInputs):
     # https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/blip_2/modeling_blip_2.py#L1514
     new_token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
     new_token_ids += inputs["prompt_token_ids"]
+    placeholder_ranges = [
+        PlaceholderRange(offset=0, length=image_feature_size)
+    ]
 
     new_prompt = inputs.get("prompt")
     if new_prompt is not None:
@@ -475,7 +478,8 @@ def input_processor_for_blip2(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": placeholder_ranges})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
