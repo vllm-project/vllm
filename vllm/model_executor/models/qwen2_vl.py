@@ -719,8 +719,8 @@ get_max_qwen2_vl_video_tokens = partial(get_max_qwen2_vl_mm_tokens,
                                         data_type_key="video")
 
 
-class Qwen2EmbeddingsInput(ModalityDataItems[dict[str, torch.Tensor],
-                                             dict[str, torch.Tensor]]):
+class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
+                                            dict[str, torch.Tensor]]):
 
     def __init__(self, data: dict, modality: str) -> None:
         super().__init__(data)
@@ -757,13 +757,13 @@ class Qwen2EmbeddingsInput(ModalityDataItems[dict[str, torch.Tensor],
         return self.data
 
 
-class Qwen2ImageEmbeddingsInput(Qwen2EmbeddingsInput):
+class Qwen2ImageEmbeddingItems(Qwen2EmbeddingItems):
 
     def __init__(self, data: dict) -> None:
         super().__init__(data, "image")
 
 
-class Qwen2VideoEmbeddingsInput(Qwen2EmbeddingsInput):
+class Qwen2VideoEmbeddingItems(Qwen2EmbeddingItems):
 
     def __init__(self, data: dict) -> None:
         super().__init__(data, "video")
@@ -776,7 +776,7 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2ImageEmbeddingsInput(data)
+            return Qwen2EmbeddingItems(data, modality="image")
 
         return super()._parse_image_data(data)
 
@@ -785,7 +785,7 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
     ) -> ModalityDataItems[Any, Any]:
         if isinstance(data, dict):
-            return Qwen2VideoEmbeddingsInput(data)
+            return Qwen2EmbeddingItems(data, modality="video")
 
         return super()._parse_video_data(data)
 

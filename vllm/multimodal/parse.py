@@ -62,7 +62,7 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         raise NotImplementedError
 
 
-class ProcessorBatchInput(ModalityDataItems[Sequence[_T], _T]):
+class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
 
     def __init__(self, data: Sequence[_T], modality: str) -> None:
         super().__init__(data)
@@ -85,7 +85,7 @@ class ProcessorBatchInput(ModalityDataItems[Sequence[_T], _T]):
         return {}
 
 
-class EmbeddingsInput(ModalityDataItems[NestedTensors, torch.Tensor]):
+class EmbeddingItems(ModalityDataItems[NestedTensors, torch.Tensor]):
 
     def __init__(self, data: NestedTensors, modality: str) -> None:
         super().__init__(data)
@@ -108,13 +108,13 @@ class EmbeddingsInput(ModalityDataItems[NestedTensors, torch.Tensor]):
         return {f"{self.modality}_embeds": self.data}
 
 
-class AudioProcessorInput(ProcessorBatchInput[HfAudioItem]):
+class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
     def __init__(self, data: Sequence[HfAudioItem]) -> None:
         super().__init__(data, "audio")
 
 
-class AudioEmbeddingsInput(EmbeddingsInput):
+class AudioEmbeddingItems(EmbeddingItems):
 
     def __init__(self, data: NestedTensors) -> None:
         super().__init__(data, "audio")
@@ -125,7 +125,7 @@ class ImageSize(NamedTuple):
     height: int
 
 
-class ImageProcessorInput(ProcessorBatchInput[HfImageItem]):
+class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
     def __init__(self, data: Sequence[HfImageItem]) -> None:
         super().__init__(data, "image")
@@ -142,19 +142,19 @@ class ImageProcessorInput(ProcessorBatchInput[HfImageItem]):
         assert_never(image)
 
 
-class ImageEmbeddingsInput(EmbeddingsInput):
+class ImageEmbeddingItems(EmbeddingItems):
 
     def __init__(self, data: NestedTensors) -> None:
         super().__init__(data, "image")
 
 
-class VideoProcessorInput(ProcessorBatchInput[HfVideoItem]):
+class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
 
     def __init__(self, data: Sequence[HfVideoItem]) -> None:
         super().__init__(data, "video")
 
 
-class VideoEmbeddingsInput(EmbeddingsInput):
+class VideoEmbeddingItems(EmbeddingItems):
 
     def __init__(self, data: NestedTensors) -> None:
         super().__init__(data, "video")
@@ -255,7 +255,7 @@ class MultiModalDataParser:
         data: ModalityData[AudioItem],
     ) -> ModalityDataItems[Any, Any]:
         if self._is_embeddings(data):
-            return AudioEmbeddingsInput(data)
+            return AudioEmbeddingItems(data)
 
         if (is_list_of(data, float)
                 or isinstance(data,
@@ -285,14 +285,14 @@ class MultiModalDataParser:
 
             new_audios.append(new_audio)
 
-        return AudioProcessorInput(new_audios)
+        return AudioProcessorItems(new_audios)
 
     def _parse_image_data(
         self,
         data: ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any]:
         if self._is_embeddings(data):
-            return ImageEmbeddingsInput(data)
+            return ImageEmbeddingItems(data)
 
         if (isinstance(data, Image)
                 or isinstance(data,
@@ -303,14 +303,14 @@ class MultiModalDataParser:
         else:
             data_items = data
 
-        return ImageProcessorInput(data_items)
+        return ImageProcessorItems(data_items)
 
     def _parse_video_data(
         self,
         data: ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any]:
         if self._is_embeddings(data):
-            return VideoEmbeddingsInput(data)
+            return VideoEmbeddingItems(data)
 
         if (is_list_of(data, Image)
                 or isinstance(data,
@@ -321,7 +321,7 @@ class MultiModalDataParser:
         else:
             data_items = data
 
-        return VideoProcessorInput(data_items)
+        return VideoProcessorItems(data_items)
 
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {

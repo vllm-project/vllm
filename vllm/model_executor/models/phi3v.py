@@ -35,7 +35,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
-from vllm.multimodal.parse import ImageProcessorInput
+from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement,
@@ -382,7 +382,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         assert isinstance(bos_token_id, int)
 
         def get_replacement_phi3v(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorInput)
+            images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
             num_tokens = image_processor.calc_num_image_tokens_from_image_size(
