@@ -25,6 +25,7 @@ from vllm.multimodal.inputs import (MultiModalDataItems, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         ProcessorInputs, PromptReplacement)
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
                                                           MlpProjectorConfig,
@@ -38,9 +39,8 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 
 logger = init_logger(__name__)
 
-# This token id is only added to processor's tokenizer,
-# and can't be found in hf_config
-_IMAGE_TOKEN_ID = 128815
+# The image token id may be various
+_IMAGE_TOKEN = "<image>"
 
 
 class DeepseekVL2ImagePixelInputs(TypedDict):
@@ -286,7 +286,14 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.projector_config = config.projector_config
         self.text_config = config.text_config
 
-        self.image_token_id = _IMAGE_TOKEN_ID
+        model_config = vllm_config.model_config
+        tokenizer = cached_get_tokenizer(
+            model_config.tokenizer,
+            tokenizer_mode=model_config.tokenizer_mode,
+            tokenizer_revision=model_config.tokenizer_revision,
+            trust_remote_code=model_config.trust_remote_code,
+        )
+        self.image_token_id = tokenizer.vocab.get(_IMAGE_TOKEN)
 
         self.vision = self._init_vision_module(self.vision_config,
                                                quant_config,
@@ -428,24 +435,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_input(
-            self, image_input: DeepseekVL2ImageInputs) -> torch.Tensor:
-        if image_input["type"] == "image_embeds":
-            image_data = image_input["data"]
-            if is_list_of(image_data, torch.Tensor):
-                # it's already a list of tensors
-                return image_data
-            if len(image_data.shape) == 3:
-                # 3D tensor
-                return list(torch.unbind(image_data, dim=0))
-            raise ValueError(
-                "We expect batched 2D tensors;"
-                "this can be either a list of 2D tensors or a single 3D tensor."
-            )
-
-        pixel_values = image_input["data"]
-        images_spatial_crop = image_input["images_spatial_crop"]
-
+    def _pixel_values_to_embedding(self, pixel_values: torch.Tensor,
+                                   images_spatial_crop: torch.Tensor):
         bs, max_n_images, _ = images_spatial_crop.shape
         batch_num_tiles = [0 for _ in range(bs)]
         total_tiles = []
@@ -559,6 +550,27 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
             vision_embeddings.extend(images_in_this_batch)
         return torch.cat(vision_embeddings, dim=0)
+
+    def _process_image_input(
+            self, image_input: DeepseekVL2ImageInputs) -> torch.Tensor:
+        if image_input["type"] == "image_embeds":
+            image_data = image_input["data"]
+            if is_list_of(image_data, torch.Tensor):
+                # it's already a list of tensors
+                return image_data
+            if len(image_data.shape) == 3:
+                # 3D tensor
+                return list(torch.unbind(image_data, dim=0))
+            raise ValueError(
+                "We expect batched 2D tensors;"
+                "this can be either a list of 2D tensors or a single 3D tensor."
+            )
+
+        pixel_values = image_input["data"]
+        images_spatial_crop = image_input["images_spatial_crop"]
+
+        return self._pixel_values_to_embedding(
+            pixel_values=pixel_values, images_spatial_crop=images_spatial_crop)
 
     def get_multimodal_embeddings(self, **kwargs: object) -> torch.Tensor:
         image_input = self._parse_and_validate_image_input(**kwargs)
