@@ -487,6 +487,12 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         image_embeds = kwargs.pop("image_embeds", None)
 
         if image_embeds is not None:
+            if not isinstance(image_embeds, (torch.Tensor, list)):
+                raise ValueError(f"Incorrect type of image embeds. "
+                                 f"Got type: {type(image_embeds)}")
+            if isinstance(image_embeds, list):
+                image_embeds = torch.concat(image_embeds)
+
             return MiniCPMVImageEmbeddingInputs(
                 image_bounds=self._get_image_bounds(input_ids, im_start_id,
                                                     im_end_id, slice_start_id,
