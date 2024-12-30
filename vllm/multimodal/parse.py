@@ -227,7 +227,7 @@ class MultiModalDataParser:
 
         self.target_sr = target_sr
 
-    def is_embeddings(self, data: object) -> TypeGuard[NestedTensors]:
+    def _is_embeddings(self, data: object) -> TypeGuard[NestedTensors]:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
@@ -254,7 +254,7 @@ class MultiModalDataParser:
         self,
         data: ModalityData[AudioItem],
     ) -> ModalityDataItems[Any, Any]:
-        if self.is_embeddings(data):
+        if self._is_embeddings(data):
             return AudioEmbeddingsInput(data)
 
         if (is_list_of(data, float)
@@ -291,7 +291,7 @@ class MultiModalDataParser:
         self,
         data: ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any]:
-        if self.is_embeddings(data):
+        if self._is_embeddings(data):
             return ImageEmbeddingsInput(data)
 
         if (isinstance(data, Image)
@@ -309,7 +309,7 @@ class MultiModalDataParser:
         self,
         data: ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any]:
-        if self.is_embeddings(data):
+        if self._is_embeddings(data):
             return VideoEmbeddingsInput(data)
 
         if (is_list_of(data, Image)
