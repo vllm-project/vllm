@@ -18,7 +18,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.inputs import InputContext
-from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
+from vllm.model_executor.layers.activation import get_act_fn, MulAndAndSilu
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
@@ -226,15 +226,6 @@ class StackAudioFrames(nn.Module):
         return audio_embeds
 
 
-class FlippedSiluAndMul(SiluAndMul):
-    """Ultravox is trained with SwiGLU with flipped halves."""
-
-    def forward(self, x: torch.Tensor):
-        a, b = x.chunk(2, dim=-1)
-        flipped = torch.cat((b, a), dim=-1)
-        return super().forward(flipped)
-
-
 class UltravoxProjector(nn.Module):
 
     def __init__(self, config: UltravoxConfig):
@@ -247,7 +238,7 @@ class UltravoxProjector(nn.Module):
         dim = self.hidden_dim
 
         if config.projector_act == "swiglu":
-            self.act = FlippedSiluAndMul()
+            self.act = MulAndAndSilu()
             dim = dim // 2
         else:
             self.act = get_act_fn(config.projector_act)
