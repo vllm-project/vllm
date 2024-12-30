@@ -24,11 +24,13 @@ def run_aria(question: str, modality: str):
     assert modality == "image"
     model_name = "rhymes-ai/Aria"
 
+    # NOTE: Need L40 to run this
     llm = LLM(model=model_name,
               tokenizer_mode="slow",
-              trust_remote_code=True,
               dtype="bfloat16",
+              max_model_len=4096,
               max_num_seqs=2,
+              trust_remote_code=True,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
     prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
@@ -259,7 +261,7 @@ def run_minicpmv(question: str, modality: str):
     # 2.5
     # model_name = "openbmb/MiniCPM-Llama3-V-2_5"
 
-    #2.6
+    # 2.6
     model_name = "openbmb/MiniCPM-V-2_6"
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
@@ -432,9 +434,11 @@ def run_pixtral_hf(question: str, modality: str):
 
     model_name = "mistral-community/pixtral-12b"
 
+    # NOTE: Need L40 to run this
     llm = LLM(
         model=model_name,
         max_model_len=8192,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
