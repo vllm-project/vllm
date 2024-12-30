@@ -105,7 +105,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            print(f"{request.prompt=}")
             request_prompts, engine_prompts = await self._preprocess_completion(
                 request,
                 tokenizer,
@@ -113,8 +112,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
-            print(f"{request_prompts=}")
-            print(f"{engine_prompts=}")
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
