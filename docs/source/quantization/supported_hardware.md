@@ -4,121 +4,120 @@
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
 
-```{eval-rst}
-.. list-table::
-   :header-rows: 1
-   :widths: 20 8 8 8 8 8 8 8 8 8 8
+```{list-table}
+:header-rows: 1
+:widths: 20 8 8 8 8 8 8 8 8 8 8
 
-   * - Implementation
-     - Volta
-     - Turing
-     - Ampere
-     - Ada
-     - Hopper
-     - AMD GPU
-     - Intel GPU
-     - x86 CPU
-     - AWS Inferentia
-     - Google TPU
-   * - AWQ
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-   * - GPTQ
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-   * - Marlin (GPTQ/AWQ/FP8)
-     - ✗
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - INT8 (W8A8)
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✅︎
-     - ✗
-     - ✗
-   * - FP8 (W8A8)
-     - ✗
-     - ✗
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - AQLM
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - bitsandbytes
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - DeepSpeedFP
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - GGUF
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
+* - Implementation
+  - Volta
+  - Turing
+  - Ampere
+  - Ada
+  - Hopper
+  - AMD GPU
+  - Intel GPU
+  - x86 CPU
+  - AWS Inferentia
+  - Google TPU
+* - AWQ
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+* - GPTQ
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+* - Marlin (GPTQ/AWQ/FP8)
+  - ✗
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - INT8 (W8A8)
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✅︎
+  - ✗
+  - ✗
+* - FP8 (W8A8)
+  - ✗
+  - ✗
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - AQLM
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - bitsandbytes
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - DeepSpeedFP
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - GGUF
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
 ```
 
 ## Notes:
