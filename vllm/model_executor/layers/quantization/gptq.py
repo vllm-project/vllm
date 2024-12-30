@@ -4,7 +4,6 @@ from fractions import Fraction
 from typing import Any, Dict, List, Optional
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
