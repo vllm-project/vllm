@@ -1,6 +1,7 @@
 # noqa: UP007
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -309,3 +310,7 @@ class XGrammarLogitsProcessor:
             scores = scores.to(device_type).squeeze()
 
         return scores
+
+    def clone(self) -> XGrammarLogitsProcessor:
+        """Deepcopy due to per-sequence state in the matchers"""
+        return copy.deepcopy(self)
