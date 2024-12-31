@@ -23,7 +23,6 @@ class MultiStepNeuronModelRunner(NeuronxDistributedModelRunner):
 
     def load_model(self) -> None:
         from vllm.model_executor.model_loader.neuronx_distributed import get_neuron_speculation_model
-        assert self.scheduler_config.max_num_seqs == 1, "Only batch size 1 is currently supported for speculation using neuronx-distributed-inference." 
         self.model = get_neuron_speculation_model(
             self.model_config,
             parallel_config=self.parallel_config,
