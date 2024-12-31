@@ -230,7 +230,5 @@ class LLMEngine:
         return tokenizer_group
 
     def shutdown(self):
-        """Shutdown the EngineCore."""
-
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
