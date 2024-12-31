@@ -65,12 +65,12 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
             mapper=hf_to_vllm_mapper,
         )
 
-    # This function is used to reshape the fairseq2 weight format
     def reshape_fairseq2_weights(
         self,
         name: str,
         loaded_weight: torch.Tensor,
     ) -> Tuple[str, torch.Tensor]:
+        """Reshape fairseq2's K and Q weights."""
 
         def permute(w: torch.Tensor, n_heads: int):
             attn_in = self.config.head_dim * n_heads
