@@ -300,18 +300,21 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return FuyuImagePatchInputs(
                 type="image_patches",
                 data=self._validate_pixel_values(
-                    flatten_bn(flatten_bn(image_patches), concat=True)),
+                    flatten_bn(image_patches, concat=True)),
             )
 
         return None
 
     def _process_image_input(
             self, image_input: FuyuImagePatchInputs) -> torch.Tensor:
+        image_patches = image_input["data"]
 
         assert self.vision_embed_tokens is not None
-        vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
-        hidden_size = vision_embeddings.shape[-1]
-        return vision_embeddings.reshape(-1, hidden_size)
+        vision_embeddings, _ = self.vision_embed_tokens(image_patches)
+
+        batch_size, num_patches, _ = image_patches.shape
+        _, _, hidden_size = vision_embeddings.shape
+        return vision_embeddings.reshape(batch_size, num_patches, hidden_size)
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
