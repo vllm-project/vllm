@@ -766,7 +766,8 @@ class ModelConfig:
         If conditions 1 and 2 are met but FlashInfer is not available,
         logs a warning and returns False.
         """
-        use_mla = self.is_deepseek_v2 and not self.disable_mla
+        use_mla = (self.is_deepseek_v2 and not self.disable_mla
+                   and not envs.VLLM_DISABLE_MLA)
         if use_mla and not _is_flashinfer_available():
             logger.warning(
                 "Please install or update FlashInfer for better performance on "

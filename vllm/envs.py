@@ -286,6 +286,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
     lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
 
+    # If set, vLLM will disable the MLA attention optimizations.
+    "VLLM_DISABLE_MLA":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_MLA", "0"))),
+
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
