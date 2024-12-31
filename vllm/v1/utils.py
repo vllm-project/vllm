@@ -114,9 +114,6 @@ class BackgroundProcHandle:
             raise RuntimeError(f"{process_name} initialization failed. "
                                "See root cause above.")
 
-    def __del__(self):
-        self.shutdown()
-
     def shutdown(self):
         # Shutdown the process if needed.
         if hasattr(self, "proc") and self.proc.is_alive():

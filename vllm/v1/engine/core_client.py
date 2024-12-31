@@ -1,5 +1,6 @@
 from typing import List, Optional, Type
 
+import weakref
 import msgspec
 import zmq
 import zmq.asyncio
@@ -106,9 +107,6 @@ class InprocClient(EngineCoreClient):
 
     def shutdown(self):
         self.engine_core.shutdown()
-
-    def __del__(self):
-        self.shutdown()
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
