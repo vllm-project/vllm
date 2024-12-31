@@ -110,7 +110,7 @@ class GlobalHyperparameters:
     for the following hyperparameters.
     '''
     window_left: int
-    logits_soft_cap: float | None
+    logits_soft_cap: Optional[float]
     sm_scale: float
 
 
@@ -130,9 +130,9 @@ def infer_global_hyperparameters(model: nn.Module) -> GlobalHyperparameters:
         return model.global_hyperparameters
 
     params_inferred = False
-    global_window_left: int | None = None
-    global_logits_soft_cap: float | None = None
-    global_sm_scale: float | None = None
+    global_window_left: Optional[int] = None
+    global_logits_soft_cap: Optional[float] = None
+    global_sm_scale: Optional[float] = None
 
     for module in model.modules():
         if isinstance(module, Attention):
@@ -413,9 +413,9 @@ class FlashInferMetadata(AttentionMetadata):
     # formula:
     # $\texttt{logits\_soft\_cap} \times \mathrm{tanh}(x / \texttt{logits\_soft\_cap})$,
     # where $x$ is the input logits.
-    logits_soft_cap: float | None = None
+    logits_soft_cap: Optional[float] = None
     # The scale used in softmax, if not provided, will be set to `1.0 / sqrt(head_dim)`.
-    sm_scale: float | None = None
+    sm_scale: Optional[float] = None
 
     def __post_init__(self):
         # Refer to
