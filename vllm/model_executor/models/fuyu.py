@@ -301,7 +301,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
-                [_IMAGE_TOKEN_ID, _NEWLINE_TOKEN_ID])
+                _IMAGE_TOKEN_ID)
         return inputs_embeds
 
     def forward(
