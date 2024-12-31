@@ -469,9 +469,9 @@ def test_mm_prefix_caching():
     # Completed block should have hashes with extra keys.
     assert not computed_blocks
     assert len(req0.kv_block_hashes) == 3
-    assert req0.kv_block_hashes[0].extra_keys == (("aaa", 0), )
-    assert req0.kv_block_hashes[1].extra_keys == (("aaa", 5), ("bbb", 0))
-    assert req0.kv_block_hashes[2].extra_keys == (("bbb", 2), )
+    assert req0.kv_block_hashes[0].extra_keys == ("aaa", )
+    assert req0.kv_block_hashes[1].extra_keys == ("aaa", "bbb")
+    assert req0.kv_block_hashes[2].extra_keys == ("bbb", )
 
     blocks = manager.allocate_slots(req0, 59, computed_blocks)
     assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
@@ -485,7 +485,7 @@ def test_mm_prefix_caching():
 
     # The just completed block should have hashes with extra keys.
     assert len(req0.kv_block_hashes) == 4
-    assert req0.kv_block_hashes[3].extra_keys == (("ccc", 0), )
+    assert req0.kv_block_hashes[3].extra_keys == ("ccc", )
 
     # Cache hit.
     unique_token_ids = [-1] * 7 + [200] * 5
