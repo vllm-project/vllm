@@ -7,8 +7,8 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               UnloadLoraAdapterRequest)
-from vllm.entrypoints.openai.serving_models import BaseModelPath
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    OpenAIServingModels)
 from vllm.lora.request import LoRARequest
 
 MODEL_NAME = "meta-llama/Llama-2-7b"
