@@ -6,7 +6,7 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import get_open_zmq_ipc_path
+from vllm.utils import get_open_zmq_ipc_path, make_zmq_socket
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
@@ -144,17 +144,13 @@ class MPClient(EngineCoreClient):
         else:
             self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
-        # Path for IPC.
+        # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-
-        # Get output (EngineCoreOutput) from EngineCore.
-        self.output_socket = self.ctx.socket(zmq.constants.PULL)
-        self.output_socket.connect(output_path)
-
-        # Send input (EngineCoreRequest) to EngineCore.
-        self.input_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.input_socket.bind(input_path)
+        self.output_socket = make_zmq_socket(self.ctx, output_path,
+                                             zmq.constants.PULL)
+        self.input_socket = make_zmq_socket(self.ctx, input_path,
+                                            zmq.constants.PUSH)
 
         # Start EngineCore in background process.
         self.proc_handle: Optional[BackgroundProcHandle]
