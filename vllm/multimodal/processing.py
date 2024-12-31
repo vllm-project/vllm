@@ -769,7 +769,7 @@ class BaseMultiModalProcessor(ABC):
             We pass prompt text and multi-modal data into the HF processor
             in separate calls to avoid HF prompt replacement being done for
             cached items; instead, we rely on our own prompt replacement logic
-            for the full text.
+            (:meth:`_get_prompt_replacements`) for the full text.
         """
         mm_missing_counts = mm_missing_data_items.get_all_counts()
 
