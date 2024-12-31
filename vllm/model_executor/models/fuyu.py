@@ -20,7 +20,8 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, FuyuConfig, FuyuProcessor
+from transformers import (BatchFeature, FuyuConfig, FuyuImageProcessor,
+                          FuyuProcessor)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -107,7 +108,8 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         if not mm_data:
             # Avoid warning from HF logger for text-only input
             tokenizer = self._get_tokenizer()
-            processed_outputs = tokenizer(prompt).data  # type: ignore
+            processed_outputs = tokenizer(
+                prompt, return_tensors="pt").data  # type: ignore
             return BatchFeature(processed_outputs)
 
         processed_outputs = super()._call_hf_processor(
@@ -153,13 +155,28 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         assert isinstance(eot_token_id, int)
         boa_token_id: int = tokenizer.vocab["<0x04>"]  # type: ignore
 
+        hf_processor = self._get_hf_processor()
+        image_processor: FuyuImageProcessor = hf_processor.image_processor
+        target_size = image_processor.size
+        target_height, target_width = (target_size["height"],
+                                       target_size["width"])
+
         def get_replacement_fuyu(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
+            width, height = image_size.width, image_size.height
+            if not (width <= target_width and height <= target_height):
+                height_scale_factor = target_height / height
+                width_scale_factor = target_width / width
+                optimal_scale_factor = min(height_scale_factor,
+                                           width_scale_factor)
+
+                height = int(height * optimal_scale_factor)
+                width = int(width * optimal_scale_factor)
 
             ncols, nrows = _get_fuyu_num_image_tokens(
-                image_width=image_size.width,
-                image_height=image_size.height,
+                image_width=width,
+                image_height=height,
             )
 
             return (([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows +
