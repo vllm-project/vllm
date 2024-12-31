@@ -20,11 +20,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalDataItems,
-                                    MultiModalFieldConfig, MultiModalInputsV2,
-                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputsV2, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        ProcessorInputs, PromptReplacement,
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement,
                                         full_groupby_modality)
 from vllm.sequence import IntermediateTensors
 
@@ -179,7 +181,9 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
             assert isinstance(vision_config, PixtralVisionConfig)
 
             def get_replacement_pixtral(item_idx: int):
-                image_size = mm_items.get_image_size(item_idx)
+                images = mm_items.get_items("image", ImageProcessorItems)
+                image_size = images.get_image_size(item_idx)
+
                 (
                     num_width_tokens,
                     num_height_tokens,
@@ -591,8 +595,8 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
         result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
 
-        mm_items = self._get_mm_items(mm_data)
-        mm_item_counts = mm_items.get_item_counts()
+        mm_items = self._to_mm_items(mm_data)
+        mm_item_counts = mm_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
 
         # We reimplement the functionality of MLlavaProcessor from
