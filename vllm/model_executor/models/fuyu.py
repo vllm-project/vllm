@@ -80,18 +80,18 @@ def _get_fuyu_num_image_tokens(
         ncols: int - number of image tokens in `x` direction
         nrows: int - number of image tokens in `y` direction
     """
-    ncol = math.ceil(image_width / 30)
-    nrow = math.ceil(image_height / 30)
-    return ncol, nrow
+    ncols = math.ceil(image_width / 30)
+    nrows = math.ceil(image_height / 30)
+    return ncols, nrows
 
 
 def get_max_fuyu_image_tokens(ctx: InputContext):
-    ncol, nrow = _get_fuyu_num_image_tokens(
+    ncols, nrows = _get_fuyu_num_image_tokens(
         image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
     )
 
-    return (ncol + 1) * nrow
+    return (ncols + 1) * nrows
 
 
 class FuyuMultiModalProcessor(BaseMultiModalProcessor):
