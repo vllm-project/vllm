@@ -126,8 +126,8 @@ class MPClient(EngineCoreClient):
         executor_class: Type[Executor],
         log_stats: bool = False,
     ):
-        # Ensure cleanup of ZMQ during GC.
-        self._finalizer = weakref.finalize(self, self.shutdown)
+        # # Ensure cleanup of ZMQ during GC.
+        # self._finalizer = weakref.finalize(self, self.shutdown)
 
         # Serialization setup.
         self.encoder = PickleEncoder()
@@ -159,8 +159,8 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
-    def shutdown(self):
-        self.ctx.destroy(linger=0)
+    # def shutdown(self):
+    #     self.ctx.destroy(linger=0)
 
 
 class SyncMPClient(MPClient):

@@ -91,9 +91,6 @@ class BackgroundProcHandle:
         target_fn: Callable,
         process_kwargs: Dict[Any, Any],
     ):
-        # Ensure cleanup of background process during GC.
-        self._finalizer = weakref.finalize(self, self.shutdown)
-
         context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)
 
@@ -103,34 +100,35 @@ class BackgroundProcHandle:
         process_kwargs["ready_pipe"] = writer
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
-        self.input_path = input_path
-        self.output_path = output_path
+        # self.input_path = input_path
+        # self.output_path = output_path
 
-        # Run Detokenizer busy loop in background process.
-        self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
-        self.proc.start()
+        # Run busy loop in background process.
+        proc = context.Process(target=target_fn, kwargs=process_kwargs)
+        self._finalizer = weakref.finalize(
+            self, shutdown, proc, input_path, output_path)
+        proc.start()
 
         # Wait for startup.
         if reader.recv()["status"] != "READY":
             raise RuntimeError(f"{process_name} initialization failed. "
                                "See root cause above.")
 
-    def shutdown(self):
-        # Shutdown the process if needed.
-        if hasattr(self, "proc") and self.proc.is_alive():
-            self.proc.terminate()
-            self.proc.join(5)
 
-            if self.proc.is_alive():
-                kill_process_tree(self.proc.pid)
+# Note(rob): shutdown function cannot be a bound method,
+# else the gc cannot collect the object.
+def shutdown(proc, input_path, output_path):
+    # Shutdown the process.
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
 
-        # Remove zmq ipc socket files
-        ipc_sockets = [self.output_path, self.input_path]
-        for ipc_socket in ipc_sockets:
-            socket_file = ipc_socket.replace("ipc://", "")
-            if os and os.path.exists(socket_file):
-                os.remove(socket_file)
-    
-    def __del__(self):
-        print("CALLED DEL")
-        self.shutdown()
+        if proc.is_alive():
+            kill_process_tree(proc.pid)
+
+    # Remove zmq ipc socket files
+    ipc_sockets = [output_path, input_path]
+    for ipc_socket in ipc_sockets:
+        socket_file = ipc_socket.replace("ipc://", "")
+        if os and os.path.exists(socket_file):
+            os.remove(socket_file)

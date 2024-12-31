@@ -300,9 +300,6 @@ class WorkerProc:
         self.worker_response_mq = None
         destroy_model_parallel()
         destroy_distributed_environment()
-    
-    def __del__(self):
-        self.shutdown()
 
     @staticmethod
     def worker_main(*args, **kwargs):
