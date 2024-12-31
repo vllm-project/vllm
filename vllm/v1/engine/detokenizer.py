@@ -385,6 +385,7 @@ class DetokenizerProc(Detokenizer):
             raise ValueError(f"Unknown type: {req}")
 
         # Forward to EngineCore.
+        print("sending to engine core.")
         to_engine_core.send(request_bytes)
 
     def _handle_from_engine_core(
@@ -425,15 +426,19 @@ class DetokenizerProc(Detokenizer):
             to_engine_core = make_zmq_socket(ctx, self.to_engine_core_path,
                                              zmq.constants.PUSH)
 
+            i = 0
             while True:
-                (msg_type, msg_bytes) = input_socket.recv_multipart()
+                data = input_socket.recv_multipart()
+                msg_type, msg_bytes = data
 
-                # Handle message from LLMEngine (Abort or New Request).
+                # Handle message from AsyncEngine (Abort or New Request).
                 if msg_type == EngineCoreRequestType.FROM_ENGINE.value:
                     self._handle_from_llm_engine(msg_bytes, to_engine_core)
 
                 # Handle message from EngineCore (EngineCoreOutputs).
                 elif msg_type == EngineCoreRequestType.FROM_ENGINE_CORE.value:
+                    logger.info(f"EPOCH: {i}")
+                    i+=1
                     self._handle_from_engine_core(
                         output_bytes=msg_bytes,
                         to_engine_core=to_engine_core,

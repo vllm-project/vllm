@@ -227,7 +227,11 @@ class EngineCoreProc(EngineCore):
         """Core busy loop of the EngineCore."""
 
         # Loop until process is sent a SIGINT or SIGTERM
+        i = 0
         while True:
+            logger.info(f"EPOCH: {i}")
+            i += 1
+
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
@@ -310,7 +314,7 @@ class EngineCoreProc(EngineCore):
 
 
 class EngineCoreClient(ABC):
-    """Client Used By LLMEngine."""
+    """Client used To interact with EngineCore."""
 
     @abstractmethod
     def get_output(self) -> List[EngineCoreOutput]:
@@ -321,11 +325,11 @@ class EngineCoreClient(ABC):
         ...
 
     @abstractmethod
-    def profile(self, is_start: bool = True) -> None:
+    def abort_requests(self, request_ids: List[str]) -> None:
         ...
 
     @abstractmethod
-    def abort_requests(self, request_ids: List[str]) -> None:
+    def profile(self, is_start: bool = True) -> None:
         ...
 
     @abstractmethod

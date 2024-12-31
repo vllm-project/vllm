@@ -1,3 +1,20 @@
+# Copyright 2033-2024 The vLLM team.
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+# Inspired by https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/tokenizer_manager.py
+
 import asyncio
 import os
 import pickle
@@ -76,22 +93,22 @@ class AsyncLLM(EngineClient):
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
+        tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
-        self.tokenizer.ping()
+        tokenizer.ping()
 
         # Request streams (map of request_id -> queue).
         self.rid_to_queue: Dict[str, asyncio.Queue] = {}
 
-        # Processor (converts Inputs --> EngineCoreRequests).
+        # Processor (in this process).
         self.processor = Processor(
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
-            tokenizer=self.tokenizer,
+            tokenizer=tokenizer,
             input_registry=input_registry,
         )
 
@@ -107,7 +124,7 @@ class AsyncLLM(EngineClient):
                                                 from_detokenizer_path,
                                                 zmq.constants.PULL)
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
+        # Detokenizer (in background process).
         self.detokenizer_handle = DetokenizerProc.make_process(
             input_path=to_detokenizer_path,
             output_path=from_detokenizer_path,
@@ -118,12 +135,11 @@ class AsyncLLM(EngineClient):
             revision=self.model_config.revision,
         )
 
-        # EngineCore (starts the engine in background process).
-        # (Gets input from Detokenizer, sends outputs to Detokenizer).
+        # EngineCore (in background process).
         self.engine_core_handle = EngineCoreProc.make_process(
             vllm_config=vllm_config,
             executor_class=executor_class,
-            input_path=from_detokenizer_path,
+            input_path=to_engine_core_path,
             output_path=to_detokenizer_path,
             log_stats=log_stats,
         )
@@ -313,7 +329,11 @@ class AsyncLLM(EngineClient):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
         try:
+            i = 0
             while True:
+                logger.info(f"EPOCH: {i}")
+                i+=1
+
                 # note(rob): use socket directly to avoid calling await multiple
                 # times, which causes too much task switching at high QPS.
                 outputs: List[RequestOutput] = []
@@ -373,7 +393,7 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        return self.tokenizer.get_lora_tokenizer(lora_request)
+        return self.processor.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
         return False
