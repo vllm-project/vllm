@@ -44,7 +44,7 @@ class AsyncLLM(EngineClient):
     ) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
-        self._finalizer = weakref.finalize(self, self.shutdown)
+        # self._finalizer = weakref.finalize(self, self.shutdown)
 
         # The child processes will send SIGQUIT when unrecoverable
         # errors happen. We kill the process tree here so that the
@@ -136,15 +136,6 @@ class AsyncLLM(EngineClient):
             usage_context=usage_context,
             stat_loggers=stat_loggers,
         )
-
-    def shutdown(self):
-        """Shutdown, cleaning up the background proc and IPC."""
-
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
-
-        if handler := getattr(self, "output_handler", None):
-            handler.cancel()
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:

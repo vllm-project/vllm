@@ -28,6 +28,7 @@ _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 
 
 class LLMEngine:
+    """Legacy LLMEngine for backwards compatibility."""
 
     def __init__(
         self,
@@ -41,6 +42,8 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+
+        # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
