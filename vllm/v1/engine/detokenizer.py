@@ -317,18 +317,18 @@ class DetokenizerProc(Detokenizer):
     ) -> BackgroundProcHandle:
         """Make background process and return handle."""
 
-        return BackgroundProcHandle(
-            input_path=input_path,
-            output_path=output_path,
-            process_name="Detokenizer",
-            target_fn=DetokenizerProc.run_detokenizer,
-            process_kwargs={
-                "to_engine_core_path": to_engine_core_path,
-                "tokenizer_name": tokenizer_name,
-                "tokenizer_mode": tokenizer_mode,
-                "trust_remote_code": trust_remote_code,
-                "revision": revision,
-            })
+        return BackgroundProcHandle(input_path=input_path,
+                                    output_path=output_path,
+                                    process_name="Detokenizer",
+                                    target_fn=DetokenizerProc.run_detokenizer,
+                                    process_kwargs={
+                                        "to_engine_core_path":
+                                        to_engine_core_path,
+                                        "tokenizer_name": tokenizer_name,
+                                        "tokenizer_mode": tokenizer_mode,
+                                        "trust_remote_code": trust_remote_code,
+                                        "revision": revision,
+                                    })
 
     @staticmethod
     def run_detokenizer(*args, **kwargs):
@@ -369,9 +369,9 @@ class DetokenizerProc(Detokenizer):
                 detokenizer = None
 
     def _handle_from_llm_engine(
-        self,
-        request_bytes: bytes,
-        to_engine_core: zmq.Socket,  # type: ignore[name-defined]
+            self,
+            request_bytes: bytes,
+            to_engine_core: zmq.Socket,  # type: ignore[name-defined]
     ) -> None:
         """Handle inputs from the LLM Engine."""
 

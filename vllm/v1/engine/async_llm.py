@@ -100,17 +100,21 @@ class AsyncLLM(EngineClient):
         to_engine_core_path = get_open_zmq_ipc_path()
         from_detokenizer_path = get_open_zmq_ipc_path()
         self.ctx = zmq.asyncio.Context(io_threads=2)
-        self.to_detokenizer = make_zmq_socket(
-            self.ctx, to_detokenizer_path, zmq.constants.PUSH)
-        self.from_detokenizer = make_zmq_socket(
-            self.ctx, from_detokenizer_path, zmq.constants.PULL)
+        self.to_detokenizer = make_zmq_socket(self.ctx, to_detokenizer_path,
+                                              zmq.constants.PUSH)
+        self.from_detokenizer = make_zmq_socket(self.ctx,
+                                                from_detokenizer_path,
+                                                zmq.constants.PULL)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
         self.detokenizer_handle = DetokenizerProc.make_process(
             input_path=to_detokenizer_path,
             output_path=from_detokenizer_path,
             to_engine_core_path=to_engine_core_path,
-            model_config=self.model_config,
+            tokenizer_name=self.model_config.tokenizer,
+            tokenizer_mode=self.model_config.tokenizer_mode,
+            trust_remote_code=self.model_config.trust_remote_code,
+            revision=self.model_config.revision,
         )
 
         # EngineCore (starts the engine in background process).
@@ -171,7 +175,6 @@ class AsyncLLM(EngineClient):
         # Output handler background task.
         if hasattr(self, "output_handler") and self.output_handler:
             self.output_handler.cancel()
-
 
     @staticmethod
     def _get_executor_cls(vllm_config: VllmConfig) -> Type[Executor]:
@@ -273,11 +276,11 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             while True:
-                # note(rob): drain queue without await if possible 
+                # note(rob): drain queue without await if possible
                 # (avoids task switching under load for performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
-                # notte(rob): both Detokenizer and EngineCore handle 
+                # notte(rob): both Detokenizer and EngineCore handle
                 # their own request cleanup based on finished.
                 if out.finished:
                     del self.rid_to_queue[request_id]

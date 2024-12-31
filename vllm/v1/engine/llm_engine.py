@@ -1,5 +1,6 @@
 import weakref
 from typing import Dict, List, Mapping, Optional, Type, Union
+
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
@@ -74,9 +75,8 @@ class LLMEngine:
             revision=vllm_config.model_config.tokenizer_revision,
         )
 
-        self.engine_core: EngineCoreClient
-
         # EngineCore (converts EngineCoreRequests --> EngineCoreOutputs)
+        self.engine_core: EngineCoreClient
         if multiprocess_mode:
             input_path = get_open_zmq_ipc_path()
             output_path = get_open_zmq_ipc_path()

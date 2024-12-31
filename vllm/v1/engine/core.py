@@ -2,19 +2,19 @@ import queue
 import signal
 import threading
 import time
-import psutil
-import zmq
 from abc import ABC, abstractmethod
 from multiprocessing.connection import Connection
-from msgspec import msgpack
 from typing import List, Optional, Tuple, Type
+
+import psutil
+import zmq
+from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (get_exception_traceback, zmq_socket_ctx,
-                        make_zmq_socket)
+from vllm.utils import get_exception_traceback, make_zmq_socket, zmq_socket_ctx
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreAbort, EngineCoreOutput,
                             EngineCoreOutputs, EngineCoreProfile,
@@ -24,7 +24,6 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import BackgroundProcHandle
-
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -383,11 +382,11 @@ class MpEngineCoreClient(EngineCoreClient):
         self.decoder = msgpack.Decoder(EngineCoreOutputs)
 
         # Setup ZMQ IO.
-        self.ctx = zmq.Context(io_threads=2)  # ignore: typing[attr-defined]
-        self.input_socket = make_zmq_socket(
-            self.ctx, input_path, zmq.constants.PUSH)
-        self.output_socket = make_zmq_socket(
-            self.ctx, output_path, zmq.constants.PULL)
+        self.ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+        self.input_socket = make_zmq_socket(self.ctx, input_path,
+                                            zmq.constants.PUSH)
+        self.output_socket = make_zmq_socket(self.ctx, output_path,
+                                             zmq.constants.PULL)
 
         # Optionally hold the proc handle for cleanup at shutdown().
         self.proc_handle = proc_handle
