@@ -1,6 +1,5 @@
 from typing import List, Optional, Type
 
-import weakref
 import msgspec
 import zmq
 import zmq.asyncio

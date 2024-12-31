@@ -91,6 +91,7 @@ class BackgroundProcHandle:
         target_fn: Callable,
         process_kwargs: Dict[Any, Any],
     ):
+        # Ensure cleanup of background process during GC.
         self._finalizer = weakref.finalize(self, self.shutdown)
 
         context = get_mp_context()
