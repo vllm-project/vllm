@@ -140,10 +140,7 @@ VLM_TEST_SETTINGS = {
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
         tokenizer_mode="slow",
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-        ),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         dtype="bfloat16",
         prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
         img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",

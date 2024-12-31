@@ -6,13 +6,12 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.nn.init import trunc_normal_
-from transformers import LlamaConfig
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.inputs import InputContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -25,27 +24,22 @@ from vllm.model_executor.layers.sampler import (SamplerOutput,
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.idefics2_vision_model import (
-    Idefics2VisionTransformer)
-from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.llama import (LlamaDecoderLayer, LlamaMLP,
-                                              LlamaModel)
-from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
-                                              is_pp_missing_parameter,
-                                              maybe_prefix,
-                                              merge_multimodal_embeddings)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges,
-                                   repeat_and_pad_placeholder_tokens)
-from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement)
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.aria import (AriaMoELMConfig,
                                                   AriaVisionConfig)
-from vllm.utils import is_list_of
 
-from .utils import flatten_bn
+from .idefics2_vision_model import Idefics2VisionTransformer
+from .interfaces import SupportsMultiModal
+from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    is_pp_missing_parameter, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 
 class AriaImagePixelInputs(TypedDict):
@@ -256,7 +250,7 @@ class AriaProjector(nn.Module):
 class AriaFusedMoE(FusedMoE):
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      shard_id: str) -> Set[str]:
+                      shard_id: str) -> None:
         # Override the weight_loader to handle the expert weights in the Aria
         # model, which are already packed with experts, and merge the gate and
         # up weights for each expert.
@@ -351,7 +345,7 @@ class MoEDecoderLayer(LlamaDecoderLayer):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        config: AriaMoELMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -439,7 +433,7 @@ class AriaMoELMModel(LlamaModel):
         return loaded_params
 
 
-def build_mm_projector(config):
+def build_mm_projector(config: PretrainedConfig):
     return AriaProjector(
         patch_to_query_dict=config.projector_patch_to_query_dict,
         embed_dim=config.vision_config.hidden_size,
@@ -450,7 +444,7 @@ def build_mm_projector(config):
     )
 
 
-def get_aria_max_multimodal_tokens(ctx: InputContext):
+def get_max_aria_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config()
     image_size2tokens = {
         int(math.sqrt(k) * hf_config.vision_config.patch_size): v
@@ -459,130 +453,69 @@ def get_aria_max_multimodal_tokens(ctx: InputContext):
     return max(image_size2tokens.values())
 
 
-def dummy_seq_data_for_aria(ctx: InputContext, seq_len: int, num_images: int):
-    image_feature_size = get_aria_max_multimodal_tokens(ctx)
-    hf_config = ctx.get_hf_config()
-    return SequenceData.from_prompt_token_counts(
-        (hf_config.image_token_index, image_feature_size * num_images),
-        (0, seq_len - image_feature_size * num_images),
-    ), {
-        "image":
-        consecutive_placeholder_ranges(num_items=num_images,
-                                       item_size=image_feature_size)
-    }
-
-
 def dummy_image_for_aria(
-    ctx: InputContext,
+    vision_config: AriaVisionConfig,
     num_images: int,
 ):
-    hf_config = ctx.get_hf_config()
-    max_image_size = hf_config.vision_config.image_size
+    max_image_size = vision_config.image_size
     image = Image.new("RGB", (max_image_size, max_image_size), color=0)
     images = [image] * num_images
 
     return {"image": images}
 
 
-def dummy_data_for_aria(ctx: InputContext, seq_len: int,
-                        mm_counts: Mapping[str, int]):
-    num_images = mm_counts["image"]
-    seq_data, ranges = dummy_seq_data_for_aria(ctx, seq_len, num_images)
-    mm_data = dummy_image_for_aria(ctx, num_images)
-    return DummyData(seq_data, mm_data, ranges)
+class AriaMultiModalProcessor(BaseMultiModalProcessor):
 
-
-def input_mapper_for_aria(ctx: InputContext, data: object):
-    data_list = data if isinstance(data, list) else [data]
-
-    # For profiling with dummy image data
-    if is_list_of(data_list, Image.Image):
-        hf_config = ctx.get_hf_config()
-        max_image_size = hf_config.vision_config.image_size
-        model_config = ctx.model_config
-        image_processor = cached_get_image_processor(
-            model_config.model,
-            trust_remote_code=model_config.trust_remote_code)
-        image_inputs = image_processor.preprocess(
-            data_list,
-            max_image_size=max_image_size,
-            split_image=False,
-            return_tensors="pt").data
-        image_inputs['pixel_values'] = image_inputs['pixel_values'].to(
-            ctx.model_config.dtype)
-        return MultiModalKwargs(image_inputs)
-
-    # For actual inference when image has been processed with
-    # prompt in input processor
-    return MultiModalKwargs(data_list[0])
-
-
-def input_processor_for_aria(ctx: InputContext, llm_inputs: DecoderOnlyInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
-    # if it is pure text input, use it as is
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
-
-    model_config = ctx.model_config
-
-    tokenizer = cached_get_tokenizer(model_config.tokenizer)
-    image_processor = cached_get_image_processor(
-        model_config.model, trust_remote_code=model_config.trust_remote_code)
-    hf_config = model_config.hf_config
-
-    # prepare image tokens, the max_image_size is used to determine the number
-    # of patch_size for every image
-    max_image_size = multi_modal_data.pop("max_image_size", 980)
-    _split_image = multi_modal_data.pop("split_image", False)
-
-    assert isinstance(max_image_size,
-                      (int, float)), "max_image_size should be float or int"
-    images = (multi_modal_data["image"] if isinstance(
-        multi_modal_data["image"], list) else [multi_modal_data["image"]])
-
-    image_inputs = image_processor.preprocess(images,
-                                              max_image_size=max_image_size,
-                                              split_image=_split_image,
-                                              return_tensors="pt").data
-    image_inputs['pixel_values'] = image_inputs['pixel_values'].to(
-        ctx.model_config.dtype)
-    num_crops = image_inputs.pop("num_crops")
-
-    prompt_token_ids = llm_inputs["prompt_token_ids"]
-    if num_crops.sum().item() > 0:
-        _, prompt_token_ids, _ = repeat_and_pad_placeholder_tokens(
-            tokenizer,
-            None,
-            prompt_token_ids,
-            placeholder_token_id=hf_config.image_token_index,
-            repeat_count=num_crops,
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            pixel_mask=MultiModalFieldConfig.batched("image"),
         )
 
-    image_size2tokens = {
-        int(math.sqrt(k) * hf_config.vision_config.patch_size): v
-        for k, v in hf_config.projector_patch_to_query_dict.items()
-    }
-    repeat_count = [image_size2tokens[max_image_size]] * sum(num_crops).item()
-    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
-        tokenizer,
-        None,
-        prompt_token_ids,
-        placeholder_token_id=hf_config.image_token_index,
-        repeat_count=repeat_count,
-    )
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        hf_config = self.ctx.get_hf_config()
+        image_token_id = hf_config.image_token_index
 
-    return token_inputs(
-        prompt_token_ids=new_token_ids,
-        prompt=new_prompt,
-        multi_modal_data={"image": image_inputs},
-        multi_modal_placeholders={"image": ranges},
-    )
+        max_image_tokens = get_max_aria_image_tokens(self.ctx)
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=[image_token_id] * max_image_tokens,
+            )
+        ]
+
+    def _get_dummy_mm_inputs(
+        self,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        hf_config = self.ctx.get_hf_config()
+        vision_config = hf_config.vision_config
+        num_images = mm_counts.get("image", 0)
+
+        data = dummy_image_for_aria(vision_config, num_images)
+
+        hf_processor = self._get_hf_processor()
+        image_token = hf_processor.image_token  # type: ignore
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=data,
+        )
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_aria_max_multimodal_tokens)
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_aria)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_aria)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_aria)
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_aria_image_tokens)
+@MULTIMODAL_REGISTRY.register_processor(AriaMultiModalProcessor)
 class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """
     Aria model for conditional generation tasks.
@@ -651,7 +584,12 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         pixel_values = self._validate_image_sizes(pixel_values)
         pixel_values = flatten_bn(pixel_values, concat=True)
+
         if pixel_mask is not None:
+            if not isinstance(pixel_mask, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel mask. "
+                                 f"Got type: {type(pixel_mask)}")
+
             pixel_mask = flatten_bn(pixel_mask, concat=True)
 
         return AriaImagePixelInputs(
