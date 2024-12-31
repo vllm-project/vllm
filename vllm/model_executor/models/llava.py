@@ -144,8 +144,8 @@ class LlavaMultiModalProcessor(BaseMultiModalProcessor):
                 # Original output: (1, num_images, C, H, W)
                 # New output: (num_images, C, H, W)
                 assert (isinstance(pixel_values, list)
-                        and len(pixel_values) == 1
-                        and isinstance(pixel_values[0], list)
+                        and len(pixel_values) == 1)
+                assert (isinstance(pixel_values[0], list)
                         and len(pixel_values[0]) == len(images))
 
                 processed_outputs["pixel_values"] = pixel_values[0]

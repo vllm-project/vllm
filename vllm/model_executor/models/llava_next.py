@@ -528,10 +528,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         stacked_image_features = self._image_pixels_to_features(
             self.vision_tower, stacked_pixel_values)
 
-        return [
-            self.multi_modal_projector(image_features) for image_features in
-            torch.split(stacked_image_features, num_patches_per_batch)
-        ]
+        return torch.split(self.multi_modal_projector(stacked_image_features),
+                           num_patches_per_batch)
 
     def _process_image_input(
         self,

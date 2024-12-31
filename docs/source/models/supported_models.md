@@ -570,28 +570,28 @@ See [this page](#generative-models) for more information on how to use generativ
   - `rhymes-ai/Aria`
   -
   - ✅︎
-  -
+  - ✅︎
 * - `Blip2ForConditionalGeneration`
   - BLIP-2
   - T + I<sup>E</sup>
   - `Salesforce/blip2-opt-2.7b`, `Salesforce/blip2-opt-6.7b`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `ChameleonForConditionalGeneration`
   - Chameleon
   - T + I
   - `facebook/chameleon-7b` etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `FuyuForCausalLM`
   - Fuyu
   - T + I
   - `adept/fuyu-8b` etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `ChatGLMModel`
   - GLM-4V
   - T + I
@@ -633,7 +633,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `llava-hf/llava-v1.6-mistral-7b-hf`, `llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `LlavaNextVideoForConditionalGeneration`
   - LLaVA-NeXT-Video
   - T + V
