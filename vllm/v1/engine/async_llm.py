@@ -31,7 +31,6 @@ from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.detokenizer import DetokenizerProc
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
 
