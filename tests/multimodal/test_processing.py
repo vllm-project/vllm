@@ -528,7 +528,7 @@ def _rand_audio(
 
 def _test_processing_cache_correctness(
     model_id: str,
-    modalities: set[str],
+    modalities: dict[str, bool],
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
@@ -583,9 +583,8 @@ def _test_processing_cache_correctness(
         partial(_rand_audio, rng, min_len=256, max_len=512, sr=16000),
     }
     input_max_count = {
-        "image": 3,
-        "video": 3,
-        "audio": 3,
+        modality: 3 if supports_multi else 1
+        for modality, supports_multi in modalities.items()
     }
 
     for batch_idx in range(num_batches):
@@ -624,12 +623,16 @@ def _test_processing_cache_correctness(
 
 # yapf: disable
 @pytest.mark.parametrize(("model_id", "modalities"), [
-    ("llava-hf/llava-1.5-7b-hf", {"image"}),
-    ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image"}),
-    ("mistral-community/pixtral-12b", {"image"}),
-    ("Qwen/Qwen2-VL-2B-Instruct", {"image", "video"}),
-    ("Qwen/Qwen2-Audio-7B-Instruct", {"audio"}),
-    ("fixie-ai/ultravox-v0_3", {"audio"}),
+    ("rhymes-ai/Aria", {"image": True}),
+    ("Salesforce/blip2-opt-2.7b", {"image": False}),
+    ("facebook/chameleon-7b", {"image": True}),
+    ("adept/fuyu-8b", {"image": False}),
+    ("llava-hf/llava-1.5-7b-hf", {"image": True}),
+    ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image": True}),
+    ("mistral-community/pixtral-12b", {"image": True}),
+    ("Qwen/Qwen2-VL-2B-Instruct", {"image": True, "video": True}),
+    ("Qwen/Qwen2-Audio-7B-Instruct", {"audio": True}),
+    ("fixie-ai/ultravox-v0_3", {"audio": True}),
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -637,7 +640,7 @@ def _test_processing_cache_correctness(
 # yapf: enable
 def test_processing_cache_correctness(
     model_id: str,
-    modalities: set[str],
+    modalities: dict[str, bool],
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
@@ -653,7 +656,7 @@ def test_processing_cache_correctness(
 
 # yapf: disable
 @pytest.mark.parametrize(("model_id", "modalities"), [
-    ("microsoft/Phi-3-vision-128k-instruct", {"image"}),
+    ("microsoft/Phi-3-vision-128k-instruct", {"image": True}),
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -661,7 +664,7 @@ def test_processing_cache_correctness(
 # yapf: enable
 def test_processing_cache_correctness_phi3v(
     model_id: str,
-    modalities: set[str],
+    modalities: dict[str, bool],
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,

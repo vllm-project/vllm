@@ -400,15 +400,19 @@ def repeat_and_pad_placeholder_tokens(
     placeholder_token_idx = 0
     for i, token in enumerate(prompt_token_ids):
         if token == placeholder_token_id:
+            curr_repeat_count = repeat_count[placeholder_token_idx]
             replacement_ids = repeat_and_pad_token(
                 placeholder_token_id,
-                repeat_count=repeat_count[placeholder_token_idx],
+                repeat_count=curr_repeat_count,
                 pad_token_left=pad_token_left,
                 pad_token_right=pad_token_right,
             )
+            offset = len(new_token_ids)
+            if pad_token_left is not None:
+                offset += 1
             placeholder_ranges.append({
-                "offset": len(new_token_ids),
-                "length": len(replacement_ids)
+                "offset": offset,
+                "length": curr_repeat_count,
             })
             new_token_ids.extend(replacement_ids)
             placeholder_token_idx += 1

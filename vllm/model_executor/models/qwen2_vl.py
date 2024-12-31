@@ -29,7 +29,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from PIL import Image
 from transformers import BatchFeature
 from transformers.models.qwen2_vl import (Qwen2VLImageProcessor,
                                           Qwen2VLProcessor)
@@ -882,12 +881,10 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
         hf_processor = self._get_hf_processor()
-        image_token: str = hf_processor.image_token
         image_processor = _get_image_processor(hf_processor)
 
-        data = {}
+        image_token: str = hf_processor.image_token
         resized_height, resized_width = smart_resize(
             height=9999999,
             width=9999999,
@@ -895,14 +892,18 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
             min_pixels=image_processor.min_pixels,
             max_pixels=image_processor.max_pixels,
         )
+        num_images = mm_counts.get("image", 0)
 
-        dummy_image = Image.new("RGB", (resized_width, resized_height),
-                                color=0)
-        data["image"] = [dummy_image] * num_images
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=resized_width,
+                                   height=resized_height,
+                                   num_images=num_images)
+        }
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,
-            mm_data=data,
+            mm_data=mm_data,
         )
 
 

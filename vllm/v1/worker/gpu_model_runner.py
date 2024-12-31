@@ -647,9 +647,22 @@ class GPUModelRunner:
                 self.mm_registry.get_max_tokens_per_item_by_modality(
                     self.model_config).values())
 
-            max_num_mm_items = min(
+            max_num_mm_items_encoder_budget = min(
                 self.max_num_encoder_input_tokens,
                 self.encoder_cache_size) // max_tokens_per_mm_item
+
+            max_mm_items_per_req = max(
+                self.mm_registry.get_mm_limits_per_prompt(
+                    self.model_config).values())
+
+            # NOTE: We do not consider max_num_batched_tokens on purpose
+            # because the multimodal embeddings can be generated in advance
+            # and chunked prefilled.
+            max_num_mm_items_decoder_budget = self.max_num_reqs * \
+                max_mm_items_per_req
+
+            max_num_mm_items = min(max_num_mm_items_encoder_budget,
+                                   max_num_mm_items_decoder_budget)
 
             # Dummy data definition in V0 may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we

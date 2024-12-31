@@ -4,22 +4,16 @@ from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
-from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
 
 from vllm.attention.layer import MultiHeadAttention
-from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.inputs import DecoderOnlyInputs, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   repeat_and_pad_placeholder_tokens)
-from vllm.sequence import SequenceData
 
 
 def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -31,92 +25,6 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
     grid_length = get_blip_patch_grid_length(image_size=image_size,
                                              patch_size=patch_size)
     return grid_length * grid_length
-
-
-def get_blip_image_feature_size(
-        hf_config: Union[BlipVisionConfig, Blip2VisionConfig]) -> int:
-    return get_blip_num_patches(image_size=hf_config.image_size,
-                                patch_size=hf_config.patch_size)
-
-
-def get_max_blip_image_tokens(
-        hf_config: Union[BlipVisionConfig, Blip2VisionConfig]) -> int:
-    return get_blip_image_feature_size(hf_config)
-
-
-def dummy_seq_data_for_blip(
-    hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
-    seq_len: int,
-    num_images: int,
-    *,
-    image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
-):
-    if image_feature_size_override is None:
-        image_feature_size = get_blip_image_feature_size(hf_config)
-    else:
-        image_feature_size = image_feature_size_override
-
-    return SequenceData.from_prompt_token_counts(
-        (image_token_id, image_feature_size * num_images),
-        (0, seq_len - image_feature_size * num_images),
-    )
-
-
-def dummy_image_for_blip(
-    hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
-    num_images: int,
-    *,
-    image_width_override: Optional[int] = None,
-    image_height_override: Optional[int] = None,
-):
-    width = height = hf_config.image_size
-    if image_width_override is not None:
-        width = image_width_override
-    if image_height_override is not None:
-        height = image_height_override
-
-    image = Image.new("RGB", (width, height), color=0)
-    return {"image": image if num_images == 1 else [image] * num_images}
-
-
-def input_processor_for_blip(
-    model_config: ModelConfig,
-    hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
-    inputs: DecoderOnlyInputs,
-    *,
-    image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
-):
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
-
-    if "multi_modal_placeholders" in inputs and "image" in inputs[
-            "multi_modal_placeholders"]:
-        # The inputs already have placeholders.
-        return inputs
-
-    tokenizer = cached_get_tokenizer(model_config.tokenizer)
-
-    if image_feature_size_override is None:
-        image_feature_size = get_blip_image_feature_size(hf_config)
-    else:
-        image_feature_size = image_feature_size_override
-
-    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
-        tokenizer,
-        inputs.get("prompt"),
-        inputs["prompt_token_ids"],
-        placeholder_token_id=image_token_id,
-        repeat_count=image_feature_size,
-    )
-
-    # NOTE: Create a defensive copy of the original inputs
-    return token_inputs(prompt_token_ids=new_token_ids,
-                        prompt=new_prompt,
-                        multi_modal_data=multi_modal_data,
-                        multi_modal_placeholders={"image": ranges})
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
