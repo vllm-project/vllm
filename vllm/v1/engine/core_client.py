@@ -1,4 +1,5 @@
-from typing import List, Optional, Type
+import weakref
+from typing import List, Type
 
 import msgspec
 import zmq
@@ -52,9 +53,6 @@ class EngineCoreClient:
 
         return InprocClient(vllm_config, executor_class, log_stats)
 
-    def shutdown(self):
-        pass
-
     def get_output(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
 
@@ -104,9 +102,6 @@ class InprocClient(EngineCoreClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self.engine_core.abort_requests(request_ids)
 
-    def shutdown(self):
-        pass
-
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
 
@@ -131,6 +126,9 @@ class MPClient(EngineCoreClient):
         executor_class: Type[Executor],
         log_stats: bool = False,
     ):
+        # Ensure cleanup of ZMQ during GC.
+        self._finalizer = weakref.finalize(self, self.shutdown)
+
         # Serialization setup.
         self.encoder = PickleEncoder()
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
@@ -150,7 +148,6 @@ class MPClient(EngineCoreClient):
                                             zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        self.proc_handle: Optional[BackgroundProcHandle]
         self.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
@@ -163,12 +160,7 @@ class MPClient(EngineCoreClient):
             })
 
     def shutdown(self):
-        # Shut down the zmq context.
         self.ctx.destroy(linger=0)
-
-        if hasattr(self, "proc_handle") and self.proc_handle:
-            self.proc_handle.shutdown()
-            self.proc_handle = None
 
 
 class SyncMPClient(MPClient):
