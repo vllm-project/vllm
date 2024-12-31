@@ -105,12 +105,18 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+
         if not mm_data:
             # Avoid warning from HF logger for text-only input
+            # Input_ids format: bos_token_id + prompt_token_ids + boa_token_id
+            # Tokenizer won't add boa_token_id by default, we add it manually.
             tokenizer = self._get_tokenizer()
-            processed_outputs = tokenizer(
-                prompt, return_tensors="pt").data  # type: ignore
-            return BatchFeature(processed_outputs)
+            boa_token_id: int = tokenizer.vocab["<0x04>"]  # type: ignore
+            processed_outputs = tokenizer(prompt).data  # type: ignore
+            processed_outputs["input_ids"] = [
+                processed_outputs["input_ids"] + [boa_token_id]
+            ]
+            return BatchFeature(processed_outputs, tensor_type="pt")
 
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
@@ -153,7 +159,6 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         tokenizer = self._get_tokenizer()
         eot_token_id = tokenizer.bos_token_id
         assert isinstance(eot_token_id, int)
-        boa_token_id: int = tokenizer.vocab["<0x04>"]  # type: ignore
 
         hf_processor = self._get_hf_processor()
         image_processor: FuyuImageProcessor = hf_processor.image_processor
@@ -180,7 +185,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
             )
 
             return (([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows +
-                    [bos_token_id, boa_token_id])
+                    [bos_token_id])
 
         return [
             PromptReplacement(
@@ -199,10 +204,10 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
 
         # Only |SPEAKER| (image) tokens should be considered as placeholders,
-        # so we ignore the trailing bos_token_id and boa_token_id
+        # so we ignore the trailing bos_token_id
         result["mm_placeholders"] = {
             modality: [
-                PlaceholderRange(offset=p["offset"], length=p["length"] - 2)
+                PlaceholderRange(offset=p["offset"], length=p["length"] - 1)
                 for p in ps
             ]
             for modality, ps in result["mm_placeholders"].items()
@@ -295,7 +300,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return FuyuImagePatchInputs(
                 type="image_patches",
                 data=self._validate_pixel_values(
-                    flatten_bn(image_patches, concat=True)),
+                    flatten_bn(flatten_bn(image_patches), concat=True)),
             )
 
         return None
