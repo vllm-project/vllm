@@ -299,16 +299,14 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             if not isinstance(image_patches, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image patches. "
                                  f"Got type: {type(image_patches)}")
-        
+
             image_patches_flat = flatten_bn(image_patches)
 
             return FuyuImagePatchInputs(
                 type="image_patches",
                 data=self._validate_pixel_values(
                     flatten_bn(image_patches_flat, concat=True)),
-                patches_per_image=[
-                    x.size(0) for x in image_patches_flat
-                ],
+                patches_per_image=[x.size(0) for x in image_patches_flat],
             )
 
         return None
