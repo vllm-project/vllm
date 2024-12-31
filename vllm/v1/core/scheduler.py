@@ -185,9 +185,8 @@ class Scheduler:
 
                 request = self.waiting[0]
                 # Get already-cached tokens.
-                computed_blocks_and_num_evictable = (
-                    self.kv_cache_manager.get_computed_blocks(request))
-                computed_blocks, _ = computed_blocks_and_num_evictable
+                computed_blocks = self.kv_cache_manager.get_computed_blocks(
+                    request)
                 # NOTE(woosuk): Since incomplete blocks are not eligible for
                 # sharing, `num_computed_tokens` is always a multiple of
                 # `block_size`.
@@ -197,8 +196,18 @@ class Scheduler:
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
+                if num_new_tokens == 0:
+                    # The happens when prompt length is divisible by the block
+                    # size and all blocks are cached. Now we force to recompute
+                    # the last block. Note that we have to re-compute an entire
+                    # block because allocate_slots() assumes num_computed_tokens
+                    # is always a multiple of the block size. This limitation
+                    # can potentially be removed in the future to slightly
+                    # improve the performance.
+                    num_computed_tokens -= self.block_size
+                    num_new_tokens = self.block_size
+                    computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
-                assert num_new_tokens > 0
 
                 # Schedule encoder inputs.
                 (encoder_inputs_to_schedule, num_new_tokens,
@@ -210,7 +219,7 @@ class Scheduler:
                     break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks_and_num_evictable)
+                    request, num_new_tokens, computed_blocks)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
