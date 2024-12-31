@@ -226,7 +226,7 @@ class MultiModalDataParser:
             belonging to each modality. This effectively sets a hard limit over
             `--limit-mm-per-prompt`.
         target_sr (float, optional): Enables automatic resampling of audio
-            items to the model's expected sapmling rate.
+            items to the model's expected sampling rate.
     """
 
     def __init__(
