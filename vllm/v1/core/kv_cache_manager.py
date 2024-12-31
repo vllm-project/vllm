@@ -191,7 +191,7 @@ class KVCacheManager:
             request: The request to allocate slots.
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
-            computed_blocks: The blocks that have already been computed.
+            computed_blocks: A list of computed blocks.
 
         Returns:
             A list of new allocated blocks.
@@ -200,6 +200,18 @@ class KVCacheManager:
             raise ValueError(
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
+        # If a computed block of a request is an eviction candidate (in the
+        # free queue and ref_cnt == 0), it cannot be counted as a free block
+        # when allocating this request.
+        num_evictable_computed_blocks = sum(1 for blk in computed_blocks
+                                            if blk.ref_cnt == 0)
+
+        num_required_blocks = cdiv(num_tokens, self.block_size)
+        if (num_required_blocks > self.free_block_queue.num_free_blocks -
+                num_evictable_computed_blocks):
+            # Cannot allocate new blocks.
+            return None
+
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
             self._touch(computed_blocks)
@@ -207,11 +219,6 @@ class KVCacheManager:
             assert not computed_blocks, (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
-
-        num_required_blocks = cdiv(num_tokens, self.block_size)
-        if (num_required_blocks > self.free_block_queue.num_free_blocks):
-            # Cannot allocate new blocks.
-            return None
 
         # Determine the number of new blocks to allocate considering
         # preallocated blocks.
