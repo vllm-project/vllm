@@ -106,6 +106,7 @@ class GPUModelRunner:
         # self.input_batch: InputBatch # Set by initialize_kv_cache
         # self.kv_cache_config: KVCacheConfig # Set by initialize_kv_cache
         # self.max_num_blocks_per_req: int # Set by initialize_kv_cache
+        # self.block_id_multipliers: List[int] # Set by initialize_kv_cache
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -207,6 +208,8 @@ class GPUModelRunner:
                 if num_new_blocks == 0:
                     continue
                 start_index = len(req_state.block_ids)
+                if (multiplier := self.block_id_multipliers[group_id]) != 1:
+                    new_block_ids = [b * multiplier for b in new_block_ids]
                 end_index = start_index + num_new_blocks
                 req_state.block_ids[group_id].extend(new_block_ids)
                 self.input_batch.block_table_cpu[
@@ -750,6 +753,14 @@ class GPUModelRunner:
         print("layer_names", layer_names)
         assert len(layer_names) == self.num_attn_layers
 
+        layer_to_group_id = {
+            layer_name: group_id
+            for group_id, layer_names in enumerate(kv_cache_config.groups)
+            for layer_name in layer_names
+        }
+        layer_to_multiplier = {}
+        # TODO: explain multipiler
+
         for i in range(self.num_attn_layers):
             layer_name = layer_names[i]
             layer_spec = kv_cache_config.kv_cache_spec[layer_name]
@@ -758,23 +769,49 @@ class GPUModelRunner:
             num_blocks = tensor_config.size // layer_spec.page_size_bytes
             if isinstance(layer_spec, (FullAttentionSpec, SlidingWindowSpec)):
                 kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
+                    -1, layer_spec.block_size, layer_spec.num_kv_heads,
                     layer_spec.head_size)
                 dtype = layer_spec.dtype
             else:
                 raise NotImplementedError
             if isinstance(tensor_config, KVCacheTensorSeperate):
+                kv_cache_shape[kv_cache_shape.index(-1)] = num_blocks
                 tensor = torch.zeros(kv_cache_shape,
                                      dtype=dtype,
                                      device=self.device)
+                layer_to_multiplier[layer_name] = 1
             elif isinstance(tensor_config, KVCacheTensorShareBuffer):
                 assert isinstance(buffer, torch.Tensor)
-                tensor = buffer[
-                    tensor_config.start_bias:tensor_config.start_bias +
-                    tensor_config.size].view(dtype).view(kv_cache_shape)
+                layer_buffer = buffer[tensor_config.
+                                      start_bias:tensor_config.start_bias +
+                                      tensor_config.size].view(dtype)
+                group_size = len(
+                    kv_cache_config.groups[layer_to_group_id[layer_name]])
+                if kv_cache_shape[0] == -1:
+                    # e.g., flash_infer backend
+                    tensor = layer_buffer
+                    layer_to_multiplier[layer_name] = group_size
+                elif kv_cache_shape[0] == 2 and kv_cache_shape[1] == -1:
+                    # e.g., flash_attn backend
+                    layer_buffer = layer_buffer.view((-1, *kv_cache_shape[2:]))
+                    key_tensor = layer_buffer[:-1]
+                    value_tensor = layer_buffer[1:]
+                    tensor = (key_tensor, value_tensor)
+                    layer_to_multiplier[layer_name] = 2 * group_size
+                else:
+                    raise NotImplementedError
             else:
                 raise NotImplementedError
             self.kv_caches.append(tensor)
+
+        block_id_multipliers = []
+        for layer_names in kv_cache_config.groups:
+            multiplier_set = set(layer_to_multiplier[layer_name]
+                                 for layer_name in layer_names)
+            assert len(multiplier_set) == 1
+            block_id_multipliers.append(multiplier_set.pop())
+        self.block_id_multipliers = block_id_multipliers
+        print("block_id_multipliers", self.block_id_multipliers)
 
         self.kv_cache_config = kv_cache_config
 
