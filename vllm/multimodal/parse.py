@@ -222,8 +222,8 @@ class MultiModalDataParser:
     Parses :class:`MultiModalDataDict` into :class:`MultiModalDataItems`.
 
     Args:
-        max_mm_counts (int): The maximum allowed number of items belonging to
-            each modality. This effectively sets a hard limit over
+        max_mm_counts (Mapping[str, int]): The maximum allowed number of items
+            belonging to each modality. This effectively sets a hard limit over
             `--limit-mm-per-prompt`.
         target_sr (float, optional): Enables automatic resampling of audio
             items to the model's expected sapmling rate.
