@@ -8,9 +8,10 @@ from functools import lru_cache
 from typing import Any, NamedTuple, Optional, Protocol, TypeVar, Union
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from blake3 import blake3
-from PIL.Image import Image
+from PIL import Image
 from transformers import BatchFeature, ProcessorMixin
 
 from vllm.inputs import DummyData, InputProcessingContext
@@ -513,7 +514,7 @@ class ProcessingCache:
             return obj.encode("utf-8")
         if isinstance(obj, bytes):
             return obj
-        if isinstance(obj, Image):
+        if isinstance(obj, Image.Image):
             return obj.tobytes()
 
         # Convertible to NumPy arrays
@@ -1006,6 +1007,36 @@ class BaseMultiModalProcessor(ABC):
             mm_kwargs=mm_kwargs,
             mm_placeholders=mm_placeholders,
         )
+
+    def _get_dummy_audios(
+        self,
+        *,
+        length: int,
+        num_audios: int,
+    ) -> list[npt.NDArray]:
+        audio = np.zeros((length, ))
+        return [audio] * num_audios
+
+    def _get_dummy_images(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_images: int,
+    ) -> list[Image.Image]:
+        image = Image.new("RGB", (width, height), color=0)
+        return [image] * num_images
+
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+    ) -> list[npt.NDArray]:
+        video = np.zeros((num_frames, width, height, 3))
+        return [video] * num_videos
 
     @abstractmethod
     def _get_dummy_mm_inputs(

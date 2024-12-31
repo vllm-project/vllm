@@ -4,7 +4,6 @@ from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
 
 import torch
 import torch.nn as nn
-from PIL import Image
 from torch.nn.init import trunc_normal_
 from transformers import BatchFeature, PretrainedConfig
 
@@ -453,17 +452,6 @@ def get_max_aria_image_tokens(ctx: InputContext):
     return max(image_size2tokens.values())
 
 
-def dummy_image_for_aria(
-    vision_config: AriaVisionConfig,
-    num_images: int,
-):
-    max_image_size = vision_config.image_size
-    image = Image.new("RGB", (max_image_size, max_image_size), color=0)
-    images = [image] * num_images
-
-    return {"image": images}
-
-
 class AriaMultiModalProcessor(BaseMultiModalProcessor):
 
     def _get_mm_fields_config(
@@ -501,16 +489,23 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
     ) -> ProcessorInputs:
         hf_config = self.ctx.get_hf_config()
         vision_config: AriaVisionConfig = hf_config.vision_config
+
+        max_image_size = vision_config.image_size
         num_images = mm_counts.get("image", 0)
 
-        data = dummy_image_for_aria(vision_config, num_images)
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=max_image_size,
+                                   height=max_image_size,
+                                   num_images=num_images)
+        }
 
         hf_processor = self._get_hf_processor()
         image_token: str = hf_processor.image_token  # type: ignore
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,
-            mm_data=data,
+            mm_data=mm_data,
         )
 
 

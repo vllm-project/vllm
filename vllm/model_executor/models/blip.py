@@ -4,7 +4,6 @@ from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
-from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
 
 from vllm.attention.layer import MultiHeadAttention
@@ -26,23 +25,6 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
     grid_length = get_blip_patch_grid_length(image_size=image_size,
                                              patch_size=patch_size)
     return grid_length * grid_length
-
-
-def dummy_image_for_blip(
-    hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
-    num_images: int,
-    *,
-    image_width_override: Optional[int] = None,
-    image_height_override: Optional[int] = None,
-):
-    width = height = hf_config.image_size
-    if image_width_override is not None:
-        width = image_width_override
-    if image_height_override is not None:
-        height = image_height_override
-
-    image = Image.new("RGB", (width, height), color=0)
-    return {"image": image if num_images == 1 else [image] * num_images}
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa

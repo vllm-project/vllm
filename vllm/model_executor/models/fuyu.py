@@ -20,8 +20,6 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
-from PIL import Image
 from transformers import BatchFeature, FuyuProcessor
 
 from vllm.attention import AttentionMetadata
@@ -161,15 +159,18 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
             )
         ]
 
-    def _get_dummy_mm_inputs(self, mm_counts):
+    def _get_dummy_mm_inputs(
+        self,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
 
-        image = Image.new(
-            "RGB",
-            (MAX_IMAGE_FEATURE_SIZE_WIDTH, MAX_IMAGE_FEATURE_SIZE_HEIGHT),
-            color=0,
-        )
-        mm_data = {"image": image if num_images == 1 else [image] * num_images}
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+                                   height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+                                   num_images=num_images)
+        }
 
         return ProcessorInputs(
             prompt_text="",

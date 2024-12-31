@@ -23,7 +23,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
 
-from .blip import BlipVisionModel, dummy_image_for_blip
+from .blip import BlipVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -459,13 +459,20 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor):
     ) -> ProcessorInputs:
         hf_config = self.ctx.get_hf_config(Blip2Config)
         vision_config = hf_config.vision_config
+
+        max_image_size = vision_config.image_size
         num_images = mm_counts.get("image", 0)
 
-        data = dummy_image_for_blip(vision_config, num_images)
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=max_image_size,
+                                   height=max_image_size,
+                                   num_images=num_images)
+        }
 
         return ProcessorInputs(
             prompt_text="",
-            mm_data=data,
+            mm_data=mm_data,
         )
 
 

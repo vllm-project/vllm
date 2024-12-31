@@ -3,9 +3,8 @@ from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
-from torch import nn
 from transformers import (BatchFeature, ChameleonConfig, ChameleonProcessor,
                           ChameleonVQVAEConfig)
 
@@ -59,23 +58,6 @@ def get_max_chameleon_image_tokens(ctx: InputContext):
     return CHAMELEON_IMAGE_SEQ_LENGTH
 
 
-def dummy_image_for_chameleon(
-    num_images: int,
-    *,
-    image_width_override: Optional[int] = None,
-    image_height_override: Optional[int] = None,
-):
-    width = CHAMELEON_CROP_SIZE_WIDTH
-    height = CHAMELEON_CROP_SIZE_HEIGHT
-    if image_width_override is not None:
-        width = image_width_override
-    if image_height_override is not None:
-        height = image_height_override
-
-    image = Image.new("RGB", (width, height), color=0)
-    return {"image": image if num_images == 1 else [image] * num_images}
-
-
 class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
 
     def _get_hf_processor(self) -> ChameleonProcessor:
@@ -114,11 +96,16 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
 
-        data = dummy_image_for_chameleon(num_images)
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=CHAMELEON_CROP_SIZE_WIDTH,
+                                   height=CHAMELEON_CROP_SIZE_HEIGHT,
+                                   num_images=num_images)
+        }
 
         return ProcessorInputs(
             prompt_text="<image>" * num_images,
-            mm_data=data,
+            mm_data=mm_data,
         )
 
     def apply(
