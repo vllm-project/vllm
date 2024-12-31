@@ -385,7 +385,6 @@ class DetokenizerProc(Detokenizer):
             raise ValueError(f"Unknown type: {req}")
 
         # Forward to EngineCore.
-        print("sending to engine core.")
         to_engine_core.send(request_bytes)
 
     def _handle_from_engine_core(
