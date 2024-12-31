@@ -24,11 +24,10 @@ async def _async_serving_models_init() -> OpenAIServingModels:
     # Set the max_model_len attribute to avoid missing attribute
     mock_model_config.max_model_len = 2048
 
-    serving_models = OpenAIServingModels(
-        base_model_paths=BASE_MODEL_PATHS,
-        model_config=mock_model_config,
-        lora_modules=None,
-        prompt_adapters=None)
+    serving_models = OpenAIServingModels(base_model_paths=BASE_MODEL_PATHS,
+                                         model_config=mock_model_config,
+                                         lora_modules=None,
+                                         prompt_adapters=None)
 
     return serving_models
 
