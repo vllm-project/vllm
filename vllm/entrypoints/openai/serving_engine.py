@@ -121,8 +121,8 @@ class OpenAIServingModels:
                             lora_path=lora.path,
                             base_model_name=lora.base_model_name
                             if lora.base_model_name
-                            and self.is_base_model(lora.base_model_name)
-                            else self.base_model_paths[0].name)
+                            and self.is_base_model(lora.base_model_name) else
+                            self.base_model_paths[0].name)
                 for i, lora in enumerate(lora_modules, start=1)
             ]
 
@@ -139,7 +139,7 @@ class OpenAIServingModels:
                         prompt_adapter_id=i,
                         prompt_adapter_local_path=prompt_adapter.local_path,
                         prompt_adapter_num_virtual_tokens=num_virtual_tokens))
-                
+
     def is_base_model(self, model_name):
         return any(model.name == model_name for model in self.base_model_paths)
 
