@@ -1,7 +1,6 @@
 import asyncio
 import os
 import signal
-import weakref
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -42,9 +41,6 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-        # Call self.shutdown at exit to clean up
-        # and ensure workers will be terminated.
-        # self._finalizer = weakref.finalize(self, self.shutdown)
 
         # The child processes will send SIGQUIT when unrecoverable
         # errors happen. We kill the process tree here so that the
