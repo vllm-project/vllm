@@ -500,3 +500,54 @@ def test_mm_prefix_caching():
                         mm_hashes=mm_hashes)
     computed_blocks = manager.get_computed_blocks(req1)
     assert len(computed_blocks) == 3
+
+
+def test_allocate_slots_corner_case():
+    """
+    This is a unit test that tests the correctness of the allocate_slots
+    when there is not enough free blocks. 
+    """
+    block_size = 16
+    manager = KVCacheManager(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        max_model_len=8192,
+        sliding_window=None,
+        enable_caching=True,
+        num_preallocate_tokens=0,
+    )
+    # Complete 3 blocks (48 tokens)
+    # add hash to block 0-2 and let their ref_cnt to be 1
+    common_token_ids = [i for i in range(3) for _ in range(16)]
+    req0 = make_request("0", common_token_ids)
+    computed_blocks = manager.get_computed_blocks(req0)
+    assert not computed_blocks
+    manager.allocate_slots(req0, 48, computed_blocks)
+    block_part0 = manager.req_to_blocks[req0.request_id]
+
+    # add hash to block 3-5 again and let them free
+    req1 = make_request("1", common_token_ids * 2)
+    computed_blocks = manager.get_computed_blocks(req1)
+    assert computed_blocks == block_part0
+    manager.allocate_slots(req1, 48, computed_blocks)
+    block_part1 = manager.req_to_blocks[req1.request_id]
+    manager.free(req1)
+    assert {block.ref_cnt for block in block_part1[:3]} == {1}
+    assert {block.ref_cnt for block in block_part1[3:]} == {0}
+
+    # add req2 to take 2 blocks. make sure left 5 free blocks
+    # and three of them can be used as computed_blocks for req3
+    req2 = make_request("2", [7] * block_size * 2)
+    computed_blocks = manager.get_computed_blocks(req2)
+    assert not computed_blocks
+    manager.allocate_slots(req2, block_size * 2, computed_blocks)
+
+    # In this case, req3 can get 6 computed blocks (3 of them are free)
+    # and need 3 more new blocks
+    assert manager.free_block_queue.num_free_blocks == 5
+    req3 = make_request("3", common_token_ids * 3)
+    computed_blocks = manager.get_computed_blocks(req3)
+    assert computed_blocks == block_part1
+    assert manager.allocate_slots(req3, 48, computed_blocks) is None
+    assert {block.ref_cnt for block in block_part1[:3]} == {1}
+    assert {block.ref_cnt for block in block_part1[3:]} == {0}
