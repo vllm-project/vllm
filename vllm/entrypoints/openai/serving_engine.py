@@ -104,8 +104,8 @@ class OpenAIServingModels:
         model_config: ModelConfig,
         base_model_paths: List[BaseModelPath],
         *,
-        lora_modules: Optional[List[LoRAModulePath]],
-        prompt_adapters: Optional[List[PromptAdapterPath]],
+        lora_modules: Optional[List[LoRAModulePath]] = None,
+        prompt_adapters: Optional[List[PromptAdapterPath]] = None,
     ):
         super().__init__()
 
@@ -142,6 +142,18 @@ class OpenAIServingModels:
 
     def is_base_model(self, model_name):
         return any(model.name == model_name for model in self.base_model_paths)
+
+    def model_name(self, lora_request: Optional[LoRARequest] = None) -> str:
+        """Returns the appropriate model name depending on the availability
+        and support of the LoRA or base model.
+        Parameters:
+        - lora: LoRARequest that contain a base_model_name.
+        Returns:
+        - str: The name of the base model or the first available model path.
+        """
+        if lora_request is not None:
+            return lora_request.lora_name
+        return self.base_model_paths[0].name
 
     async def show_available_models(self) -> ModelList:
         """Show available models. This includes the base model and all 
@@ -690,19 +702,6 @@ class OpenAIServing:
 
     def _is_model_supported(self, model_name):
         return self.models.is_base_model(model_name)
-
-    def _get_model_name(self, lora: Optional[LoRARequest]):
-        """
-        Returns the appropriate model name depending on the availability
-        and support of the LoRA or base model.
-        Parameters:
-        - lora: LoRARequest that contain a base_model_name.
-        Returns:
-        - str: The name of the base model or the first available model path.
-        """
-        if lora is not None:
-            return lora.lora_name
-        return self.models.base_model_paths[0].name
 
 
 def create_error_response(
