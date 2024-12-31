@@ -1,6 +1,5 @@
 import json
 from concurrent.futures.thread import ThreadPoolExecutor
-from dataclasses import dataclass
 from http import HTTPStatus
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
                     Optional, Sequence, Tuple, TypedDict, Union)
@@ -47,26 +46,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import is_list_of, make_async, random_uuid
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class BaseModelPath:
-    name: str
-    model_path: str
-
-
-@dataclass
-class PromptAdapterPath:
-    name: str
-    local_path: str
-
-
-@dataclass
-class LoRAModulePath:
-    name: str
-    path: str
-    base_model_name: Optional[str] = None
-
 
 CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
                               EmbeddingCompletionRequest, ScoreRequest,
@@ -531,12 +510,3 @@ class OpenAIServing:
 
     def _is_model_supported(self, model_name):
         return self.models.is_base_model(model_name)
-
-
-def create_error_response(
-        message: str,
-        err_type: str = "BadRequestError",
-        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-    return ErrorResponse(message=message,
-                         type=err_type,
-                         code=status_code.value)

@@ -1,5 +1,6 @@
 import json
 import pathlib
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import List, Optional, Union
 
@@ -9,13 +10,28 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               ModelCard, ModelList,
                                               ModelPermission,
                                               UnloadLoraAdapterRequest)
-from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
-                                                    LoRAModulePath,
-                                                    PromptAdapterPath,
-                                                    create_error_response)
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import AtomicCounter
+
+
+@dataclass
+class BaseModelPath:
+    name: str
+    model_path: str
+
+
+@dataclass
+class PromptAdapterPath:
+    name: str
+    local_path: str
+
+
+@dataclass
+class LoRAModulePath:
+    name: str
+    path: str
+    base_model_name: Optional[str] = None
 
 
 class OpenAIServingModels:
@@ -183,3 +199,12 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.BAD_REQUEST)
 
         return None
+
+
+def create_error_response(
+        message: str,
+        err_type: str = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
+    return ErrorResponse(message=message,
+                         type=err_type,
+                         code=status_code.value)
