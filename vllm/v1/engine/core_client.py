@@ -105,7 +105,7 @@ class InprocClient(EngineCoreClient):
         self.engine_core.abort_requests(request_ids)
 
     def shutdown(self):
-        self.engine_core.shutdown()
+        pass
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
