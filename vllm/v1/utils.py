@@ -130,3 +130,7 @@ class BackgroundProcHandle:
             socket_file = ipc_socket.replace("ipc://", "")
             if os and os.path.exists(socket_file):
                 os.remove(socket_file)
+    
+    def __del__(self):
+        print("CALLED DEL")
+        self.shutdown()
