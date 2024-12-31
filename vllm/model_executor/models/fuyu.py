@@ -104,6 +104,12 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        if not mm_data:
+            # Avoid warning from HF logger for text-only input
+            tokenizer = self._get_tokenizer()
+            processed_outputs = tokenizer(prompt).data  # type: ignore
+            return BatchFeature(processed_outputs)
+
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
