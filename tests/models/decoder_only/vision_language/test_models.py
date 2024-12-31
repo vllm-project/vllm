@@ -199,7 +199,6 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        marks=[large_gpu_mark(min_gb=48)],
     ),
     "glm4": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
