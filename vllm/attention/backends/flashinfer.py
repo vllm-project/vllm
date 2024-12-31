@@ -106,8 +106,8 @@ class FlashInferBackend(AttentionBackend):
 @dataclass
 class GlobalHyperparameters:
     '''
-    Currently, FlashInfer backend only support models in which all layers share the same values
-    for the following hyperparameters.
+    Currently, FlashInfer backend only support models in which all layers share
+    the same values for the following hyperparameters.
     '''
     window_left: int
     logits_soft_cap: Optional[float]
@@ -119,8 +119,8 @@ def infer_global_hyperparameters(model: nn.Module) -> GlobalHyperparameters:
     Scan all attention layers in the model and determine some hyperparameters
     to use during `plan`.
 
-    Currently, FlashInfer backend only support models in which all layers share the same values
-    for the following hyperparameters:
+    Currently, FlashInfer backend only support models in which all layers share
+    the same values for the following hyperparameters:
     - `window_left`
     - `logits_soft_cap`
     - `sm_scale`
@@ -146,18 +146,13 @@ def infer_global_hyperparameters(model: nn.Module) -> GlobalHyperparameters:
             sm_scale = impl.scale
 
             if params_inferred:
+                MSG_PREFIX = "All attention layers must share the same "
                 if global_window_left != window_left:
-                    raise ValueError(
-                        "All attention layers must share the same `window_left`."
-                    )
+                    raise ValueError(MSG_PREFIX + "`window_left`.")
                 if global_logits_soft_cap != logits_soft_cap:
-                    raise ValueError(
-                        "All attention layers must share the same `logits_soft_cap`."
-                    )
+                    raise ValueError(MSG_PREFIX + "`logits_soft_cap`.")
                 if global_sm_scale != sm_scale:
-                    raise ValueError(
-                        "All attention layers must share the same `sm_scale`."
-                    )
+                    raise ValueError(MSG_PREFIX + "`sm_scale`.")
 
             params_inferred = True
             global_window_left = window_left
@@ -169,8 +164,7 @@ def infer_global_hyperparameters(model: nn.Module) -> GlobalHyperparameters:
     assert global_sm_scale is not None
 
     model.global_hyperparameters = GlobalHyperparameters(
-        global_window_left, global_logits_soft_cap, global_sm_scale
-    )
+        global_window_left, global_logits_soft_cap, global_sm_scale)
     return model.global_hyperparameters
 
 
@@ -402,19 +396,22 @@ class FlashInferMetadata(AttentionMetadata):
     device: torch.device = torch.device("cpu")
     is_profile_run: bool = False
 
-    # The FlashInfer backend currently supports only models in which all layers 
+    # The FlashInfer backend currently supports only models in which all layers
     # share the same following hyperparameters:
 
-    # The left (inclusive) window size for the attention window, when set to `-1`, the window
-    # size will be set to the full length of the sequence. Defaults to `-1`.
+    # The left (inclusive) window size for the attention window, when
+    # set to `-1`, the window size will be set to the full length of
+    # the sequence. Defaults to `-1`.
     window_left: int = -1
-    # The attention logits soft capping value (used in Gemini, Grok and Gemma-2, etc.), if not
-    # provided, will be set to `0`. If greater than 0, the logits will be capped according to
-    # formula:
-    # $\texttt{logits\_soft\_cap} \times \mathrm{tanh}(x / \texttt{logits\_soft\_cap})$,
+    # The attention logits soft capping value (used in Gemini, Grok and
+    # Gemma-2, etc.), if not provided, will be set to `0`. If greater
+    # than 0, the logits will be capped according to formula:
+    # $$\texttt{logits\_soft\_cap} \times
+    # \mathrm{tanh}(x / \texttt{logits\_soft\_cap})$$,
     # where $x$ is the input logits.
     logits_soft_cap: Optional[float] = None
-    # The scale used in softmax, if not provided, will be set to `1.0 / sqrt(head_dim)`.
+    # The scale used in softmax, if not provided, will be set to
+    # `1.0 / sqrt(head_dim)`.
     sm_scale: Optional[float] = None
 
     def __post_init__(self):
@@ -987,7 +984,8 @@ class FlashInferImpl(AttentionImpl):
 
                 assert prefill_meta.prefill_wrapper._causal
                 assert prefill_meta.prefill_wrapper._window_left == window_left
-                assert prefill_meta.prefill_wrapper._logits_soft_cap == (logits_soft_cap or 0.0)
+                assert prefill_meta.prefill_wrapper._logits_soft_cap == (
+                    logits_soft_cap or 0.0)
                 assert prefill_meta.prefill_wrapper._sm_scale == softmax_scale
 
                 prefill_output = prefill_meta.prefill_wrapper.run(
@@ -1001,7 +999,8 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_wrapper is not None
 
             assert decode_meta.decode_wrapper._window_left == window_left
-            assert decode_meta.decode_wrapper._logits_soft_cap == (logits_soft_cap or 0.0)
+            assert decode_meta.decode_wrapper._logits_soft_cap == (
+                logits_soft_cap or 0.0)
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
 
             decode_output = decode_meta.decode_wrapper.run(
