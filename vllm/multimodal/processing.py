@@ -675,10 +675,14 @@ class BaseMultiModalProcessor(ABC):
         Given the original multi-modal items for this modality
         and HF-processed data, output the replacements to perform.
 
-        Note:
-            Even when the HF processor already performs replacement for us,
-            we still use this replacement information to determine
-            the placeholder token positions for each multi-modal item.
+        Notes:
+            - You should not assume that HF processor always performs prompt
+              replacement: in :meth:`_apply_hf_processor_missing`, this method
+              is called on text-only and multimodal-only inputs separately,
+              instead of passing them in the same call.
+            - The replacement information returned by this method is also used
+              to determine the placeholder token positions for each multi-modal
+              item.
         """
         raise NotImplementedError
 
@@ -712,6 +716,10 @@ class BaseMultiModalProcessor(ABC):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        """
+        Call the HF processor on the prompt text and
+        associated multi-modal data.
+        """
         return self.ctx.call_hf_processor(
             self._get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
@@ -725,7 +733,8 @@ class BaseMultiModalProcessor(ABC):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs]:
         """
-        Apply the HF processor on the full prompt text and multi-modal data.
+        Wrapper of :meth:`_call_hf_processor` that applies
+        additional pre-processing and post-processing.
         """
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
@@ -756,10 +765,11 @@ class BaseMultiModalProcessor(ABC):
         Apply the HF processor on the full prompt text, but only on the
         multi-modal data that are missing from the cache.
 
-        Note: We pass prompt text and multi-modal data into the HF processor
-        in separate calls to avoid HF prompt replacement being done for
-        cached items; instead, we rely on our own prompt replacement logic
-        for the full text.
+        Note:
+            We pass prompt text and multi-modal data into the HF processor
+            in separate calls to avoid HF prompt replacement being done for
+            cached items; instead, we rely on our own prompt replacement logic
+            for the full text.
         """
         mm_missing_counts = mm_missing_data_items.get_all_counts()
 
