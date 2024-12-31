@@ -16,8 +16,8 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
-                                                    OpenAIServingModels)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput)

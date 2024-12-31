@@ -4,11 +4,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               UnloadLoraAdapterRequest)
-from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.serving_engine import BaseModelPath
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.lora.request import LoRARequest
 
 MODEL_NAME = "meta-llama/Llama-2-7b"
