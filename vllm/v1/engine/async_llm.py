@@ -95,9 +95,10 @@ class AsyncLLM(EngineClient):
             input_registry=input_registry,
         )
 
-        # Setup ZMQ IPC.
-        to_detokenizer_path = get_open_zmq_ipc_path()
+        # Setup ZMQ IPC. Message flow is:
+        # AsyncLLM <-> Detokenizer <-> EngineCore
         to_engine_core_path = get_open_zmq_ipc_path()
+        to_detokenizer_path = get_open_zmq_ipc_path()
         from_detokenizer_path = get_open_zmq_ipc_path()
         self.ctx = zmq.asyncio.Context(io_threads=2)
         self.to_detokenizer = make_zmq_socket(self.ctx, to_detokenizer_path,
