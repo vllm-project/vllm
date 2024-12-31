@@ -15,7 +15,6 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from array import array
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict)
 
@@ -23,24 +22,22 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from PIL import Image
-from transformers import FuyuImageProcessor
+from transformers import BatchFeature, FuyuProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.inputs import InputContext
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges)
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
-from vllm.utils import is_list_of
+from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        MultiModalDataItems,
+                                        MultiModalFieldConfig, ProcessorInputs,
+                                        PromptReplacement)
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
@@ -96,156 +93,90 @@ def get_max_fuyu_image_tokens(ctx: InputContext):
     return (ncol + 1) * nrow
 
 
-def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int, num_images: int):
-    ncol, nrow = get_max_fuyu_image_feature_size()
-    image_feature_size = get_max_fuyu_image_tokens(ctx)
+class FuyuMultiModalProcessor(BaseMultiModalProcessor):
 
-    image_token_ids = (
-        array(VLLM_TOKEN_ID_ARRAY_TYPE, [_IMAGE_TOKEN_ID]) * ncol +
-        array(VLLM_TOKEN_ID_ARRAY_TYPE, [_NEWLINE_TOKEN_ID])) * nrow
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, image_token_ids) * num_images
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids), {
-        "image":
-        consecutive_placeholder_ranges(num_items=num_images,
-                                       item_size=image_feature_size)
-    }
+    def _get_hf_processor(self) -> FuyuProcessor:
+        return self.ctx.get_hf_processor(FuyuProcessor)
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        tokenizer = self._get_tokenizer()
+        processed_outputs = super()._call_hf_processor(prompt, mm_data,
+                                                       mm_kwargs)
+        if "image_patches" in processed_outputs:
+            # separate image_input_ids from input_ids if has image inputs
+            new_prompt = tokenizer.decode(processed_outputs["input_ids"][0],
+                                          skip_special_tokens=True)
+            image_prompt = new_prompt.split("<s>")[0]
+            # we can't set add_special_tokens=False here, because placeholder
+            # and newline are all special tokens
+            image_input_ids = tokenizer.encode(image_prompt,
+                                               return_tensors="pt")
+            # Drop begin token since it doesn't belong to image_input_ids
+            processed_outputs["image_input_ids"] = image_input_ids[:, 2:]
+            processed_outputs["pixel_values"] = processed_outputs.pop(
+                "image_patches")
+        else:
+            # FuyuProcessor won't add bos and boa if no images inputs, we add
+            # them back manually
+            bos_token = tokenizer.encode("<s>", add_special_tokens=False)[1:]
+            boa_token = tokenizer.encode("\x04", add_special_tokens=False)[1:]
+            prompt_ids = tokenizer.encode(
+                prompt,
+                add_special_tokens=False,  # type: ignore
+            )
+            prompt_ids = bos_token + prompt_ids + boa_token
+            processed_outputs["input_ids"] = torch.tensor([prompt_ids])
+        return processed_outputs
 
-def dummy_image_for_fuyu(
-    num_images: int,
-    *,
-    image_width: int,
-    image_height: int,
-):
-    image = Image.new("RGB", (image_width, image_height), color=0)
-    return {"image": image if num_images == 1 else [image] * num_images}
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_input_ids=MultiModalFieldConfig.batched("image"),
+        )
 
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        image_input_ids = out_mm_kwargs.get("image_input_ids", [])
+        if isinstance(image_input_ids, torch.Tensor):
+            image_input_ids = image_input_ids.squeeze(0).tolist()
+        return [
+            PromptReplacement(
+                modality="image",
+                target="",
+                replacement=image_input_ids,
+            )
+        ]
 
-def dummy_data_for_fuyu(ctx: InputContext, seq_len: int,
-                        mm_counts: Mapping[str, int]):
-    num_images = mm_counts["image"]
-    seq_data, ranges = dummy_seq_data_for_fuyu(ctx, seq_len, num_images)
-    mm_data = dummy_image_for_fuyu(num_images,
-                                   image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-                                   image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT)
-    return DummyData(seq_data, mm_data, ranges)
-
-
-def _fuyu_image_preprocess(image_processor: FuyuImageProcessor,
-                           data: List[Image.Image]):
-    image_encoding = image_processor.preprocess(data, return_tensors="pt")
-    batch_images = torch.stack([img[0] for img in image_encoding["images"]
-                                ]).unsqueeze(1)
-    image_unpadded_heights = torch.tensor(
-        image_encoding["image_unpadded_heights"])
-    image_unpadded_widths = torch.tensor(
-        image_encoding["image_unpadded_widths"])
-
-    batch_size = len(image_encoding["images"])
-    image_present = torch.ones(batch_size, 1, 1)
-    model_image_input = image_processor.preprocess_with_tokenizer_info(
-        image_input=batch_images,
-        image_present=image_present,
-        image_unpadded_h=image_unpadded_heights,
-        image_unpadded_w=image_unpadded_widths,
-        image_placeholder_id=_IMAGE_TOKEN_ID,
-        image_newline_id=_NEWLINE_TOKEN_ID,
-        variable_sized=True,
-    )
-    return model_image_input
-
-
-def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
-
-    model_config = ctx.model_config
-    image_data = multi_modal_data["image"]
-    new_multi_modal_data = {}
-    image_list = image_data if isinstance(image_data, list) else [image_data]
-
-    # process image data
-    if is_list_of(image_list, Image.Image):
-        # Fuyu's image_processor can also finish token padding
-        image_processor: FuyuImageProcessor = cached_get_image_processor(
-            model_config.model)
-
-        model_image_input = _fuyu_image_preprocess(image_processor, image_data)
-        image_patches = torch.cat([
-            image_patch[0]
-            for image_patch in model_image_input["image_patches"]
-        ])
-        # dim0 is batch_size, dim1 is subseq_size which will always be 1
-        image_input_ids: List[List[
-            torch.Tensor]] = model_image_input["image_input_ids"]
-        image_input_ids = image_input_ids[0][0].tolist()
-        new_multi_modal_data["image"] = {
-            "image_patches": image_patches,
-            "image_input_ids": image_input_ids
-        }
-
-    elif is_list_of(image_list, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
-    else:
-        raise TypeError(f"Invalid image type: {type(image_data)}")
-
-    # process prompts
-    prompt = inputs.get("prompt")
-    prompt_token_ids = inputs["prompt_token_ids"]
-    tokenizer = cached_get_tokenizer(model_config.model)
-    bos_token = tokenizer.encode("<s>", add_special_tokens=False)[1:]
-    boa_token = tokenizer.encode("\x04", add_special_tokens=False)[1:]
-
-    new_prompt = prompt + "\x04"
-    new_prompt_token_ids = image_input_ids + bos_token + prompt_token_ids[
-        1:] + boa_token
-
-    placeholder_ranges = [
-        PlaceholderRange(offset=0, length=len(image_input_ids))
-    ]
-
-    return token_inputs(prompt=new_prompt,
-                        prompt_token_ids=new_prompt_token_ids,
-                        multi_modal_data=new_multi_modal_data,
-                        multi_modal_placeholders={"image": placeholder_ranges})
+    def _get_dummy_mm_inputs(self, mm_counts):
+        num_images = mm_counts.get("image", 0)
+        image = Image.new(
+            "RGB",
+            (MAX_IMAGE_FEATURE_SIZE_WIDTH, MAX_IMAGE_FEATURE_SIZE_HEIGHT),
+            color=0,
+        )
+        mm_data = dict(image=image if num_images == 1 else [image] *
+                       num_images)
+        return ProcessorInputs(
+            prompt_text="",
+            mm_data=mm_data,
+        )
 
 
-def input_mapper_for_fuyu(ctx: InputContext, data: object):
-    model_config = ctx.model_config
-    data_list = data if isinstance(data, list) else [data]
-
-    # For profiling with dummy image data
-    if is_list_of(data_list, Image.Image):
-        # Fuyu's image_processor can also finish token padding
-        image_processor: FuyuImageProcessor = cached_get_image_processor(
-            model_config.model)
-
-        model_image_input = _fuyu_image_preprocess(image_processor, data_list)
-        data = torch.stack([
-            image_patch[0]
-            for image_patch in model_image_input["image_patches"]
-        ])
-        image_input_ids = model_image_input["image_input_ids"][0][0]
-        return MultiModalKwargs({
-            "pixel_values": data,
-            "image_input_ids": image_input_ids,
-        })
-
-    # For actual inference when image has been processed with
-    # prompt in input processor
-    return MultiModalKwargs({
-        "pixel_values": data[0]["image_patches"],
-        "image_input_ids": data[0]["image_input_ids"],
-    })
-
-
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_fuyu_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_fuyu)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_fuyu)
+@MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -312,7 +243,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 type="pixel_values",
                 data=self._validate_pixel_values(
                     flatten_bn(pixel_values, concat=True)),
-                image_input_ids=image_input_ids,
+                image_input_ids=flatten_bn(image_input_ids),
             )
 
         return None
