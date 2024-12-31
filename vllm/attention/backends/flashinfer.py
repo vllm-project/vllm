@@ -126,6 +126,9 @@ def infer_global_hyperparameters(model: nn.Module) -> GlobalHyperparameters:
     - `sm_scale`
     """
 
+    if getattr(model, "global_hyperparameters", None) is not None:
+        return model.global_hyperparameters
+
     params_inferred = False
     global_window_left: int | None = None
     global_logits_soft_cap: float | None = None
@@ -165,9 +168,10 @@ def infer_global_hyperparameters(model: nn.Module) -> GlobalHyperparameters:
     assert global_window_left is not None
     assert global_sm_scale is not None
 
-    return GlobalHyperparameters(
+    model.global_hyperparameters = GlobalHyperparameters(
         global_window_left, global_logits_soft_cap, global_sm_scale
     )
+    return model.global_hyperparameters
 
 
 class FlashInferState(AttentionState):
