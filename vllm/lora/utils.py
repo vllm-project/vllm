@@ -3,8 +3,6 @@ import re
 from typing import List, Optional, Set, Tuple, Type, Union
 
 import huggingface_hub
-from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                   HFValidationError, RepositoryNotFoundError)
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -197,15 +195,27 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     if os.path.exists(lora_path):
         return os.path.abspath(lora_path)
 
-    # If the path does not exist locally, assume it's a Hugging Face repo.
+    # If the path does not exist locally,
+    # assume it's a Hugging Face repo or ModelScope repo.
     try:
-        local_snapshot_path = huggingface_hub.snapshot_download(
-            repo_id=lora_path)
-    except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
-            HFValidationError):
+        if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
+            if os.getenv('MODELSCOPE_ACCESS_TOKEN', ''):
+                from modelscope.hub.api import HubApi
+                access_token = os.getenv('MODELSCOPE_ACCESS_TOKEN')
+                api = HubApi()
+                api.login(access_token)
+
+            from modelscope import snapshot_download
+
+            local_snapshot_path = snapshot_download(model_id=lora_path)
+        else:
+            local_snapshot_path = huggingface_hub.snapshot_download(
+                repo_id=lora_path)
+    except Exception:
         # Handle errors that may occur during the download
         # Return original path instead instead of throwing error here
-        logger.exception("Error downloading the HuggingFace model")
+        logger.exception(
+            "Error downloading the HuggingFace or ModelScope model")
         return lora_path
 
     return local_snapshot_path
