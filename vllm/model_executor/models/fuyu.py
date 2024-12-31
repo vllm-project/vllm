@@ -57,11 +57,13 @@ class FuyuImagePatchInputs(TypedDict):
     data: torch.Tensor
     """
     Shape: 
-    `(batch_size, num_patches, patch_size_x * patch_size_y * num_channels)`
+    `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
     """
+
     patches_per_image: List[int]
     """
     List of number of total patches for each image in the batch.
+    This is used to restore the first two dimensions of `data`.
     """
 
 
@@ -116,11 +118,8 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
             # Tokenizer won't add boa_token_id by default, we add it manually.
             tokenizer = self._get_tokenizer()
             boa_token_id: int = tokenizer.vocab["<0x04>"]  # type: ignore
-            processed_outputs = tokenizer(prompt).data  # type: ignore
-            processed_outputs["input_ids"] = [
-                processed_outputs["input_ids"] + [boa_token_id]
-            ]
-            return BatchFeature(processed_outputs, tensor_type="pt")
+            prompt_ids = tokenizer.encode(prompt) + [boa_token_id]
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
@@ -300,13 +299,15 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             if not isinstance(image_patches, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image patches. "
                                  f"Got type: {type(image_patches)}")
+        
+            image_patches_flat = flatten_bn(image_patches)
 
             return FuyuImagePatchInputs(
                 type="image_patches",
                 data=self._validate_pixel_values(
-                    flatten_bn(flatten_bn(image_patches), concat=True)),
+                    flatten_bn(image_patches_flat, concat=True)),
                 patches_per_image=[
-                    x.size(0) for x in flatten_bn(image_patches)
+                    x.size(0) for x in image_patches_flat
                 ],
             )
 
