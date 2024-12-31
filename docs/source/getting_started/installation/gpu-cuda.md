@@ -1,6 +1,6 @@
 (installation-cuda)=
 
-# Installation with CUDA
+# Installation for CUDA
 
 vLLM is a Python library that also contains pre-compiled C++ and CUDA (12.1) binaries.
 

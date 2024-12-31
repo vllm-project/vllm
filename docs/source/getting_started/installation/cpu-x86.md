@@ -1,6 +1,6 @@
 (installation-x86)=
 
-# Installation with x86 CPU
+# Installation for x86 CPUs
 
 vLLM initially supports basic model inferencing and serving on x86 CPU platform, with data types FP32, FP16 and BF16. vLLM CPU backend supports the following vLLM features:
 

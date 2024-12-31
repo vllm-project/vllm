@@ -2,6 +2,8 @@
 
 # Installation
 
+vLLM supports the following hardware platforms:
+
 ```{toctree}
 :maxdepth: 1
 

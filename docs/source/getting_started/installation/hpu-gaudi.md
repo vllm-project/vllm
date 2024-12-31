@@ -1,6 +1,6 @@
 (installation-gaudi)=
 
-# Installation with Intel® Gaudi® AI Accelerators
+# Installation for Intel® Gaudi®
 
 This README provides instructions on running vLLM with Intel Gaudi devices.
 
