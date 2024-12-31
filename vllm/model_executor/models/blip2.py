@@ -15,8 +15,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputsV2, MultiModalKwargs,
+                                    NestedTensors, PlaceholderRange)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -29,8 +30,7 @@ from .utils import (AutoWeightsLoader, init_vllm_registered_model,
 
 # We use this internally as placeholders since there is no image token
 # defined on the HuggingFace repo
-BLIP2_IMAGE_TOKEN = "<image>"
-BLIP2_IMAGE_TOKEN_ID = 50265
+_IMAGE_TOKEN_ID = 50265
 
 
 class Blip2ImagePixelInputs(TypedDict):
@@ -428,10 +428,30 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor):
         return [
             PromptReplacement(
                 modality="image",
-                target="",  # An empty target is never matched against
-                replacement="<image>" * max_image_tokens,
+                target="</s>",
+                replacement="<image>" * max_image_tokens + "</s>",
             )
         ]
+
+    def apply(
+        self,
+        prompt_text: str,
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalInputsV2:
+        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
+
+        # Only <image> tokens should be considered as placeholders,
+        # so we ignore the trailing bos_token
+        result["mm_placeholders"] = {
+            modality: [
+                PlaceholderRange(offset=p["offset"], length=p["length"] - 1)
+                for p in ps
+            ]
+            for modality, ps in result["mm_placeholders"].items()
+        }
+
+        return result
 
     def _get_dummy_mm_inputs(
         self,
@@ -596,7 +616,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
-                BLIP2_IMAGE_TOKEN_ID)
+                _IMAGE_TOKEN_ID)
         return inputs_embeds
 
     def forward(

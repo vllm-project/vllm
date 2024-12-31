@@ -86,7 +86,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(pixel_values=MultiModalFieldConfig.batched("image"), )
+        return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
     def _get_prompt_replacements(
         self,
@@ -722,7 +722,7 @@ class ChameleonVQVAEEncoder(nn.Module):
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 hidden_state = self.down[i_level].block[i_block](
-                    hidden_states[-1], )
+                    hidden_states[-1])
                 if len(self.down[i_level].attn) > 0:
                     hidden_state = self.down[i_level].attn[i_block](
                         hidden_state)

@@ -56,40 +56,41 @@ class FuyuImagePixelInputs(TypedDict):
     data: torch.Tensor
     """
     Shape: 
-    (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)
+    `(batch_size, num_patches, patch_size_x * patch_size_y * num_channels)`
     """
     image_input_ids: torch.Tensor
 
 
-def _calculate_num_image_tokens(
-    height: int,
-    width: int,
+def _get_fuyu_num_image_tokens(
+    image_height: int,
+    image_width: int,
 ) -> Tuple[int, int]:
     """
-    calculate number of image tokens needed for a given image size
-    The expected Fuyu image prompts is in format:
+    Calculate the number of image tokens needed for a given image size.
+
+    The expected Fuyu image prompts can be expressed as:
+
+    .. code-block::
         (image_token * ncols + newline_token) * nrows
-    args:
-        image_size: Tuple[int, int] - (width, height) of the image
-    returns:
-        ncols: int - number of image tokens in x direction
-        nrows: int - number of image tokens in y direction
+
+    Args:
+        image_size: Tuple[int, int] - `(width, height)` of the image
+
+    Returns:
+        ncols: int - number of image tokens in `x` direction
+        nrows: int - number of image tokens in `y` direction
     """
-    ncol = math.ceil(width / 30)
-    nrow = math.ceil(height / 30)
+    ncol = math.ceil(image_width / 30)
+    nrow = math.ceil(image_height / 30)
     return ncol, nrow
 
 
-def get_max_fuyu_image_feature_size():
-
-    return _calculate_num_image_tokens(
-        height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
-        width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+def get_max_fuyu_image_tokens(ctx: InputContext):
+    ncol, nrow = _get_fuyu_num_image_tokens(
+        image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
     )
 
-
-def get_max_fuyu_image_tokens(ctx: InputContext):
-    ncol, nrow = get_max_fuyu_image_feature_size()
     return (ncol + 1) * nrow
 
 
@@ -162,13 +163,14 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
 
     def _get_dummy_mm_inputs(self, mm_counts):
         num_images = mm_counts.get("image", 0)
+
         image = Image.new(
             "RGB",
             (MAX_IMAGE_FEATURE_SIZE_WIDTH, MAX_IMAGE_FEATURE_SIZE_HEIGHT),
             color=0,
         )
-        mm_data = dict(image=image if num_images == 1 else [image] *
-                       num_images)
+        mm_data = {"image": image if num_images == 1 else [image] * num_images}
+
         return ProcessorInputs(
             prompt_text="",
             mm_data=mm_data,

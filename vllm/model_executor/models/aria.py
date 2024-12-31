@@ -500,13 +500,13 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         hf_config = self.ctx.get_hf_config()
-        vision_config = hf_config.vision_config
+        vision_config: AriaVisionConfig = hf_config.vision_config
         num_images = mm_counts.get("image", 0)
 
         data = dummy_image_for_aria(vision_config, num_images)
 
         hf_processor = self._get_hf_processor()
-        image_token = hf_processor.image_token  # type: ignore
+        image_token: str = hf_processor.image_token  # type: ignore
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,
