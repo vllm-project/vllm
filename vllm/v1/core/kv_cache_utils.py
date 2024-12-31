@@ -217,9 +217,8 @@ def generate_block_hash_extra_keys(
                 curr_mm_idx += 1
                 continue
 
-            if start_token_idx <= offset:
-                # This block contains the start of the current mm input.
-                extra_keys.append(mm_hashes[curr_mm_idx])
+            # The block contains the current mm input.
+            extra_keys.append(mm_hashes[curr_mm_idx])
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,

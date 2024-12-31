@@ -470,8 +470,8 @@ def test_mm_prefix_caching():
     assert not computed_blocks
     assert len(req0.kv_block_hashes) == 3
     assert req0.kv_block_hashes[0].extra_keys == ("aaa", )
-    assert req0.kv_block_hashes[1].extra_keys == ("bbb", )
-    assert req0.kv_block_hashes[2].extra_keys == tuple()
+    assert req0.kv_block_hashes[1].extra_keys == ("aaa", "bbb")
+    assert req0.kv_block_hashes[2].extra_keys == ("bbb", )
 
     blocks = manager.allocate_slots(req0, 59, computed_blocks)
     assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
