@@ -329,11 +329,7 @@ class AsyncLLM(EngineClient):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
         try:
-            i = 0
             while True:
-                logger.info(f"EPOCH: {i}")
-                i+=1
-
                 # note(rob): use socket directly to avoid calling await multiple
                 # times, which causes too much task switching at high QPS.
                 outputs: List[RequestOutput] = []
