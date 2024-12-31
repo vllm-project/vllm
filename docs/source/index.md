@@ -60,8 +60,8 @@ For more information, check out the following:
 
 getting_started/installation/index
 getting_started/quickstart
-getting_started/troubleshooting
 getting_started/examples/examples_index
+getting_started/troubleshooting
 getting_started/faq
 ```
 
