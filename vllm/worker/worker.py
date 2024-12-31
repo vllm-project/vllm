@@ -10,8 +10,8 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
-                              init_distributed_environment,
-                              get_device_idx, set_custom_all_reduce)
+                              get_device_idx, init_distributed_environment,
+                              set_custom_all_reduce)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -41,13 +41,13 @@ class Worker(LocalOrDistributedWorkerBase):
     """
 
     def __init__(
-            self,
-            vllm_config: VllmConfig,
-            local_rank: int,
-            rank: int,
-            distributed_init_method: str,
-            is_driver_worker: bool = False,
-            model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
+        self,
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
         WorkerBase.__init__(self, vllm_config)
         self.parallel_config.rank = rank
@@ -149,7 +149,8 @@ class Worker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.vllm_config, self.rank,
+        init_worker_distributed_environment(self.vllm_config,
+                                            self.rank,
                                             self.distributed_init_method,
                                             self.local_rank,
                                             device=self.device)
