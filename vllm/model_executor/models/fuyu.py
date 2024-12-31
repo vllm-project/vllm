@@ -36,6 +36,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalFieldConfig, ProcessorInputs,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
+from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
@@ -117,8 +118,10 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
                                                return_tensors="pt")
             # Drop begin token since it doesn't belong to image_input_ids
             processed_outputs["image_input_ids"] = image_input_ids[:, 2:]
-            processed_outputs["pixel_values"] = processed_outputs.pop(
-                "image_patches")
+            processed_outputs["pixel_values"] = [
+                image_patch[0]
+                for image_patch in processed_outputs.pop("image_patches")
+            ]
         else:
             # FuyuProcessor won't add bos and boa if no images inputs, we add
             # them back manually
@@ -265,6 +268,8 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         image_sizes = [
             len(input_ids_per_image) for input_ids_per_image in image_input_ids
         ]
+        if is_list_of(image_input_ids, torch.Tensor):
+            image_input_ids = torch.cat(image_input_ids)
         image_input_ids = torch.flatten(image_input_ids)
 
         image_token_mask = image_input_ids == _IMAGE_TOKEN_ID
