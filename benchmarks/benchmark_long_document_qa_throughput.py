@@ -51,7 +51,12 @@ from vllm.utils import FlexibleArgumentParser
 def test_long_document_qa(llm=None, sampling_params=None, prompts=None):
     """
     Test long document QA with the given prompts and sampling parameters.
-    Print the time cost processing all the prompts.
+    Print the time spent in processing all the prompts.
+
+    Args:
+        llm: The language model used for generating responses.
+        sampling_params: Sampling parameter used to generate the response.
+        prompts: A list of prompt strings to be processed by the LLM.
     """
     start_time = time.time()
     llm.generate(prompts, sampling_params=sampling_params)
@@ -61,14 +66,24 @@ def test_long_document_qa(llm=None, sampling_params=None, prompts=None):
 
 def repeat_prompts(prompts, repeat_count, mode: str):
     """
-    Repeat each prompt in the list for repeat_count times.
+    Repeat each prompt in the list for a specified number of times.
     The order of prompts in the output list depends on the mode.
-    Currently, we support the following modes:
-    - 'random': shuffle the prompts randomly
-    - 'tile': the entire prompt list is repeated in sequence. Ex. [1, 2, 3] 
-                -> [1, 2, 3, 1, 2, 3] (1, 2, 3 are prompts)
-    - 'interleave': each prompt is repeated consecutively before moving to the 
-                    next element. Ex. [1, 2, 3] -> [1, 1, 2, 2, 3, 3]
+
+    Args:
+        prompts: A list of prompts to be repeated.
+        repeat_count: The number of times each prompt is repeated.
+        mode: The mode of repetition. Supported modes are:
+            - 'random': Shuffle the prompts randomly after repetition.
+            - 'tile': Repeat the entire prompt list in sequence.
+              Example: [1, 2, 3] -> [1, 2, 3, 1, 2, 3].
+            - 'interleave': Repeat each prompt consecutively before moving to 
+              the next. Example: [1, 2, 3] -> [1, 1, 2, 2, 3, 3].
+
+    Returns:
+        A list of repeated prompts in the specified order.
+
+    Raises:
+        ValueError: If an invalid mode is provided.
     """
     print("Repeat mode: ", mode)
     if mode == 'random':
