@@ -598,11 +598,9 @@ class ModelConfig:
 
     @property
     def is_deepseek_v2(self) -> bool:
-        result = hasattr(
+        return hasattr(
             self.hf_text_config,
             "model_type") and self.hf_text_config.model_type == 'deepseek_v2'
-        assert result
-        return result
 
     def get_head_size(self) -> int:
         # TODO remove hard code

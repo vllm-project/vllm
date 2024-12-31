@@ -396,7 +396,7 @@ class DeepseekV2MLAAttention(nn.Module):
 
     From @tsu-bin's calculation, we only want to use the absorption technique
     for decode. The prefill algorithm should still use the up-projected MHA
-    for less flops and momory usage.
+    for less flops and memory usage.
     """
 
     def __init__(
@@ -436,9 +436,6 @@ class DeepseekV2MLAAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        # TODO(simon): implement matrix absorption for this, needed for deepseek v2.5
-        assert q_lora_rank is None, "Currently not supported"
-
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
                                              self.q_lora_rank,
@@ -447,20 +444,22 @@ class DeepseekV2MLAAttention(nn.Module):
                                              prefix=f"{prefix}.q_a_proj")
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(q_lora_rank,
-                                                 self.num_heads *
-                                                 self.qk_head_dim,
-                                                 bias=False,
-                                                 quant_config=quant_config,
-                                                 prefix=f"{prefix}.q_b_proj")
+            self.q_b_proj = ColumnParallelLinear(
+                q_lora_rank,
+                # self.q_b_proj = ReplicatedLinear(q_lora_rank,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_b_proj")
         else:
             # (H -> N(P+R))
-            self.q_proj = ColumnParallelLinear(self.hidden_size,
-                                               self.num_heads *
-                                               self.qk_head_dim,
-                                               bias=False,
-                                               quant_config=quant_config,
-                                               prefix=f"{prefix}.q_proj")
+            self.q_proj = ColumnParallelLinear(
+                self.hidden_size,
+                # self.q_proj = ReplicatedLinear(self.hidden_size,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj")
 
         # (H -> (L+R))
         self.kv_a_proj_with_mqa = ReplicatedLinear(
@@ -473,17 +472,20 @@ class DeepseekV2MLAAttention(nn.Module):
                                       eps=config.rms_norm_eps)
         # ((L -> (N(P+V)))
         self.kv_b_proj = ColumnParallelLinear(
+            # self.kv_b_proj = ReplicatedLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
         # (NV -> H)
-        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
-                                        self.hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.v_head_dim,
+            # self.o_proj = ReplicatedLinear(self.num_local_heads * self.v_head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj")
 
         rope_scaling["rope_type"] = 'deepseek_yarn'
         self.rotary_emb = get_rope(qk_rope_head_dim,
@@ -515,8 +517,8 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_b_proj_weight = self.kv_b_proj.weight.T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)
-        ), f"{kv_b_proj_weight.shape} != {(self.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim))}"
+            self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim)
+        ), f"{kv_b_proj_weight.shape} != {(self.kv_lora_rank, self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim))}"
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
             self.num_local_heads,

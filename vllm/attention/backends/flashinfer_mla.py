@@ -1,6 +1,6 @@
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 import math
 from functools import cached_property
@@ -205,7 +205,7 @@ class FlashInferMLAMetadata(AttentionMetadata):
     is_profile_run: bool = False
 
     sm_scale: float = 0.0
-    extras: Dict[str, torch.Tensor] = {}
+    extras: Dict[str, torch.Tensor] = field(default_factory=dict)
 
     def __post_init__(self):
         supported_head_sizes = FlashInferMLABackend.get_supported_head_sizes()

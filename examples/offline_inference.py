@@ -12,10 +12,11 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
 llm = LLM(
-    model="deepseek-ai/DeepSeek-V2-Lite-Chat",
-    # model="deepseek-ai/DeepSeek-V2.5", tensor_parallel_size=8,
+    # model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+    model="deepseek-ai/DeepSeek-V2.5",
+    tensor_parallel_size=8,
     trust_remote_code=True,
-    max_model_len=16384,
+    max_model_len=6128,
     #   dtype="float16",
     enforce_eager=True,
     #   max_num_seqs=1,
