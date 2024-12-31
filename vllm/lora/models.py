@@ -173,7 +173,7 @@ class LoRAModel(AdapterModel):
         return cls(lora_model_id,
                    peft_helper.r,
                    loras,
-                   scaling_factor=peft_helper.vllm_scaling_factor)
+                   scaling_factor=peft_helper.vllm_long_context_scaling_factor)
 
     @classmethod
     def from_local_checkpoint(
