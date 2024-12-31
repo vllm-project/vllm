@@ -8,8 +8,6 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.sampling_params import SamplingParams
 
-    lora_request: Optional[LoRARequest]
-
 
 @dataclass
 class EngineCoreRequest:
