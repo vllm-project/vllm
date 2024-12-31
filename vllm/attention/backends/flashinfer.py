@@ -1,3 +1,4 @@
+import dataclasses
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -13,12 +14,15 @@ try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 except ImportError:
-    BatchDecodeWithPagedKVCacheWrapper = None
-    CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
-    BatchPrefillWithPagedKVCacheWrapper = None
+    # Avoid turning these types into variables during type checking
+    if not TYPE_CHECKING:
+        BatchDecodeWithPagedKVCacheWrapper = None
+        CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
+        BatchPrefillWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 import torch
+from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -29,6 +33,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
+from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
@@ -96,6 +101,73 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e5m2
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
+
+@dataclass
+class GlobalHyperparameters:
+    '''
+    Currently, FlashInfer backend only support models in which all layers share the same values
+    for the following hyperparameters.
+    '''
+    window_left: int
+    logits_soft_cap: float | None
+    sm_scale: float
+
+
+def infer_global_hyperparameters(model: nn.Module) -> GlobalHyperparameters:
+    """
+    Scan all attention layers in the model and determine some hyperparameters
+    to use during `plan`.
+
+    Currently, FlashInfer backend only support models in which all layers share the same values
+    for the following hyperparameters:
+    - `window_left`
+    - `logits_soft_cap`
+    - `sm_scale`
+    """
+
+    params_inferred = False
+    global_window_left: int | None = None
+    global_logits_soft_cap: float | None = None
+    global_sm_scale: float | None = None
+
+    for module in model.modules():
+        if isinstance(module, Attention):
+            impl = module.impl
+            assert isinstance(impl, FlashInferImpl)
+
+            # Infer hyperparameters from the attention layer
+            window_size = impl.sliding_window
+            window_left = window_size[0] if window_size is not None else -1
+            logits_soft_cap = impl.logits_soft_cap
+            sm_scale = impl.scale
+
+            if params_inferred:
+                if global_window_left != window_left:
+                    raise ValueError(
+                        "All attention layers must share the same `window_left`."
+                    )
+                if global_logits_soft_cap != logits_soft_cap:
+                    raise ValueError(
+                        "All attention layers must share the same `logits_soft_cap`."
+                    )
+                if global_sm_scale != sm_scale:
+                    raise ValueError(
+                        "All attention layers must share the same `sm_scale`."
+                    )
+
+            params_inferred = True
+            global_window_left = window_left
+            global_logits_soft_cap = logits_soft_cap
+            global_sm_scale = sm_scale
+
+    assert params_inferred
+    assert global_window_left is not None
+    assert global_sm_scale is not None
+
+    return GlobalHyperparameters(
+        global_window_left, global_logits_soft_cap, global_sm_scale
+    )
 
 
 class FlashInferState(AttentionState):
@@ -214,6 +286,8 @@ class FlashInferState(AttentionState):
                                             batch_size + 1,
                                             dtype=torch.int32)
 
+        global_params = infer_global_hyperparameters(self.runner.model)
+
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
             slot_mapping=self._graph_slot_mapping[:batch_size],
@@ -236,7 +310,9 @@ class FlashInferState(AttentionState):
             q_data_type=self.runner.model_config.dtype,
             use_cuda_graph=True,
             decode_wrapper=self._graph_decode_wrapper,
-            prefill_wrapper=None)
+            prefill_wrapper=None,
+            **dataclasses.asdict(global_params),
+        )
         attn_metadata.begin_forward()
         return attn_metadata
 
@@ -322,6 +398,21 @@ class FlashInferMetadata(AttentionMetadata):
     device: torch.device = torch.device("cpu")
     is_profile_run: bool = False
 
+    # The FlashInfer backend currently supports only models in which all layers 
+    # share the same following hyperparameters:
+
+    # The left (inclusive) window size for the attention window, when set to `-1`, the window
+    # size will be set to the full length of the sequence. Defaults to `-1`.
+    window_left: int = -1
+    # The attention logits soft capping value (used in Gemini, Grok and Gemma-2, etc.), if not
+    # provided, will be set to `0`. If greater than 0, the logits will be capped according to
+    # formula:
+    # $\texttt{logits\_soft\_cap} \times \mathrm{tanh}(x / \texttt{logits\_soft\_cap})$,
+    # where $x$ is the input logits.
+    logits_soft_cap: float | None = None
+    # The scale used in softmax, if not provided, will be set to `1.0 / sqrt(head_dim)`.
+    sm_scale: float | None = None
+
     def __post_init__(self):
         # Refer to
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
@@ -366,6 +457,10 @@ class FlashInferMetadata(AttentionMetadata):
                     self.num_kv_heads,
                     self.head_dim,
                     self.page_size,
+                    causal=True,
+                    sm_scale=self.sm_scale,
+                    window_left=self.window_left,
+                    logits_soft_cap=self.logits_soft_cap,
                     q_data_type=self.q_data_type,
                     kv_data_type=self.data_type)
         if self.num_decode_tokens > 0:
@@ -393,6 +488,9 @@ class FlashInferMetadata(AttentionMetadata):
                 self.page_size,
                 # Disable flashinfer's pos encoding and use vllm's rope.
                 pos_encoding_mode="NONE",
+                window_left=self.window_left,
+                logits_soft_cap=self.logits_soft_cap,
+                sm_scale=self.sm_scale,
                 # kv-cache data type.
                 kv_data_type=self.data_type,
                 # query data type.
@@ -507,6 +605,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_last_page_len: List[int] = []
         self.total_blocks = 0
         self.is_profile_run: bool = False
+
+        # Infer global hyperparameters, since currently we only support models
+        # in which all layers share the same values for the following
+        # hyperparameters:
+        # - `window_left`
+        # - `logits_soft_cap`
+        # - `sm_scale`
+        model = self.runner.model
+        inferred_params = infer_global_hyperparameters(model)
+        self.window_left = inferred_params.window_left
+        self.logits_soft_cap = inferred_params.logits_soft_cap
+        self.sm_scale = inferred_params.sm_scale
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -735,7 +845,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             data_type=kv_cache_dtype,
             q_data_type=self.runner.model_config.dtype,
             use_cuda_graph=use_captured_graph,
-            is_profile_run=self.is_profile_run)
+            is_profile_run=self.is_profile_run,
+            window_left=self.window_left,
+            logits_soft_cap=self.logits_soft_cap,
+            sm_scale=self.sm_scale,
+        )
 
 
 class FlashInferImpl(AttentionImpl):
@@ -866,10 +980,12 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert prefill_meta is not None
                 assert prefill_meta.prefill_wrapper is not None
-                # [TODO] avoid setting private variables in prefill_wrapper
-                prefill_meta.prefill_wrapper._causal = True
-                prefill_meta.prefill_wrapper._window_left = window_left
-                prefill_meta.prefill_wrapper._logits_soft_cap = logits_soft_cap
+
+                assert prefill_meta.prefill_wrapper._causal
+                assert prefill_meta.prefill_wrapper._window_left == window_left
+                assert prefill_meta.prefill_wrapper._logits_soft_cap == (logits_soft_cap or 0.0)
+                assert prefill_meta.prefill_wrapper._sm_scale == softmax_scale
+
                 prefill_output = prefill_meta.prefill_wrapper.run(
                     query,
                     kv_cache,
@@ -879,10 +995,11 @@ class FlashInferImpl(AttentionImpl):
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
             assert decode_meta.decode_wrapper is not None
-            # [TODO] avoid setting private variables in decode_wrapper
-            decode_meta.decode_wrapper._window_left = window_left
-            decode_meta.decode_wrapper._logits_soft_cap = logits_soft_cap
-            decode_meta.decode_wrapper._sm_scale = softmax_scale
+
+            assert decode_meta.decode_wrapper._window_left == window_left
+            assert decode_meta.decode_wrapper._logits_soft_cap == (logits_soft_cap or 0.0)
+            assert decode_meta.decode_wrapper._sm_scale == softmax_scale
+
             decode_output = decode_meta.decode_wrapper.run(
                 decode_query,
                 kv_cache,
