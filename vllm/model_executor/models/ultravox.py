@@ -3,8 +3,8 @@
 
 import math
 from functools import cached_property, lru_cache
-from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -24,10 +24,12 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataItems, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        ProcessorInputs, PromptReplacement)
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils import is_list_of
@@ -85,15 +87,9 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor = self._get_hf_processor()
         return hf_processor.audio_processor.feature_extractor  # type: ignore
 
-    def _get_hf_mm_data(
-        self,
-        mm_items: MultiModalDataItems,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        # resample audio to the model's sampling rate
+    def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self._get_feature_extractor()
-        mm_items.resample_audios(feature_extractor.sampling_rate)
-
-        return super()._get_hf_mm_data(mm_items)
+        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
     def _call_hf_processor(
         self,

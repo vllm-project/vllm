@@ -15,8 +15,6 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_w8a8_block_fp8_linear)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -337,6 +335,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 size_k=layer.input_size_per_partition,
                 bias=bias)
 
+        # Note: lazy import to avoid triton import error.
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            apply_w8a8_block_fp8_linear)
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
             return apply_w8a8_block_fp8_linear(

@@ -1,4 +1,6 @@
 import asyncio
+import os
+import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -16,6 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -38,6 +41,22 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+
+        # The child processes will send SIGQUIT when unrecoverable
+        # errors happen. We kill the process tree here so that the
+        # stack trace is very evident.
+        # TODO: rather than killing the main process, we should
+        # figure out how to raise an AsyncEngineDeadError and
+        # handle at the API server level so we can return a better
+        # error code to the clients calling VLLM.
+        def sigquit_handler(signum, frame):
+            logger.fatal(
+                "AsyncLLM got SIGQUIT from worker processes, shutting "
+                "down. See stack trace above for root cause issue.")
+            kill_process_tree(os.getpid())
+
+        signal.signal(signal.SIGQUIT, sigquit_handler)
+
         assert start_engine_loop
 
         self.log_requests = log_requests
@@ -276,9 +295,9 @@ class AsyncLLM(EngineClient):
                 # 4) Abort any requests that finished due to stop strings.
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
-        except BaseException as e:
-            logger.error(e)
-            raise e
+        except Exception as e:
+            logger.exception("EngineCore output handler hit an error: %s", e)
+            kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""
