@@ -248,7 +248,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return FuyuImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
+                    flatten_bn(flatten_bn(pixel_values), concat=True)),
                 image_input_ids=flatten_bn(image_input_ids),
             )
 
