@@ -55,6 +55,19 @@ HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
 
 
+def _is_flashinfer_available() -> bool:
+    """Check if FlashInfer is available.
+
+    Returns:
+        bool: True if FlashInfer is installed and available, False otherwise.
+    """
+    try:
+        from flashinfer import BatchDecodeMlaWithPagedKVCacheWrapper
+        return True
+    except ImportError:
+        return False
+
+
 class ModelConfig:
     """Configuration for the model.
 
@@ -132,40 +145,43 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         override_pooling_config: Initialize non default pooling config or
             override default pooling config for the embedding model.
+        disable_mla: Whether to disable MLA for DeepSeek models.
     """
 
     def __init__(
-            self,
-            model: str,
-            task: Union[TaskOption, _Task],
-            tokenizer: str,
-            tokenizer_mode: str,
-            trust_remote_code: bool,
-            dtype: Union[str, torch.dtype],
-            seed: int,
-            allowed_local_media_path: str = "",
-            revision: Optional[str] = None,
-            code_revision: Optional[str] = None,
-            rope_scaling: Optional[Dict[str, Any]] = None,
-            rope_theta: Optional[float] = None,
-            tokenizer_revision: Optional[str] = None,
-            max_model_len: Optional[int] = None,
-            spec_target_max_model_len: Optional[int] = None,
-            quantization: Optional[str] = None,
-            quantization_param_path: Optional[str] = None,
-            enforce_eager: Optional[bool] = None,
-            max_seq_len_to_capture: Optional[int] = None,
-            max_logprobs: int = 20,
-            disable_sliding_window: bool = False,
-            skip_tokenizer_init: bool = False,
-            served_model_name: Optional[Union[str, List[str]]] = None,
-            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-            use_async_output_proc: bool = True,
-            config_format: ConfigFormat = ConfigFormat.AUTO,
-            hf_overrides: Optional[HfOverrides] = None,
-            mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-            override_neuron_config: Optional[Dict[str, Any]] = None,
-            override_pooler_config: Optional["PoolerConfig"] = None) -> None:
+        self,
+        model: str,
+        task: Union[TaskOption, _Task],
+        tokenizer: str,
+        tokenizer_mode: str,
+        trust_remote_code: bool,
+        dtype: Union[str, torch.dtype],
+        seed: int,
+        allowed_local_media_path: str = "",
+        revision: Optional[str] = None,
+        code_revision: Optional[str] = None,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_theta: Optional[float] = None,
+        tokenizer_revision: Optional[str] = None,
+        max_model_len: Optional[int] = None,
+        spec_target_max_model_len: Optional[int] = None,
+        quantization: Optional[str] = None,
+        quantization_param_path: Optional[str] = None,
+        enforce_eager: Optional[bool] = None,
+        max_seq_len_to_capture: Optional[int] = None,
+        max_logprobs: int = 20,
+        disable_sliding_window: bool = False,
+        skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
+        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        use_async_output_proc: bool = True,
+        config_format: ConfigFormat = ConfigFormat.AUTO,
+        hf_overrides: Optional[HfOverrides] = None,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        override_neuron_config: Optional[Dict[str, Any]] = None,
+        override_pooler_config: Optional["PoolerConfig"] = None,
+        disable_mla: bool = False,
+    ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -210,6 +226,7 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
+        self.disable_mla = disable_mla
 
         hf_config = get_config(self.model, trust_remote_code, revision,
                                code_revision, config_format)
@@ -607,9 +624,10 @@ class ModelConfig:
         if self.is_deepseek_v2:
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
-            # return 256
-            # TODO(simon): feature flag MLA
-            return self.hf_text_config.kv_lora_rank  # + self.hf_text_config.qk_rope_head_dim
+            if self.should_use_mla:
+                return self.hf_text_config.kv_lora_rank
+            else:
+                return 256
 
         if self.is_attention_free:
             return 0
@@ -668,7 +686,7 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
-        if self.is_deepseek_v2:
+        if self.should_use_mla:
             # TODO(simon): feature flag MLA
             return 1
 
@@ -735,6 +753,28 @@ class ModelConfig:
     def is_cross_encoder(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_cross_encoder_model(architectures)
+
+    @property
+    def should_use_mla(self) -> bool:
+        """Whether MLA should be used for this model.
+
+        Returns True if:
+        1. The model is DeepSeek V2
+        2. MLA is not explicitly disabled
+        3. FlashInfer is available
+
+        If conditions 1 and 2 are met but FlashInfer is not available,
+        logs a warning and returns False.
+        """
+        use_mla = self.is_deepseek_v2 and not self.disable_mla
+        if use_mla and not _is_flashinfer_available():
+            logger.warning(
+                "Please install or update FlashInfer for better performance on "
+                "DeepSeek model via enabling MLA. See "
+                "https://github.com/flashinfer-ai/flashinfer for installation."
+            )
+            return False
+        return use_mla
 
 
 class CacheConfig:

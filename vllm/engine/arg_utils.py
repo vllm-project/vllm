@@ -102,6 +102,7 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
+    disable_mla: bool = False
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -901,6 +902,10 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
 
+        parser.add_argument('--disable-mla',
+                            action='store_true',
+                            help='Disable MLA for DeepSeek models.')
+
         return parser
 
     @classmethod
@@ -943,6 +948,7 @@ class EngineArgs:
             mm_processor_kwargs=self.mm_processor_kwargs,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
+            disable_mla=self.disable_mla,
         )
 
     def create_load_config(self) -> LoadConfig:

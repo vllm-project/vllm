@@ -16,11 +16,12 @@ llm = LLM(
     model="deepseek-ai/DeepSeek-V2.5",
     tensor_parallel_size=8,
     trust_remote_code=True,
-    max_model_len=6128,
+    max_model_len=1024,
     #   dtype="float16",
     enforce_eager=True,
     #   max_num_seqs=1,
     #   block_size=128,
+    # disable_mla=True,
 )
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
