@@ -1008,18 +1008,30 @@ _RANK_DEV_MAP: Optional[Dict[str, List[int]]] = None
 
 
 def _get_rank_dev_map() -> Optional[Dict[str, List[int]]]:
+    """
+    If VLLM_LOCAL_RANK_DEV_MAP exists, parse JSON object
+    The resulting dict should be structure as:
+    '{ "tp-0" : "[d_tp0-0, d_tp0-1, ..., d_tp0-(npp-1)]",
+       "tp-1" : "[d_tp1-0, d_tp1-1, ..., d_tp1-(npp-1)]",
+          ...
+       "tp-(ntp-1)" : "[d_tpn-0, d_tpn-1, ..., d_tpn-(npp-1)]" }'
+    Where npp == pipeline-parallel world size
+          ntp == tensor-parallel world size
+          d_tpx-y is the device ordinal to map to tp-rank x / pp-rank y
+    """
+
     global _RANK_DEV_MAP
     if _RANK_DEV_MAP is not None:
         return _RANK_DEV_MAP.copy() if len(_RANK_DEV_MAP) > 0 else None
 
-    drm_str = envs.VLLM_LOCAL_RANK_DEV_MAP
-    if not drm_str:
+    rdm_str = envs.VLLM_LOCAL_RANK_DEV_MAP
+    if not rdm_str:
         logger.info("No rank-dev-map found")
         _RANK_DEV_MAP = {}
         return None
 
     try:
-        jrdmobj = json.loads(drm_str)
+        jrdmobj = json.loads(rdm_str)
         if not jrdmobj:
             _RANK_DEV_MAP = {}
             return None
