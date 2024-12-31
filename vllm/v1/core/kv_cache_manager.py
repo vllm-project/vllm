@@ -203,8 +203,8 @@ class KVCacheManager:
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
         # when allocating this request.
-        num_evictable_computed_blocks = sum(
-            blk for blk in computed_blocks if blk.ref_cnt == 0)
+        num_evictable_computed_blocks = sum(1 for blk in computed_blocks
+                                            if blk.ref_cnt == 0)
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
         if (num_required_blocks > self.free_block_queue.num_free_blocks -
