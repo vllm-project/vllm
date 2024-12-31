@@ -1,4 +1,3 @@
-import math
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union)
 
@@ -445,11 +444,7 @@ def build_mm_projector(config: PretrainedConfig):
 
 def get_max_aria_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config()
-    image_size2tokens = {
-        int(math.sqrt(k) * hf_config.vision_config.patch_size): v
-        for k, v in hf_config.projector_patch_to_query_dict.items()
-    }
-    return max(image_size2tokens.values())
+    return max(hf_config.projector_patch_to_query_dict.values())
 
 
 class AriaMultiModalProcessor(BaseMultiModalProcessor):
