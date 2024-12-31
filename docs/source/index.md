@@ -50,7 +50,7 @@ For more information, check out the following:
 - [vLLM announcing blog post](https://vllm.ai) (intro to PagedAttention)
 - [vLLM paper](https://arxiv.org/abs/2309.06180) (SOSP 2023)
 - [How continuous batching enables 23x throughput in LLM inference while reducing p50 latency](https://www.anyscale.com/blog/continuous-batching-llm-inference) by Cade Daniel et al.
-- {ref}`vLLM Meetups <meetups>`.
+- [vLLM Meetups](#meetups)
 
 ## Documentation
 
