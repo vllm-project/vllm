@@ -292,7 +292,7 @@ class KVCacheManager:
 
         NOTE(woosuk): The number of requests in the RUNNING state is **greater
         than or equal to** the number of requests scheduled in the current step.
-        This is because the RUNNING state indicates that:
+        This is because the RUNNING state only indicates that:
         1. The request has not yet finished, and 
         2. The request holds its blocks unfreed.
 
