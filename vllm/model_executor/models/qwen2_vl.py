@@ -696,9 +696,7 @@ class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
                                             dict[str, torch.Tensor]]):
 
     def __init__(self, data: dict, modality: str) -> None:
-        super().__init__(data)
-
-        self.modality = modality
+        super().__init__(data, modality)
 
         grid_thw = data[f"{modality}_grid_thw"]
         slice_idxs = [0] + grid_thw.prod(-1).cumsum_(0).tolist()
@@ -706,9 +704,6 @@ class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
             slice(slice_idxs[i], slice_idxs[i + 1])
             for i in range(len(grid_thw))
         ]
-
-    def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r})")
 
     def get_count(self) -> int:
         return len(self.data[f"{self.modality}_grid_thw"])

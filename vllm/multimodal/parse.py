@@ -21,10 +21,15 @@ _I = TypeVar("_I")
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
 
-    def __init__(self, data: _T) -> None:
+    def __init__(self, data: _T, modality: str) -> None:
         super().__init__()
 
         self.data = data
+        self.modality = modality
+
+    def __repr__(self) -> str:
+        return (f"{type(self).__name__}(modality={self.modality!r}, "
+                f"count={len(self)})")
 
     def __len__(self) -> int:
         return self.get_count()
@@ -64,14 +69,6 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 
 class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
 
-    def __init__(self, data: Sequence[_T], modality: str) -> None:
-        super().__init__(data)
-
-        self.modality = modality
-
-    def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r})")
-
     def get_count(self) -> int:
         return len(self.data)
 
@@ -86,14 +83,6 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
 
 
 class EmbeddingItems(ModalityDataItems[NestedTensors, torch.Tensor]):
-
-    def __init__(self, data: NestedTensors, modality: str) -> None:
-        super().__init__(data)
-
-        self.modality = modality
-
-    def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r})")
 
     def get_count(self) -> int:
         return len(self.data)
