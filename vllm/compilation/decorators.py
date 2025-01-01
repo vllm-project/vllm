@@ -76,6 +76,9 @@ def support_torch_compile(
 
     - if it is a single integer, the corresponding dimension of the argument
         will be marked as dynamic.
+    - if it is a function returns a single integer, it will be called with 
+        the tensor as argument, and the returned dimension will be marked 
+        as dynamic.
     - if it is `None`, ignored.
     - if it is `IntermediateTensors`, all the tensors in the intermediate
         tensors will be marked as dynamic.
@@ -176,10 +179,12 @@ def _support_torch_compile(
                 arg = bound_args.arguments.get(k)
                 if arg is not None:
                     if isinstance(arg, torch.Tensor):
-                        torch._dynamo.mark_dynamic(arg, dims)
+                        dims_ = dims(arg) if callable(dims) else dims
+                        torch._dynamo.mark_dynamic(arg, dims_)
                     elif isinstance(arg, IntermediateTensors):
                         for tensor in arg.tensors.values():
-                            torch._dynamo.mark_dynamic(tensor, dims)
+                            dims_ = dims(tensor) if callable(dims) else dims
+                            torch._dynamo.mark_dynamic(tensor, dims_)
                     else:
                         raise ValueError(
                             "Unsupported dynamic dimensions"

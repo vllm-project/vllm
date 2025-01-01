@@ -259,7 +259,13 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(dynamic_arg_dims={
+    "input_ids": 0,
+    # dim 1 for mrope in shape (3, seq_len), else dim 0 in shape (seq_len, )
+    "positions": lambda tensor: tensor.ndim - 1,
+    "intermediate_tensors": 0,
+    "inputs_embeds": 0,
+})
 class Qwen2Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
