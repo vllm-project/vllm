@@ -163,9 +163,6 @@ class GPUModelRunner:
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        # Clean up diffs.
-        self.input_batch.block_table.clear_diff()
-
         # Remove stopped requests from the cached states.
         # Keep the states of the pre-empted requests.
         for req_id in scheduler_output.finished_req_ids:
@@ -270,7 +267,7 @@ class GPUModelRunner:
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.apply_diff(num_reqs)
+        self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.

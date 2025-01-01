@@ -88,7 +88,7 @@ class BlockTable:
             # Clear the source row.
             self.block_table_diff_np[src].fill(0)
 
-    def apply_diff(self, num_reqs: int) -> None:
+    def commit(self, num_reqs: int) -> None:
         if self.use_uva:
             # Only copy the diff to the GPU.
             ops.copy_subranges(
@@ -103,6 +103,7 @@ class BlockTable:
             # table is large.
             self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
                                               non_blocking=True)
+        self.clear_diff()
 
     def clear(self) -> None:
         self.block_table.fill_(0)
