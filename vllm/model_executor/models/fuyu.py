@@ -25,7 +25,6 @@ from transformers import (BatchFeature, FuyuConfig, FuyuImageProcessor,
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import InputContext
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
@@ -34,7 +33,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataParser
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -47,9 +46,6 @@ from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
 _NEWLINE_TOKEN_ID = 71019
-
-MAX_IMAGE_FEATURE_SIZE_HEIGHT = 1080
-MAX_IMAGE_FEATURE_SIZE_WIDTH = 1920
 
 
 class FuyuImagePatchInputs(TypedDict):
@@ -67,43 +63,49 @@ class FuyuImagePatchInputs(TypedDict):
     """
 
 
-def _get_fuyu_num_image_tokens(
-    image_height: int,
-    image_width: int,
-) -> Tuple[int, int]:
-    """
-    Calculate the number of image tokens needed for a given image size.
-
-    The expected Fuyu image prompts can be expressed as:
-
-    .. code-block::
-        (image_token * ncols + newline_token) * nrows
-
-    Args:
-        image_size: Tuple[int, int] - `(width, height)` of the image
-
-    Returns:
-        ncols: int - number of image tokens in `x` direction
-        nrows: int - number of image tokens in `y` direction
-    """
-    ncols = math.ceil(image_width / 30)
-    nrows = math.ceil(image_height / 30)
-    return ncols, nrows
-
-
-def get_max_fuyu_image_tokens(ctx: InputContext):
-    ncols, nrows = _get_fuyu_num_image_tokens(
-        image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
-        image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-    )
-
-    return (ncols + 1) * nrows
-
-
 class FuyuMultiModalProcessor(BaseMultiModalProcessor):
 
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(max_mm_counts={"image": 1})
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
+    def _get_image_target_size(self) -> ImageSize:
+        processor = self._get_hf_processor()
+        image_processor: FuyuImageProcessor = processor.image_processor
+
+        target_size = image_processor.size
+        return ImageSize(width=target_size["width"],
+                         height=target_size["height"])
+
+    def _get_image_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        target_width, target_height = self._get_image_target_size()
+
+        if not (image_width <= target_width and image_height <= target_height):
+            height_scale_factor = target_height / image_height
+            width_scale_factor = target_width / image_width
+            optimal_scale_factor = min(height_scale_factor, width_scale_factor)
+
+            image_height = int(image_height * optimal_scale_factor)
+            image_width = int(image_width * optimal_scale_factor)
+
+        ncols = math.ceil(image_width / 30)
+        nrows = math.ceil(image_height / 30)
+        return ncols, nrows
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        target_width, target_height = self._get_image_target_size()
+
+        max_ncols, max_nrows = self._get_image_grid_size(
+            image_width=target_width,
+            image_height=target_height,
+        )
+        max_image_tokens = (max_ncols + 1) * max_nrows
+
+        return {"image": max_image_tokens}
 
     def _get_hf_processor(self) -> FuyuProcessor:
         return self.ctx.get_hf_processor(FuyuProcessor)
@@ -166,28 +168,13 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         eot_token_id = tokenizer.bos_token_id
         assert isinstance(eot_token_id, int)
 
-        hf_processor = self._get_hf_processor()
-        image_processor: FuyuImageProcessor = hf_processor.image_processor
-        target_size = image_processor.size
-        target_height, target_width = (target_size["height"],
-                                       target_size["width"])
-
         def get_replacement_fuyu(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
-            width, height = image_size.width, image_size.height
-            if not (width <= target_width and height <= target_height):
-                height_scale_factor = target_height / height
-                width_scale_factor = target_width / width
-                optimal_scale_factor = min(height_scale_factor,
-                                           width_scale_factor)
 
-                height = int(height * optimal_scale_factor)
-                width = int(width * optimal_scale_factor)
-
-            ncols, nrows = _get_fuyu_num_image_tokens(
-                image_width=width,
-                image_height=height,
+            ncols, nrows = self._get_image_grid_size(
+                image_width=image_size.width,
+                image_height=image_size.height,
             )
 
             return (([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows +
@@ -225,12 +212,13 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
+        target_width, target_height = self._get_image_target_size()
         num_images = mm_counts.get("image", 0)
 
         mm_data = {
             "image":
-            self._get_dummy_images(width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-                                   height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
                                    num_images=num_images)
         }
 
@@ -240,7 +228,6 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_fuyu_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
