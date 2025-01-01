@@ -49,6 +49,7 @@ def test_processor_override(
         model_name=model,
         tokenizer_name=model,
         mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": num_imgs},
     )
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     ctx = InputProcessingContext(ctx.model_config, tokenizer)

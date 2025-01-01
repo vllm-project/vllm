@@ -41,6 +41,7 @@ def test_processor_override(processor_for_phi3v, image_assets: _ImageAssets,
         model_name=model,
         tokenizer_name=model,
         trust_remote_code=True,
+        limit_mm_per_prompt={"image": num_imgs},
     )
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     ctx = InputProcessingContext(ctx.model_config, tokenizer)
