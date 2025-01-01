@@ -71,8 +71,10 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         # creates tp process group containing only a subset of gpu ranks
         local_rank = get_tp_group().local_rank
         tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
+        device = get_tp_group().device
         self._tp_group = init_model_parallel_group([self._draft_ranks],
-                                                   local_rank, tp_backend)
+                                                   local_rank, device,
+                                                   tp_backend)
 
         with self._patch_tensor_parallel_group():
             self._worker.init_device()
