@@ -1139,7 +1139,12 @@ class BaseMultiModalProcessor(ABC):
 
         mm_counts = self._get_and_validate_dummy_mm_counts()
         mm_max_tokens_per_item = self.get_mm_max_tokens_per_item()
-        assert mm_counts.keys() == mm_max_tokens_per_item.keys()
+        if mm_counts.keys() != mm_max_tokens_per_item.keys():
+            raise AssertionError(
+                "The keys returned by `get_supported_mm_limits`"
+                f"({set(mm_counts.keys())}) should be the same as those "
+                "returned by `get_mm_max_tokens_per_item` "
+                f"({set(mm_max_tokens_per_item.keys())})")
 
         processor_inputs = self._get_dummy_mm_inputs(mm_counts)
         mm_inputs = self.apply(

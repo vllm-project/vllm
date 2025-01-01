@@ -766,7 +766,7 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
+        return {"image": None, "video": None}
 
     def _get_max_mm_tokens(self, modality: str) -> int:
         hf_config = self.ctx.get_hf_config(Qwen2VLConfig)
