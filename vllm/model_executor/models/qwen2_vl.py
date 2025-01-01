@@ -931,7 +931,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         "o_proj",
         "gate_up_proj",
         "down_proj",
-        # vison tower
+        # vision tower
         "qkv",
         "attn.proj",  # Distinguish patch_embed.proj
         "fc1",
