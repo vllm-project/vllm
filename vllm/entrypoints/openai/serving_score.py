@@ -10,7 +10,8 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (ErrorResponse, ScoreRequest,
                                               ScoreResponse, ScoreResponseData,
                                               UsageInfo)
-from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
@@ -50,15 +51,13 @@ class OpenAIServingScores(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        base_model_paths: List[BaseModelPath],
+        models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         base_model_paths=base_model_paths,
-                         lora_modules=None,
-                         prompt_adapters=None,
+                         models=models,
                          request_logger=request_logger)
 
     async def create_score(

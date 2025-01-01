@@ -58,7 +58,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
@@ -269,6 +271,10 @@ def base(request: Request) -> OpenAIServing:
     return tokenization(request)
 
 
+def models(request: Request) -> OpenAIServingModels:
+    return request.app.state.openai_serving_models
+
+
 def chat(request: Request) -> Optional[OpenAIServingChat]:
     return request.app.state.openai_serving_chat
 
@@ -336,10 +342,10 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
 
 @router.get("/v1/models")
 async def show_available_models(raw_request: Request):
-    handler = base(raw_request)
+    handler = models(raw_request)
 
-    models = await handler.show_available_models()
-    return JSONResponse(content=models.model_dump())
+    models_ = await handler.show_available_models()
+    return JSONResponse(content=models_.model_dump())
 
 
 @router.get("/version")
@@ -505,26 +511,22 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     @router.post("/v1/load_lora_adapter")
     async def load_lora_adapter(request: LoadLoraAdapterRequest,
                                 raw_request: Request):
-        for route in [chat, completion, embedding]:
-            handler = route(raw_request)
-            if handler is not None:
-                response = await handler.load_lora_adapter(request)
-                if isinstance(response, ErrorResponse):
-                    return JSONResponse(content=response.model_dump(),
-                                        status_code=response.code)
+        handler = models(raw_request)
+        response = await handler.load_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
 
         return Response(status_code=200, content=response)
 
     @router.post("/v1/unload_lora_adapter")
     async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
                                   raw_request: Request):
-        for route in [chat, completion, embedding]:
-            handler = route(raw_request)
-            if handler is not None:
-                response = await handler.unload_lora_adapter(request)
-                if isinstance(response, ErrorResponse):
-                    return JSONResponse(content=response.model_dump(),
-                                        status_code=response.code)
+        handler = models(raw_request)
+        response = await handler.unload_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
 
         return Response(status_code=200, content=response)
 
@@ -628,13 +630,18 @@ def init_app_state(
     resolved_chat_template = load_chat_template(args.chat_template)
     logger.info("Using supplied chat template:\n%s", resolved_chat_template)
 
+    state.openai_serving_models = OpenAIServingModels(
+        model_config=model_config,
+        base_model_paths=base_model_paths,
+        lora_modules=args.lora_modules,
+        prompt_adapters=args.prompt_adapters,
+    )
+    # TODO: The chat template is now broken for lora adapters :(
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
-        base_model_paths,
+        state.openai_serving_models,
         args.response_role,
-        lora_modules=args.lora_modules,
-        prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -646,16 +653,14 @@ def init_app_state(
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
-        base_model_paths,
-        lora_modules=args.lora_modules,
-        prompt_adapters=args.prompt_adapters,
+        state.openai_serving_models,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     ) if model_config.runner_type == "generate" else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
-        base_model_paths,
+        state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -663,7 +668,7 @@ def init_app_state(
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
-        base_model_paths,
+        state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -671,14 +676,13 @@ def init_app_state(
     state.openai_serving_scores = OpenAIServingScores(
         engine_client,
         model_config,
-        base_model_paths,
+        state.openai_serving_models,
         request_logger=request_logger
     ) if model_config.task == "score" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
-        base_model_paths,
-        lora_modules=args.lora_modules,
+        state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,

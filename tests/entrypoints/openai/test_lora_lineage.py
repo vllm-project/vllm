@@ -55,7 +55,10 @@ def server_with_lora_modules_json(zephyr_lora_files):
         "64",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # Enable the /v1/load_lora_adapter endpoint
+    envs = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs) as remote_server:
         yield remote_server
 
 
@@ -67,8 +70,8 @@ async def client_for_lora_lineage(server_with_lora_modules_json):
 
 
 @pytest.mark.asyncio
-async def test_check_lora_lineage(client_for_lora_lineage: openai.AsyncOpenAI,
-                                  zephyr_lora_files):
+async def test_static_lora_lineage(client_for_lora_lineage: openai.AsyncOpenAI,
+                                   zephyr_lora_files):
     models = await client_for_lora_lineage.models.list()
     models = models.data
     served_model = models[0]
@@ -81,3 +84,26 @@ async def test_check_lora_lineage(client_for_lora_lineage: openai.AsyncOpenAI,
     assert all(lora_model.parent == MODEL_NAME for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
     assert lora_models[1].id == "zephyr-lora2"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_lora_lineage(
+        client_for_lora_lineage: openai.AsyncOpenAI, zephyr_lora_files):
+
+    response = await client_for_lora_lineage.post("load_lora_adapter",
+                                                  cast_to=str,
+                                                  body={
+                                                      "lora_name":
+                                                      "zephyr-lora-3",
+                                                      "lora_path":
+                                                      zephyr_lora_files
+                                                  })
+    # Ensure adapter loads before querying /models
+    assert "success" in response
+
+    models = await client_for_lora_lineage.models.list()
+    models = models.data
+    dynamic_lora_model = models[-1]
+    assert dynamic_lora_model.root == zephyr_lora_files
+    assert dynamic_lora_model.parent == MODEL_NAME
+    assert dynamic_lora_model.id == "zephyr-lora-3"
