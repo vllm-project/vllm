@@ -2616,6 +2616,12 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
+@dataclass
+class LayerForwardContext:
+    attn_module: Any  # vllm.attention.layer.Attention
+    kv_cache: Any  # torch.Tensor
+
+
 class CompilationConfig(BaseModel):
     """
     Configuration for compilation.
@@ -2769,9 +2775,9 @@ class CompilationConfig(BaseModel):
     inductor_hash_cache: Any = PrivateAttr
 
     # Per-model forward context
-    # Mainly used to store attention cls
-    # Map from layer name to the attention cls
-    static_forward_context: Dict[str, Any] = PrivateAttr
+    # Map from layer name to the layer's forward context, which stores
+    # attention cls and kv_cache
+    static_forward_context: Dict[str, LayerForwardContext] = PrivateAttr
 
     def compute_hash(self) -> str:
         """
