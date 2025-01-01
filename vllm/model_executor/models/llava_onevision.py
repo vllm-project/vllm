@@ -38,8 +38,8 @@ from .siglip import (SiglipVisionModel, dummy_seq_data_for_siglip,
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
-# Result in the max possible feature size (2x2 grid of 336x336px tiles)
-MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
+# Ref: https://github.com/LLaVA-VL/LLaVA-NeXT/blob/main/docs/LLaVA_OneVision.md?plain=1#L14
+MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 2304
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -366,9 +366,11 @@ def input_processor_for_llava_onevision(ctx: InputContext,
                                     and "image" not in multi_modal_data):
         return inputs
     if "image" in multi_modal_data:
-        return input_processor_when_multimodal_input_image(ctx, inputs)
+        inputs = input_processor_when_multimodal_input_image(ctx, inputs)
     if "video" in multi_modal_data:
         return input_processor_when_multimodal_input_video(ctx, inputs)
+    else:
+        return inputs
 
     msg = "Unsupported multi data type"
     raise NotImplementedError(msg)
@@ -832,21 +834,18 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if not modalities:
             return None
 
-        # We make a tuple of each embedding with its modality string. This is a
-        # temporary workaround for models to handle mixed modalities when
-        # get_multimodal_embeddings and get_input_embeddings are called
-        # separately.
-        # TODO(ywang96): Add support for mixed-modality inference for v1.
-        multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
+        # The result multimoal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         if "images" in modalities:
             image_input = modalities["images"]
             vision_embeddings = self._process_image_input(image_input)
-            multimodal_embeddings.append((vision_embeddings, "image"))
+            multimodal_embeddings += tuple(vision_embeddings)
         if "videos" in modalities:
             video_input = modalities["videos"]
             video_embeddings = self._process_video_pixels(video_input)
-            multimodal_embeddings.append((video_embeddings, "video"))
+            multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
@@ -858,15 +857,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            for embeddings, modality in multimodal_embeddings:
-                if modality == "image":
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, embeddings,
-                        self.config.image_token_index)
-                if modality == "video":
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, embeddings,
-                        self.config.video_token_index)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [self.config.image_token_index, self.config.video_token_index])
         return inputs_embeds
 
     def forward(
