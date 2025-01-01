@@ -17,6 +17,14 @@ from vllm.sequence import IntermediateTensors
 from .utils import maybe_prefix
 
 
+class DummyInputLayerNorm(nn.Module):
+    def forward(self, x):
+        return x
+
+class DummyNorm(nn.Module):
+    def forward(self, x, y):
+        return x, None
+
 class EAGLE(nn.Module):
     """This class implements the EAGLE draft model from the paper: https://arxiv.org/pdf/2401.15077
     Reference implementation: https://github.com/SafeAILab/EAGLE
@@ -46,6 +54,10 @@ class EAGLE(nn.Module):
 
         self.model = model_cls(vllm_config=vllm_config,
                                prefix=maybe_prefix(prefix, "model"))
+        for layer in self.model.model.layers:
+            layer.input_layernorm = DummyInputLayerNorm()
+        self.model.model.norm = DummyNorm()
+
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
                             bias=getattr(self.config, "eagle_fc_bias", False))
