@@ -426,7 +426,6 @@ class GPUModelRunner:
             )
 
         if use_cascade:
-            logger.debug("Using cascade attention.")
             # TODO: Optimize.
             cu_prefix_query_lens = torch.tensor(
                 [0, total_num_scheduled_tokens],
