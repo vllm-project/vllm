@@ -1,7 +1,7 @@
 import gc
 import re
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Tuple, Union, cast
 
 import numpy as np
 import torch
@@ -15,7 +15,6 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
@@ -96,7 +95,7 @@ class GPUModelRunner:
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
+        self.dummy_kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
@@ -635,7 +634,7 @@ class GPUModelRunner:
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
-        dummy_kv_caches = [
+        self.dummy_kv_caches = [
             torch.tensor([], dtype=torch.float32, device=self.device)
             for _ in range(self.num_attn_layers)
         ]
@@ -698,7 +697,7 @@ class GPUModelRunner:
 
         # Trigger compilation for general shape.
         hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                        dummy_kv_caches)
+                                        self.dummy_kv_caches)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
@@ -724,8 +723,9 @@ class GPUModelRunner:
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(self.model, num_tokens, self.kv_caches)
-                self._dummy_run(self.model, num_tokens, self.kv_caches)
+                    self._dummy_run(self.model, num_tokens,
+                                    self.dummy_kv_caches)
+                self._dummy_run(self.model, num_tokens, self.dummy_kv_caches)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -736,7 +736,6 @@ class GPUModelRunner:
                     elapsed_time, cuda_graph_size / (1 << 30))
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        assert len(self.kv_caches) == 0
         if kv_cache_config.buffer_size != -1:
             buffer = torch.zeros((kv_cache_config.buffer_size, ),
                                  dtype=torch.int8,
@@ -748,10 +747,6 @@ class GPUModelRunner:
             raise NotImplementedError("When pipeline parallel enabled, " \
                 "layer_name 'layers.i.self_attn.attn' is associated with" \
                 "kv_caches[i - self.start_layer]")
-        layer_names = sorted(kv_cache_config.kv_cache_spec.keys(),
-                             key=extract_layer_index)
-        print("layer_names", layer_names)
-        assert len(layer_names) == self.num_attn_layers
 
         layer_to_group_id = {
             layer_name: group_id
@@ -760,9 +755,14 @@ class GPUModelRunner:
         }
         layer_to_multiplier = {}
         # TODO: explain multipiler
+        kv_caches: Dict[str, Union[torch.Tensor, Tuple[torch.Tensor,
+                                                       torch.Tensor]]] = {}
 
-        for i in range(self.num_attn_layers):
-            layer_name = layer_names[i]
+        layer_names = [
+            layer_name for group in kv_cache_config.groups
+            for layer_name in group
+        ]
+        for layer_name in layer_names:
             layer_spec = kv_cache_config.kv_cache_spec[layer_name]
             tensor_config = kv_cache_config.tensors[layer_name]
             assert tensor_config.size % layer_spec.page_size_bytes == 0
@@ -802,7 +802,7 @@ class GPUModelRunner:
                     raise NotImplementedError
             else:
                 raise NotImplementedError
-            self.kv_caches.append(tensor)
+            kv_caches[layer_name] = tensor
 
         block_id_multipliers = []
         for layer_names in kv_cache_config.groups:
@@ -839,24 +839,29 @@ class GPUModelRunner:
                                             pin_memory=self.pin_memory)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
+        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        for layer_name, kv_cache in kv_caches.items():
+            forward_ctx[layer_name].kv_cache = kv_cache
+
     def get_kv_cache_spec(self) -> KVCacheSpec:
-        attn_layers = self.vllm_config.compilation_config.static_forward_context
+        forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: KVCacheSpec = {}
-        for layer_name, attn_layer in attn_layers.items():
-            if attn_layer.sliding_window is not None:
+        for layer_name, ctx in forward_ctx.items():
+            attn_module = ctx.attn_module
+            if attn_module.sliding_window is not None:
                 kv_cache_spec[layer_name] = SlidingWindowSpec(
                     block_size=block_size,
-                    num_kv_heads=attn_layer.num_kv_heads,
-                    head_size=attn_layer.head_size,
-                    dtype=attn_layer.dtype,
-                    sliding_window=attn_layer.sliding_window)
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=attn_module.dtype,
+                    sliding_window=attn_module.sliding_window)
             else:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
-                    num_kv_heads=attn_layer.num_kv_heads,
-                    head_size=attn_layer.head_size,
-                    dtype=attn_layer.dtype,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=attn_module.dtype,
                 )
 
         return kv_cache_spec

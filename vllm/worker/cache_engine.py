@@ -1,11 +1,13 @@
 """CacheEngine class for managing the KV cache."""
-from typing import List
+from typing import Dict, List
 
 import torch
 
 from vllm.attention import get_attn_backend
-from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
+from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
+                         LayerForwardContext, ModelConfig, ParallelConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
                         get_dtype_size, is_pin_memory_available)
 
@@ -26,6 +28,7 @@ class CacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         device_config: DeviceConfig,
+        compilation_config: CompilationConfig,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
@@ -62,6 +65,7 @@ class CacheEngine:
         self.gpu_cache = self._allocate_kv_cache(
             self.num_gpu_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
+        self._register_gpu_kv_cache(compilation_config.static_forward_context)
 
     def _allocate_kv_cache(
         self,
@@ -83,6 +87,14 @@ class CacheEngine:
                             pin_memory=pin_memory,
                             device=device))
         return kv_cache
+
+    def _register_gpu_kv_cache(self, ctx: Dict[str,
+                                               LayerForwardContext]) -> None:
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise NotImplementedError
+        for layer_name, forward_ctx in ctx.items():
+            layer_id = extract_layer_index(layer_name)
+            forward_ctx.kv_cache = self.gpu_cache[layer_id]
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         for i in range(self.num_attention_layers):
