@@ -320,8 +320,6 @@ def cascade_attention(
         "Cascade attention does not support sliding window.")
 
     num_tokens = query.shape[0]
-    num_query_heads = query.shape[1]
-    head_size = query.shape[2]
     block_size = key_cache.shape[-3]
     assert common_prefix_len % block_size == 0
     num_common_kv_blocks = common_prefix_len // block_size
@@ -366,21 +364,37 @@ def cascade_attention(
         return_softmax_lse=True,
     )
 
-    # Merge prefix and suffix outputs.
+    # Merge prefix and suffix outputs, and store the result in output.
+    merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
+                      suffix_lse)
+
+
+def merge_attn_states(
+    output: torch.Tensor,
+    prefix_output: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    suffix_output: torch.Tensor,
+    suffix_lse: torch.Tensor,
+) -> None:
+    num_tokens = output.shape[0]
+    num_query_heads = output.shape[1]
+    head_size = output.shape[2]
+    padded_head_size = triton.next_power_of_2(head_size)
+
     # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
-    merge_attn_states[(num_tokens, num_query_heads)](
+    merge_attn_states_kernel[(num_tokens, num_query_heads)](
         output,
         prefix_output,
         prefix_lse,
         suffix_output,
         suffix_lse,
         head_size,
-        triton.next_power_of_2(head_size),
+        padded_head_size,
     )
 
 
 @triton.jit
-def merge_attn_states(
+def merge_attn_states_kernel(
     output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     prefix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     prefix_lse,  # [NUM_HEADS, NUM_TOKENS]
