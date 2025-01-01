@@ -586,7 +586,7 @@ def _test_processing_cache_correctness(
                 min_wh=128,
                 max_wh=256),
         "audio":
-        partial(_rand_audio, rng, min_len=256, max_len=512, sr=16000),
+        partial(_rand_audio, rng, min_len=512, max_len=1024, sr=16000),
     }
 
     for batch_idx in range(num_batches):

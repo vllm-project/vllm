@@ -29,7 +29,7 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 
     def __repr__(self) -> str:
         return (f"{type(self).__name__}(modality={self.modality!r}, "
-                f"count={len(self)})")
+                f"len={len(self)})")
 
     def __len__(self) -> int:
         return self.get_count()
