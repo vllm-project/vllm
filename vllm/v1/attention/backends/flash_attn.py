@@ -9,8 +9,8 @@ import triton.language as tl
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.vllm_flash_attn import flash_attn_varlen_func
 from vllm.utils import cdiv
+from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
 class FlashAttentionBackend(AttentionBackend):
