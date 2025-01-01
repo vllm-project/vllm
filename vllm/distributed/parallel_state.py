@@ -966,10 +966,6 @@ def init_distributed_environment(
     device: Optional[torch.device] = None,
     backend: str = "nccl",
 ):
-    if device is None:
-        dstr = f"cuda:{local_rank}"
-        logger.warning("device not found, setting to %s", dstr)
-        device = torch.device(dstr)
 
     logger.debug(
         "world_size=%d rank=%d local_rank=%d %r "
@@ -995,6 +991,12 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
+
+    if device is None:
+        dstr = f"cuda:{local_rank}"
+        logger.warning("device not found, setting to %s", dstr)
+        device = torch.device(dstr)
+
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
