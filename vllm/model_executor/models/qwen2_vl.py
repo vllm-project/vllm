@@ -52,6 +52,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
@@ -926,15 +927,23 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     }
 
     # LoRA specific attributes
-    # TODO Support LoRA for the visual encoder in the future.
     supported_lora_modules = [
         "qkv_proj",
         "o_proj",
         "gate_up_proj",
         "down_proj",
+        # vision tower
+        "qkv",
+        "attn.proj",  # Distinguish patch_embed.proj
+        "fc1",
+        "fc2",
+        # projector
+        "mlp.0",
+        "mlp.2"
     ]
     embedding_modules = {}
     embedding_padding_modules = []
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "lm_head.": "language_model.lm_head.",
@@ -1231,3 +1240,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="visual.",
+            tower_model="visual.merger.")
