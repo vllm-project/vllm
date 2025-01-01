@@ -39,7 +39,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             strict_mode: Whether or not to perform shape/device/dtype checks
             during sampling. This catches correctness issues but adds
             nontrivial latency.
-            use_falshinfer: We will use this parameter to determine whether
+            use_flashinfer: We will use this parameter to determine whether
             to use the FlashInfer rejection sampling kernel or not. If it's
             None, we will use the default value from the environment variable.
             This parameter is only used for testing purposes.
