@@ -829,9 +829,10 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         if not self._placeholder_map:
             # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
             # image_token and video_token registered
+            encode_fn = hf_processor.tokenizer.encode
             self._placeholder_map = {
-                "image": hf_processor.tokenizer.encode(hf_processor.image_token),
-                "video": hf_processor.tokenizer.encode(hf_processor.video_token),
+                "image": encode_fn(hf_processor.image_token),
+                "video": encode_fn(hf_processor.video_token),
             }
         placeholder = self._placeholder_map
 

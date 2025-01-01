@@ -841,21 +841,22 @@ class MRotaryEmbedding(RotaryEmbedding):
     ) -> Tuple[List[List[int]], int]:
         """Get mrope input positions and delta value."""
 
-        llm_positions, mrope_position_delta = MRotaryEmbedding.get_input_positions_tensor(
-            input_tokens,
-            image_grid_thw,
-            video_grid_thw,
-            image_token_id,
-            video_token_id,
-            vision_start_token_id,
-            vision_end_token_id,
-            spatial_merge_size,
-            context_len,
-            seq_len,
-        )
+        llm_positions, mrope_position_delta = \
+            MRotaryEmbedding.get_input_positions_tensor(
+                input_tokens,
+                image_grid_thw,
+                video_grid_thw,
+                image_token_id,
+                video_token_id,
+                vision_start_token_id,
+                vision_end_token_id,
+                spatial_merge_size,
+                context_len,
+                seq_len,
+            )
 
         return llm_positions.tolist(), mrope_position_delta
-    
+
     @staticmethod
     def get_input_positions_tensor(
         input_tokens: List[int],
@@ -959,7 +960,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 range(context_len + mrope_position_delta,
                       seq_len + mrope_position_delta)) for _ in range(3)
         ]
-    
+
     @staticmethod
     def get_next_input_positions_tensor(
         mrope_position_delta: int,

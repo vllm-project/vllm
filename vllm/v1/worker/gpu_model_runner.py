@@ -12,8 +12,8 @@ from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
@@ -126,21 +126,21 @@ class GPUModelRunner:
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
-        
+
         if self.model_config.uses_mrope:
-            # a permuted mrope_positions tensor satisfying the following 
+            # a permuted mrope_positions tensor satisfying the following
             #   properties to allow `torch.compile` work properly:
             # - shape: (3, <variable>)
             # - stride: (1, <variable>)
 
             self.mrope_positions = torch.zeros((self.max_num_tokens, 3),
-                                                dtype=torch.int64,
-                                                device=self.device)
+                                               dtype=torch.int64,
+                                               device=self.device)
             self.mrope_positions_cpu = torch.zeros((self.max_num_tokens, 3),
-                                            dtype=torch.int64,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
-            
+                                                   dtype=torch.int64,
+                                                   device="cpu",
+                                                   pin_memory=self.pin_memory)
+
             self.mrope_positions = self.mrope_positions.permute((1, 0))
             self.mrope_positions_cpu = self.mrope_positions_cpu.permute((1, 0))
 
@@ -257,10 +257,12 @@ class GPUModelRunner:
                 video_grid_thw = []
                 for mm_input in self.requests[req_id].mm_inputs:
                     if mm_input.get("image_grid_thw") is not None:
-                        image_grid_thw.extend(mm_input["image_grid_thw"].tolist())
+                        image_grid_thw.extend(
+                            mm_input["image_grid_thw"].tolist())
                     if mm_input.get("video_grid_thw") is not None:
-                        video_grid_thw.extend(mm_input["video_grid_thw"].tolist())
-                
+                        video_grid_thw.extend(
+                            mm_input["video_grid_thw"].tolist())
+
                 hf_config = self.model_config.hf_config
 
                 self.requests[req_id].mrope_positions, \
@@ -345,7 +347,7 @@ class GPUModelRunner:
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
-        
+
         # Calculate M-RoPE positions.
         if self.model_config.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
@@ -398,10 +400,12 @@ class GPUModelRunner:
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         if self.model_config.uses_mrope:
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions_cpu[:, :total_num_scheduled_tokens], non_blocking=True)
+                self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
+                non_blocking=True)
         else:
             self.positions[:total_num_scheduled_tokens].copy_(
-                self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+                self.positions_cpu[:total_num_scheduled_tokens],
+                non_blocking=True)
 
         query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(
             self.device, non_blocking=True)
@@ -425,12 +429,16 @@ class GPUModelRunner:
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
         return attn_metadata, logits_indices
-    
+
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
         num_reqs = self.input_batch.num_reqs
         for index, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            assert req_id is not None
+
             req = self.requests[req_id]
+            assert req.mrope_positions is not None
+
             num_computed_tokens = \
                 self.input_batch.num_computed_tokens_cpu[index]
             num_scheduled_tokens = \
@@ -438,12 +446,10 @@ class GPUModelRunner:
             num_prompt_tokens = len(req.prompt_token_ids)
 
             if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
-                prompt_part_len = max(
-                    0,
-                    num_prompt_tokens - num_computed_tokens)
+                prompt_part_len = max(0,
+                                      num_prompt_tokens - num_computed_tokens)
                 completion_part_len = max(
-                    0,
-                    num_scheduled_tokens - prompt_part_len)
+                    0, num_scheduled_tokens - prompt_part_len)
             else:
                 prompt_part_len = num_scheduled_tokens
                 completion_part_len = 0
@@ -452,25 +458,31 @@ class GPUModelRunner:
 
             if prompt_part_len > 0:
                 # prompt's mrope_positions are pre-computed
-                self.mrope_positions_cpu[
-                    :,
-                    mrope_pos_ptr:mrope_pos_ptr + prompt_part_len
-                ] = req.mrope_positions[
-                    :,
-                    num_computed_tokens:num_computed_tokens + prompt_part_len
-                ]
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + prompt_part_len
+                src_start = num_computed_tokens
+                src_end = num_computed_tokens + prompt_part_len
+
+                self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                    req.mrope_positions[:,src_start:src_end]
+
                 mrope_pos_ptr += prompt_part_len
-            
+
             if completion_part_len > 0:
                 # compute completion's mrope_positions on-the-fly
-                self.mrope_positions_cpu[
-                    :,
-                    mrope_pos_ptr:mrope_pos_ptr + completion_part_len
-                ] = MRotaryEmbedding.get_next_input_positions_tensor(
-                    req.mrope_position_delta,
-                    context_len=num_computed_tokens + prompt_part_len,
-                    seq_len=num_computed_tokens + prompt_part_len + completion_part_len,
-                )
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + completion_part_len
+
+                self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                    MRotaryEmbedding.get_next_input_positions_tensor(
+                        req.mrope_position_delta,
+                        context_len=num_computed_tokens +
+                        prompt_part_len,
+                        seq_len=num_computed_tokens +
+                        prompt_part_len +
+                        completion_part_len,
+                    )
+
                 mrope_pos_ptr += completion_part_len
 
     def _prepare_sampling(
@@ -565,8 +577,9 @@ class GPUModelRunner:
                 encoder_output = self.encoder_cache[req_id][i]
                 if isinstance(encoder_output, tuple):
                     encoder_outputs.append((
-                        encoder_output[0][start_idx:end_idx], # embedding tensor
-                        encoder_output[1], # modality
+                        encoder_output[0]
+                        [start_idx:end_idx],  # embedding tensor
+                        encoder_output[1],  # modality
                     ))
                 else:
                     encoder_outputs.append(encoder_output[start_idx:end_idx])
@@ -715,7 +728,7 @@ class GPUModelRunner:
         else:
             input_ids = self.input_ids[:num_tokens]
             inputs_embeds = None
-        
+
         positions = self.mrope_positions[:, :num_tokens] \
             if self.model_config.uses_mrope \
             else self.positions[:num_tokens]
@@ -779,7 +792,7 @@ class GPUModelRunner:
             if isinstance(dummy_mm_data, MultiModalKwargs):
                 dummy_mm_kwargs = {
                     k: dummy_mm_data.get_item(k, 0).data
-                    for k in dummy_mm_data.keys()
+                    for k in dummy_mm_data
                 }
 
             # Case when models have dummy data explicitly defined as
