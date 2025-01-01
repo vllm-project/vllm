@@ -34,21 +34,21 @@ PROMPTS = [
 EXPECTED = {
     "openai/whisper-medium": [
         " The first words I spoke in the original phonograph, a little piece"
-        " of practical poetry. Mary had a little lamb, its fleece was white as"
-        " snow, and everywhere that Mary went the lamb would shun it all.",
-        " And the old one pitch on the way to Edgar Martinez swung on the line"
-        " down the left field line for Obeysmith. Here comes Joy. Here is"
-        " Jorgen at third base. They're gonna wave him in. The throw to the"
+        " of practical poetry. Mary had a little lamb, its fleece was quite as"
+        " slow, and everywhere that Mary went the lamb was sure to go.",
+        " And the 0-1 pitch on the way to Edgar Martinez swung on the line"
+        " down the left field line for Obeyshev. Here comes Joy. Here is"
+        " Jorgen at third base. They're going to wave him in. The throw to the"
         " plate will be late. The Mariners are going to play for the American"
         " League Championship. I don't believe it. It just continues. My, oh"
         " my."
     ],
     "openai/whisper-large-v3": [
-        " The first words I spoke in the original phonograph. A little piece"
-        " of practical poetry. Mary had a little lamb, its fleece was white as"
-        " snow, and everywhere that Mary went, the lamb was sure to go.",
-        " And the 0-1 pitch on the way to Edgar Martinez. Swung on the line,"
-        " down the left field line for a base hit. Here comes Joy. Here is"
+        " The first words I spoke in the original phonograph, a little piece"
+        " of practical poetry. Mary had a little lamb, its feet were quite as"
+        " slow, and everywhere that Mary went, the lamb was sure to go.",
+        " And the 0-1 pitch on the way to Edgar Martinez. Swung on the line."
+        " Now the left field line for a base hit. Here comes Joy. Here is"
         " Junior to third base. They're going to wave him in. The throw to the"
         " plate will be late. The Mariners are going to play for the American"
         " League Championship. I don't believe it. It just continues. My, oh,"
