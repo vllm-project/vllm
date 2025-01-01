@@ -373,7 +373,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
 
         blocks_to_copy: List[Tuple[int, int]]
         blocks_to_swap_in: List[Tuple[int, int]]
-        blocks_to_swap_out: List[Tuple[int, int]] 
+        blocks_to_swap_out: List[Tuple[int, int]]
 
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None

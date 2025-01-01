@@ -146,8 +146,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
-        self.att_metadata_builder = self.attn_backend.get_builder_cls()(
-            self)
+        self.att_metadata_builder = self.attn_backend.get_builder_cls()(self)
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
