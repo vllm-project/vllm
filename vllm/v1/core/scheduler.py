@@ -10,7 +10,7 @@ from vllm.multimodal.base import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.engine import EngineCoreOutput	
+from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -109,11 +109,11 @@ class Scheduler:
         # but not all. The constraint is due to the persistent batch in the
         # V1 model runner.
         # TODO(woosuk): Remove this constraint after refactoring model runner.
-        partial_req_index = None
+        partial_req_id = None
         req_index = 0
         while req_index < len(self.running):
             # Only the last request in the RUNNING queue can be "partial".
-            assert partial_req_index is None
+            assert partial_req_id is None
             assert token_budget > 0
             request = self.running[req_index]
             num_new_tokens = request.num_tokens - request.num_computed_tokens
@@ -162,8 +162,8 @@ class Scheduler:
             token_budget -= num_new_tokens
             if (request.num_computed_tokens + num_new_tokens <
                     request.num_tokens):
-                assert partial_req_index is None
-                partial_req_index = req_index
+                assert partial_req_id is None
+                partial_req_id = request.request_id
             req_index += 1
 
             # Encoder-related.
@@ -178,7 +178,7 @@ class Scheduler:
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting:
-                if partial_req_index:
+                if partial_req_id:
                     break
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -245,8 +245,8 @@ class Scheduler:
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if (num_computed_tokens + num_new_tokens < request.num_tokens):
-                    assert partial_req_index is None
-                    partial_req_index = req_index
+                    assert partial_req_id is None
+                    partial_req_id = request.request_id
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
@@ -287,7 +287,7 @@ class Scheduler:
             scheduled_new_reqs=new_reqs_data,
             scheduled_resumed_reqs=resumed_reqs_data,
             scheduled_running_reqs=running_reqs_data,
-            partial_req_index=partial_req_index,
+            partial_req_id=partial_req_id,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
@@ -434,8 +434,8 @@ class Scheduler:
                 # token is discarded and all sequence offsets are prompt
                 # offsets), otherwise it is the number of scheduled
                 # tokens minus one (for the sampled token)
-                req_is_not_partial = (scheduler_output.partial_req_index !=
-                                      req_index)
+                req_is_not_partial = (scheduler_output.partial_req_id !=
+                                      req_id)
                 num_new_prompt_tokens = (
                     num_scheduled_tokens[request.request_id] -
                     int(req_is_not_partial))
@@ -725,7 +725,7 @@ class SchedulerOutput:
     scheduled_new_reqs: List[NewRequestData]
     scheduled_resumed_reqs: List[ResumedRequestData]
     scheduled_running_reqs: List[RunningRequestData]
-    partial_req_index: Optional[int]
+    partial_req_id: Optional[str]
 
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int

@@ -110,14 +110,20 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
 
+        # Logprobs-related.
+        # NOTE(rob): The prompt logprobs trackers only include reqs that 
+        # are actively generating logprobs (i.e. in prefill phase).
+        self.num_logprobs: Dict[str, int] = {}
+        self.num_prompt_logprobs: Dict[str, int] = {}
+
+        # NOTE(rob): The req indexes that need sampling
+        self.needs_logits: set[int] = set()
+
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
         self.generators: Dict[int, torch.Generator] = {}
 
-        self.num_logprobs: Dict[str, int] = {}
-        self.num_prompt_logprobs: Dict[str, int] = {}
-        self.prompt_logprob_reqs: Set[str] = set()
 
     def add_request(
         self,
@@ -166,12 +172,11 @@ class InputBatch:
 
         num_logprobs = sampling_params.logprobs
         num_prompt_logprobs = sampling_params.prompt_logprobs
-        if num_logprobs is not None and num_logprobs > 0:
+        if num_logprobs and num_logprobs > 0:
             self.num_logprobs[req_id] = num_logprobs
-        if num_prompt_logprobs is not None and num_prompt_logprobs > 0:
+        if num_prompt_logprobs and num_prompt_logprobs > 0:
             self.num_prompt_logprobs[req_id] = num_prompt_logprobs
-        if sampling_params.prompt_logprobs:
-            self.prompt_logprob_reqs.add(req_id)
+
 
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -186,7 +191,6 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
-        self.prompt_logprob_reqs.discard(req_id)
         return req_index
 
     def clear(self) -> None:
@@ -199,7 +203,6 @@ class InputBatch:
         self.generators.clear()
         self.num_logprobs.clear()
         self.num_prompt_logprobs.clear()
-        self.prompt_logprob_reqs.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:
@@ -247,9 +250,6 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
-        partial_req_index: int,
-        num_input_tokens: int,
-        query_start_loc: torch.Tensor,
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -273,15 +273,7 @@ class InputBatch:
             generators=self.generators,
             max_num_batch_sample_logprobs=self.max_num_logprobs,
             max_num_batch_prompt_logprobs=self.max_num_prompt_logprobs,
-            # Required for sampling indices computation
-            query_start_loc=query_start_loc,
-            num_input_tokens=num_input_tokens,
-            partial_req_index=partial_req_index,
-            # Required for prompt logprobs temperature computation.
-            # If prompt logprobs is not required for this batch, then
-            # avoid storing num_query_tokens
-            num_query_tokens=(torch.diff(query_start_loc)
-                              if self.max_num_prompt_logprobs > 0 else None))
+            prompt_logprobs_req_indices=[xxx])
 
     @property
     def num_reqs(self) -> int:
@@ -318,4 +310,4 @@ class InputBatch:
 
     @property
     def no_prompt_logprob(self) -> bool:
-        return len(self.prompt_logprob_reqs) == 0
+        return len(self.num_prompt_logprobs) == 0

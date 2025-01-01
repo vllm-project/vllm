@@ -4,27 +4,13 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.v1.outputs import SamplerOutput
+from vllm.v1.outputs import SamplerOutput, LogprobsOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
 _SAMPLING_EPS = 1e-5
 
 
 class Sampler(nn.Module):
-
-    def _apply_temperature_top_k_top_p(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-        num_query_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-
-        temperature = (sampling_metadata.temperature if
-                       num_query_tokens is None else torch.repeat_interleave(
-                           sampling_metadata.temperature, num_query_tokens))
-
-        return self._apply_top_k_top_p(
-            self._apply_temperature(logits, temperature), sampling_metadata)
 
     def _probs_sample(
         self,
@@ -36,176 +22,27 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         return sampled.to(torch.int32)
 
-    def _top_logprobs_token_indices(
+   
+
+    def compute_logprobs(
         self,
-        logprob_values: torch.Tensor,
-        max_num_logprobs: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute top logprobs and associated token indices
+        logits: torch.Tensor,
+        max_num_logprobs: int
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Compute logprobs and move to CPU."""
         
-        Args:
-          logprobs: total_tokens x vocab tensor
-          max_num_logprobs: Max number of top {sample,prompt} logprobs
-                            requested in batch (depending on whether top sample
-                            logprobs or top prompt logprobs are being computed).
-                            This will be the k.
+        if max_num_logprobs > 0:
+            logprobs = self.get_logprobs(logits)
+            # FIXME: Mask the sampled token_id, get topk logprobs,
+            # and concatenate the topk with the sampled token_id.
+            topk_logprobs, topk_indices = torch.topk(
+                logprobs, max_num_logprobs, dim=-1)
+            # Use int32 to reduce the tensor size.
+            topk_indices = topk_indices.to(torch.int32)
 
-        Returns:
-          Top logprobs, total_tokens x max_num_logprobs tensor
-          Top logprob token indices, total_tokens x max_num_logprobs tensor
-        """
-        topk_logprobs, topk_indices = torch.topk(logprob_values,
-                                                 max_num_logprobs,
-                                                 dim=-1)
-        # Use int32 to reduce the tensor size.
-        return topk_logprobs, topk_indices.to(torch.int32)
-
-    def _compute_logprobs_from_processed_logits(
-        self,
-        do_batch_sample_logprobs: bool,
-        do_batch_prompt_logprobs: bool,
-        maybe_sampled: torch.Tensor,
-        maybe_sample_logits_indices: Optional[torch.Tensor],
-        prompt_logits_mask: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-        maybe_sample_logits_w_tmp_tpk_tpp: torch.Tensor,
-        logits_w_tmp_tpk_tpp: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute sample and prompt logprobs as required by batch config
-        
-        Consumes logits which have already had temperature, top-k and top-p
-        applied. 
-         
-        `do_batch_sample_logprobs` and `do_batch_prompt_logprobs` control
-        whether sample and prompt logprobs are computed, respectively.
-
-        This function does not handle the case where no logprobs are required
-        at the batch level; it is assumed this function will not be called in
-        that scenario.
-
-        Args:
-          do_batch_sample_logprobs: at least one request in the batch requires
-                                    sample logprobs to be computed
-          do_batch_prompt_logprobs: at least one request in the batch requires
-                                    prompt logprobs to be computed
-          maybe_sampled: list of sampled tokens; if there is a partial request,
-                         includes the partial request's sampled token (which
-                         will later be discarded.)
-          maybe_sample_logits_indices: sequence-offset indices where a new
-                         token is decoded; if there is a partial request,
-                         includes the index of the partial request's sampled
-                         token (which will later be discarded.)
-          prompt_logits_mask: mask indicating the sequence offsets of prompt
-                         tokens. Note: if there is a partial request,
-                         this mask includes the index of the partial request's
-                         sample token (since this sampled token will be
-                         discarded, but the logprobs computed at this offset
-                         are part of the prompt logprobs.) Note that this means
-                         prompt_logits_mask and maybe_sample_logits_indices
-                         may have overlap.
-          sampling_metadata
-          maybe_sample_logits_w_tmp_tpk_tpp: assumed to be logits gathered
-                         from sequence offsets where a new token is being
-                         decoded (including for a partial request); assumed
-                         that temperature, top-k and top-p have been applied.
-          logits_w_tmp_tpk_tpp: optional; all logits with temperature, top-k,
-                         top-p applied.
-
-          Returns:
-            Sample logprobs (`None` if `do_batch_sample_logprobs == False`,
-                             o/w num_samples x max_num_logprobs tensor)
-            Sample logprobs token indices (`None` if
-                            `do_batch_sample_logprobs == False`,
-                             o/w num_samples x max_num_logprobs tensor)
-            Prompt logprobs (`None` if `do_batch_prompt_logprobs == False`,
-                             o/w num_prompt_tokens x max_num_prompt_logprobs
-                             tensor)
-            Prompt logprobs token indices (`None` if
-                 `do_batch_prompt_logprobs == False`, o/w
-                 num_prompt_tokens x max_num_prompt_logprobs tensor)
-        """
-
-        assert do_batch_sample_logprobs or do_batch_prompt_logprobs
-        if do_batch_sample_logprobs and do_batch_prompt_logprobs:
-            # Batch requires sample and prompt logprobs
-
-            # - Compute logprobs for all sequence offsets
-            logprobs = self.get_logprobs(logits_w_tmp_tpk_tpp)
-
-            # - Compute *top* logprobs for sequence offsets
-            #   where a new token is being decoded
-            (
-                maybe_sample_topk_logprobs,
-                maybe_sample_topk_indices,
-            ) = self._top_logprobs_token_indices(
-                logprobs[maybe_sample_logits_indices, :],
-                sampling_metadata.max_num_batch_sample_logprobs)
-
-            # - In case sampled tokens are not in the top logprobs at their
-            #   respective sequence offsets, gather logprobs associated with
-            #   sampled tokens
-            maybe_sampled_logprobs = logprobs[maybe_sample_logits_indices,
-                                              maybe_sampled]
-
-            return ((
-                # Sample logprobs (including sampled tokens)
-                torch.cat((maybe_sample_topk_logprobs,
-                           maybe_sampled_logprobs.unsqueeze(-1)),
-                          dim=-1),
-                # Sample logprobs token indices (including sampled tokens)
-                torch.cat(
-                    (maybe_sample_topk_indices, maybe_sampled.unsqueeze(-1)),
-                    dim=-1)) +
-                    # Prompt logprobs and token indices
-                    self._top_logprobs_token_indices(
-                        logprobs[prompt_logits_mask, :],
-                        sampling_metadata.max_num_batch_prompt_logprobs))
-        elif do_batch_sample_logprobs:
-            # Batch requires only sample logprobs
-
-            # - Compute top logprobs only at sequence offsets where new tokens
-            #   are being decoded
-            logprobs = self.get_logprobs(maybe_sample_logits_w_tmp_tpk_tpp)
-            (
-                maybe_sample_topk_logprobs,
-                maybe_sample_topk_indices,
-            ) = self._top_logprobs_token_indices(
-                logprobs, sampling_metadata.max_num_batch_sample_logprobs)
-
-            # - In case sampled tokens are not in the top logprobs at their
-            #   respective sequence offsets, gather logprobs associated with
-            #   sampled tokens
-            maybe_sampled_logprobs = logprobs[
-                torch.arange(maybe_sampled.shape[0]), maybe_sampled]
-
-            # - Concat sampled token logprobs
-            maybe_sample_topk_logprobs = torch.cat(
-                (maybe_sample_topk_logprobs,
-                 maybe_sampled_logprobs.unsqueeze(-1)),
-                dim=-1)
-            # - Concat sampled token id
-            maybe_sample_topk_indices = torch.cat(
-                (maybe_sample_topk_indices, maybe_sampled.unsqueeze(-1)),
-                dim=-1)
-
-            # Return sample logprobs
-            return (maybe_sample_topk_logprobs, maybe_sample_topk_indices,
-                    None, None)
-
-        elif do_batch_prompt_logprobs:
-            # Batch requires only prompt logprobs
-
-            # - Compute top logprobs only at sequence offsets of prompt tokens
-            assert logits_w_tmp_tpk_tpp is not None
-            logprobs = self.get_logprobs(
-                logits_w_tmp_tpk_tpp[prompt_logits_mask, :])
-
-            # Return prompt logprobs
-            return ((None, None) + self._top_logprobs_token_indices(
-                logprobs, sampling_metadata.max_num_batch_prompt_logprobs))
-
-        raise ValueError("One or both of Logprobs and Prompt Logprobs must"
-                         " be enabled to use this method.")
+            return topk_logprobs.cpu(), topk_indices.cpu()
+        else:
+            return None, None
 
     def forward(
         self,
@@ -228,93 +65,27 @@ class Sampler(nn.Module):
           (if requested)
         """
 
-        # Batch-level logprobs configs. `do_batch_sample_logprobs`
-        # indicates whether any request requires sample logprobs.
-        # `do_batch_prompt_logprobs` indicates whether any request
-        # requires prompt logprobs. `do_batch_any_logprobs` indicates
-        # whether, overall, any request in the batch requires logprobs
-        # computed
-        do_batch_sample_logprobs = (
-            sampling_metadata.max_num_batch_sample_logprobs > 0)
-        do_batch_prompt_logprobs = (
-            sampling_metadata.max_num_batch_prompt_logprobs > 0)
-        do_batch_any_logprobs = (do_batch_sample_logprobs
-                                 or do_batch_prompt_logprobs)
+        # Sample next token.
+        logits = self._process_logits(logits, sampling_metadata)
+        probs = self.get_probs(logits)
+        sampled = self.sample(probs, sampling_metadata)
+        # Use int32 to reduce the tensor size.
+        sampled = sampled.to(torch.int32)
 
-        num_query_tokens = sampling_metadata.num_query_tokens
-        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
-        # request in the batch. While we should not sample any token from this
-        # partial request, we do so for simplicity. We will ignore the sampled
-        # token from the partial request.
-        assert sampling_metadata.query_start_loc is not None
-        maybe_sample_logits_indices = sampling_metadata.query_start_loc[1:] - 1
-        prompt_logits_mask = torch.ones(sampling_metadata.num_input_tokens,
-                                        dtype=torch.bool)
-        # Sequence offsets where a token is being decoded are *not* prompt
-        # tokens...
-        pdx = sampling_metadata.partial_req_index
-        prompt_logits_mask[maybe_sample_logits_indices] = False
-        # ...unless the request in question is partial
-        prompt_logits_mask[maybe_sample_logits_indices[pdx]] = True
+        # Compute the logprobs.
+        # NOTE: CPU-GPU synchronization happens here. 
+        logprob_token_ids, logprobs = self.compute_logprobs(
+            logits,
+            sampling_metadata.max_num_logprobs
+        )
 
-        # Apply temperature, top-k and top-p to logits at sequence offsets
-        # where a new token is being decoded.
-        if do_batch_prompt_logprobs:
-            # If prompt logprobs are required, then temp/top-k/top-p
-            # must also be applied to prompt logits as a prerequisite.
-            # So pass *all* logits through temp/top-k/top-p, then gather
-            # the processed logits from the sequence offsets where a new token
-            # is being decoded.
-            logits_w_tmp_tpk_tpp = self._apply_temperature_top_k_top_p(
-                logits, sampling_metadata, num_query_tokens)
-
-            maybe_sample_logits_w_tmp_tpk_tpp = (
-                logits_w_tmp_tpk_tpp[maybe_sample_logits_indices])
-        else:
-            # If prompt logprobs are not required, then gather the logits
-            # only from the sequence offsets where a new token is being
-            # decoded, and *only* apply temp/top-k/top-p to those logits.
-            maybe_sample_logits_w_tmp_tpk_tpp = (
-                self._apply_temperature_top_k_top_p(
-                    logits[maybe_sample_logits_indices], sampling_metadata,
-                    None))
-
-        # Compute and sample token probability distribution, *only* at sequence
-        # offsets where a new token is being decoded
-        maybe_sampled = self._probs_sample(maybe_sample_logits_w_tmp_tpk_tpp,
-                                           sampling_metadata)
-
-        # Compute sample & prompt logprobs, as-needed
-        if do_batch_any_logprobs:
-            (
-                maybe_sample_logprobs,
-                maybe_sample_logprobs_token_indices,
-                prompt_logprobs,
-                prompt_logprobs_token_indices,
-            ) = self._compute_logprobs_from_processed_logits(
-                do_batch_sample_logprobs=do_batch_sample_logprobs,
-                do_batch_prompt_logprobs=do_batch_prompt_logprobs,
-                maybe_sampled=maybe_sampled,
-                maybe_sample_logits_indices=maybe_sample_logits_indices,
-                prompt_logits_mask=prompt_logits_mask,
-                sampling_metadata=sampling_metadata,
-                maybe_sample_logits_w_tmp_tpk_tpp=
-                maybe_sample_logits_w_tmp_tpk_tpp,
-                logits_w_tmp_tpk_tpp=(logits_w_tmp_tpk_tpp
-                                      if do_batch_prompt_logprobs else None))
-
-            # Return decoded output tokens and sample/prompt logprobs,
-            # as required
-            return SamplerOutput(
-                sampled_token_ids=maybe_sampled.tolist(),
-                batch_sample_logprobs=maybe_sample_logprobs,
-                batch_sample_logprob_token_ids=
-                maybe_sample_logprobs_token_indices,
-                batch_prompt_logprobs=prompt_logprobs,
-                batch_prompt_logprob_token_ids=prompt_logprobs_token_indices)
-        else:
-            # No logprobs; return decoded output tokens
-            return SamplerOutput(sampled_token_ids=maybe_sampled.tolist())
+        # NOTE: CPU-GPU synchronization happens here.
+        sampler_output = SamplerOutput(
+            sampled_token_ids=sampled.tolist(),
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs,
+        )
+        return sampler_output
 
     def _apply_temperature(
         self,
@@ -341,6 +112,15 @@ class Sampler(nn.Module):
             sampling_metadata.no_top_p,
             sampling_metadata.top_p,
         )
+
+    def _process_logits(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        logits = self.apply_top_k_top_p(logits, sampling_metadata)
+        return logits
 
     def get_probs(self, logits: torch.Tensor) -> torch.Tensor:
         return torch.softmax(logits, dim=-1, dtype=torch.float32)

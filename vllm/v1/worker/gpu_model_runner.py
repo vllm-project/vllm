@@ -208,6 +208,14 @@ class GPUModelRunner:
             self.input_batch.block_table_cpu[
                 req_index, start_index:end_index] = req_data.new_block_ids
 
+            # TODO(rob): is there a cleaner way to do this?
+            # If the request is still in the prompt phase and requires
+            # prompt logprobs, include it in active_prompt_logprobs.
+            if (req_id == scheduler_output.partial_req_id
+                    and req_id in self.input_batch.num_prompt_logprobs):
+                self.input_batch.active_prompt_logprobs[req_id] = (
+                    self.input_batch.num_prompt_logprobs[req_id])
+
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -262,7 +270,7 @@ class GPUModelRunner:
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> FlashAttentionMetadata:
+    ) -> Tuple[FlashAttentionMetadata, np.ndarray[bool]]:
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -367,11 +375,22 @@ class GPUModelRunner:
             block_table=self.input_batch.block_table[:num_reqs],
             slot_mapping=slot_mapping,
         )
-        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
-        # request in the batch. While we should not sample any token from this
-        # partial request, we do so for simplicity. We will ignore the sampled
-        # token from the partial request.
-        return attn_metadata
+
+        # Get mask of indices that need logits for sampling.
+        sample_logits_mask = query_start_loc[1:] - 1
+
+        # Get mask of indices that need logits for prompt logprobs.
+        # NOTE(rob): we should avoid loops over all reqs in this fn,
+        # but the size of num_prompt_logprobs is small since it is
+        # only requests that are currently in the prefill phase.
+        prompt_logprobs_indicies = [
+            self.input_batch.req_id_to_index[req_id]
+            for req_id in self.input_batch.num_prompt_logprobs
+        ]
+        prompt_logits_mask = torch.from_numpy(
+            np.isin(req_indices, prompt_logprobs_indicies))
+
+        return attn_metadata, sample_logits_mask, prompt_logits_mask
 
     def _prepare_sampling(
         self,
@@ -483,7 +502,8 @@ class GPUModelRunner:
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata = self._prepare_inputs(scheduler_output)
+        attn_metadata, sample_logits_mask, prompt_logits_mask = (
+            self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -498,12 +518,6 @@ class GPUModelRunner:
 
         sampling_metadata = self._prepare_sampling(
             scheduler_output, num_input_tokens, attn_metadata.query_start_loc)
-        # Indicate whether one or more requests in the batch require sample
-        # logprobs or prompt logprobs to be computed, respectively
-        do_batch_sample_logprobs = (
-            sampling_metadata.max_num_batch_sample_logprobs > 0)
-        do_batch_prompt_logprobs = (
-            sampling_metadata.max_num_batch_prompt_logprobs > 0)
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -537,12 +551,13 @@ class GPUModelRunner:
                 attn_metadata=None,
                 inputs_embeds=inputs_embeds,
             )
-
         hidden_states = hidden_states[:num_scheduled_tokens]
+        sample_hidden_states = hidden_states[sample_logits_mask]
+        sample_logits = self.model.compute_logits(sample_hidden_states, None)
 
-        # Sample the next token and get logprobs if needed.
-        sampler_output: SamplerOutput = self.model.sample(
-            logits=self.model.compute_logits(hidden_states, None),
+        # Sample the next token.
+        sampler_output = self.model.sample(
+            logits=sample_logits,
             sampling_metadata=sampling_metadata,
         )
 
@@ -569,6 +584,12 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
+        # Indicate whether one or more requests in the batch require sample
+        # logprobs or prompt logprobs to be computed, respectively
+        do_batch_sample_logprobs = (
+            sampling_metadata.max_num_batch_sample_logprobs > 0)
+        do_batch_prompt_logprobs = (
+            sampling_metadata.max_num_batch_prompt_logprobs > 0)
         # Prepare batch-level sample logprobs in a way that the type-checker
         # understands
         if do_batch_sample_logprobs:
