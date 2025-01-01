@@ -80,13 +80,6 @@ def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     return feat_lengths, output_lengths
 
 
-def get_max_qwen2_audio_audio_tokens(ctx: InputContext) -> int:
-    hf_config = ctx.get_hf_config(Qwen2AudioConfig)
-    max_source_position = hf_config.audio_config.max_source_positions
-    output_lengths = (max_source_position - 2) // 2 + 1
-    return output_lengths
-
-
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -94,8 +87,8 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
 
     def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
         hf_config = self.ctx.get_hf_config(Qwen2AudioConfig)
-        max_source_position = hf_config.audio_config.max_source_positions
-        max_output_lengths = (max_source_position - 2) // 2 + 1
+        max_source_positions = hf_config.audio_config.max_source_positions
+        max_output_lengths = (max_source_positions - 2) // 2 + 1
 
         return {"audio": max_output_lengths}
 
