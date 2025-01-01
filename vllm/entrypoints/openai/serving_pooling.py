@@ -15,7 +15,8 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PoolingChatRequest,
                                               PoolingRequest, PoolingResponse,
                                               PoolingResponseData, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils import merge_async_iterators
@@ -44,7 +45,7 @@ class OpenAIServingPooling(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        base_model_paths: List[BaseModelPath],
+        models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
@@ -52,9 +53,7 @@ class OpenAIServingPooling(OpenAIServing):
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         base_model_paths=base_model_paths,
-                         lora_modules=None,
-                         prompt_adapters=None,
+                         models=models,
                          request_logger=request_logger)
 
         self.chat_template = chat_template
