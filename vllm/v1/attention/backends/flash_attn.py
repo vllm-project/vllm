@@ -328,10 +328,13 @@ def cascade_attention(
     assert num_common_kv_blocks > 0
 
     # Process shared prefix.
+    prefix_only = common_prefix_len == max_kv_len
+    prefix_output = output if prefix_only else None
     prefix_output, prefix_lse = flash_attn_varlen_func(
         q=query,
         k=key_cache,
         v=value_cache,
+        out=prefix_output,
         cu_seqlens_q=cu_prefix_query_lens,
         cu_seqlens_k=cu_prefix_kv_lens,
         max_seqlen_q=num_tokens,
@@ -343,6 +346,8 @@ def cascade_attention(
         softcap=logits_soft_cap,
         return_softmax_lse=True,
     )
+    if prefix_only:
+        return prefix_output
 
     # Process suffix per query.
     suffix_output, suffix_lse = flash_attn_varlen_func(
