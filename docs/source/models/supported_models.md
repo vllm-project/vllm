@@ -566,7 +566,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - [V1](gh-issue:8779)
 * - `AriaForConditionalGeneration`
   - Aria
-  - T + I
+  - T + I<sup>+</sup>
   - `rhymes-ai/Aria`
   -
   - ✅︎

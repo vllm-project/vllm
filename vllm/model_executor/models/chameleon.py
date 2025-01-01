@@ -31,6 +31,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -59,6 +60,9 @@ def get_max_chameleon_image_tokens(ctx: InputContext):
 
 
 class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return MultiModalDataParser(max_mm_counts={"image": 1})
 
     def _get_hf_processor(self) -> ChameleonProcessor:
         return self.ctx.get_hf_processor(ChameleonProcessor)
