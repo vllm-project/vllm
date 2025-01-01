@@ -16,15 +16,15 @@ from .monitor import start_monitoring_torch_compile
 logger = init_logger(__name__)
 
 _T = TypeVar("_T", bound=type[nn.Module])
-DynamicDimValue = Union[int, List[int]]
-DynamicDimFunc = Callable[[torch.Tensor], DynamicDimValue]
+DimIndexes = Union[int, List[int]]
+DimIndexesSelector = Callable[[torch.Tensor], DimIndexes]
 
 
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: Optional[Dict[str, Union[DynamicDimValue,
-                                               DynamicDimFunc]]],
+    dynamic_arg_dims: Optional[Dict[str, Union[DimIndexes,
+                                               DimIndexesSelector]]],
 ) -> Callable[[_T], _T]:
     ...
 
@@ -37,8 +37,8 @@ def support_torch_compile(cls: _T) -> _T:
 def support_torch_compile(
     cls: Optional[_T] = None,
     *,
-    dynamic_arg_dims: Optional[Dict[str, Union[DynamicDimValue,
-                                               DynamicDimFunc]]] = None,
+    dynamic_arg_dims: Optional[Dict[str, Union[DimIndexes,
+                                               DimIndexesSelector]]] = None,
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -134,7 +134,7 @@ def support_torch_compile(
 
 def _support_torch_compile(
     cls: _T,
-    dynamic_arg_dims: Dict[str, Union[DynamicDimValue, DynamicDimFunc]],
+    dynamic_arg_dims: Dict[str, Union[DimIndexes, DimIndexesSelector]],
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
