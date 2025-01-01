@@ -319,7 +319,7 @@ async def health(raw_request: Request) -> Response:
     return Response(status_code=200)
 
 
-@router.post("/ping")
+@router.api_route("/ping", methods=["GET", "POST"])
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
     return await health(raw_request)
