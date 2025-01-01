@@ -262,8 +262,8 @@ class Scheduler:
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) == len(self.running))
 
-        # Get the longest common prefix. This can be potentially used for
-        # cascade attention.
+        # Get the longest common prefix among all requests in the running queue.
+        # This can be potentially used for cascade attention.
         if self.running:
             any_request = self.running[0]
             num_common_prefix_blocks = (
