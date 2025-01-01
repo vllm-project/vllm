@@ -313,6 +313,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         supported_attention_backends: List[str] = \
             _get_supported_attention_backends(
                 self.scheduler_config.chunked_prefill_enabled)
+
+        assert isinstance(self.attn_backend, AttentionBackend)
         if self.attn_backend.get_name() not in supported_attention_backends:
             ms_config_str: str = "Multi-Step + Chunked-Prefill" \
                 if self.scheduler_config.chunked_prefill_enabled \

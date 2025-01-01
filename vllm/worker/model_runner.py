@@ -1048,14 +1048,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         needs_attn_backend = (num_attn_heads != 0
                               or self.model_config.is_attention_free)
 
-        self.attn_backend: AttentionBackend = get_attn_backend(
+        self.attn_backend: Optional[AttentionBackend] = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
         ) if needs_attn_backend else None
-        if self.attn_backend:
+        if self.attn_backend is not None:
             self.attn_state = self.attn_backend.get_state_cls()(
                 weakref.proxy(self))
         else:
@@ -1481,6 +1481,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         )
                         self.set_active_prompt_adapters(
                             set(), prompt_adapter_mapping)
+                    assert isinstance(self.attn_backend, AttentionBackend)
                     graph_runner = CUDAGraphRunner(
                         self.model, self.attn_backend.get_name(),
                         self.attn_state.graph_clone(batch_size),
