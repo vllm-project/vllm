@@ -258,8 +258,8 @@ def use_cascade_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     # The criteria for using FlashDecoding can be found in the following link:
     # https://github.com/vllm-project/flash-attention/blob/96266b1111111f3d11aabefaf3bacbab6a89d03c/csrc/flash_attn/flash_api.cpp#L535
-    use_flash_decoding = (num_queries_per_kv > 1 and np.all(query_lens == 1)
-                          and not use_sliding_window and not use_alibi)
+    use_flash_decoding = (num_queries_per_kv > 1 and not use_sliding_window
+                          and not use_alibi and np.all(query_lens == 1))
     if not use_flash_decoding:
         # Use cascade attention.
         return True
