@@ -359,8 +359,9 @@ class MultiModalDataParser:
                 max_count = max_mm_counts[k]
                 if len(modality_items) > max_count:
                     raise ValueError(
-                        f"This model supports at most {max_count} {k} items, "
-                        f"but you inputted {len(modality_items)} items!")
+                        f"This model supports at most {max_count} {k} items "
+                        f"per prompt, but {len(modality_items)} {k} items "
+                        "were given or set as its limit_mm_per_prompt.")
 
             mm_items[k] = modality_items
 
