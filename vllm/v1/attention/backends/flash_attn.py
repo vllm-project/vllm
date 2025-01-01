@@ -409,6 +409,9 @@ def merge_attn_states(
                     head_idx * HEAD_SIZE + head_arange,
                     mask=head_mask)
 
+    # NOTE(woosuk): Be careful with the numerical stability.
+    # We should compute the scale first, and then multiply it with the output.
+    # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
     p_scale = tl.exp(p_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
     s_scale = tl.exp(s_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
     out = p_out * p_scale + s_out * s_scale
