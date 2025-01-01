@@ -370,13 +370,13 @@ class GPUModelRunner:
             # Common case.
             use_cascade = False
         else:
-            # NOTE(woosuk): Cascade attention uses two kernels: one for the
-            # common prefix and the other for the rest. For the first kernel,
-            # we concatenate all the query tokens (possibly from different
-            # requests) and treat them as if they are from a single request.
-            # Then, we use bi-directional attention to process the common prefix
-            # in the KV cache. Importantly, this means that the first kernel
-            # does not do any masking.
+            # NOTE(woosuk): Cascade attention uses two attention kernels: one
+            # for the common prefix and the other for the rest. For the first
+            # kernel, we concatenate all the query tokens (possibly from
+            # different requests) and treat them as if they are from the same
+            # request. Then, we use bi-directional attention to process the
+            # common prefix in the KV cache. Importantly, this means that the
+            # first kernel does not do any masking.
 
             # Consider the following example:
             # Request 1's input query: [D, E, X]
@@ -395,9 +395,23 @@ class GPUModelRunner:
             # That is, the common prefix should be capped by the minimum
             # num_computed_tokens among the requests, and plus one to include
             # the first token of the query.
+
+            # In practice, we use [A, B, C] as the common prefix, instead of
+            # [A, B, C, D] (i.e., the common prefix is capped by the minimum
+            # num_computed_tokens, without plus one).
+            # This is because of an implementation detail: We want to always
+            # use two kernels for cascade attention. Let's imagine:
+            # Request 3's input query: [D]
+            # Request 3's kv cache: [A, B, C, D]
+            # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
+            # If we use [A, B, C, D] as the common prefix for Request 1-3,
+            # then Request 3 will be processed only by the first kernel,
+            # and the second kernel will get an empty input. While this is not
+            # a fundamental problem, our current implementation does not support
+            # this case.
             common_prefix_len = min(
                 common_prefix_len,
-                self.input_batch.num_computed_tokens_cpu[:num_reqs].min() + 1)
+                self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
             # common_prefix_len should be a multiple of the block size.
             common_prefix_len = (common_prefix_len // self.block_size *
                                  self.block_size)
