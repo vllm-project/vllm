@@ -46,7 +46,15 @@ class OpenAIBaseModel(BaseModel):
     @classmethod
     def __log_extra_fields__(cls, data):
         if isinstance(data, dict):
-            extra_fields = data.keys() - cls.model_fields.keys()
+            # Get all class field names and their potential aliases
+            field_names = set()
+            for field_name, field in cls.model_fields.items():
+                field_names.add(field_name)
+                if hasattr(field, 'alias') and field.alias:
+                    field_names.add(field.alias)
+
+            # Compare against both field names and aliases
+            extra_fields = data.keys() - field_names
             if extra_fields:
                 logger.warning(
                     "The following fields were present in the request "
@@ -955,6 +963,10 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
+PoolingCompletionRequest = EmbeddingCompletionRequest
+PoolingChatRequest = EmbeddingChatRequest
+PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
+
 
 class ScoreRequest(OpenAIBaseModel):
     model: str
@@ -1047,6 +1059,21 @@ class EmbeddingResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     data: List[EmbeddingResponseData]
+    usage: UsageInfo
+
+
+class PoolingResponseData(OpenAIBaseModel):
+    index: int
+    object: str = "pooling"
+    data: Union[List[List[float]], List[float], str]
+
+
+class PoolingResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"pool-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: List[PoolingResponseData]
     usage: UsageInfo
 
 
