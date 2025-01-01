@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 
 import numpy as np
@@ -24,6 +24,9 @@ logger = init_logger(__name__)
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
 _M = TypeVar("_M")
+
+if TYPE_CHECKING:
+    from ..multimodal import MultiModalPlaceholderDict
 
 
 class MediaConnector:
@@ -437,3 +440,28 @@ def consecutive_placeholder_ranges(
         PlaceholderRange(offset=initial_offset + i * item_size,
                          length=item_size) for i in range(num_items)
     ]
+
+
+def merge_and_sort_placeholders_from_modalities(
+    modalities: list[str], mm_positions: "MultiModalPlaceholderDict"
+) -> tuple[list[tuple[str, int]], list[PlaceholderRange]]:
+
+    placeholder_lists_with_modality = [(modality, mm_positions[modality])
+                                       for modality in modalities
+                                       if modality in mm_positions]
+
+    sorted_lists_with_modality = sorted(placeholder_lists_with_modality,
+                                        key=lambda x: x[1][0]['offset'])
+
+    # Verify if the sorted order avoids interleaving
+    merged: list[PlaceholderRange] = []
+    for modality, placeholder_list in sorted_lists_with_modality:
+        if merged and placeholder_list[0]['offset'] < merged[-1]['offset']:
+            raise ValueError(
+                "Interleaved mixed-modality inference is currently not "
+                "supported.")
+        merged.extend(placeholder_list)
+
+    # Return the order of the keys and the merged result
+    return [(modality, len(lst))
+            for modality, lst in sorted_lists_with_modality], merged
