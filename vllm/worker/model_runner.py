@@ -448,7 +448,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         self.runner = runner
         self.model_input_cls = self.runner._model_input_cls
-        self.attn_backend = self.runner.attn_backend
+        self.attn_backend: AttentionBackend = self.runner.attn_backend
         self.scheduler_config = self.runner.scheduler_config
         self.sliding_window = self.runner.sliding_window
         self.block_size = self.runner.block_size
@@ -1048,7 +1048,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         needs_attn_backend = (num_attn_heads != 0
                               or self.model_config.is_attention_free)
 
-        self.attn_backend = get_attn_backend(
+        self.attn_backend: AttentionBackend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,

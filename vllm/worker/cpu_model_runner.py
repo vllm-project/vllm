@@ -142,11 +142,11 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.chunked_prefill = (runner.scheduler_config.chunked_prefill_enabled
                                 or runner.cache_config.enable_prefix_caching)
         self.model_input_cls = self.runner._model_input_cls
-        self.attn_backend = self.runner.attn_backend
+        self.attn_backend: AttentionBackend = self.runner.attn_backend
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
-        self.att_metadata_builder = self.runner.attn_backend.get_builder_cls()(
+        self.att_metadata_builder = self.attn_backend.get_builder_cls()(
             self)
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):

@@ -371,10 +371,14 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         else:
             seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
+        blocks_to_copy: List[Tuple[int, int]]
+        blocks_to_swap_in: List[Tuple[int, int]]
+        blocks_to_swap_out: List[Tuple[int, int]] 
+
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups: int = len(seq_group_metadata_list)
-            assert execute_model_req is not None
+            assert isinstance(execute_model_req, ExecuteModelRequest)
             blocks_to_copy = execute_model_req.blocks_to_copy
             blocks_to_swap_in = execute_model_req.blocks_to_swap_in
             blocks_to_swap_out = execute_model_req.blocks_to_swap_out
@@ -393,8 +397,8 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
             blocks_to_swap_out = data["blocks_to_swap_out"]
 
         if current_platform.is_openvino_cpu():
-            assert len(execute_model_req.blocks_to_swap_in) == 0
-            assert len(execute_model_req.blocks_to_swap_out) == 0
+            assert len(blocks_to_swap_in) == 0
+            assert len(blocks_to_swap_out) == 0
         else:
             self.cache_swap_in(blocks_to_swap_in)
             self.cache_swap_out(blocks_to_swap_out)
