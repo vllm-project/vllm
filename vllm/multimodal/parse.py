@@ -220,11 +220,24 @@ ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
 class MultiModalDataParser:
     """
     Parses :class:`MultiModalDataDict` into :class:`MultiModalDataItems`.
+
+    Args:
+        max_mm_counts (Mapping[str, int]): The maximum allowed number of items
+            belonging to each modality. This effectively sets a hard limit over
+            `--limit-mm-per-prompt`.
+        target_sr (float, optional): Enables automatic resampling of audio
+            items to the model's expected sampling rate.
     """
 
-    def __init__(self, *, target_sr: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_mm_counts: Mapping[str, int] = {},
+        target_sr: Optional[float] = None,
+    ) -> None:
         super().__init__()
 
+        self.max_mm_counts = max_mm_counts
         self.target_sr = target_sr
 
     def _is_embeddings(self, data: object) -> TypeGuard[NestedTensors]:
@@ -332,6 +345,7 @@ class MultiModalDataParser:
 
     def parse_mm_data(self,
                       mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        max_mm_counts = self.max_mm_counts
         subparsers = self._get_subparsers()
 
         mm_items = MultiModalDataItems()
@@ -339,6 +353,16 @@ class MultiModalDataParser:
             if k not in subparsers:
                 raise ValueError(f"Unsupported modality: {k}")
 
-            mm_items[k] = subparsers[k](v)
+            modality_items = subparsers[k](v)
+
+            if k in max_mm_counts:
+                max_count = max_mm_counts[k]
+                if len(modality_items) > max_count:
+                    raise ValueError(
+                        f"This model supports at most {max_count} {k} items "
+                        f"per prompt, but {len(modality_items)} {k} items "
+                        "were given or set as its limit_mm_per_prompt.")
+
+            mm_items[k] = modality_items
 
         return mm_items

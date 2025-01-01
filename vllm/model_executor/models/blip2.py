@@ -18,6 +18,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -403,6 +404,9 @@ def get_max_blip2_image_tokens(ctx: InputContext):
 
 
 class Blip2MultiModalProcessor(BaseMultiModalProcessor):
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return MultiModalDataParser(max_mm_counts={"image": 1})
 
     def _get_hf_processor(self) -> Blip2Processor:
         return self.ctx.get_hf_processor(Blip2Processor)
