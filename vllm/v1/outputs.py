@@ -22,7 +22,6 @@ class SamplerOutput:
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: Optional[torch.Tensor] = None
     logprobs: Optional[torch.Tensor] = None
-    
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.

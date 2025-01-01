@@ -111,7 +111,7 @@ class InputBatch:
         self.top_k_reqs: Set[str] = set()
 
         # Logprobs-related.
-        # NOTE(rob): The prompt logprobs trackers only include reqs that 
+        # NOTE(rob): The prompt logprobs trackers only include reqs that
         # are actively generating logprobs (i.e. in prefill phase).
         self.num_logprobs: Dict[str, int] = {}
         self.num_prompt_logprobs: Dict[str, int] = {}
@@ -123,7 +123,6 @@ class InputBatch:
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
         self.generators: Dict[int, torch.Generator] = {}
-
 
     def add_request(
         self,
@@ -176,7 +175,6 @@ class InputBatch:
             self.num_logprobs[req_id] = num_logprobs
         if num_prompt_logprobs and num_prompt_logprobs > 0:
             self.num_prompt_logprobs[req_id] = num_prompt_logprobs
-
 
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)

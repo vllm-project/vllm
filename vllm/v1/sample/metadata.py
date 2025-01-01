@@ -18,3 +18,11 @@ class SamplingMetadata:
 
     generators: Dict[int, torch.Generator]
     max_num_logprobs: int
+
+
+@dataclass
+class PromptLogprobsMetadata:
+
+    temperature: torch.Tensor
+    top_p: torch.Tensor
+    top_k: torch.Tensor

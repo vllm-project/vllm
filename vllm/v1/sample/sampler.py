@@ -4,45 +4,13 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.v1.outputs import SamplerOutput, LogprobsOutput
+from vllm.v1.outputs import SamplerOutput, PromptLogprobsOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
 _SAMPLING_EPS = 1e-5
 
 
 class Sampler(nn.Module):
-
-    def _probs_sample(
-        self,
-        maybe_sample_logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
-        probs = self.get_probs(maybe_sample_logits)
-        sampled = self.sample(probs, sampling_metadata)
-        # Use int32 to reduce the tensor size.
-        return sampled.to(torch.int32)
-
-   
-
-    def compute_logprobs(
-        self,
-        logits: torch.Tensor,
-        max_num_logprobs: int
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Compute logprobs and move to CPU."""
-        
-        if max_num_logprobs > 0:
-            logprobs = self.get_logprobs(logits)
-            # FIXME: Mask the sampled token_id, get topk logprobs,
-            # and concatenate the topk with the sampled token_id.
-            topk_logprobs, topk_indices = torch.topk(
-                logprobs, max_num_logprobs, dim=-1)
-            # Use int32 to reduce the tensor size.
-            topk_indices = topk_indices.to(torch.int32)
-
-            return topk_logprobs.cpu(), topk_indices.cpu()
-        else:
-            return None, None
 
     def forward(
         self,
@@ -72,12 +40,10 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
-        # Compute the logprobs.
+        # Compute the logprobs if requested.
         # NOTE: CPU-GPU synchronization happens here. 
-        logprob_token_ids, logprobs = self.compute_logprobs(
-            logits,
-            sampling_metadata.max_num_logprobs
-        )
+        logprob_token_ids, logprobs = self._compute_logprobs(
+            logits, sampling_metadata.max_num_logprobs)
 
         # NOTE: CPU-GPU synchronization happens here.
         sampler_output = SamplerOutput(
@@ -86,6 +52,41 @@ class Sampler(nn.Module):
             logprobs=logprobs,
         )
         return sampler_output
+
+    def get_prompt_logprobs(
+        self,
+        logits: torch.Tensor,
+
+    ) -> PromptLogprobsOutput:
+        
+        
+        
+    def _compute_logprobs(
+        self,
+        logits: torch.Tensor,
+        max_num_logprobs: int
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:        
+        if max_num_logprobs > 0:
+            logprobs = self.get_logprobs(logits)
+            # FIXME: Mask the sampled token_id, get topk logprobs,
+            # and concatenate the topk with the sampled token_id.
+            topk_logprobs, topk_indices = torch.topk(
+                logprobs, max_num_logprobs, dim=-1)
+            # Use int32 to reduce the tensor size.
+            topk_indices = topk_indices.to(torch.int32)
+
+            return topk_logprobs.cpu(), topk_indices.cpu()
+        else:
+            return None, None
+
+    def _process_logits(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        logits = self._apply_temperature(logits, sampling_metadata.temperature)
+        logits = self._apply_top_k_top_p(logits, sampling_metadata)
+        return logits
 
     def _apply_temperature(
         self,
@@ -112,15 +113,6 @@ class Sampler(nn.Module):
             sampling_metadata.no_top_p,
             sampling_metadata.top_p,
         )
-
-    def _process_logits(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
-        logits = self.apply_top_k_top_p(logits, sampling_metadata)
-        return logits
 
     def get_probs(self, logits: torch.Tensor) -> torch.Tensor:
         return torch.softmax(logits, dim=-1, dtype=torch.float32)
