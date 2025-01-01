@@ -26,3 +26,4 @@ class PromptLogprobsMetadata:
     temperature: torch.Tensor
     top_p: torch.Tensor
     top_k: torch.Tensor
+    max_num_logprobs: int

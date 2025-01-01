@@ -116,9 +116,6 @@ class InputBatch:
         self.num_logprobs: Dict[str, int] = {}
         self.num_prompt_logprobs: Dict[str, int] = {}
 
-        # NOTE(rob): The req indexes that need sampling
-        self.needs_logits: set[int] = set()
-
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
@@ -269,9 +266,8 @@ class InputBatch:
             no_top_p=self.no_top_p,
             no_top_k=self.no_top_k,
             generators=self.generators,
-            max_num_batch_sample_logprobs=self.max_num_logprobs,
-            max_num_batch_prompt_logprobs=self.max_num_prompt_logprobs,
-            prompt_logprobs_req_indices=[xxx])
+            max_num_logprobs=self.max_num_logprobs,
+        )
 
     @property
     def num_reqs(self) -> int:

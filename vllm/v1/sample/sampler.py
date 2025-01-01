@@ -5,7 +5,8 @@ import torch
 import torch.nn as nn
 
 from vllm.v1.outputs import SamplerOutput, PromptLogprobsOutput
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.metadata import (SamplingMetadata,
+                                     PromptLogprobsMetadata)
 
 _SAMPLING_EPS = 1e-5
 
@@ -56,10 +57,18 @@ class Sampler(nn.Module):
     def get_prompt_logprobs(
         self,
         logits: torch.Tensor,
-
+        prompt_logprobs_metadata: PromptLogprobsMetadata,
     ) -> PromptLogprobsOutput:
+        logits = self._process_logits(logits, prompt_logprobs_metadata)
+
+        # Compute the prompt logprobs if requested.
+        # NOTE: CPU-GPU synchronization happens here.
+        logprob_token_ids, logprobs = self._compute_logprobs(
+            logits, prompt_logprobs_metadata.max_num_logprobs)
         
-        
+        return PromptLogprobsOutput(
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs)
         
     def _compute_logprobs(
         self,

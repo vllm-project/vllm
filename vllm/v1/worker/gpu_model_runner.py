@@ -584,37 +584,12 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        # Indicate whether one or more requests in the batch require sample
-        # logprobs or prompt logprobs to be computed, respectively
-        do_batch_sample_logprobs = (
-            sampling_metadata.max_num_batch_sample_logprobs > 0)
-        do_batch_prompt_logprobs = (
-            sampling_metadata.max_num_batch_prompt_logprobs > 0)
-        # Prepare batch-level sample logprobs in a way that the type-checker
-        # understands
-        if do_batch_sample_logprobs:
-            assert (sampler_output.batch_sample_logprob_token_ids is not None)
-            assert (sampler_output.batch_sample_logprobs is not None)
-            batch_logprob_token_ids_cpu = (
-                sampler_output.batch_sample_logprob_token_ids.cpu().numpy())
-            batch_logprobs_cpu = (
-                sampler_output.batch_sample_logprobs.cpu().numpy())
-        else:
-            batch_logprob_token_ids_cpu = None
-            batch_logprobs_cpu = None
-
-        # Prepare batch-level prompt logprobs in a way that the type-checker
-        # understands
-        if do_batch_prompt_logprobs:
-            assert (sampler_output.batch_prompt_logprob_token_ids is not None)
-            assert (sampler_output.batch_prompt_logprobs is not None)
-            batch_prompt_logprob_token_ids_cpu = (
-                sampler_output.batch_prompt_logprob_token_ids.cpu().numpy())
-            batch_prompt_logprobs_cpu = (
-                sampler_output.batch_prompt_logprobs.cpu().numpy())
-        else:
-            batch_prompt_logprob_token_ids_cpu = None
-            batch_prompt_logprobs_cpu = None
+        # Compute prompt logprobs.
+        prompt_hidden_states = hidden_states[prompt_logits_mask]
+        prompt_logits = self.model.compute_logits(prompt_hidden_states, None)
+        # TODO: why is the sampler part of the model def?
+        prompt_logprobs_output = self.model.sampler.get_prompt_logprobs(
+            prompt_logits, prompt_logprobs_metadata)
 
         model_runner_output = ModelRunnerOutput(
             req_ids=cast(List[str], self.input_batch.req_ids[:num_reqs]),
