@@ -310,7 +310,8 @@ class KVCacheManager:
             request: Any request in the RUNNING state, used to identify the
                 common prefix blocks.
             num_running_requests: The total number of requests in the RUNNING
-                state.
+                state. This can be different from the number of scheduled
+                requests in the current step.
 
         Returns:
             int: The number of common prefix blocks.
