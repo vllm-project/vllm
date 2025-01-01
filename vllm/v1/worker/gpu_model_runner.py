@@ -395,8 +395,6 @@ class GPUModelRunner:
     def _prepare_sampling(
         self,
         scheduler_output: "SchedulerOutput",
-        num_input_tokens: int,
-        query_start_loc: torch.Tensor,
     ) -> SamplingMetadata:
         skip_copy = True
         if (scheduler_output.finished_req_ids
@@ -406,12 +404,7 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(
-            scheduler_output.partial_req_index,
-            num_input_tokens,
-            query_start_loc,
-            skip_copy,
-        )
+        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -516,7 +509,7 @@ class GPUModelRunner:
             num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
 
-        sampling_metadata = self._prepare_sampling(
+        sampling_metadata, prompt_logprobs_metadata = self._prepare_sampling(
             scheduler_output, num_input_tokens, attn_metadata.query_start_loc)
 
         if self.is_multimodal_model:
@@ -587,22 +580,19 @@ class GPUModelRunner:
         # Compute prompt logprobs.
         prompt_hidden_states = hidden_states[prompt_logits_mask]
         prompt_logits = self.model.compute_logits(prompt_hidden_states, None)
-        # TODO: why is the sampler part of the model def?
+        # TODO(rob): Why is the sampler part of the model definition?
         prompt_logprobs_output = self.model.sampler.get_prompt_logprobs(
             prompt_logits, prompt_logprobs_metadata)
 
-        model_runner_output = ModelRunnerOutput(
+        return ModelRunnerOutput(
             req_ids=cast(List[str], self.input_batch.req_ids[:num_reqs]),
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            # NOTE: sample and prompt logprob CPU-GPU synchronization happens
-            # here
-            batch_logprob_token_ids_cpu=batch_logprob_token_ids_cpu,
-            batch_logprobs_cpu=batch_logprobs_cpu,
-            batch_prompt_logprob_token_ids_cpu=(
-                batch_prompt_logprob_token_ids_cpu),
-            batch_prompt_logprobs_cpu=(batch_prompt_logprobs_cpu))
-        return model_runner_output
+            logprob_token_ids=sampler_output.logprob_token_ids,
+            logprobs=sampler_output.logprobs,
+            prompt_logprob_token_ids=prompt_logprobs_output.logprob_token_ids,
+            prompt_logprobs=prompt_logprobs_output.logprobs,
+        )
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

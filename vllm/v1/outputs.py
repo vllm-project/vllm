@@ -1,16 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional
-
-import numpy.typing as npt
-import torch
-
-
-@dataclass
-class PromptLogprobsOutput:
-
-    # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: Optional[torch.Tensor] = None
-    logprobs: Optional[torch.Tensor] = None
+from typing import Dict, List
 
 
 @dataclass
@@ -19,9 +8,17 @@ class SamplerOutput:
     # [num_reqs]
     sampled_token_ids: List[int]
 
-    # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: Optional[torch.Tensor] = None
-    logprobs: Optional[torch.Tensor] = None
+    # [num_reqs, max_num_logprobs]
+    logprob_token_ids: List[int]
+    logprobs: List[int]
+
+
+@dataclass
+class PromptLogprobsOutput:
+
+    # req_id -> [max_num_prompt_logprobs]
+    logprob_token_ids: Dict[str, List[int]]
+    logprobs: Dict[str, List[float]]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -37,12 +34,10 @@ class ModelRunnerOutput:
     # [num_reqs]
     sampled_token_ids: List[int]
 
-    # [num_reqs, max_num_logprobs + 1]
-    batch_logprob_token_ids_cpu: Optional[npt.NDArray]
-    # [num_reqs, max_num_logprobs + 1]
-    batch_logprobs_cpu: Optional[npt.NDArray]
+    # [num_reqs, max_num_logprobs]
+    logprob_token_ids: List[List[int]]
+    logprobs: List[List[float]]
 
-    # [num_reqs, max_num_prompt_logprobs]
-    batch_prompt_logprob_token_ids_cpu: Optional[npt.NDArray]
-    # [num_reqs, max_num_prompt_logprobs]
-    batch_prompt_logprobs_cpu: Optional[npt.NDArray]
+    # req_id -> [max_num_prompt_logprobs]
+    prompt_logprob_token_ids: Dict[str, List[int]]
+    prompt_logprobs: Dict[str, List[float]]

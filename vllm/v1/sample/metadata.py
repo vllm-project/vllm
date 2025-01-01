@@ -5,17 +5,21 @@ import torch
 
 
 @dataclass
-class SamplingMetadata:
+class LogitsProcessMetadata:
 
     temperature: torch.Tensor
-    all_greedy: bool
-    all_random: bool
-
     top_p: torch.Tensor
     top_k: torch.Tensor
     no_top_p: bool
     no_top_k: bool
 
+
+@dataclass
+class SamplingMetadata:
+
+    all_greedy: bool
+    all_random: bool
+    logits_process_metadata: LogitsProcessMetadata
     generators: Dict[int, torch.Generator]
     max_num_logprobs: int
 
@@ -23,7 +27,7 @@ class SamplingMetadata:
 @dataclass
 class PromptLogprobsMetadata:
 
-    temperature: torch.Tensor
-    top_p: torch.Tensor
-    top_k: torch.Tensor
+    req_ids: List[str]
+    req_indicies: List[int]
+    logits_process_metadata: LogitsProcessMetadata
     max_num_logprobs: int
