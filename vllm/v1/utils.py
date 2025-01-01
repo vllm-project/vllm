@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import weakref
 from collections.abc import Sequence
@@ -100,13 +101,11 @@ class BackgroundProcHandle:
         process_kwargs["ready_pipe"] = writer
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
-        # self.input_path = input_path
-        # self.output_path = output_path
 
         # Run busy loop in background process.
         proc = context.Process(target=target_fn, kwargs=process_kwargs)
-        self._finalizer = weakref.finalize(
-            self, shutdown, proc, input_path, output_path)
+        self._finalizer = weakref.finalize(self, shutdown, proc, input_path,
+                                           output_path)
         proc.start()
 
         # Wait for startup.
@@ -117,7 +116,7 @@ class BackgroundProcHandle:
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(proc, input_path, output_path):
+def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
     # Shutdown the process.
     if proc.is_alive():
         proc.terminate()
