@@ -237,6 +237,12 @@ def use_cascade_attention(
     use_sliding_window: bool,
     num_sms: int,
 ) -> bool:
+    """Decide whether to use cascade attention.
+
+    This function 1) checks whether cascade attention is supported with the
+    given configuration, and 2) heuristically decides whether using cascade
+    attention can improve performance.
+    """
     # Too short common prefix. Probably not worth using cascade attention.
     # We use an arbitrary threshold of 256 tokens. TODO: Tune this threshold.
     # NOTE(woosuk): This is the common case. We should return False as soon as
