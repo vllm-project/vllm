@@ -598,13 +598,9 @@ def input_processor_for_whisper(ctx: InputContext, inputs):
     processor = cached_get_processor(ctx.model_config.model)
     target_sr = processor.feature_extractor.sampling_rate
     audio = resample_audio(audio, orig_sr=orig_sr, target_sr=target_sr)
-    if audio.size > 30 * target_sr:
-        # Truncate audio to 30 seconds
-        audio = audio[:30 * target_sr]
     multi_modal_data["audio"] = (audio, target_sr)
-    # Calculate number of tokens after feature extraction and convolutions
-    num_tokens = (audio.size // 160 - 1) // 2 + 1
     # Pre-allocate placeholder tokens in encoder sequence
+    num_tokens = ctx.model_config.hf_config.max_source_positions
     inputs["encoder"]["prompt_token_ids"] = [0] * num_tokens
     return inputs
 
@@ -628,7 +624,6 @@ def input_mapper_for_whisper(
 
     kwargs = processor(audios,
                        sampling_rate=sampling_rate,
-                       padding=False,
                        return_tensors="pt")
     kwargs["input_features"] = kwargs["input_features"].squeeze(0)
     kwargs["input_features"] = kwargs["input_features"].to(torch.float16)
