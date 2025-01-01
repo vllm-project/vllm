@@ -370,11 +370,34 @@ class GPUModelRunner:
             # Common case.
             use_cascade = False
         else:
-            # The common prefix should be already computed and stored in KV
-            # cache before this step.
+            # NOTE(woosuk): Cascade attention uses two kernels: one for the
+            # common prefix and the other for the rest. For the first kernel,
+            # we concatenate all the query tokens (possibly from different
+            # requests) and treat them as if they are from a single request.
+            # Then, we use bi-directional attention to process the common prefix
+            # in the KV cache. Importantly, this means that the first kernel
+            # does not do any masking.
+
+            # Consider the following example:
+            # Request 1's input query: [D, E, X]
+            # Request 1's kv cache: [A, B, C, D, E, X]
+            # Request 1's num_computed_tokens: 3 (i.e., [A, B, C])
+            # Request 2's input query: [E, Y]
+            # Request 2's kv cache: [A, B, C, D, E, Y]
+            # Request 2's num_computed_tokens: 4 (i.e., [A, B, C, D])
+
+            # If we use [A, B, C, D, E] as the common prefix, then the
+            # first kernel will compute the bi-directional attention between
+            # input query [D, E, X, E, Y] and common prefix [A, B, C, D, E].
+            # However, this is wrong because D in Request 1 should not attend to
+            # E in the common prefix (i.e., we need masking).
+            # To avoid this, [A, B, C, D] should be the common prefix.
+            # That is, the common prefix should be capped by the minimum
+            # num_computed_tokens among the requests, and plus one to include
+            # the first token of the query.
             common_prefix_len = min(
                 common_prefix_len,
-                self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
+                self.input_batch.num_computed_tokens_cpu[:num_reqs].min() + 1)
             # common_prefix_len should be a multiple of the block size.
             common_prefix_len = (common_prefix_len // self.block_size *
                                  self.block_size)
