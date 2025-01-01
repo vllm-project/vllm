@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, List, Optional, Union
 from vllm.inputs import DecoderOnlyInputs, SingletonInputsAdapter, token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.utils import merge_and_sort_placeholders_from_modalities
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
 from vllm.v1.engine import EngineCoreRequest
@@ -49,16 +50,31 @@ class Request:
         self.num_computed_tokens = 0
 
         # Multi-modal input metadata.
+        all_modalities = ["image", "video", "audio"]
         mm_positions = self.inputs.multi_modal_placeholders
         if mm_positions:
-            # FIXME(woosuk): Support other modalities.
-            self.mm_positions = mm_positions.get("image", [])
+            sorted_modalities, sorted_mm_positions = merge_and_sort_placeholders_from_modalities(  # noqa: E501
+                all_modalities, mm_positions)
+            self.mm_positions = sorted_mm_positions
         else:
             self.mm_positions = []
         # Output of the mm input mapper (e.g., image tensors).
         self.mm_inputs: List[MultiModalKwargs] = []
         if self.inputs.multi_modal_inputs:
-            self.mm_inputs = self.inputs.multi_modal_inputs
+            if len(sorted_modalities) == 1:
+                self.mm_inputs = self.inputs.multi_modal_inputs
+            else:
+                for modality, count in sorted_modalities:
+                    for i in range(len(self.inputs.multi_modal_inputs)):
+                        if modality in self.inputs.multi_modal_inputs[i]:
+                            for j in range(count):
+                                self.inputs.multi_modal_inputs[i +
+                                                               j].pop(modality)
+                                self.mm_inputs.append(
+                                    self.inputs.multi_modal_inputs[i + j])
+                            break
+        assert len(self.mm_inputs) == len(self.inputs.multi_modal_inputs)
+        assert len(self.mm_inputs) == len(self.mm_positions)
 
         self.mm_hashes: List[str] = self.inputs.multi_modal_hashes
 
