@@ -18,13 +18,17 @@ from .utils import maybe_prefix
 
 
 class DummyInputLayerNorm(nn.Module):
+
     def forward(self, x):
         return x
 
+
 class DummOutputNorm(nn.Module):
+
     def forward(self, x, residual):
         x = x + residual
         return x, residual
+
 
 class EAGLE(nn.Module):
     """This class implements the EAGLE draft model from the paper: https://arxiv.org/pdf/2401.15077
@@ -60,7 +64,7 @@ class EAGLE(nn.Module):
                             config.model.hidden_size,
                             bias=getattr(self.config, "eagle_fc_bias", False))
 
-        # Modify layer normalization and residual connections as suggested 
+        # Modify layer normalization and residual connections as suggested
         # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
         self.model.model.layers[0].input_layernorm = DummyInputLayerNorm()
         self.model.model.norm = DummOutputNorm()
