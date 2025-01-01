@@ -23,7 +23,6 @@ from functools import cached_property
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union)
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
@@ -177,16 +176,19 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         feature_extractor = self._get_feature_extractor()
+
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
+        num_audios = mm_counts.get("audio", 0)
 
-        audio_count = mm_counts.get("audio", 0)
-        audio = np.zeros(audio_len)
-        data = {"audio": [audio] * audio_count}
+        mm_data = {
+            "audio":
+            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+        }
 
         return ProcessorInputs(
-            prompt_text="<|AUDIO|>" * audio_count,
-            mm_data=data,
+            prompt_text="<|AUDIO|>" * num_audios,
+            mm_data=mm_data,
         )
 
 
