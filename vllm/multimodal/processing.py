@@ -935,6 +935,17 @@ class BaseMultiModalProcessor(ABC):
 
         return [prompt_repl.bind(tokenizer) for prompt_repl in prompt_repls]
 
+    def _always_apply_prompt_replacements(self) -> bool:
+        """
+        A flag which can be overridden so that
+        :meth:`_apply_prompt_replacements` is always called even if we
+        detect that HF has performed processing via :meth:`_find_placeholders`.
+
+        This is useful in cases where :meth:`_find_placeholders` cannot be
+        reliably used to detect whether HF has performed processing or not.
+        """
+        return False
+
     def _apply_prompt_replacements(
         self,
         token_ids: list[int],
@@ -1029,7 +1040,7 @@ class BaseMultiModalProcessor(ABC):
         all_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
                                                    mm_item_counts)
 
-        if all_placeholders:
+        if all_placeholders and not self._always_apply_prompt_replacements():
             tokenizer = self._get_tokenizer()
             prompt_text = _decode(tokenizer, prompt_ids)
         else:
