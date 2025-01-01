@@ -1,25 +1,28 @@
 import pickle
 import re
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from collections.abc import Callable, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, NamedTuple, Optional, Protocol, TypeVar, Union
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from blake3 import blake3
-from PIL.Image import Image
+from PIL import Image
 from transformers import BatchFeature, ProcessorMixin
 
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import LRUCache, flatten_2d_lists, full_groupby, is_list_of
+from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
-from .inputs import (MultiModalDataDict, MultiModalDataItems,
-                     MultiModalFieldConfig, MultiModalFieldItem,
-                     MultiModalInputsV2, MultiModalKwargs, PlaceholderRange)
+from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                     MultiModalFieldItem, MultiModalInputsV2, MultiModalKwargs,
+                     PlaceholderRange)
+from .parse import MultiModalDataItems, MultiModalDataParser
 
 logger = init_logger(__name__)
 
@@ -352,13 +355,13 @@ def _replace_matches(
 ) -> list[_S]:
     out_seqs = list[_S]()
     prev_end_idx = 0
-    next_idx_by_modality = {modality: 0 for modality in mm_item_counts}
+    next_idx_by_modality = defaultdict[str, int](lambda: 0)
 
     for match in _resolve_matches(prompt, matches):
         modality = match.modality
 
         item_idx = next_idx_by_modality[modality]
-        if item_idx >= mm_item_counts[modality]:
+        if item_idx >= mm_item_counts.get(modality, 0):
             continue
 
         start_idx = match.start_idx
@@ -512,7 +515,7 @@ class ProcessingCache:
             return obj.encode("utf-8")
         if isinstance(obj, bytes):
             return obj
-        if isinstance(obj, Image):
+        if isinstance(obj, Image.Image):
             return obj.tobytes()
 
         # Convertible to NumPy arrays
@@ -621,6 +624,16 @@ class BaseMultiModalProcessor(ABC):
     ) -> MultiModalInputsV2:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
+    def _get_data_parser(self) -> MultiModalDataParser:
+        """
+        Construct a data parser to preprocess multi-modal data items
+        before passing them to :meth:`_get_hf_mm_data`.
+
+        You can support additional modalities by creating a subclass
+        of :class:`MultiModalDataParser` that has additional subparsers.
+        """
+        return MultiModalDataParser()
+
     def _get_hf_processor(self) -> ProcessorMixin:
         """
         Subclasses can add keyword arguments to this method to accept
@@ -631,11 +644,16 @@ class BaseMultiModalProcessor(ABC):
     def _get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
-    def _get_mm_items(
+    def _to_mm_items(
         self,
         mm_data: MultiModalDataDict,
     ) -> MultiModalDataItems:
-        return MultiModalDataItems.from_dict(mm_data)
+        """
+        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`
+        before passing them to :meth:`_get_hf_mm_data`.
+        """
+        parser = self._get_data_parser()
+        return parser.parse_mm_data(mm_data)
 
     @abstractmethod
     def _get_mm_fields_config(
@@ -657,10 +675,14 @@ class BaseMultiModalProcessor(ABC):
         Given the original multi-modal items for this modality
         and HF-processed data, output the replacements to perform.
 
-        Note:
-            Even when the HF processor already performs replacement for us,
-            we still use this replacement information to determine
-            the placeholder token positions for each multi-modal item.
+        Notes:
+            - You should not assume that HF processor always performs prompt
+              replacement: in :meth:`_apply_hf_processor_missing`, this method
+              is called on text-only and multimodal-only inputs separately,
+              instead of passing them in the same call.
+            - The replacement information returned by this method is also used
+              to determine the placeholder token positions for each multi-modal
+              item.
         """
         raise NotImplementedError
 
@@ -680,22 +702,9 @@ class BaseMultiModalProcessor(ABC):
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
 
-        for k, v in mm_items.items():
-            # TODO: Make a separate modality for embedding inputs
-            # to avoid confusion
-            if k in ("image", "video", "audio"):
-                if isinstance(v, torch.Tensor) and v.ndim == 3:
-                    # Pass through embedding inputs (single)
-                    passthrough_data[f"{k}_embeds"] = [v]
-                elif (is_list_of(v, torch.Tensor) and len(v) > 0
-                      and v[0].ndim == 2):
-                    # Pass through embedding inputs (multi)
-                    passthrough_data[f"{k}_embeds"] = v
-                elif len(v) > 0:
-                    # Map keys to plural form, e.g.: image -> images
-                    processor_data[f"{k}s"] = v
-            else:
-                processor_data[k] = v
+        for items in mm_items.values():
+            processor_data.update(items.get_processor_data())
+            passthrough_data.update(items.get_passthrough_data())
 
         return processor_data, passthrough_data
 
@@ -707,6 +716,10 @@ class BaseMultiModalProcessor(ABC):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        """
+        Call the HF processor on the prompt text and
+        associated multi-modal data.
+        """
         return self.ctx.call_hf_processor(
             self._get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
@@ -720,7 +733,8 @@ class BaseMultiModalProcessor(ABC):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs]:
         """
-        Apply the HF processor on the full prompt text and multi-modal data.
+        Wrapper of :meth:`_call_hf_processor` that applies
+        additional pre-processing and post-processing.
         """
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
@@ -751,12 +765,13 @@ class BaseMultiModalProcessor(ABC):
         Apply the HF processor on the full prompt text, but only on the
         multi-modal data that are missing from the cache.
 
-        Note: We pass prompt text and multi-modal data into the HF processor
-        in separate calls to avoid HF prompt replacement being done for
-        cached items; instead, we rely on our own prompt replacement logic
-        for the full text.
+        Note:
+            We pass prompt text and multi-modal data into the HF processor
+            in separate calls to avoid HF prompt replacement being done for
+            cached items; instead, we rely on our own prompt replacement logic
+            (:meth:`_get_prompt_replacements`) for the full text.
         """
-        mm_missing_counts = mm_missing_data_items.get_item_counts()
+        mm_missing_counts = mm_missing_data_items.get_all_counts()
 
         prompt_ids, _ = self._apply_hf_processor(
             prompt_text=prompt_text,
@@ -789,7 +804,8 @@ class BaseMultiModalProcessor(ABC):
         cache = self.cache
         model_id = self.ctx.model_config.model
 
-        if cache is None or mm_data_items.has_embedding_inputs():
+        _, passthrough_data = self._get_hf_mm_data(mm_data_items)
+        if cache is None or passthrough_data:
             return self._apply_hf_processor(
                 prompt_text=prompt_text,
                 mm_items=mm_data_items,
@@ -812,7 +828,7 @@ class BaseMultiModalProcessor(ABC):
             modality: [mm_data_items[modality][idx] for idx in idxs]
             for modality, idxs in mm_missing_idxs.items()
         }
-        mm_missing_data_items = self._get_mm_items(mm_missing_data)
+        mm_missing_data_items = self._to_mm_items(mm_missing_data)
 
         prompt_ids, mm_missing_kwargs = self._apply_hf_processor_missing(
             prompt_text=prompt_text,
@@ -852,7 +868,7 @@ class BaseMultiModalProcessor(ABC):
             mm_merged_field_items[modality] = merged_modal_items_lst
 
         if self.enable_sanity_checks:
-            mm_missing_counts = mm_missing_data_items.get_item_counts()
+            mm_missing_counts = mm_missing_data_items.get_all_counts()
             assert all(
                 item_count == mm_missing_counts[modality]
                 for modality, item_count in mm_missing_next_idx.items()), dict(
@@ -865,7 +881,7 @@ class BaseMultiModalProcessor(ABC):
         )
 
         if self.enable_sanity_checks:
-            mm_item_counts = mm_data_items.get_item_counts()
+            mm_item_counts = mm_data_items.get_all_counts()
 
             for modality, item_count in mm_item_counts.items():
                 for item_idx in range(item_count):
@@ -958,7 +974,7 @@ class BaseMultiModalProcessor(ABC):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        mm_items = self._get_mm_items(mm_data)
+        mm_items = self._to_mm_items(mm_data)
 
         prompt_ids, mm_kwargs = self._cached_apply_hf_processor(
             prompt_text,
@@ -975,7 +991,7 @@ class BaseMultiModalProcessor(ABC):
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        mm_item_counts = mm_items.get_item_counts()
+        mm_item_counts = mm_items.get_all_counts()
         all_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
                                                    mm_item_counts)
 
@@ -1005,6 +1021,36 @@ class BaseMultiModalProcessor(ABC):
             mm_kwargs=mm_kwargs,
             mm_placeholders=mm_placeholders,
         )
+
+    def _get_dummy_audios(
+        self,
+        *,
+        length: int,
+        num_audios: int,
+    ) -> list[npt.NDArray]:
+        audio = np.zeros((length, ))
+        return [audio] * num_audios
+
+    def _get_dummy_images(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_images: int,
+    ) -> list[Image.Image]:
+        image = Image.new("RGB", (width, height), color=0)
+        return [image] * num_images
+
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+    ) -> list[npt.NDArray]:
+        video = np.zeros((num_frames, width, height, 3))
+        return [video] * num_videos
 
     @abstractmethod
     def _get_dummy_mm_inputs(
