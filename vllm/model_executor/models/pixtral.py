@@ -1,8 +1,8 @@
+import math
 from dataclasses import dataclass, fields
 from functools import cached_property
 from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
 
-import numpy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -306,7 +306,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         images: Optional[Union[List[List[torch.Tensor]], List[torch.Tensor],
                                torch.Tensor]] = None,
         image_tokens: Optional[torch.Tensor] = None,
-    ) -> Optional[List[torch.Tensor]]:
+    ) -> Tuple[Optional[List[torch.Tensor]], Optional[torch.Tensor]]:
         if images is None:
             return None, None
 
@@ -604,11 +604,11 @@ class VisionTransformer(nn.Module):
         return self.args.image_size // self.args.patch_size
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> torch.types.Device:
         return next(self.parameters()).device
 
     @property
-    def dtype(self) -> torch.device:
+    def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
 
     @property
@@ -741,8 +741,8 @@ def get_pixtral_hf_image_feature_size(hf_config: PixtralVisionConfig,
     ratio = max(image_width / max_width, image_height / max_height)
 
     if ratio > 1:
-        image_width = int(numpy.ceil(image_width / ratio))
-        image_height = int(numpy.ceil(image_height / ratio))
+        image_width = int(math.ceil(image_width / ratio))
+        image_height = int(math.ceil(image_height / ratio))
 
     num_height_tokens, num_width_tokens = _get_pixtral_hf_num_image_tokens(
         (image_height, image_width),

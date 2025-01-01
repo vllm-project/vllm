@@ -29,7 +29,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from PIL import Image
 from transformers import BatchFeature
 from transformers.models.qwen2_vl import (Qwen2VLImageProcessor,
                                           Qwen2VLProcessor)
@@ -53,6 +52,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
@@ -882,12 +882,10 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
         hf_processor = self._get_hf_processor()
-        image_token: str = hf_processor.image_token
         image_processor = _get_image_processor(hf_processor)
 
-        data = {}
+        image_token: str = hf_processor.image_token
         resized_height, resized_width = smart_resize(
             height=9999999,
             width=9999999,
@@ -895,14 +893,18 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
             min_pixels=image_processor.min_pixels,
             max_pixels=image_processor.max_pixels,
         )
+        num_images = mm_counts.get("image", 0)
 
-        dummy_image = Image.new("RGB", (resized_width, resized_height),
-                                color=0)
-        data["image"] = [dummy_image] * num_images
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=resized_width,
+                                   height=resized_height,
+                                   num_images=num_images)
+        }
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,
-            mm_data=data,
+            mm_data=mm_data,
         )
 
 
@@ -925,15 +927,23 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     }
 
     # LoRA specific attributes
-    # TODO Support LoRA for the visual encoder in the future.
     supported_lora_modules = [
         "qkv_proj",
         "o_proj",
         "gate_up_proj",
         "down_proj",
+        # vision tower
+        "qkv",
+        "attn.proj",  # Distinguish patch_embed.proj
+        "fc1",
+        "fc2",
+        # projector
+        "mlp.0",
+        "mlp.2"
     ]
     embedding_modules = {}
     embedding_padding_modules = []
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "lm_head.": "language_model.lm_head.",
@@ -1230,3 +1240,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="visual.",
+            tower_model="visual.merger.")
