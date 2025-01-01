@@ -238,6 +238,7 @@ def use_cascade_attention(
     num_sms: int,
 ) -> bool:
     # Too short common prefix. Probably not worth using cascade attention.
+    # We use an arbitrary threshold of 256 tokens. TODO: Tune this threshold.
     # NOTE(woosuk): This is the common case. We should return False as soon as
     # possible to avoid any unnecessary computation.
     if common_prefix_len < 256:
@@ -246,6 +247,7 @@ def use_cascade_attention(
     if use_alibi or use_sliding_window:
         return False
     # Too few queries. Probably not worth using cascade attention.
+    # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
     num_reqs = len(query_lens)
     if num_reqs < 8:
         return False
