@@ -315,12 +315,6 @@ class LlamaModel(nn.Module):
             )
         else:
             self.embed_tokens = PPMissingLayer()
-
-        if config.num_hidden_layers==1:
-            self.eagle = True
-        else:
-            self.eagle = False
-
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: layer_type(config=config,
@@ -374,8 +368,6 @@ class LlamaModel(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        if self.eagle:
-            hidden_states = residual + hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
