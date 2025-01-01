@@ -624,6 +624,29 @@ class BaseMultiModalProcessor(ABC):
     ) -> MultiModalInputsV2:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
+    @abstractmethod
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        """
+        Return the maximum supported number of items for each modality.
+
+        A value of `None` means unlimited number of items.
+
+        Omitting a modality from the returned dictionary means that
+        it is not supported at all.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        """
+        Get the maximum possible number of tokens per data item
+        for each modality.
+
+        The dictionary returned by this method should have the same
+        keys as that returned by :meth:`get_supported_mm_limits`.
+        """
+        raise NotImplementedError
+
     def _get_data_parser(self) -> MultiModalDataParser:
         """
         Construct a data parser to preprocess multi-modal data items
@@ -653,7 +676,18 @@ class BaseMultiModalProcessor(ABC):
         before passing them to :meth:`_get_hf_mm_data`.
         """
         parser = self._get_data_parser()
-        return parser.parse_mm_data(mm_data)
+        mm_items = parser.parse_mm_data(mm_data)
+
+        mm_limits = self.ctx.get_mm_config().limit_per_prompt
+        for modality, items in mm_items.items():
+            limit = mm_limits.get(modality, 1)
+            if len(items) > limit:
+                raise ValueError(
+                    f"You set {modality}={limit} (or defaulted to 1) in "
+                    f"`--limit-mm-per-prompt`, but passed {len(items)} "
+                    f"{modality} items in the same prompt.")
+
+        return mm_items
 
     @abstractmethod
     def _get_mm_fields_config(
@@ -901,6 +935,17 @@ class BaseMultiModalProcessor(ABC):
 
         return [prompt_repl.bind(tokenizer) for prompt_repl in prompt_repls]
 
+    def _always_apply_prompt_replacements(self) -> bool:
+        """
+        A flag which can be overridden so that
+        :meth:`_apply_prompt_replacements` is always called even if we
+        detect that HF has performed processing via :meth:`_find_placeholders`.
+
+        This is useful in cases where :meth:`_find_placeholders` cannot be
+        reliably used to detect whether HF has performed processing or not.
+        """
+        return False
+
     def _apply_prompt_replacements(
         self,
         token_ids: list[int],
@@ -995,7 +1040,7 @@ class BaseMultiModalProcessor(ABC):
         all_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
                                                    mm_item_counts)
 
-        if all_placeholders:
+        if all_placeholders and not self._always_apply_prompt_replacements():
             tokenizer = self._get_tokenizer()
             prompt_text = _decode(tokenizer, prompt_ids)
         else:
@@ -1009,10 +1054,27 @@ class BaseMultiModalProcessor(ABC):
                 mm_item_counts,
             )
 
-        mm_placeholders = {
-            modality: [item.to_range() for item in items]
-            for modality, items in full_groupby_modality(all_placeholders)
-        }
+        mm_placeholders = dict[str, list[PlaceholderRange]]()
+        err_suffix = ("This suggests a problem with your implementation of "
+                      "the merged multi-modal processor for this model, "
+                      "particularly in the `_get_prompt_replacements` method.")
+
+        for modality, placeholders in full_groupby_modality(all_placeholders):
+            if modality not in mm_items:
+                raise AssertionError(
+                    f"Expected no placeholders for {modality=}, "
+                    f"but found {placeholders=}. Input items: {mm_items}"
+                    f"\n{err_suffix}")
+
+            if len(placeholders) != len(mm_items[modality]):
+                raise AssertionError(
+                    f"Expected length of {placeholders=} for {modality=} "
+                    f"to equal that of input items: {mm_items[modality]}"
+                    f"\n{err_suffix}")
+
+            mm_placeholders[modality] = [
+                item.to_range() for item in placeholders
+            ]
 
         return MultiModalInputsV2(
             type="multimodal",
@@ -1063,14 +1125,37 @@ class BaseMultiModalProcessor(ABC):
         """
         raise NotImplementedError
 
-    def get_dummy_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_max_tokens: Mapping[str, int],
-    ) -> DummyData:
+    def _get_and_validate_dummy_mm_counts(self) -> Mapping[str, int]:
+        mm_limit_per_prompt = self.ctx.get_mm_config().limit_per_prompt
+        supported_mm_limits = self.get_supported_mm_limits()
+
+        mm_limits = {
+            modality: mm_limit_per_prompt.get(modality, 1)
+            for modality in supported_mm_limits
+        }
+
+        for modality, supported_limit in supported_mm_limits.items():
+            limit = mm_limits[modality]
+            if supported_limit is not None and supported_limit < limit:
+                raise ValueError(
+                    f"You set {modality}={limit} (or defaulted to 1) in "
+                    f"`--limit-mm-per-prompt`, but this model only supports "
+                    f"at most {supported_limit} {modality} items.")
+
+        return mm_limits
+
+    def get_dummy_data(self, seq_len: int) -> DummyData:
         # Avoid circular import
         from vllm.sequence import SequenceData
+
+        mm_counts = self._get_and_validate_dummy_mm_counts()
+        mm_max_tokens_per_item = self.get_mm_max_tokens_per_item()
+        if mm_counts.keys() != mm_max_tokens_per_item.keys():
+            raise AssertionError(
+                "The keys returned by `get_supported_mm_limits`"
+                f"({set(mm_counts.keys())}) should be the same as those "
+                "returned by `get_mm_max_tokens_per_item` "
+                f"({set(mm_max_tokens_per_item.keys())})")
 
         processor_inputs = self._get_dummy_mm_inputs(mm_counts)
         mm_inputs = self.apply(
@@ -1087,7 +1172,7 @@ class BaseMultiModalProcessor(ABC):
             for modality, placeholders in placeholders_by_modality.items()
         }
         expected_placeholders_by_modality = {
-            modality: mm_max_tokens[modality]
+            modality: mm_max_tokens_per_item[modality] * mm_counts[modality]
             for modality in placeholders_by_modality
         }
         if total_placeholders_by_modality != expected_placeholders_by_modality:

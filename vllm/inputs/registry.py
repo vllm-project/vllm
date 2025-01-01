@@ -331,13 +331,7 @@ class InputRegistry:
                 trust_remote_code=model_config.trust_remote_code,
             )
             processor = mm_registry.create_processor(model_config, tokenizer)
-
-            mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
-            mm_max_tokens = mm_registry.get_max_tokens_by_modality(
-                model_config)
-
-            dummy_data = processor.get_dummy_data(seq_len, mm_counts,
-                                                  mm_max_tokens)
+            dummy_data = processor.get_dummy_data(seq_len)
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:

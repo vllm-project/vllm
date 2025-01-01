@@ -119,6 +119,12 @@ def get_max_llava_image_tokens(ctx: InputContext):
 
 class LlavaMultiModalProcessor(BaseMultiModalProcessor):
 
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        return {"image": get_max_llava_image_tokens(self.ctx)}
+
     def _get_hf_processor(self) -> Union[LlavaProcessor, PixtralProcessor]:
         return self.ctx.get_hf_processor((LlavaProcessor, PixtralProcessor))
 
@@ -324,7 +330,6 @@ def init_vision_tower_for_llava(
     raise NotImplementedError(msg)
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     # BitandBytes specific attributes
@@ -649,7 +654,6 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
 # To use this model, please use
 # `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(MantisMultiModalProcessor)
 class MantisForConditionalGeneration(LlavaForConditionalGeneration):
     pass

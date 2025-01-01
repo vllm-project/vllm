@@ -538,6 +538,11 @@ def _test_processing_cache_correctness(
     else:
         hf_overrides = {}
 
+    limit_mm_per_prompt = {
+        modality: 3 if supports_multi else 1
+        for modality, supports_multi in modalities.items()
+    }
+
     model_config = ModelConfig(
         model_id,
         task="auto",
@@ -548,6 +553,7 @@ def _test_processing_cache_correctness(
         dtype="float16",
         revision=None,
         hf_overrides=hf_overrides,
+        limit_mm_per_prompt=limit_mm_per_prompt,
     )
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
@@ -580,18 +586,14 @@ def _test_processing_cache_correctness(
                 min_wh=128,
                 max_wh=256),
         "audio":
-        partial(_rand_audio, rng, min_len=256, max_len=512, sr=16000),
-    }
-    input_max_count = {
-        modality: 3 if supports_multi else 1
-        for modality, supports_multi in modalities.items()
+        partial(_rand_audio, rng, min_len=512, max_len=1024, sr=16000),
     }
 
     for batch_idx in range(num_batches):
         mm_data = {
             k:
             [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
-             for _ in range(rng.randint(input_max_count[k]))]
+             for _ in range(rng.randint(limit_mm_per_prompt[k]))]
             for k in modalities
         }
 
