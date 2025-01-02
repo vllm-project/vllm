@@ -34,7 +34,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
-from vllm.multimodal.parse import ImageProcessorItems
+from vllm.multimodal.parse import ImageEmbeddingItems, ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement,
@@ -388,15 +388,19 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         assert isinstance(bos_token_id, int)
 
         def get_replacement_phi3v(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image_size = images.get_image_size(item_idx)
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
 
-            num_tokens = self._get_num_image_tokens(
-                image_width=image_size.width,
-                image_height=image_size.height,
-            )
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                num_image_tokens = self._get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                )
 
-            return [_IMAGE_TOKEN_ID] * num_tokens + [bos_token_id]
+            return [_IMAGE_TOKEN_ID] * num_image_tokens + [bos_token_id]
 
         num_images = mm_items.get_count("image", strict=False)
 

@@ -3,13 +3,11 @@ from typing import Optional
 import torch
 
 from vllm.model_executor.models.llava import (LlavaForConditionalGeneration,
-                                              LlavaMultiModalProcessor,
-                                              get_max_llava_image_tokens)
+                                              LlavaMultiModalProcessor)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor)
 class MyLlava(LlavaForConditionalGeneration):
 
