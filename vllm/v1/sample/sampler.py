@@ -64,16 +64,19 @@ class Sampler(nn.Module):
             logprobs = self.get_logprobs(logits)
             topk_logprobs, topk_indices = torch.topk(logprobs,
                                                      max_num_logprobs,
-                                                     dim=-1)
+                                                     dim=-1,
+                                                     sorted=True)
             # Use int32 to reduce the tensor size.
             topk_indices = topk_indices.to(torch.int32)
 
             # Concatenate with the sampled token_id if provided.
             if sampled_token_ids:
                 # TODO(rob): check if the concat is right.
+                # TODO(rob): we need to return the rank of the sampled token
+                # to be compatible with the OAI spec.
                 sampled_logprobs = logprobs[sampled_token_ids]
-                topk_indices = torch.cat([topk_indices, sampled_token_ids])
-                topk_logprobs = torch.cat([topk_logprobs, sampled_logprobs])
+                topk_indices = torch.cat([sampled_token_ids, topk_indices])
+                topk_logprobs = torch.cat([sampled_logprobs, topk_logprobs])
 
             return topk_indices.cpu(), topk_logprobs.cpu()
         else:
