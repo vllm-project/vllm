@@ -298,9 +298,7 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        if hidden_states.dtype == torch.float16 and (
-                torch.isinf(hidden_states).any()
-                or torch.isnan(hidden_states).any()):
+        if hidden_states.isinf().any() or hidden_states.isnan().any():
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
             hidden_states = torch.clamp(hidden_states,
                                         min=-clamp_value,
@@ -580,11 +578,14 @@ def get_max_whisper_audio_tokens(ctx: InputContext) -> int:
 def dummy_encoder_data_for_whisper(ctx: InputContext, seq_len: int,
                                    mm_counts: Mapping[str, int]):
     assert mm_counts["audio"] == 1
-    sample_rate = 16000
-    num_tokens = ctx.model_config.hf_config.max_source_positions
+    num_tokens = get_max_whisper_audio_tokens(ctx)
+    processor = cached_get_processor(ctx.model_config.model)
+    chunk_length = processor.feature_extractor.chunk_length
+    sampling_rate = processor.feature_extractor.sampling_rate
+    num_samples = chunk_length * sampling_rate
     return DummyData(
         SequenceData.from_prompt_token_counts((0, num_tokens)),
-        {"audio": [(np.zeros(30 * sample_rate), sample_rate)]},
+        {"audio": [(np.zeros(num_samples), sampling_rate)]},
     )
 
 
@@ -600,7 +601,7 @@ def input_processor_for_whisper(ctx: InputContext, inputs):
     audio = resample_audio(audio, orig_sr=orig_sr, target_sr=target_sr)
     multi_modal_data["audio"] = (audio, target_sr)
     # Pre-allocate placeholder tokens in encoder sequence
-    num_tokens = ctx.model_config.hf_config.max_source_positions
+    num_tokens = get_max_whisper_audio_tokens(ctx)
     inputs["encoder"]["prompt_token_ids"] = [0] * num_tokens
     return inputs
 
@@ -625,8 +626,8 @@ def input_mapper_for_whisper(
     kwargs = processor(audios,
                        sampling_rate=sampling_rate,
                        return_tensors="pt")
-    kwargs["input_features"] = kwargs["input_features"].squeeze(0)
-    kwargs["input_features"] = kwargs["input_features"].to(torch.float16)
+    kwargs["input_features"] = kwargs["input_features"].squeeze(0).to(
+        ctx.model_config.dtype)
 
     return MultiModalKwargs(kwargs)
 

@@ -88,6 +88,7 @@ def run_test(
 
 
 @fork_new_process_for_each_test
+@pytest.mark.core_model
 @pytest.mark.parametrize("model",
                          ["openai/whisper-medium", "openai/whisper-large-v3"])
 @pytest.mark.parametrize("enforce_eager", [True, False])
@@ -96,6 +97,7 @@ def test_models(model, enforce_eager) -> None:
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3"])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
