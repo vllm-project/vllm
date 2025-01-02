@@ -143,16 +143,16 @@ class IncrementalDetokenizer:
             topk_token_ids = logprobs_token_ids[1:].tolist()
             topk_logprobs = logprobs[1:].tolist()
 
-            # Detokenize (non-incrementally).
+            # Detokenize non-incrementally.
             decoded_tokens = self.tokenizer.batch_decode(
                 topk_token_ids.reshape(-1, 1))
 
-            # Make the Logprob objects for each position.
+            # Make the Logprob objects the position.
             pos_logprobs_dict = self._make_pos_logprob_dict(
                 topk_logprobs, topk_token_ids, decoded_tokens,
                 self.num_logprobs)
 
-            # Add the sampled Logprob if it was not in topk
+            # Add the sampled Logprob if it was not in topk.
             if sampled_token_id not in pos_logprobs_dict:
                 token = self.tokenizer.decode(sampled_token_id)
                 pos_logprobs_dict[sampled_token_id] = Logprob(
