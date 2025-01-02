@@ -257,7 +257,6 @@ class InputBatch:
                 self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
             self.top_k[:self.num_reqs].copy_(
                 self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
-
         return SamplingMetadata(
             sample_indicies=sample_indices,
             all_greedy=self.all_greedy,
