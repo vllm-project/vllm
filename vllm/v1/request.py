@@ -52,9 +52,8 @@ class Request:
         # Multi-modal input metadata.
         mm_positions = self.inputs.multi_modal_placeholders
         if mm_positions:
-            available_modalities = mm_positions.keys()
             sorted_modalities, sorted_mm_positions = merge_and_sort_placeholders_from_modalities(  # noqa: E501
-                list(available_modalities), mm_positions)
+                mm_positions)
             self.mm_positions = sorted_mm_positions
         else:
             sorted_modalities = []

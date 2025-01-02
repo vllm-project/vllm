@@ -443,8 +443,25 @@ def consecutive_placeholder_ranges(
 
 
 def merge_and_sort_placeholders_from_modalities(
-    modalities: list[str], mm_positions: "MultiModalPlaceholderDict"
+    mm_positions: "MultiModalPlaceholderDict"
 ) -> tuple[list[str], list[PlaceholderRange]]:
+    """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
+    objects from all available modalities into a single list of 
+    PlaceholderRange, sorted by their offset (starting index in the input 
+    sequence) in the ascending order.
+
+    Raises:
+        ValueError: If the input prompt has interleaved placeholders from
+            different modalities (e.g, "<image><audio><image> Describe the 
+            content.")
+    
+    Returns:
+        list[str]: Sorted list of involved modalities.
+        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
+            mm_positions.
+    """
+
+    modalities = list(mm_positions.keys())
 
     # For single modality, its placeholder ranges are already sorted.
     if len(modalities) == 1:
