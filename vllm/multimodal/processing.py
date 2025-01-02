@@ -20,8 +20,8 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
 from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                     MultiModalFieldItem, MultiModalInputsV2, MultiModalKwargs,
-                     PlaceholderRange)
+                     MultiModalInputsV2, MultiModalKwargs,
+                     MultiModalKwargsItem, PlaceholderRange)
 from .parse import MultiModalDataItems, MultiModalDataParser
 
 logger = init_logger(__name__)
@@ -496,8 +496,7 @@ class ProcessingCache:
         # DEBUG: Set to None to disable
         self.debug_cache_hit_ratio_steps: Optional[int] = None
 
-        self._cache = LRUCache[str, Mapping[str,
-                                            MultiModalFieldItem]](capacity)
+        self._cache = LRUCache[str, MultiModalKwargsItem](capacity)
 
     def _maybe_log_cache_stats(self) -> None:
         steps = self.debug_cache_hit_ratio_steps
@@ -565,7 +564,7 @@ class ProcessingCache:
         modality: str,
         input_item: object,
         input_kwargs: Mapping[str, object],
-    ) -> Optional[Mapping[str, MultiModalFieldItem]]:
+    ) -> Optional[MultiModalKwargsItem]:
         """
         Get a processed multi-modal item from the cache
         according to its dependencies, including:
@@ -588,7 +587,7 @@ class ProcessingCache:
         modality: str,
         input_item: object,
         input_kwargs: Mapping[str, object],
-        output_kwargs: Mapping[str, MultiModalFieldItem],
+        output_kwargs: MultiModalKwargsItem,
     ) -> None:
         """
         Put a processed multi-modal item into the cache
@@ -784,7 +783,6 @@ class BaseMultiModalProcessor(ABC):
         mm_kwargs = MultiModalKwargs.from_hf_inputs(
             processed_data,
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
-            enable_sanity_checks=self.enable_sanity_checks,
         )
 
         return prompt_ids, mm_kwargs
@@ -846,7 +844,7 @@ class BaseMultiModalProcessor(ABC):
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             )
 
-        mm_maybe_cached_field_items = {
+        mm_maybe_cached_kw_items = {
             modality: [
                 cache.get(model_id, modality, item, hf_processor_mm_kwargs)
                 for item in items
@@ -855,8 +853,9 @@ class BaseMultiModalProcessor(ABC):
         }
 
         mm_missing_idxs = {
-            modality: [idx for idx, out in enumerate(fields) if out is None]
-            for modality, fields in mm_maybe_cached_field_items.items()
+            modality:
+            [idx for idx, item in enumerate(kw_items) if item is None]
+            for modality, kw_items in mm_maybe_cached_kw_items.items()
         }
         mm_missing_data = {
             modality: [mm_data_items[modality][idx] for idx in idxs]
@@ -875,14 +874,11 @@ class BaseMultiModalProcessor(ABC):
             for modality in mm_missing_data_items
         }
 
-        mm_merged_field_items = dict[str, list[Mapping[str,
-                                                       MultiModalFieldItem]]]()
-        for modality, modal_items_lst in mm_maybe_cached_field_items.items():
-            merged_modal_items_lst = list[Mapping[str, MultiModalFieldItem]]()
-
-            for idx, modal_items in enumerate(modal_items_lst):
-                if modal_items is None:
-                    modal_items = mm_missing_kwargs.get_items_by_modality(
+        merged_kw_items = list[MultiModalKwargsItem]()
+        for modality, kw_items in mm_maybe_cached_kw_items.items():
+            for idx, kw_item in enumerate(kw_items):
+                if kw_item is None:
+                    kw_item = mm_missing_kwargs.get_item(
                         modality,
                         mm_missing_next_idx[modality],
                     )
@@ -892,14 +888,12 @@ class BaseMultiModalProcessor(ABC):
                         modality,
                         mm_data_items[modality][idx],
                         hf_processor_mm_kwargs,
-                        modal_items,
+                        kw_item,
                     )
 
                     mm_missing_next_idx[modality] += 1
 
-                merged_modal_items_lst.append(modal_items)
-
-            mm_merged_field_items[modality] = merged_modal_items_lst
+                merged_kw_items.append(kw_item)
 
         if self.enable_sanity_checks:
             mm_missing_counts = mm_missing_data_items.get_all_counts()
@@ -909,10 +903,7 @@ class BaseMultiModalProcessor(ABC):
                     mm_missing_next_idx=mm_missing_next_idx,
                     mm_missing_counts=mm_missing_counts)
 
-        mm_kwargs = MultiModalKwargs.from_items_by_modality(
-            mm_merged_field_items,
-            enable_sanity_checks=self.enable_sanity_checks,
-        )
+        mm_kwargs = MultiModalKwargs.from_items(merged_kw_items)
 
         if self.enable_sanity_checks:
             mm_item_counts = mm_data_items.get_all_counts()
@@ -920,7 +911,7 @@ class BaseMultiModalProcessor(ABC):
             for modality, item_count in mm_item_counts.items():
                 for item_idx in range(item_count):
                     try:
-                        mm_kwargs.get_items_by_modality(modality, item_idx)
+                        mm_kwargs.get_item(modality, item_idx)
                     except Exception as e:
                         # Make it easy to set a breakpoint in the debugger
                         raise e

@@ -113,15 +113,27 @@ class Processor:
 
         # For merged preprocessor, mm_data is already mm_inputs
         precomputed_mm_inputs = None
-        if isinstance(decoder_inputs.multi_modal_data, MultiModalKwargs):
-            precomputed_mm_inputs = [decoder_inputs.multi_modal_data]
+        decoder_mm_data = decoder_inputs.multi_modal_data
+        if isinstance(decoder_mm_data, MultiModalKwargs):
+            # The output of merged multi-modal processor (`decoder_mm_data`)
+            # contains the kwargs for all items from all modalities.
+            # This code separates them so that there is one set of kwargs
+            # per item per modality.
+            precomputed_mm_inputs = [
+                MultiModalKwargs.from_items([item])
+                for modality in decoder_mm_data.modalities
+                for item in decoder_mm_data.get_items(modality)
+            ]
 
         # Apply MM mapper
         mm_inputs = None
-        if len(decoder_inputs.multi_modal_data) > 0:
+        if len(decoder_mm_data) > 0:
             mm_inputs = self.mm_input_mapper_client.process_inputs(
-                decoder_inputs.multi_modal_data, mm_hashes,
-                decoder_inputs.mm_processor_kwargs, precomputed_mm_inputs)
+                decoder_mm_data,
+                mm_hashes,
+                decoder_inputs.mm_processor_kwargs,
+                precomputed_mm_inputs,
+            )
 
         return EngineCoreRequest(
             request_id,
