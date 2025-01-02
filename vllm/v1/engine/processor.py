@@ -54,20 +54,10 @@ class Processor:
         self,
         params: Union[SamplingParams, PoolingParams],
     ) -> None:
-        """Validate requested number of sample logprobs & prompt logprobs
-        
-        Fails with ValueError if to many logprobs are requested.
-
-        Args:
-          params: Sampling parameters
-          max_logprobs: max number of logprobs or prompt logprobs
-        """
-
         if not isinstance(params, SamplingParams):
             return
 
         max_logprobs = self.model_config.max_logprobs
-
         # Validate sample logprobs.
         if (params.logprobs and params.logprobs > max_logprobs):
             raise ValueError(
@@ -79,6 +69,11 @@ class Processor:
             raise ValueError(
                 f"Requested prompt logprobs of {params.prompt_logprobs}, "
                 f"which is greated than max allowed: {max_logprobs}")
+        
+    def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
 
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
     # This ideally should releases the GIL, so we should not block the
@@ -98,12 +93,10 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
-        # TODO(rob): Add more param validation here.
+        # TODO(rob): Validate all SamplingParams.
         self._validate_logprobs(params)
+        self._validate_lora(lora_request)
 
-        if lora_request is not None and not self.lora_config:
-            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
-                             "not enabled!")
         if arrival_time is None:
             arrival_time = time.time()
         assert priority == 0, "vLLM V1 does not support priority at the moment."
