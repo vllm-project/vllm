@@ -380,11 +380,9 @@ class IncrementalDetokenizer:
             and not finished:
             return None
 
+        # Return just newly created items if DELTA.
         delta = self.output_kind == RequestOutputKind.DELTA
         output_text = self._get_next_output_text(finished, delta)
-
-        # DELTA -> return just newly created items.
-        # FINAL -> return the whole history so far.
         token_ids = new_token_ids if delta else self.output_token_ids
         logprobs = new_logprobs if delta else self.logprobs
         prompt_logprobs = new_logprobs if delta else self.prompt_logprobs
@@ -427,7 +425,6 @@ class IncrementalDetokenizer:
 
 
 class Detokenizer:
-    """Track and implement detokenization of multiple requests"""
 
     def __init__(self,
                  tokenizer_name: str,
