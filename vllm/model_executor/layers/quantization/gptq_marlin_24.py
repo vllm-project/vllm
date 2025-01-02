@@ -1,7 +1,6 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -256,11 +255,7 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
         layer.register_parameter("workspace", workspace)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # required by torch.compile
-        layer.B_24 = Parameter(layer.B_24.data, requires_grad=False)
-        layer.s = Parameter(layer.s.data, requires_grad=False)
-        layer.B_meta = Parameter(layer.B_meta.data, requires_grad=False)
-        layer.workspace = Parameter(layer.workspace.data, requires_grad=False)
+        pass
 
     def apply(
         self,

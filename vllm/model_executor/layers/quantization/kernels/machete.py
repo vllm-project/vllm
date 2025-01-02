@@ -9,7 +9,7 @@ from vllm.model_executor.layers.quantization.utils.machete_utils import (
     query_machete_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
-from vllm.model_executor.parameter import (BasevLLMParameter,
+from vllm.model_executor.parameter import (Features, has_any_param_feature,
                                            permute_param_layout_)
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -68,7 +68,7 @@ class MacheteLinearKernel(MPLinearKernel):
                 self.act_perm = partial(ops.permute_cols, perm=perm)
 
         def transform_w_q(x):
-            assert isinstance(x, BasevLLMParameter)
+            assert has_any_param_feature(x, Features.Base)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             if c.has_g_idx:
                 x_unpacked = unpack_quantized_values_into_int32(x.data,
@@ -85,7 +85,7 @@ class MacheteLinearKernel(MPLinearKernel):
             return x
 
         def transform_w_s(x):
-            assert isinstance(x, BasevLLMParameter)
+            assert has_any_param_feature(x, Features.Base)
             permute_param_layout_(x, input_dim=0, output_dim=1)
             x.data = x.data.contiguous()
             return x
