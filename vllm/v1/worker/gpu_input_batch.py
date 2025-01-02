@@ -278,23 +278,22 @@ class InputBatch:
         req_indices: npt.NDArray,
     ) -> Optional[PromptLogprobsMetadata]:
 
-        if not self.max_num_prompt_logprobs:
+        if self.no_prompt_logprob:
             return None
 
         # Precompute the indicies.
         all_indicies = np.arange(req_indices.shape[0])
 
-        # NOTE(rob): we should avoid loops like this  in model runner,
+        # NOTE(rob): we should avoid loops like this in ModelRunner,
         # but this ONLY loops over requests that are currently in
         # prefill phase AND need prompt lps.
+        # Should we move this to _update_states or execute_model()
+        # to avoid another loop?
         req_ids = []
         masks = []
         logits_process_metadatas = []
         num_prompt_logprobs = []
-
-        # TODO(rob): should we move this to _update_states?
-        for req_id, req_num_prompt_logprobs in self.num_prompt_logprobs.items(
-        ):
+        for req_id in self.num_prompt_logprobs:
             req_idx = self.req_id_to_index[req_id]
 
             # Make the logits mask for this request's prefill.
@@ -313,7 +312,7 @@ class InputBatch:
 
             req_ids.append(req_id)
             masks.append(mask)
-            num_prompt_logprobs.append(req_num_prompt_logprobs)
+            num_prompt_logprobs.append(self.num_prompt_logprobs[req_id])
             logits_process_metadatas.append(
                 LogitsProcessMetadata(temperature=temperature,
                                       top_p=top_p,
@@ -352,6 +351,5 @@ class InputBatch:
         return max(self.num_logprobs.values()) if self.num_logprobs else 0
 
     @property
-    def max_num_prompt_logprobs(self) -> int:
-        return (max(self.num_prompt_logprobs.values())
-                if self.num_prompt_logprobs else 0)
+    def no_prompt_logprob(self) -> bool:
+        return len(self.num_prompt_logprobs) == 0

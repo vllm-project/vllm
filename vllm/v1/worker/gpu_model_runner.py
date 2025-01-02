@@ -553,10 +553,10 @@ class GPUModelRunner:
         )
 
         # Compute prompt logprobs if needed.
-        # NOTE(rob): compute prompt logprobs for each req separately,
-        # which is suboptimal. However, prompt logprobs are rare (used
-        # by lm-eval-harness) and we have few prefill per batch,
-        # so prioritize simplicity.
+        # NOTE(rob): for clean code, compute prompt logprobs for each req
+        # separately, which is suboptimal. However, prompt logprobs are rare
+        # (used mostly by lm-eval-harness) and we have few prefill per batch,
+        # so we prioritize simplicity.
         prompt_lps_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
         if prompt_logprobs_metadata:
             for (req_id, mask, metadata,

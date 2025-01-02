@@ -50,7 +50,6 @@ class IncrementalDetokenizer:
     prompt_logprobs: Optional[PromptLogprobs]
     cumulative_logprob: Optional[float]
     num_logprobs: int
-    num_prompt_logprobs: int
 
     # Accounting for stop string buffering
     stop_buffer_length: int
@@ -103,10 +102,8 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
             cumulative_logprob=(0. if request.logprobs else None),
             logprobs=([] if request.logprobs else None),
-            # NOTE(rob): prompt logprobs of first token is always None.
-            prompt_logprobs=([None] if request.prompt_logprobs else None),
+            prompt_logprobs=None,
             num_logprobs=request.logprobs,
-            num_prompt_logprobs=request.prompt_logprobs,
         )
 
     def _update_sample_logprobs(
@@ -206,45 +203,52 @@ class IncrementalDetokenizer:
             PromptLogprobs: List[Dict[int, Logprob]]
         """
 
-        # Skip if this request is not using logprobs.
-        if self.num_prompt_logprobs == 0:
-            return None
-
-        # Skip if last step did not generate prompt lps (decode).
         if logprobs_token_ids is None:
             return None
         assert logprobs is not None
 
-        # Since EngineCore does not stream partial requests,
-        # Detokenizer gets all the prompt logprobs at once, thus
-        # self.prompt_logprobs=[None].
-        assert (self.prompt_logprobs is not None
-                and len(self.prompt_logprobs == 1))
+        # EngineCore does not stream until entire prompt complete,
+        # so Detokenizer should get all prompt lps at once.
+        assert self.prompt_logprobs is None
 
-        # Decode the tokens (*non-incrementally).
-        # Flattened: [prompt_len, num_logprobs] ->
-        #            [prompt_len * num_logprobs]
+        # Detokenize non-incrementally.
+        # [num_tok, num_lps] -> [num_tok * num_lps]
         decoded_tokens = self.tokenizer.batch_decode(
             logprobs_token_ids.reshape(-1, 1))
 
-        # Make Logprob for each prompt token.
+        # Make Logprob for prompt token.
+        # NOTE(rob): the first tok has None.
         num_tokens, num_logprobs = logprobs.shape
-        assert num_logprobs == self.num_prompt_logprobs
-        for token_idx in range(num_tokens):
-            topk_logprobs = logprobs[token_idx].tolist()
-            topk_token_ids = logprobs_token_ids[token_idx].tolist()
-            # Sampler uses torch.topk(sorted=True), so idx=rank.
-            self.prompt_logprobs.append({
-                topk_token_ids[idx]: Logprob(
-                    logprob=topk_logprobs[idx],
-                    rank=idx,
-                    decoded_token=decoded_tokens[num_tokens * num_logprobs +
-                                                 idx],
-                )
-                for idx in range(num_logprobs)
-            })
+        self.prompt_logprobs = [None] + [
+            self._make_pos_logprob_dict(
+                logprobs[tok_idx].tolist(),
+                logprobs_token_ids[tok_idx].tolist(),
+                decoded_tokens[tok_idx * num_logprobs:],
+                num_logprobs,
+            ) for tok_idx in range(num_tokens)
+        ]
 
         return self.prompt_logprobs
+
+    @staticmethod
+    def _make_pos_logprob_dict(
+        logprobs: List[float],
+        token_ids: List[int],
+        decoded_tokens: List[str],
+        num_logprobs: int,
+    ) -> Dict[int, Logprob]:
+        """Make a Logprob dictionary for a position in the sequence."""
+
+        # Sampler uses torch.topk() which sorts so the
+        # index in lists is equivalent to rank.
+        return {
+            token_ids[idx]: Logprob(
+                logprob=logprobs[idx],
+                rank=idx,
+                decoded_token=decoded_tokens[idx],
+            )
+            for idx in range(num_logprobs)
+        }
 
     def add_tokens(
         self,
