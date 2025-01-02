@@ -41,7 +41,7 @@ class BlockTable:
         self.num_blocks_per_row = np.zeros((max_num_reqs,), dtype=np.int32)
 
         # UVA requires pinned memory.
-        self.use_uva = is_uva_available() and pin_memory and False
+        self.use_uva = is_uva_available() and pin_memory
         if self.use_uva:
             logger.info("Using Unified Virtual Addressing (UVA) for block "
                         "table transfer.")
