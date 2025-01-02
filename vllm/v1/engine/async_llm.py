@@ -164,14 +164,8 @@ class AsyncLLM(EngineClient):
 
         # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
         detokenizer_req, engine_core_req = self.processor.process_inputs(
-            request_id=request_id,
-            prompt=prompt,
-            params=params,
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request,
-            priority=priority)
+            request_id, prompt, params, arrival_time, lora_request,
+            trace_headers, prompt_adapter_request, priority)
 
         # 3) Add the request to Detokenizer (this process).
         self.detokenizer.add_request(detokenizer_req)
