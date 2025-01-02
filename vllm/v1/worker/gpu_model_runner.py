@@ -209,8 +209,8 @@ class GPUModelRunner:
                 req_index, start_index:end_index] = req_data.new_block_ids
 
             # Remove from prompt logprobs once out of prefill phase.
-            if (req_id in self.input_batch.num_prompt_logprobs
-                    and req_id != scheduler_output.partial_req_id):
+            if (req_id in self.input_batch.num_prompt_logprobs and
+                req_id not in scheduler_output.partial_req_ids):
                 del self.input_batch.num_prompt_logprobs[req_id]
 
         req_ids_to_add: List[str] = []
