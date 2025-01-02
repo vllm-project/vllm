@@ -113,12 +113,6 @@ class IncrementalDetokenizer:
         logprobs_lst: List[torch.Tensor],
     ) -> Optional[SampleLogprobs]:
         """
-        Create formatted SampleLogprobs objects from the raw
-        EngineCore outputs after pythonizing + detokenizing.
-
-        NOTE: we detokenize the logprobs *non-incrementally*
-        for simplicity and performance of the implementation.
-
         Args:
             sampled_token_ids: List of new sampled tokens
             logprobs_token_ids_lst: List of tensors of token ids of 
@@ -126,7 +120,7 @@ class IncrementalDetokenizer:
             logprobs_lst: List of tensors of logprobs of 
                 shape [topk+1] for to sampled + topk token ids    
         Returns:
-            SampleLogprobs: List[Dict[str, Logprob]]: New only.
+            New SampleLogprobs or None
         """
 
         if self.num_logprobs == 0:
@@ -181,17 +175,11 @@ class IncrementalDetokenizer:
         logprobs: Optional[torch.Tensor],
     ) -> Optional[PromptLogprobs]:
         """
-        Create formatted PromptLogprobs objects from the raw
-        EngineCore outputs after pythonizing + detokenizing.
-
-        NOTE: we detokenize the logprobs *non-incrementally*
-        for simplicity and performance of the implementation.
-
         Args:
             token_ids: Tensor of tok ids of shape [prompt_len, topk]
             logprobs: Tensor of logprobs of shape [prompt_len, topk]
         Returns:
-            PromptLogprobs: List[Dict[int, Logprob]]
+            PromptLogprobs or None
         """
 
         if logprobs_token_ids is None:
