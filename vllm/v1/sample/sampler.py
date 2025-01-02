@@ -17,7 +17,9 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        logits = self._process_logits(
+        logits = self.apply_temperature(
+            logits, sampling_metadata.logits_process_metadata.temperature)
+        logits = self.apply_top_k_top_p(
             logits, sampling_metadata.logits_process_metadata)
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
@@ -45,7 +47,9 @@ class Sampler(nn.Module):
         logits_process_metadata: LogitsProcessMetadata,
         num_logprobs: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        logits = self._process_logits(logits, logits_process_metadata)
+        logits = self.apply_temperature(logits,
+                                        logits_process_metadata.temperature)
+        logits = self.apply_top_k_top_p(logits, logits_process_metadata)
 
         # NOTE: CPU-GPU synchronization happens here.
         logprob_token_ids, logprobs = self._compute_logprobs(
@@ -80,17 +84,7 @@ class Sampler(nn.Module):
         else:
             return None, None
 
-    def _process_logits(
-        self,
-        logits: torch.Tensor,
-        logits_process_metadata: LogitsProcessMetadata,
-    ) -> torch.Tensor:
-        logits = self._apply_temperature(logits,
-                                         logits_process_metadata.temperature)
-        logits = self._apply_top_k_top_p(logits, logits_process_metadata)
-        return logits
-
-    def _apply_temperature(
+    def apply_temperature(
         self,
         logits: torch.Tensor,
         temp: torch.Tensor,
@@ -103,7 +97,7 @@ class Sampler(nn.Module):
         logits.div_(temp.unsqueeze(dim=1))
         return logits
 
-    def _apply_top_k_top_p(
+    def apply_top_k_top_p(
         self,
         logits: torch.Tensor,
         logits_process_metadata: LogitsProcessMetadata,
