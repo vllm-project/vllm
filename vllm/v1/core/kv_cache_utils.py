@@ -164,7 +164,7 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-def generate_block_hash_extra_keys_for_mm(
+def _gen_mm_extra_hash_keys(
         request: Request, start_token_idx: int, end_token_idx: int,
         start_mm_idx: int) -> Tuple[Optional[List[Any]], int]:
     """Generate extra keys related to MultiModal request for block hash
@@ -232,7 +232,7 @@ def generate_block_hash_extra_keys_for_mm(
     return extra_keys, curr_mm_idx
 
 
-def generate_block_hash_extra_keys_for_lora(
+def _gen_lora_extra_hash_keys(
         request: Request) -> Optional[List[int]]:
     """Generate extra keys related to LoRA for block hash computation.
     
@@ -264,10 +264,10 @@ def generate_block_hash_extra_keys(
         A tuple of extra keys and the next multi-modal index.
     """
     mm_extra_keys: Optional[List[Any]]
-    mm_extra_keys, new_start_mm_idx = generate_block_hash_extra_keys_for_mm(
+    mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx)
     lora_extra_keys: Optional[
-        List[int]] = generate_block_hash_extra_keys_for_lora(request)
+        List[int]] = _gen_lora_extra_hash_keys(request)
 
     extra_keys: List[Any] = []
     if mm_extra_keys:
