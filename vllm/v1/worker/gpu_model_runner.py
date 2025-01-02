@@ -401,7 +401,7 @@ class GPUModelRunner:
         # Create the sampling metadata.
         sampling_metadata = self.input_batch.make_sampling_metadata(
             skip_copy, sample_indices)
-        
+
         # Create the prompt logprobs metdata.
         prompt_lps_metdata = self.input_batch.make_prompt_logprobs_metadata(
             num_scheduled_tokens, req_indices)
@@ -553,31 +553,20 @@ class GPUModelRunner:
         )
 
         # Compute prompt logprobs if requested.
-        prompt_logprobs_output = {}
-        if prompt_logprobs_metadata:
-            # NOTE(rob): the implementation computes logits that are not
-            # needed and uses a small loop to keep code simple for a low
-            # importance feature (primarily used for lm-eval evaluations).
-
-            # First, compute the logits for all elements of the batch
-            logits = self.model.sampler.compute_logits(hidden_states, None)
-            logits = self.model.sampler.process_logits(
-                logits, prompt_logprobs_metadata.logits_process_metadata)
-
-            # Second, compute the logprobs for requests needing prompt lps.
-            # NOTE(rob): We should avoid looping over all reqs, this loop
-            # this only loops over active prefills which need prompt lps.
-            prompt_logprobs = {}
-            for req_id, logits_mask in logits_mask.items():
-                req_logits = logits[logits_mask]
-                lp_token_ids, lps = self.model.sampler.compute_logprobs(
-                    req_logits, self.input_batch.num_prompt_logprobs[req_id])
-
-                # TODO: remove the sample logprob by checking if this is a
-                # partial request or not.
-                prompt_logprobs[req_id] = (lp_token_ids, lps)
-
-            # Second, split the prompt logprobs
+        # NOTE(rob): this implementation computes the prompt logprobs for
+        # each active prompt separately, which is suboptimal. However,
+        # there are typically < 5 active prefills in a batch and prompt
+        # logprobs are a rare feature (used by lm-eval-harness), so
+        # prioritize simplicity over performance.
+        prompt_logprobs_output: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        for (req_id, mask, num_logprobs,
+             logits_process_metadata) in prompt_logprobs_metadata.zipped():
+            # Compute logits.
+            logits = self.model.sampler.compute_logits(
+                hidden_states[mask], None)
+            # Compute logprobs.
+            prompt_logprobs_output[req_id] = self.model.sampler.get_prompt_logprobs(
+                logits, logits_process_metadata, num_logprobs)
 
         # Update Request State.
         sampled_token_ids = sampler_output.sampled_token_ids
@@ -603,10 +592,10 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        # num_reqs entries should be non-None	
-        assert all(	
-            req_id is not None for req_id in	
-            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"	
+        # num_reqs entries should be non-None
+        assert all(
+            req_id is not None for req_id in
+            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
         model_runner_output = ModelRunnerOutput(

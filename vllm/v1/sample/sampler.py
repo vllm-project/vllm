@@ -18,8 +18,8 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        logits = self.process_logits(
-            logits, sampling_metadata.logits_process_metadata)
+        logits = self.process_logits(logits,
+                                     sampling_metadata.logits_process_metadata)
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
         # Use int32 to reduce the tensor size.
@@ -46,8 +46,9 @@ class Sampler(nn.Module):
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         if max_num_logprobs > 0:
             logprobs = self.get_logprobs(logits)
-            topk_logprobs, topk_indices = torch.topk(
-                logprobs, max_num_logprobs, dim=-1)
+            topk_logprobs, topk_indices = torch.topk(logprobs,
+                                                     max_num_logprobs,
+                                                     dim=-1)
             # Use int32 to reduce the tensor size.
             topk_indices = topk_indices.to(torch.int32)
 

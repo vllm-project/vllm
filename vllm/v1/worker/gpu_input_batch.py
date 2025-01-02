@@ -116,10 +116,10 @@ class InputBatch:
         # generator should not be included in the dictionary.
         self.generators: Dict[int, torch.Generator] = {}
 
-        # Logprobs-related.
-        # NOTE(rob): The prompt logprobs trackers only include reqs that
-        # are actively generating logprobs (i.e. they in prefill phase).
+        
         self.num_logprobs: Dict[str, int] = {}
+        # NOTE(rob): num_prompt_logprobs ONLY includes reqs
+        # that are currently in the prefill phase.
         self.num_prompt_logprobs: Dict[str, int] = {}
 
     def add_request(
@@ -274,7 +274,8 @@ class InputBatch:
 
     def make_prompt_logprobs_metadata(
         self,
-        num_scheduled_tokens: np.ndarray,
+        partial_req_ids: List[int],
+        num_scheduled_tokens: Dict[str, int],
         req_indices: np.ndarray,
     ) -> Optional[PromptLogprobsMetadata]:
 
@@ -286,8 +287,8 @@ class InputBatch:
         metas = {}
         for req_id in self.num_prompt_logprobs:
             req_index = self.req_id_to_index[req_id]
-            num_scheduled_tok = num_scheduled_tokens[req_index]
-            top_p = self.top_p
+            req_num_scheduled_tokens = num_scheduled_tokens[req_index]
+            top_p = self.top_p[req_id]
 
         logits_masks = {
             req_id: (req_indices == self.req_id_to_index[req_id])

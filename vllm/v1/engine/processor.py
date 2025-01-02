@@ -69,7 +69,7 @@ class Processor:
             raise ValueError(
                 f"Requested prompt logprobs of {params.prompt_logprobs}, "
                 f"which is greated than max allowed: {max_logprobs}")
-        
+
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
