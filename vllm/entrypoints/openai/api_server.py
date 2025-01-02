@@ -631,12 +631,12 @@ def init_app_state(
     logger.info("Using supplied chat template:\n%s", resolved_chat_template)
 
     state.openai_serving_models = OpenAIServingModels(
+        engine_client=engine_client,
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
     )
-    # TODO: The chat template is now broken for lora adapters :(
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,

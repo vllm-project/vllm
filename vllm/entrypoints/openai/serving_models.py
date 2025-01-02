@@ -5,6 +5,7 @@ from http import HTTPStatus
 from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               ModelCard, ModelList,
@@ -45,6 +46,7 @@ class OpenAIServingModels:
 
     def __init__(
         self,
+        engine_client: EngineClient,
         model_config: ModelConfig,
         base_model_paths: List[BaseModelPath],
         *,
@@ -55,6 +57,7 @@ class OpenAIServingModels:
 
         self.base_model_paths = base_model_paths
         self.max_model_len = model_config.max_model_len
+        self.engine_client = engine_client
 
         self.lora_id_counter = AtomicCounter(0)
         self.lora_requests = []
@@ -136,10 +139,19 @@ class OpenAIServingModels:
 
         lora_name, lora_path = request.lora_name, request.lora_path
         unique_id = self.lora_id_counter.inc(1)
-        self.lora_requests.append(
-            LoRARequest(lora_name=lora_name,
-                        lora_int_id=unique_id,
-                        lora_path=lora_path))
+        lora_request = LoRARequest(lora_name=lora_name,
+                                   lora_int_id=unique_id,
+                                   lora_path=lora_path)
+
+        # Validate that the adapter can be loaded into the engine
+        try:
+            await self.engine_client.add_lora(lora_request)
+        except BaseException as e:
+            return create_error_response(message=str(e),
+                                         err_type="InvalidUserInput",
+                                         status_code=HTTPStatus.BAD_REQUEST)
+
+        self.lora_requests.append(lora_request)
         return f"Success: LoRA adapter '{lora_name}' added successfully."
 
     async def unload_lora_adapter(

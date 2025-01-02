@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Mapping, Optional, Union, overload
 
@@ -120,8 +121,15 @@ class RPCUProfileRequest(Enum):
     STOP_PROFILE = 2
 
 
+@dataclass
+class RPCLoadAdapterRequest:
+    lora_request: LoRARequest
+    # Set the default value of request_id to a new UUID
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
-                      RPCUProfileRequest]
+                      RPCUProfileRequest, RPCLoadAdapterRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
 

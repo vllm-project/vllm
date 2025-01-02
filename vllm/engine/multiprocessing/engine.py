@@ -14,8 +14,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCProcessRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
+                                         RPCError, RPCLoadAdapterRequest,
+                                         RPCProcessRequest, RPCStartupRequest,
+                                         RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
 from vllm.executor.gpu_executor import GPUExecutor
@@ -234,6 +235,8 @@ class MQLLMEngine:
                         self.start_profile()
                     else:
                         self.stop_profile()
+                elif isinstance(request, RPCLoadAdapterRequest):
+                    self._handle_load_adapter_request(request)
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -283,6 +286,18 @@ class MQLLMEngine:
         self.engine.abort_request(request.request_id)
         if self.log_requests:
             logger.info("Aborted request %s.", request.request_id)
+
+    def _handle_load_adapter_request(self, request: RPCLoadAdapterRequest):
+        try:
+            self.engine.add_lora(request.lora_request)
+        except BaseException as e:
+            # Send back an error if the adater fails to load
+            rpc_err = RPCError(request_id=request.request_id,
+                               is_engine_errored=False,
+                               exception=e)
+            self._send_outputs(rpc_err)
+        # Otherwise, echo back the request if successful
+        self._send_outputs([request])
 
     def _health_check(self):
         # Send unhealthy if engine has already errored
