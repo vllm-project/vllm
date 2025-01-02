@@ -12,7 +12,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequestType, EngineCoreRequestUnion)
 from vllm.v1.engine.core import (EngineCore, EngineCoreProc,
                                  EngineCoreProcHandle)
-from vllm.v1.serial_utils import PickleEncoder, MsgpackDecoder
+from vllm.v1.serial_utils import MsgpackDecoder, PickleEncoder
 
 logger = init_logger(__name__)
 

@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.v1.sample.metadata import (LogitsProcessMetadata, SamplingMetadata,
-                                     PromptLogprobsMetadata)
+from vllm.v1.sample.metadata import (LogitsProcessMetadata,
+                                     PromptLogprobsMetadata, SamplingMetadata)
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
@@ -273,12 +274,15 @@ class InputBatch:
 
     def make_prompt_logprobs_metadata(
         self,
-        partial_req_ids: List[int],
-        req_indices: np.ndarray,
+        partial_req_ids: List[str],
+        req_indices: npt.NDArray,
     ) -> Optional[PromptLogprobsMetadata]:
 
         if not self.max_num_prompt_logprobs:
             return None
+
+        # Precompute the indicies.
+        all_indicies = np.arange(req_indices.shape[0])
 
         # NOTE(rob): we should avoid loops like this  in model runner,
         # but this ONLY loops over requests that are currently in
@@ -293,8 +297,8 @@ class InputBatch:
         ):
             req_idx = self.req_id_to_index[req_id]
 
-            # Make the logits mask for the request prefills.
-            mask = req_indices[req_indices == req_idx].tolist()
+            # Make the logits mask for this request's prefill.
+            mask = all_indicies[req_indices == req_idx].tolist()
             if req_id not in partial_req_ids:
                 # Remove the sample token if there is one.
                 mask = mask[:-1]

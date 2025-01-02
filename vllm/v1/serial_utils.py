@@ -1,6 +1,7 @@
-import torch
 import pickle
 from typing import Any
+
+import torch
 from msgspec import msgpack
 
 CUSTOM_TYPE_CODE_PICKLE = 1

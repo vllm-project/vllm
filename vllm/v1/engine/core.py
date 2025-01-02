@@ -23,7 +23,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import PickleEncoder, MsgpackEncoder
+from vllm.v1.serial_utils import MsgpackEncoder, PickleEncoder
 from vllm.v1.utils import make_zmq_socket
 from vllm.version import __version__ as VLLM_VERSION
 

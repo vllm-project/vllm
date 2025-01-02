@@ -1,8 +1,5 @@
 import enum
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
-
-import numpy as np
-import numpy.typing as npt
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.inputs import DecoderOnlyInputs, SingletonInputsAdapter, token_inputs
 from vllm.lora.request import LoRARequest
@@ -49,33 +46,6 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
-
-        # If sample logprobs are enabled, the number of sample logprobs cannot
-        # be anticipated in advance (because the LLM is partially responsible
-        # for deciding when the completion is finished.) So,
-        # build a list of (logprobs,logprob_token_ids) tuples for each generated
-        # sequence position; logprobs and logprob_token_ids are both
-        # 1 x num_logprobs_at_offset np arrays,
-        # where num_logprobs_at_offset is the number of logprobs at a
-        # particular offset in the generated sequence. This has overheads
-        # compared to a single big NDArray, but should be okay because
-        # subsequent logprobs pythonization steps only
-        # aggregate along rows, not along columns.
-        # TODO: an alternative could be to preallocate a
-        # self.max_tokens x self.max_logprobs NDArray, but
-        # this was not employed because the array could be very large for large
-        # context windows, even if the completion was very short.
-        self.logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]] = (
-            None if self.request_sample_logprobs is None else [])
-        # The number of prompt logprobs is known is advance, so preallocate an
-        # NDArray
-        self.prompt_logprobs: Optional[npt.NDArray] = (
-            None if self.request_prompt_logprobs is None else np.empty(
-                (self.num_prompt_tokens, self.request_prompt_logprobs)))
-        self.prompt_logprob_token_ids: Optional[npt.NDArray] = (
-            None if self.request_prompt_logprobs is None else np.empty(
-                (self.num_prompt_tokens, self.request_prompt_logprobs),
-                dtype=np.int32))
         self.num_computed_tokens = 0
 
         # Multi-modal input metadata.

@@ -433,17 +433,16 @@ class Scheduler:
 
                 # Extract sample logprobs if needed.
                 # TODO(rob): does it make sense to pythonize here?
-                do_lps = logprobs_cpu is not None
                 logprobs_token_ids = (logprobs_token_ids_cpu[req_index]
-                                      if do_lps else None)
-                logprobs = logprobs_cpu[req_index] if do_lps else None
+                                      if logprobs_token_ids_cpu else None)
+                logprobs = logprobs_cpu[req_index] if logprobs_cpu else None
 
                 # Extract prompt logprobs for this req if needed.
                 # TODO(rob): does it make sense to pythonize here?
                 # FIXME(rob): handle partial request. Currently we throw away
                 # the prompt logprobs for the partial request.
                 prompt_logprobs_token_ids, prompt_logprobs = (
-                    prompt_logprobs_dict.get(req_id, default=(None, None)))
+                    prompt_logprobs_dict.get(req_id, (None, None)))
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(

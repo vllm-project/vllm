@@ -3,6 +3,7 @@ import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -20,8 +21,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
-from vllm.v1.outputs import ModelRunnerOutput, SamplerOutput
-from vllm.v1.sample.metadata import SamplingMetadata, PromptLogprobsMetadata
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.sample.metadata import PromptLogprobsMetadata, SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -378,7 +379,6 @@ class GPUModelRunner:
         sampling_metadata, prompt_logprobs_metadata = self._prepare_sampling(
             scheduler_output=scheduler_output,
             sample_indices=query_start_loc[1:] - 1,
-            num_scheduled_tokens=num_scheduled_tokens,
             req_indices=req_indices,
         )
 
@@ -388,8 +388,7 @@ class GPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
         sample_indices: torch.Tensor,
-        num_scheduled_tokens: np.array,
-        req_indices: np.ndarray,
+        req_indices: npt.NDArray,
     ) -> Tuple[SamplingMetadata, Optional[PromptLogprobsMetadata]]:
         skip_copy = True
         if (scheduler_output.finished_req_ids
@@ -402,9 +401,9 @@ class GPUModelRunner:
         sampling_metadata = self.input_batch.make_sampling_metadata(
             skip_copy, sample_indices)
 
-        # Create the prompt logprobs metdata.
+        # Create the prompt logprobs metadata.
         prompt_lps_metadata = self.input_batch.make_prompt_logprobs_metadata(
-            num_scheduled_tokens, req_indices)
+            scheduler_output.partial_req_ids, req_indices)
 
         return sampling_metadata, prompt_lps_metadata
 
@@ -559,8 +558,8 @@ class GPUModelRunner:
         # so prioritize simplicity.
         prompt_lps_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
         if prompt_logprobs_metadata:
-            for req_id, mask, metadata, num_logprobs in prompt_logprobs_metadata.zipped(
-            ):
+            for (req_id, mask, metadata,
+                 num_logprobs) in prompt_logprobs_metadata.zipped():
                 # TODO: make prompt lp metadata here?
 
                 # Compute logits.

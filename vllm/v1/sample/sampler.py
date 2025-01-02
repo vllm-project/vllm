@@ -4,9 +4,8 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.v1.outputs import SamplerOutput, PromptLogprobsOutput
-from vllm.v1.sample.metadata import (LogitsProcessMetadata, SamplingMetadata,
-                                     PromptLogprobsMetadata)
+from vllm.v1.outputs import SamplerOutput
+from vllm.v1.sample.metadata import LogitsProcessMetadata, SamplingMetadata
 
 _SAMPLING_EPS = 1e-5
 
@@ -28,7 +27,7 @@ class Sampler(nn.Module):
         # Compute the logprobs if requested.
         # NOTE: CPU-GPU synchronization happens here.
         logprob_token_ids, logprobs = self._compute_logprobs(
-            logit=logits,
+            logits=logits,
             max_num_logprobs=sampling_metadata.max_num_logprobs,
             sampled_token_ids=sampled)
 
