@@ -1060,6 +1060,7 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
     prompt = inputs.get("prompt")
     multi_modal_data = inputs.get("multi_modal_data")
     image = None if multi_modal_data is None else multi_modal_data.get("image")
+    # If there is no image, return directly.
     if image is None:
         return inputs
     model_config = ctx.model_config
