@@ -683,7 +683,11 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         hf_config = self.ctx.get_hf_config(LlavaConfig)
         image_token_id = hf_config.image_token_index
 
-        num_image_tokens = self._get_num_image_tokens()
+        # Assume that it doesn't depend on the image size
+        num_image_tokens = self._get_num_image_tokens(
+            image_width=-1,
+            image_height=-1,
+        )
 
         result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
 
