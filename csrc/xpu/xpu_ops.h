@@ -30,7 +30,7 @@ void paged_attention_v1(
     torch::Tensor &value_cache, int num_kv_heads, float scale,
     torch::Tensor &block_tables, torch::Tensor &context_lens, int block_size,
     int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes,
-    const std::string& kv_cache_dtype, const float kv_scale);
+    const std::string& kv_cache_dtype, const float kv_scale, const float attn_logit_softcapping);
 
 void paged_attention_v2(
     torch::Tensor &out, torch::Tensor &exp_sums, torch::Tensor &max_logits,
@@ -38,7 +38,7 @@ void paged_attention_v2(
     torch::Tensor &value_cache, int num_kv_heads, float scale,
     torch::Tensor &block_tables, torch::Tensor &context_lens, int block_size,
     int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes,
-    const std::string& kv_cache_dtype, const float kv_scale);
+    const std::string& kv_cache_dtype, const float kv_scale, const float attn_logit_softcapping);
 
 torch::Tensor context_attention_forward_v1(
     torch::Tensor query,  // [num_tokens, num_kv_head, head_dim]

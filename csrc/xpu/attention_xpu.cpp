@@ -28,6 +28,14 @@
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b)-1) / (b))
 using namespace sycl::ext::intel::esimd;
 
+template<typename T>
+static inline T attn_softcapping(T qk, float attn_logit_softcapping) {
+    qk = qk / attn_logit_softcapping;
+    qk = (sycl::exp(qk) - sycl::exp(-qk)) / (sycl::exp(qk) + sycl::exp(-qk));
+    qk = qk * attn_logit_softcapping;
+    return qk;
+}
+
 template <typename T>
 struct Float_Trait {
   using Type = T;
@@ -1274,6 +1282,7 @@ void paged_attention_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
+    const float attn_logit_softcapping,
     const sycl::nd_item<3>& item_ct1,
     uint8_t* dpct_local,
     Q_Vec_t* q_vecs,
@@ -1429,6 +1438,10 @@ void paged_attention_kernel(
       qk +=
           (alibi_slope != 0) ? alibi_slope * (token_idx - context_len + 1) : 0;
 
+      // Add the attn_logit_softcapp if given.
+      if (attn_logit_softcapping != 0.0) {
+          qk = attn_softcapping(qk, attn_logit_softcapping);
+      }
       if (thread_group_offset == 0) {
         // Store the partial reductions to shared memory.
         // NOTE(woosuk): It is required to zero out the masked logits.
@@ -1679,6 +1692,7 @@ void paged_attention_v1_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
+    const float attn_logit_softcapping,
     const sycl::nd_item<3>& item_ct1,
     uint8_t* dpct_local,
     Q_Vec_t* q_vecs,
@@ -1705,6 +1719,7 @@ void paged_attention_v1_kernel(
       q_stride,
       kv_block_stride,
       kv_head_stride,
+      attn_logit_softcapping,
       item_ct1,
       dpct_local,
       q_vecs,
@@ -1751,6 +1766,7 @@ void paged_attention_v1_kernel(
     auto q_stride_ct10 = q_stride;                                          \
     auto kv_block_stride_ct11 = kv_block_stride;                            \
     auto kv_head_stride_ct12 = kv_head_stride;                              \
+    auto attn_logit_softcapping_ct13 = attn_logit_softcapping;              \
                                                                             \
     cgh.parallel_for(                                                       \
         sycl::nd_range<3>(grid * block, block),                             \
@@ -1775,6 +1791,7 @@ void paged_attention_v1_kernel(
               q_stride_ct10,                                                \
               kv_block_stride_ct11,                                         \
               kv_head_stride_ct12,                                          \
+              attn_logit_softcapping_ct13,                                  \
               item_ct1,                                                     \
               dpct_local_acc_ct1.get_pointer(),                             \
               q_vecs_acc_ct1.get_pointer(),                                 \
@@ -1793,7 +1810,8 @@ void paged_attention_xpu_v1_impl_launcher(
     torch::Tensor& block_tables,
     torch::Tensor& context_lens,
     int max_context_len,
-    const c10::optional<torch::Tensor>& alibi_slopes) {
+    const c10::optional<torch::Tensor>& alibi_slopes,
+    const float attn_logit_softcapping) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -1907,7 +1925,8 @@ void paged_attention_xpu_v1_impl_launcher(
       block_tables,                                          \
       context_lens,                                          \
       max_context_len,                                       \
-      alibi_slopes);
+      alibi_slopes,                                          \
+      attn_logit_softcapping);
 
 #define CALL_KERNEL_LAUNCHER_BLOCK_SIZE(T)                        \
   switch (block_size) {                                           \
@@ -2101,6 +2120,7 @@ void paged_attention_v2_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
+    const float attn_logit_softcapping,
     const sycl::nd_item<3>& item_ct1,
     uint8_t* dpct_local,
     Q_Vec_t* q_vecs,
@@ -2128,6 +2148,7 @@ void paged_attention_v2_kernel(
       q_stride,
       kv_block_stride,
       kv_head_stride,
+      attn_logit_softcapping,
       item_ct1,
       dpct_local,
       q_vecs,
@@ -2157,6 +2178,7 @@ void paged_attention_v2_kernel(
     auto q_stride_ct12 = q_stride;                                          \
     auto kv_block_stride_ct13 = kv_block_stride;                            \
     auto kv_head_stride_ct14 = kv_head_stride;                              \
+    auto attn_logit_softcapping_ct15 = attn_logit_softcapping;              \
                                                                             \
     cgh.parallel_for(                                                       \
         sycl::nd_range<3>(grid * block, block),                             \
@@ -2184,6 +2206,7 @@ void paged_attention_v2_kernel(
               q_stride_ct12,                                                \
               kv_block_stride_ct13,                                         \
               kv_head_stride_ct14,                                          \
+              attn_logit_softcapping_ct15,                                  \
               item_ct1,                                                     \
               dpct_local_acc_ct1.get_pointer(),                             \
               q_vecs_acc_ct1.get_pointer(),                                 \
@@ -2243,7 +2266,8 @@ void paged_attention_v2_launcher(
     torch::Tensor& block_tables,
     torch::Tensor& context_lens,
     int max_context_len,
-    const c10::optional<torch::Tensor>& alibi_slopes) {
+    const c10::optional<torch::Tensor>& alibi_slopes,
+    const float attn_logit_softcapping) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -2402,7 +2426,8 @@ void paged_attention_v2_launcher(
       block_tables,                                 \
       context_lens,                                 \
       max_context_len,                              \
-      alibi_slopes);
+      alibi_slopes,                                 \
+      attn_logit_softcapping);
 
 #define CALL_V2_LAUNCHER_BLOCK_SIZE(T)                            \
   switch (block_size) {                                           \
@@ -2435,7 +2460,8 @@ void paged_attention_v1(
     int max_context_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype,
-    const float kv_scale) {
+    const float kv_scale,
+    const float attn_logit_softcapping) {
   VLLM_XPU_DISPATCH_FLOATING_TYPES_FLOAT_ONLY(
       query.scalar_type(), "paged_attention_xpu_v1_impl", [&] {
         CALL_KERNEL_LAUNCHER_BLOCK_SIZE(scalar_t);
@@ -2458,7 +2484,8 @@ void paged_attention_v2(
     int max_context_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype,
-    const float kv_scale) {
+    const float kv_scale,
+    const float attn_logit_softcapping) {
   VLLM_XPU_DISPATCH_FLOATING_TYPES_FLOAT_ONLY(
       query.scalar_type(), "paged_attention_xpu_v2_impl", [&] {
         CALL_V2_LAUNCHER_BLOCK_SIZE(scalar_t);

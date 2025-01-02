@@ -74,6 +74,7 @@ class ipex_ops:
         kv_cache_dtype: str,
         k_scale: float,
         v_scale: float,
+        logits_soft_cap: float,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -86,7 +87,7 @@ class ipex_ops:
                                      key_cache.view_as(value_cache),
                                      value_cache, num_kv_heads, scale,
                                      block_tables, context_lens, block_size,
-                                     max_context_len, alibi_slopes, kv_cache_dtype, k_scale)
+                                     max_context_len, alibi_slopes, kv_cache_dtype, k_scale, logits_soft_cap)
 
     @staticmethod
     def paged_attention_v2(
@@ -107,6 +108,7 @@ class ipex_ops:
         kv_cache_dtype: str,
         k_scale: float,
         v_scale: float,
+        logits_soft_cap: float,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -120,7 +122,7 @@ class ipex_ops:
                                      key_cache.view_as(value_cache),
                                      value_cache, num_kv_heads, scale, block_tables,
                                      context_lens, block_size,
-                                     max_context_len, alibi_slopes,kv_cache_dtype, k_scale)
+                                     max_context_len, alibi_slopes,kv_cache_dtype, k_scale, logits_soft_cap)
 
     @staticmethod
     def rotary_embedding(
