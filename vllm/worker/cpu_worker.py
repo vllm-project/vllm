@@ -6,14 +6,14 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.attention import get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, VllmConfig)
+from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
+                         ModelConfig, ParallelConfig, VllmConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, register_kv_cache
 from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
 from vllm.worker.cpu_model_runner import CPUModelRunner, CPUModelRunnerBase
 from vllm.worker.cpu_pooling_model_runner import CPUPoolingModelRunner
@@ -33,8 +33,8 @@ class CPUCacheEngine:
     """
 
     def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
-                 parallel_config: ParallelConfig,
-                 device_config: DeviceConfig) -> None:
+                 parallel_config: ParallelConfig, device_config: DeviceConfig,
+                 compilation_config: CompilationConfig) -> None:
         assert device_config.device_type == "cpu"
         self.cache_config = cache_config
         self.model_config = model_config
@@ -66,6 +66,8 @@ class CPUCacheEngine:
 
         # Initialize the cache.
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks)
+        register_kv_cache(compilation_config.static_forward_context,
+                          self.cpu_cache)
 
     def _allocate_kv_cache(
         self,
@@ -285,9 +287,13 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def _init_cache_engine(self) -> None:
         self.cache_engine = [
-            CPUCacheEngine(self.cache_config, self.model_config,
-                           self.parallel_config, self.device_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
+            CPUCacheEngine(
+                self.cache_config,
+                self.model_config,
+                self.parallel_config,
+                self.device_config,
+                self.compilation_config,
+            ) for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.cpu_cache = [
             self.cache_engine[ve].cpu_cache
