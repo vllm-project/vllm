@@ -571,7 +571,6 @@ class GPUModelRunner:
                     req_id] = self.model.sampler.get_prompt_logprobs(
                         logits, metadata, num_logprobs)
 
-        # Update Request State.
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
