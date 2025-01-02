@@ -1,7 +1,6 @@
 import pickle
-from typing import Any
-
 import torch
+from typing import Any
 from msgspec import msgpack
 
 CUSTOM_TYPE_CODE_PICKLE = 1
@@ -9,10 +8,10 @@ CUSTOM_TYPE_CODE_PICKLE = 1
 
 class PickleEncoder:
 
-    def encode(self, obj):
+    def encode(self, obj: Any):
         return pickle.dumps(obj)
 
-    def decode(self, data):
+    def decode(self, data: Any):
         return pickle.loads(data)
 
 
