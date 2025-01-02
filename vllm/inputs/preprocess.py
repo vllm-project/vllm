@@ -436,7 +436,7 @@ class InputPreprocessor:
                 or encoder_inputs["type"] == "multimodal"):
             pass
         else:
-            assert_never(encoder_inputs)
+            assert_never(encoder_inputs)  # type: ignore[arg-type]
 
         if decoder_inputs is None:
             dec_token_ids = self._prepare_decoder_input_ids_for_generation(
@@ -452,7 +452,7 @@ class InputPreprocessor:
                 raise ValueError("Multi-modal decoder inputs of encoder-"
                                  "decoder models are not supported yet")
         else:
-            assert_never(encoder_inputs)
+            assert_never(encoder_inputs)  # type: ignore[arg-type]
 
         return EncoderDecoderInputs(
             encoder=encoder_inputs,
@@ -569,7 +569,7 @@ class InputPreprocessor:
                 prompt_adapter_request=prompt_adapter_request,
             )
         else:
-            assert_never(prompt_inputs)
+            assert_never(prompt_inputs)  # type: ignore[arg-type]
 
         return prompt_inputs
 
