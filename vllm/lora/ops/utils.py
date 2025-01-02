@@ -79,29 +79,21 @@ def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: str):
         lora_strides_d0.append(lora_a_weight.stride(0))
         lora_strides_d1.append(lora_a_weight.stride(1))
         lora_strides_d2.append(lora_a_weight.stride(2))
-
     if len(lora_a_weights) > 1:
         lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
-
     else:
         lora_ptr_tensor = lora_a_weights[0]
-    # If each lora has the same stride, there's no need to use a
-    # tensor for storage.
-    if (len(set(lora_strides_d0)) == 1 and len(set(lora_strides_d1)) == 1
-            and len(set(lora_strides_d2)) == 1):
-        lora_strides_d0_tensor = lora_strides_d0[0]
-        lora_strides_d1_tensor = lora_strides_d1[0]
-        lora_strides_d2_tensor = lora_strides_d2[0]
-        same_stride = True
-    else:
-        lora_strides_d0_tensor = torch.tensor(lora_strides_d0, device=device)
-        lora_strides_d1_tensor = torch.tensor(lora_strides_d1, device=device)
-        lora_strides_d2_tensor = torch.tensor(lora_strides_d2, device=device)
-        same_stride = False
 
-    _LORA_A_PTR_DICT[key] = (lora_ptr_tensor, lora_strides_d0_tensor,
-                             lora_strides_d1_tensor, lora_strides_d2_tensor,
-                             same_stride)
+    if (len(set(lora_strides_d0)) > 1 or len(set(lora_strides_d1)) > 1
+            or len(set(lora_strides_d2)) > 1):
+        raise ValueError("All LoRA weights must have the same stride.")
+
+    _LORA_A_PTR_DICT[key] = (
+        lora_ptr_tensor,
+        lora_strides_d0[0],
+        lora_strides_d1[0],
+        lora_strides_d2[0],
+    )
     return _LORA_A_PTR_DICT.get(key)
 
 
@@ -123,6 +115,7 @@ def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
     lora_strides_d0 = []
     lora_strides_d1 = []
     lora_strides_d2 = []
+    hidden_sizes = []
     slice_offset = offset_start
     for lora_b_weight in lora_weights:
         if lora_b_weight.ndim == 4:  # shape:(lora_num,1,size,rank)
@@ -137,6 +130,7 @@ def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
         lora_strides_d2.append(lora_b_weight.stride(2))
         slice_offset_lst.append(slice_offset)
         slice_offset += lora_b_weight.size(1)
+        hidden_sizes.append(lora_b_weight.size(1))
 
     if len(lora_weights) > 1:
         # note these are device tensors
@@ -148,20 +142,24 @@ def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
 
     # If each lora has the same stride, there's no need to use a
     # tensor for storage.
-    if (len(set(lora_strides_d0)) == 1 and len(set(lora_strides_d1)) == 1
-            and len(set(lora_strides_d2)) == 1):
+    if (len(set(lora_strides_d0)) == 1 and len(set(lora_strides_d1)) == 1 and
+            len(set(lora_strides_d2)) == 1) and len(set(hidden_sizes)) == 1:
         lora_strides_d0_tensor = lora_strides_d0[0]
         lora_strides_d1_tensor = lora_strides_d1[0]
         lora_strides_d2_tensor = lora_strides_d2[0]
+        hidden_sizes_tensor = hidden_sizes[0]
         same_stride = True
 
     else:
         lora_strides_d0_tensor = torch.tensor(lora_strides_d0, device=device)
         lora_strides_d1_tensor = torch.tensor(lora_strides_d1, device=device)
         lora_strides_d2_tensor = torch.tensor(lora_strides_d2, device=device)
+        hidden_sizes_tensor = torch.tensor(hidden_sizes, device=device)
         same_stride = False
-
+    # MAX_N is the maximum hidden size among all the lora_b weights
+    MAX_N = max(hidden_sizes)
     _LORA_B_PTR_DICT[key] = (slice_start_tensor, lora_ptr_tensor,
                              lora_strides_d0_tensor, lora_strides_d1_tensor,
-                             lora_strides_d2_tensor, same_stride)
+                             lora_strides_d2_tensor, hidden_sizes_tensor,
+                             same_stride, MAX_N)
     return _LORA_B_PTR_DICT.get(key)

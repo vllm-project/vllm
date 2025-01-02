@@ -29,9 +29,9 @@ def _sgmv_shrink_kernel(
         scaling,
         input_d0_stride,
         input_d1_stride,  # 1
-        ls_d0_ptr,
-        ls_d1_ptr,
-        ls_d2_ptr,  # 1
+        lora_d0_stride,
+        lora_d1_stride,
+        lora_d2_stride,  # 1
         output_d0_stride,
         output_d1_stride,
         output_d2_stride,  # 1 
@@ -40,8 +40,7 @@ def _sgmv_shrink_kernel(
         BLOCK_K: tl.constexpr,
         EVEN_K: tl.constexpr,
         SPLIT_K: tl.constexpr,
-        SLICE_NUM: tl.constexpr,
-        SAME_STRIDE: tl.constexpr):
+        SLICE_NUM: tl.constexpr):
     """
     The sgmv's shrink triton kernel is based on GroupGEMM+SPLIT-K.
     The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally,
@@ -78,17 +77,6 @@ def _sgmv_shrink_kernel(
     a_ptr = (input_ptr + cur_seq_start * input_d0_stride +
              ram[:, None] * input_d0_stride +
              offset_k[None, :] * input_d1_stride)
-    # ls_d*_ptr can be either an integer or a pointer
-    if SAME_STRIDE:
-        # integer
-        cur_lora_d0_stride = ls_d0_ptr
-        cur_lora_d1_stride = ls_d1_ptr
-        cur_lora_d2_stride = ls_d2_ptr
-    else:
-        # pointer
-        cur_lora_d0_stride = tl.load(ls_d0_ptr + slice_id)
-        cur_lora_d1_stride = tl.load(ls_d1_ptr + slice_id)
-        cur_lora_d2_stride = tl.load(ls_d2_ptr + slice_id)
 
     if SLICE_NUM == 1:
         # current lora ptr
@@ -98,9 +86,9 @@ def _sgmv_shrink_kernel(
         cur_lora_ptr = tl.load(lora_ptr + slice_id).to(
             tl.pointer_type(input_ptr.dtype.element_ty))
 
-    b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
-             rbn[None, :] * cur_lora_d1_stride +
-             offset_k[:, None] * cur_lora_d2_stride)
+    b_ptr = (cur_lora_ptr + lora_d0_stride * lora_index +
+             rbn[None, :] * lora_d1_stride +
+             offset_k[:, None] * lora_d2_stride)
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_K * SPLIT_K)):
@@ -118,7 +106,7 @@ def _sgmv_shrink_kernel(
         accumulator += tl.dot(tiled_a, tiled_b)
 
         a_ptr += BLOCK_K * SPLIT_K * input_d1_stride
-        b_ptr += BLOCK_K * SPLIT_K * cur_lora_d2_stride
+        b_ptr += BLOCK_K * SPLIT_K * lora_d2_stride
     offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
 
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
@@ -181,13 +169,8 @@ def _sgmv_shrink(
     assert lora_indices_tensor.size(0) == batches
     assert inputs.is_contiguous()
     assert output_tensor.is_contiguous()
-    (
-        lora_ptr_tensor,
-        lora_strides_d0_tensor,
-        lora_strides_d1_tensor,
-        lora_strides_d2_tensor,
-        same_stride,
-    ) = _get_lora_a_ptr(lora_a_weights, b_seq_start_loc.device)
+    (lora_ptr_tensor, lora_strides_d0, lora_strides_d1,
+     lora_strides_d2) = _get_lora_a_ptr(lora_a_weights, b_seq_start_loc.device)
     # TODO tuning this config
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
     BLOCK_M = 32
@@ -200,7 +183,6 @@ def _sgmv_shrink(
         SPLIT_K * len(lora_a_weights),
         batches,
     )
-
     _sgmv_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -213,9 +195,9 @@ def _sgmv_shrink(
         scaling,
         inputs.stride(0),
         inputs.stride(1),
-        lora_strides_d0_tensor,
-        lora_strides_d1_tensor,
-        lora_strides_d2_tensor,
+        lora_strides_d0,
+        lora_strides_d1,
+        lora_strides_d2,
         output_tensor.stride(0),
         output_tensor.stride(1),
         output_tensor.stride(2),
@@ -225,7 +207,6 @@ def _sgmv_shrink(
         EVEN_K,
         SPLIT_K,
         len(lora_a_weights),
-        same_stride,
     )
     return
 

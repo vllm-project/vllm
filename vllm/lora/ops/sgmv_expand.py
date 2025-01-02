@@ -35,6 +35,7 @@ def _sgmv_expand_kernel(
         ls_d2_ptr,  # 1
         output_d0_stride,
         output_d1_stride,  # 1
+        output_hs_ptr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -54,12 +55,17 @@ def _sgmv_expand_kernel(
     pid = tl.program_id(axis=0)
     cur_batch = tl.program_id(axis=1)
     slice_id = tl.program_id(axis=2)
-
     cta_n_num = tl.cdiv(N, BLOCK_N)
+    # When the output dimensions of each slice are the same,cur_n=N, otherwise
+    # cur_n=tl.load(output_hs_ptr + slice_id), this situation exists in GQA's
+    # qkv linear.
+    curr_N = N if SAME_STRIDE else tl.load(output_hs_ptr + slice_id)
     pid_m = pid // cta_n_num
     pid_n = pid % cta_n_num
     M = tl.load(seq_lens + cur_batch)
     if pid_m * BLOCK_M > M:
+        return
+    if pid_n * BLOCK_N > curr_N:
         return
     lora_index = tl.load(lora_indices + cur_batch)
     if lora_index == -1:
@@ -70,7 +76,8 @@ def _sgmv_expand_kernel(
     offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     offset_k = tl.arange(0, BLOCK_K)
     ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
-    rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
+    rbn = tl.max_contiguous(tl.multiple_of(offset_n % curr_N, BLOCK_N),
+                            BLOCK_N)
     # ls_d*_ptr can be either an integer or a pointer
     if SAME_STRIDE:
         # integer
@@ -131,7 +138,7 @@ def _sgmv_expand_kernel(
     M = tl.load(seq_lens + cur_batch)
     c_mask = (offset_cm[:, None] <
               (cur_seq_start + M)) & (offset_cn[None, :] <
-                                      (cur_slice_start + N))
+                                      (cur_slice_start + curr_N))
     if ADD_INPUTS:
         tiled_out = tl.load(c_ptr, mask=c_mask)
         tiled_c += tiled_out
@@ -186,17 +193,13 @@ def _sgmv_expand(
     assert b_seq_start_loc.size(0) == batches
     assert lora_indices_tensor.size(0) == batches
     assert output_tensor.is_contiguous()
-    (
-        slice_start_tensor,
-        lora_ptr_tensor,
-        lora_strides_d0_tensor,
-        lora_strides_d1_tensor,
-        lora_strides_d2_tensor,
-        same_stride,
-    ) = _get_lora_b_ptr(lora_b_weights, offset_start, b_seq_start_loc.device)
+    (slice_start_tensor, lora_ptr_tensor, lora_strides_d0_tensor,
+     lora_strides_d1_tensor, lora_strides_d2_tensor, hidden_sizes_tensor,
+     same_stride, MAX_N) = _get_lora_b_ptr(lora_b_weights, offset_start,
+                                           b_seq_start_loc.device)
 
     # TODO tuning this config
-    N, K = lora_b_weights[0].shape[-2:]  # K= rank,N=hidden_size
+    K = lora_b_weights[0].shape[-1]  # K= rank
 
     BLOCK_M = 64
     BLOCK_N = 128
@@ -211,7 +214,7 @@ def _sgmv_expand(
     ]:
         CAST_TYPE = True
     grid = (
-        triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
+        triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(MAX_N, BLOCK_N),
         batches,
         len(lora_b_weights),
     )
@@ -219,7 +222,7 @@ def _sgmv_expand(
         inputs,
         lora_ptr_tensor,
         output_tensor,
-        N,
+        MAX_N,
         K,
         b_seq_start_loc,
         seq_len_tensor,
@@ -233,6 +236,7 @@ def _sgmv_expand(
         lora_strides_d2_tensor,
         output_tensor.stride(0),
         output_tensor.stride(1),
+        hidden_sizes_tensor,
         BLOCK_M,
         BLOCK_N,
         BLOCK_K,
