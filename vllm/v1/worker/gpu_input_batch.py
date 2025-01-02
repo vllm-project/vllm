@@ -274,46 +274,54 @@ class InputBatch:
     def make_prompt_logprobs_metadata(
         self,
         partial_req_ids: List[int],
-        num_scheduled_tokens: Dict[str, int],
         req_indices: np.ndarray,
     ) -> Optional[PromptLogprobsMetadata]:
 
         if not self.max_num_prompt_logprobs:
             return None
 
-        # Create masks for each request needing prompt logprobs.
-        # TODO(rob): wrap this in torch tensor + move to GPU?
-        metas = {}
-        for req_id in self.num_prompt_logprobs:
-            req_index = self.req_id_to_index[req_id]
-            req_num_scheduled_tokens = num_scheduled_tokens[req_index]
-            top_p = self.top_p[req_id]
+        # NOTE(rob): we should avoid loops like this  in model runner,
+        # but this ONLY loops over requests that are currently in
+        # prefill phase AND need prompt lps.
+        req_ids = []
+        masks = []
+        logits_process_metadatas = []
+        num_prompt_logprobs = []
 
-        logits_masks = {
-            req_id: (req_indices == self.req_id_to_index[req_id])
-            for req_id in self.num_prompt_logprobs
-        }
+        # TODO(rob): should we move this to _update_states?
+        for req_id, req_num_prompt_logprobs in self.num_prompt_logprobs.items():
+            req_idx = self.req_id_to_index[req_id]
 
-        # Expand temp, top_p, and top_k for the whole batch
-        num_scheduled_tokens_torch = torch.from_numpy(num_scheduled_tokens).to(
-            self.temperature.device)
-        temperature = torch.repeat_interleave(self.temperature,
-                                              num_scheduled_tokens_torch)
-        # Skip expansion if we are going to skip top_p/k anyways.
-        top_p = (self.top_p if self.no_top_p else torch.repeat_interleave(
-            self.top_p, num_scheduled_tokens_torch))
-        top_k = (self.top_k if self.no_top_k else torch.repeat_interleave(
-            self.top_k, num_scheduled_tokens_torch))
+            # Make the logits mask for the request prefills.
+            mask = req_indices[req_indices == req_idx].tolist()
+            if req_id not in partial_req_ids:
+                # Remove the sample token if there is one.
+                mask = mask[:-1]
 
+            # NOTE(rob): the tensors are shape 1, so we can use them in
+            # process_logits since they will be broadcasted to shape N.
+            temperature = self.temperature[req_idx]
+            top_p = self.top_p[req_idx]
+            top_k = self.top_k[req_idx]
+            no_top_p = req_id not in self.top_p_reqs
+            no_top_k = req_id not in self.top_k_reqs
+
+            req_ids.append(req_id)
+            masks.append(mask)
+            num_prompt_logprobs.append(req_num_prompt_logprobs)
+            logits_process_metadatas.append(
+                LogitsProcessMetadata(
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    no_top_p=no_top_p,
+                    no_top_k=no_top_k))
+        
         return PromptLogprobsMetadata(
-            logits_masks=logits_masks,
-            logits_process_metadata=LogitsProcessMetadata(
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                no_top_p=self.no_top_p,
-                no_top_k=self.no_top_k,
-            ))
+            req_ids=req_ids,
+            logits_process_metadatas=logits_process_metadatas,
+            masks=masks,
+            num_prompt_logprobs=num_prompt_logprobs)
 
     @property
     def num_reqs(self) -> int:

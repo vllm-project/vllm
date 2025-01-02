@@ -28,9 +28,8 @@ class SamplingMetadata:
 
 @dataclass
 class PromptLogprobsMetadata:
-
-    # req_id -> mask of indices each prompt logprob
-    logits_masks: Dict[str, numpy.ndarray[bool]]
-
-    # Logits process metadata for all elts of the batch
-    logits_process_metadata: LogitsProcessMetadata
+    
+    req_ids: List[str]
+    masks: List[int]
+    logits_process_metadatas: List[LogitsProcessMetadata]
+    num_prompt_logprobs: List[int]
