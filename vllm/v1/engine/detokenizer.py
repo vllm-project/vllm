@@ -461,7 +461,7 @@ class Detokenizer:
 
             # Detokenize and update state.
             request_output = detokenizer.add_tokens(
-                new_sampled_token_ids=engine_core_output.new_token_ids,
+                new_token_ids=engine_core_output.new_token_ids,
                 finish_reason=engine_core_output.finish_reason,
                 stop_reason=engine_core_output.stop_reason,
                 new_sample_logprobs=engine_core_output.logprobs,
