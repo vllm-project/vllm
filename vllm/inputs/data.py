@@ -178,8 +178,8 @@ class TokenInputs(TypedDict):
 
 
 def is_token_inputs(
-        inputs: Union[TokenInputs,
-                      "MultiModalInputsV2"]) -> TypeGuard[TokenInputs]:
+    inputs: Union[TokenInputs,
+                  "MultiModalInputsV2"]) -> TypeGuard[TokenInputs]:
     """
     Helper function to make sure mypy narrows down the type to
     TokenInputs.
