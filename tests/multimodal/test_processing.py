@@ -631,6 +631,7 @@ def _test_processing_cache_correctness(
     ("facebook/chameleon-7b", {"image": False}),
     ("adept/fuyu-8b", {"image": False}),
     ("llava-hf/llava-1.5-7b-hf", {"image": True}),
+    ("llava-hf/llava-v1.6-mistral-7b-hf", {"image": True}),
     ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image": True}),
     ("mistral-community/pixtral-12b", {"image": True}),
     ("Qwen/Qwen2-VL-2B-Instruct", {"image": True, "video": True}),
