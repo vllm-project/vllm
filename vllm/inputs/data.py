@@ -177,9 +177,20 @@ class TokenInputs(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
+def is_token_inputs(inputs: Union[TokenInputs, MultiModalInputsV2]
+                    ) -> TypeGuard[TokenInputs]:
+    """
+    Helper function to make sure mypy narrows down the type to
+    TokenInputs.
+    """
+    return inputs["type"] == "token"
+
 def is_multimodal_inputs(inputs: Union[TokenInputs, MultiModalInputsV2]
                          ) -> TypeGuard[MultiModalInputsV2]:
-    """Helper function to make sure mypy narrows down the type."""
+    """
+    Helper function to make sure mypy narrows down the type to
+    MultiModalInputsV2.
+    """
     return inputs["type"] == "multimodal"
 
 
@@ -314,9 +325,8 @@ class SingletonInputsAdapter:
     def multi_modal_hashes(self) -> List[str]:
         inputs = self.inputs
 
-        if inputs["type"] == "token":
+        if is_token_inputs(inputs):
             return inputs.get("multi_modal_hashes", [])
-
         elif is_multimodal_inputs(inputs):
             # only the case when we use MultiModalInputsV2
             return inputs.get("mm_hashes", [])
