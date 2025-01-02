@@ -21,10 +21,12 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataItems, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.parse import ImageEmbeddingItems, ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        ProcessorInputs, PromptReplacement)
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement)
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
@@ -156,6 +158,35 @@ def get_max_deepseek_vl2_image_tokens(ctx: InputContext) -> int:
 
 class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
 
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def _get_num_image_tokens(self, *, image_width: int,
+                              image_height: int) -> int:
+        hf_processor = self._get_hf_processor()
+        image_size = hf_processor.image_size
+        patch_size = hf_processor.patch_size
+        downsample_ratio = hf_processor.downsample_ratio
+
+        best_width, best_height = hf_processor.select_best_resolution(
+            (image_width, image_height))
+
+        num_width_tiles, num_height_tiles = (best_width // image_size,
+                                             best_height // image_size)
+        h = w = math.ceil((image_size // patch_size) / downsample_ratio)
+
+        global_views_tokens = h * (w + 1)
+        local_views_tokens = (num_height_tiles * h) * (num_width_tiles * w + 1)
+        return global_views_tokens + local_views_tokens + 1
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        max_image_tokens = self._get_num_image_tokens(
+            image_width=99999,
+            image_height=99999,
+        )
+
+        return {"image": max_image_tokens}
+
     def _get_hf_processor(
         self,
         *,
@@ -196,7 +227,6 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
                 name: outputs[name].unsqueeze(0)
                 for name in ("input_ids", "images", "images_spatial_crop")
             }
-            processed_outputs["num_image_tokens"] = outputs.num_image_tokens
             # rename `images` -> `pixel_values` to avoid confusion
             processed_outputs["pixel_values"] = processed_outputs.pop("images")
 
@@ -219,7 +249,6 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
             pixel_values=MultiModalFieldConfig.batched("image"),
             images_spatial_crop=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            num_image_tokens=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_replacements(
@@ -232,8 +261,19 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         image_token_id: int = hf_processor.image_token_id
 
         def get_replacement_deepseek_vl2(item_idx: int):
-            num_tokens = out_mm_kwargs["num_image_tokens"][item_idx]
-            return [image_token_id] * num_tokens
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
+
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+
+                num_image_tokens = self._get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                )
+            return [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
