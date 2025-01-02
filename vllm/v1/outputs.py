@@ -1,5 +1,7 @@
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+
+import torch
 
 
 @dataclass
@@ -26,9 +28,9 @@ class ModelRunnerOutput:
     # [num_reqs]
     sampled_token_ids: List[int]
 
-    # [num_reqs, max_num_logprobs]
-    logprob_token_ids: List[List[int]]
-    logprobs: List[List[float]]
+    # [num_reqs, max_num_logprobs + 1]
+    logprob_token_ids_cpu: Optional[torch.Tensor]
+    logprobs_cpu: Optional[torch.Tensor]
 
     # req_id -> (prompt_logprobs_token_ids, prompt_logprobs)
     # [num_reqs, max_num_prompt_logprobs]
