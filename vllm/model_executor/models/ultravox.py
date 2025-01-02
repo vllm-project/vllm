@@ -2,7 +2,7 @@
 """PyTorch Ultravox model."""
 
 import math
-from functools import cached_property, lru_cache
+from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -17,7 +17,6 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import InputContext
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -58,22 +57,17 @@ UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
                             UltravoxAudioEmbeddingInputs]
 
 
-@lru_cache
-def cached_feature_extractor(model_id: str) -> WhisperFeatureExtractor:
-    return WhisperFeatureExtractor.from_pretrained(model_id)
-
-
-def whisper_feature_extractor(ctx: InputContext) -> WhisperFeatureExtractor:
-    hf_config = ctx.get_hf_config(UltravoxConfig)
-    return cached_feature_extractor(hf_config.audio_model_id)
-
-
-def get_ultravox_max_audio_tokens(ctx: InputContext):
-    feature_extractor = whisper_feature_extractor(ctx)
-    return math.ceil(feature_extractor.chunk_length * _AUDIO_TOKENS_PER_SECOND)
-
-
 class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"audio": None}
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        feature_extractor = self._get_feature_extractor()
+        max_audio_tokens = math.ceil(feature_extractor.chunk_length *
+                                     _AUDIO_TOKENS_PER_SECOND)
+
+        return {"audio": max_audio_tokens}
 
     def _get_hf_processor(
         self,
@@ -322,8 +316,6 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "audio", get_ultravox_max_audio_tokens)
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
