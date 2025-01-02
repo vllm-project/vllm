@@ -1,6 +1,4 @@
-from typing import Dict, List, Optional, Tuple
-
-from vllm.sequence import Logprob
+from typing import List, Optional, Tuple
 
 from .tokenizer import AnyTokenizer
 
