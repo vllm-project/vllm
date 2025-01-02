@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict, List, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -26,7 +26,7 @@ class Sampler(nn.Module):
         sampled = sampled.to(torch.int32)
 
         # Compute the logprobs if requested.
-        # NOTE: logprob CPU-GPU synchronization happens here.
+        # NOTE: CPU-GPU synchronization happens here.
         logprob_token_ids, logprobs = self.compute_logprobs(
             logits, sampling_metadata.max_num_logprobs)
 
@@ -39,8 +39,10 @@ class Sampler(nn.Module):
         return sampler_output
 
     def compute_logprobs(
-            self, logits: torch.Tensor,
-            max_num_logprobs: int) -> Tuple[List[int], List[float]]:
+        self,
+        logits: torch.Tensor,
+        max_num_logprobs: int
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         if max_num_logprobs > 0:
             logprobs = self.get_logprobs(logits)
             # FIXME: Mask the sampled token_id, get topk logprobs,
@@ -51,10 +53,9 @@ class Sampler(nn.Module):
             # Use int32 to reduce the tensor size.
             topk_indices = topk_indices.to(torch.int32)
 
-            # NOTE: CPU<>GPU synchronization happens here.
-            return topk_indices.tolist(), topk_logprobs.tolist()
+            return topk_indices.cpu(), topk_logprobs.cpu()
         else:
-            return [], []
+            return None, None
 
     def process_logits(
         self,

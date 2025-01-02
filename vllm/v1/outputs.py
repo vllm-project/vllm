@@ -11,8 +11,8 @@ class SamplerOutput:
     sampled_token_ids: List[int]
 
     # [num_reqs, max_num_logprobs]
-    logprob_token_ids: List[List[int]]
-    logprobs: List[List[int]]
+    logprob_token_ids: Optional[torch.Tensor]
+    logprobs: Optional[torch.Tensor]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
