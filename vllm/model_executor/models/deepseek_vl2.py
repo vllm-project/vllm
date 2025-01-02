@@ -548,8 +548,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
                 images_in_this_batch.append(global_local_features)
 
-            vision_embeddings.extend(images_in_this_batch)
-        return torch.cat(vision_embeddings, dim=0)
+            vision_embeddings.append(torch.stack(images_in_this_batch))
+        return vision_embeddings
 
     def _process_image_input(
             self, image_input: DeepseekVL2ImageInputs) -> torch.Tensor:
