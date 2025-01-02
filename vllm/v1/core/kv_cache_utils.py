@@ -163,6 +163,7 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
         return ret
 
+
 def need_extra_keys(request: Request) -> bool:
     mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
     if mm_positions and len(mm_positions) != len(mm_hashes):
@@ -171,9 +172,10 @@ def need_extra_keys(request: Request) -> bool:
 
     return bool(mm_positions) or (request.lora_request is not None)
 
-def _gen_mm_extra_hash_keys(
-        request: Request, start_token_idx: int, end_token_idx: int,
-        start_mm_idx: int) -> Tuple[List[Any], int]:
+
+def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
+                            end_token_idx: int,
+                            start_mm_idx: int) -> Tuple[List[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
     (mm_hash, start_offset) that indicate a mm input contained in the
@@ -240,8 +242,7 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(
-        request: Request) -> List[int]:
+def _gen_lora_extra_hash_keys(request: Request) -> List[int]:
     """Generate extra keys related to LoRA for block hash computation.
     
     Args:
