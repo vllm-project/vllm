@@ -196,7 +196,6 @@ class IncrementalDetokenizer:
             logprobs_token_ids.reshape(-1, 1))
 
         # Make Logprob for prompt token.
-        # NOTE(rob): the first tok has None.
         num_tokens, num_logprobs = logprobs.shape
         self.prompt_logprobs = [None] + [
             self._make_pos_logprob_dict(
