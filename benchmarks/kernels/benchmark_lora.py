@@ -137,6 +137,52 @@ def make_token_lora_mapping(num_tokens: int, num_prompts: int,
     return torch.tensor(token_lora_mapping, dtype=torch.long, device=device)
 
 
+def ref_group_gemm(ref_out: torch.Tensor, input: torch.Tensor,
+                   lora_weights: List[torch.Tensor],
+                   seq_lens_cpu: torch.Tensor,
+                   prompt_lora_mapping_cpu: torch.Tensor, scaling: float,
+                   add_inputs: Optional[bool]):
+    """
+    Torch group gemm reference implementation to test correctness of
+    benchmarking operations.
+    """
+    batches = seq_lens_cpu.size(0)
+    out_list = []
+    current_offset = 0
+    for lora_index, b_length in zip(range(batches), seq_lens_cpu):
+        x = input[current_offset:b_length + current_offset, :]
+        current_offset += b_length
+        w = lora_weights[prompt_lora_mapping_cpu[lora_index]]
+        result = torch.nn.functional.linear(x, w)
+        result *= scaling
+        out_list.append(result)
+    torch.cat(out_list, dim=0)
+
+    cat_result = torch.cat(out_list, dim=0)
+
+    if add_inputs:
+        ref_out += cat_result
+    else:
+        ref_out.copy_(cat_result)
+
+
+def ref_group_gemm_with_slices(ref_out: torch.Tensor, input: torch.Tensor,
+                               lora_weights: List[torch.Tensor],
+                               seq_lens_cpu: torch.Tensor,
+                               prompt_lora_mapping_cpu: torch.Tensor,
+                               scaling: float, add_inputs: Optional[bool],
+                               num_slices: int, hidden_size: int):
+    for slice_idx in range(num_slices):
+        slice_offset = slice_idx * hidden_size
+        ref_group_gemm(ref_out[:, slice_offset:slice_offset + hidden_size],
+                       input,
+                       lora_weights[slice_idx],
+                       seq_lens_cpu,
+                       prompt_lora_mapping_cpu,
+                       scaling=scaling,
+                       add_inputs=add_inputs)
+
+
 ## LoRA Ops to Benchmark and its properties
 class OpType(Enum):
     SGMV_SHRINK = auto()
@@ -559,12 +605,54 @@ class BenchmarkTensors:
             return self.as_bgmv_expand_slice_kwargs(add_inputs)
         raise ValueError(f"Unrecognized optype {self}")
 
+    def test_correctness(self, op_type: OpType,
+                         expand_fn_add_inputs: Optional[bool]) -> bool:
+        """
+        Test correctness of the given benchmarking operation against a
+        grouped gemm reference implementation.
+        """
+        seq_lens_cpu = self.seq_lens.to(device="cpu")
+        prompt_lora_mapping_cpu = self.prompt_lora_mapping.to(device="cpu")
+
+        ref_output = self.output.clone()
+
+        num_slices = len(self.lora_weights_lst)
+        hidden_size = self.lora_weights_lst[0].shape[-2]  # n
+        assert hidden_size * num_slices == self.output.shape[-1]
+
+        do_input_cast: bool = op_type.is_expand_fn(
+        ) or op_type.is_expand_slice_fn()
+        weight_dtype = self.lora_weights_lst[0].dtype
+        ref_group_gemm_with_slices(
+            ref_output,
+            self.input.clone().to(
+                dtype=weight_dtype) if do_input_cast else self.input,
+            self.lora_weights_lst,
+            seq_lens_cpu,
+            prompt_lora_mapping_cpu,
+            scaling=1.0,
+            add_inputs=expand_fn_add_inputs,
+            num_slices=num_slices,
+            hidden_size=hidden_size,
+        )
+
+        op_type.bench_fn()(
+            **self.bench_fn_kwargs(op_type, expand_fn_add_inputs))
+
+        rtol, atol = {
+            torch.float16: (6e-2, 6e-2),
+            torch.bfloat16: (6e-2, 6e-2),
+            torch.float32: (1e-2, 1e-2),
+        }[self.output.dtype]
+        return torch.allclose(ref_output, self.output, rtol=rtol, atol=atol)
+
 
 def bench_optype(ctx: BenchmarkContext,
                  arg_pool_size: int,
                  op_type: OpType,
                  with_cuda_graph: bool = False,
-                 expand_fn_add_inputs: Optional[bool] = None) -> TMeasurement:
+                 expand_fn_add_inputs: Optional[bool] = None,
+                 test_correcntess: bool = False) -> TMeasurement:
 
     assert arg_pool_size >= 1
     if op_type.is_shrink_fn():
@@ -577,6 +665,9 @@ def bench_optype(ctx: BenchmarkContext,
         [BenchmarkTensors.make(ctx, op_type) for _ in range(arg_pool_size)]
     for bt in bench_tensors:
         bt.sanity_check()
+
+    if test_correcntess:
+        assert bench_tensors[0].test_correctness(op_type, expand_fn_add_inputs)
 
     # BenchmarkTensors -> Dict (kwargs)
     kwargs_list = [
@@ -679,7 +770,8 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
                     for add_input_arg in expand_fn_add_inputs:
                         seq_len_timers.append(
                             bench_optype(_ctx, args.arg_pool_size, bench_op,
-                                         args.with_cuda_graph, add_input_arg))
+                                         args.with_cuda_graph, add_input_arg,
+                                         args.test_correctness))
 
             print_timers(seq_len_timers)
             timers.extend(seq_len_timers)
@@ -845,7 +937,18 @@ if __name__ == '__main__':
                        nargs="+",
                        type=get_bool,
                        default=DEFAULT_EXPAND_FN_ADD_INPUTS)
-        p.add_argument('-o', '--output-directory', type=str)
+        p.add_argument(
+            '-o',
+            '--output-directory',
+            type=str,
+            help=("Output directory to store a the list of benchmarking"
+                  "TMeasurement objects as a pickle file"))
+
+        p.add_argument(
+            "--test-correctness",
+            action='store_true',
+            help=("When enabled, the benchmarking objects are additionally "
+                  "checked for correctness"))
 
     parser = FlexibleArgumentParser(
         description="""
