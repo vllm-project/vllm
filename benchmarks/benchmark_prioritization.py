@@ -66,6 +66,7 @@ def run_vllm(
     requests: List[Tuple[str, int, int]],
     n: int,
     engine_args: EngineArgs,
+    detokenize: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -84,6 +85,7 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=output_len,
+                detokenize=detokenize,
             ))
 
     start = time.perf_counter()
@@ -110,7 +112,8 @@ def main(args: argparse.Namespace):
 
     if args.backend == "vllm":
         elapsed_time = run_vllm(requests, args.n,
-                                EngineArgs.from_cli_args(args))
+                                EngineArgs.from_cli_args(args),
+                                args.detokenize)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(prompt_len + output_len
@@ -163,6 +166,11 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='Path to save the throughput results in JSON format.')
+    parser.add_argument(
+        '--detokenize',
+        action='store_true',
+        help=('Detokenize the response (detokenization time included in the '
+              'latency measurement)'))
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
