@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List, Literal,
                     Optional, Tuple, Union, cast)
 
 import torch
-from typing_extensions import (NotRequired, TypedDict, TypeGuard, TypeVar,
+from typing_extensions import (NotRequired, TypedDict, TypeIs, TypeVar,
                                assert_never)
 
 if TYPE_CHECKING:
@@ -178,8 +178,8 @@ class TokenInputs(TypedDict):
 
 
 def is_token_inputs(
-    inputs: Union[TokenInputs,
-                  "MultiModalInputsV2"]) -> TypeGuard[TokenInputs]:
+        inputs: Union[TokenInputs,
+                      "MultiModalInputsV2"]) -> TypeIs[TokenInputs]:
     """
     Helper function to make sure mypy narrows down the type to
     TokenInputs.
@@ -189,7 +189,7 @@ def is_token_inputs(
 
 def is_multimodal_inputs(
     inputs: Union[TokenInputs, "MultiModalInputsV2"]
-) -> TypeGuard["MultiModalInputsV2"]:
+) -> TypeIs["MultiModalInputsV2"]:
     """
     Helper function to make sure mypy narrows down the type to
     MultiModalInputsV2.
