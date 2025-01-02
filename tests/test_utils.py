@@ -1,14 +1,14 @@
 import asyncio
 import os
 import socket
-from typing import TYPE_CHECKING, AsyncIterator, Tuple
+from typing import AsyncIterator, Tuple
 
 import pytest
 import torch
 
 from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
                         get_open_port, memory_profiling, merge_async_iterators,
-                        supports_kw, register_kv_cache)
+                        register_kv_cache, supports_kw)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
@@ -309,8 +309,8 @@ def test_memory_profiling():
 
 
 def test_register_gpu_kv_cache():
-    from vllm.config import LayerForwardContext
     from vllm.attention import Attention
+    from vllm.config import LayerForwardContext
 
     # example from Jamba PP=2
     ctx = {
