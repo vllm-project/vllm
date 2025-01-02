@@ -644,6 +644,7 @@ class GPUModelRunner:
                 # Append the sampled token to the output token ids.
                 token_id = sampled_token_ids[i]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                self.input_batch.num_tokens[i] += 1
                 req_state.output_token_ids.append(token_id)
             else:
                 # Ignore the sampled token from the partial request.
