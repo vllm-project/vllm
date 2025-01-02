@@ -64,6 +64,7 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 
 @pytest.fixture
 def dist_init():
+    import habana_frameworks.torch.hpu  # noqa: F401
     temp_file = tempfile.mkstemp()[1]
     backend_type = "hccl" if current_platform.is_hpu() else "nccl"
     init_distributed_environment(
