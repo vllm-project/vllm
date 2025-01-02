@@ -202,13 +202,13 @@ class GPUModelRunner:
                 req_data.num_computed_tokens)
 
             # Update the block table.
-            for group_id, new_block_ids in enumerate(req_data.new_block_ids):
+            new_block_ids = multiply_block_id(req_data.new_block_ids,
+                                              self.block_id_multipliers)
+            for group_id, new_block_ids in enumerate(new_block_ids):
                 num_new_blocks = len(new_block_ids)
                 if num_new_blocks == 0:
                     continue
                 start_index = len(req_state.block_ids)
-                if (multiplier := self.block_id_multipliers[group_id]) != 1:
-                    new_block_ids = [b * multiplier for b in new_block_ids]
                 end_index = start_index + num_new_blocks
                 req_state.block_ids[group_id].extend(new_block_ids)
                 self.input_batch.block_table_cpu[
@@ -233,7 +233,8 @@ class GPUModelRunner:
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
                 generator=generator,
-                block_ids=new_req_data.block_ids,
+                block_ids=multiply_block_id(new_req_data.block_ids,
+                                            self.block_id_multipliers),
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
             )
@@ -244,7 +245,8 @@ class GPUModelRunner:
             req_id = res_req_data.req_id
             req_state = self.requests[req_id]
 
-            req_state.block_ids = res_req_data.block_ids
+            req_state.block_ids = multiply_block_id(res_req_data.block_ids,
+                                                    self.block_id_multipliers)
             req_state.num_computed_tokens = res_req_data.num_computed_tokens
             req_ids_to_add.append(req_id)
 
@@ -336,8 +338,8 @@ class GPUModelRunner:
             # NOTE(woosuk): We use torch.index_select instead of np.take here
             # because torch.index_select is much faster than np.take for large
             # tensors.
-            block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
-                             [block_table_indices].numpy())
+            block_numbers = (self.input_batch.block_table_cpu_tensor[i].
+                             flatten()[block_table_indices].numpy())
             block_offsets = positions_np % block_size
             np.add(block_numbers * block_size,
                    block_offsets,
@@ -532,7 +534,7 @@ class GPUModelRunner:
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],
-                kv_caches=self.kv_caches,
+                kv_caches=self.dummy_kv_caches,
                 attn_metadata=None,
                 inputs_embeds=inputs_embeds,
             )
@@ -768,9 +770,10 @@ class GPUModelRunner:
             assert tensor_config.size % layer_spec.page_size_bytes == 0
             num_blocks = tensor_config.size // layer_spec.page_size_bytes
             if isinstance(layer_spec, (FullAttentionSpec, SlidingWindowSpec)):
-                kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-                    -1, layer_spec.block_size, layer_spec.num_kv_heads,
-                    layer_spec.head_size)
+                kv_cache_shape = list(
+                    FlashAttentionBackend.get_kv_cache_shape(
+                        -1, layer_spec.block_size, layer_spec.num_kv_heads,
+                        layer_spec.head_size))
                 dtype = layer_spec.dtype
             else:
                 raise NotImplementedError
@@ -865,3 +868,16 @@ class GPUModelRunner:
                 )
 
         return kv_cache_spec
+
+
+def multiply_block_id(
+    block_ids: List[List[int]],
+    block_id_multipliers: List[int],
+) -> List[List[int]]:
+    new_block_ids = []
+    for group_id, multiplier in enumerate(block_id_multipliers):
+        if multiplier == 1:
+            new_block_ids.append(block_ids[group_id])
+        else:
+            new_block_ids.append([b * multiplier for b in block_ids[group_id]])
+    return new_block_ids

@@ -156,7 +156,8 @@ class FlashAttentionImpl(AttentionImpl):
         # not padded. However, we don't need to do key[:num_actual_tokens] and
         # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
         # the slot_mapping's shape to determine the number of actual tokens.
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache = kv_cache[0]
+        value_cache = kv_cache[1]
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
