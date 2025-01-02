@@ -38,11 +38,6 @@ class BlockTable:
         self.block_table_np = self.block_table_cpu.numpy()
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
-    def add_row(self, row_idx: int, block_ids: List[int]) -> None:
-        num_blocks = len(block_ids)
-        self.block_table_np[row_idx, :num_blocks] = block_ids
-        self.num_blocks_per_row[row_idx] = num_blocks
-
     def append_row(
         self,
         row_idx: int,
@@ -52,6 +47,9 @@ class BlockTable:
         num_blocks = len(block_ids)
         self.block_table_np[row_idx, start:start + num_blocks] = block_ids
         self.num_blocks_per_row[row_idx] = start + num_blocks
+
+    def add_row(self, row_idx: int, block_ids: List[int]) -> None:
+        self.append_row(row_idx, 0, block_ids)
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
