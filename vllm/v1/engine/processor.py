@@ -116,10 +116,9 @@ class Processor:
         decoder_mm_data = decoder_inputs.multi_modal_data
         if isinstance(decoder_mm_data, MultiModalKwargs):
             precomputed_mm_inputs = [
-                MultiModalKwargs.from_items(
-                    [decoder_mm_data.get_item(modality, item_idx)])
+                MultiModalKwargs.from_items([item])
                 for modality in decoder_mm_data.modalities
-                for item_idx in range(decoder_mm_data.get_num_items(modality))
+                for item in decoder_mm_data.get_items(modality)
             ]
 
         # Apply MM mapper
