@@ -110,37 +110,33 @@ class IncrementalDetokenizer:
     def _update_sample_logprobs(
         self,
         sampled_token_ids: List[int],
-        logprobs_token_ids_lst: List[torch.Tensor],
+        token_ids_lst: List[torch.Tensor],
         logprobs_lst: List[torch.Tensor],
     ) -> Optional[SampleLogprobs]:
         """
-        Update logprobs based the prior step.
-
-        
+        Lists are only of length >1 if EngineCore made
+        >1 tokens in prior step (e.g. in spec decoding).
 
         Tensors are:
-            logprobs_token_ids: [topk + 1]: topk token ids at pos
-            logprobs: [num_logprobs + 1]: topk logprobs at pos
+            token_ids: [topk + 1]: topk token ids at pos
+            logprobs:  [topk + 1]: topk logprobs at pos
         """
 
         if self.num_logprobs == 0:
             return None
         assert self.logprobs is not None
 
-        # NOTE(rob): Lists are only of length >1 if EngineCore
-        # generated >1 token during the prior step (e.g. spec decoding).
-        for sampled_token_id, logprobs, logprobs_token_ids in zip(
-                sampled_token_ids, logprobs_lst, logprobs_token_ids_lst):
+        for sampled_token_id, logprobs, token_ids in zip(
+                sampled_token_ids, logprobs_lst, token_ids_lst):
 
-            # Sampler concatenates the logprobs of the sampled token
-            # ahead of the topk tokens.
-            assert sampled_token_id == logprobs_token_ids[0].item(), (
+            # Split into sampled vs top_k.
+            assert sampled_token_id == token_ids[0].item(), (
                 "Sampler concats the sampled token logprob in front of "
                 f"the topk logprobs, but got {sampled_token_id=} and "
-                f"{logprobs_token_ids[0].item()=}")
+                f"{token_ids[0].item()=}")
             sampled_token_logprob = logprobs[0].item()
-            topk_token_ids = logprobs_token_ids[1:].tolist()
-            topk_logprobs = logprobs[1:].tolist()
+            topk_token_ids = token_ids[1:]
+            topk_logprobs = logprobs[1:]
 
             # Detokenize non-incrementally.
             decoded_tokens = detokenize_non_incrementally(
@@ -148,8 +144,8 @@ class IncrementalDetokenizer:
 
             # Make the Logprob objects the position.
             pos_logprobs_dict = self._make_pos_logprob_dict(
-                topk_logprobs, topk_token_ids, decoded_tokens,
-                self.num_logprobs)
+                topk_token_ids.tolist(), topk_logprobs.tolist(),
+                decoded_tokens, self.num_logprobs)
 
             # Add the sampled Logprob if it was not in topk.
             if sampled_token_id not in pos_logprobs_dict:
@@ -168,12 +164,12 @@ class IncrementalDetokenizer:
 
     def _update_prompt_logprobs(
         self,
-        logprobs_token_ids: Optional[torch.Tensor],
+        token_ids: Optional[torch.Tensor],
         logprobs: Optional[torch.Tensor],
     ) -> Optional[PromptLogprobs]:
 
-        # Skip if no prompt logprobs
-        if logprobs_token_ids is None:
+        # Skip if no prompt logprobs were generated.
+        if token_ids is None:
             return None
         assert logprobs is not None
 
@@ -185,14 +181,14 @@ class IncrementalDetokenizer:
         # NOTE(rob): the output is flattened:
         #   [num_tok, num_lps] -> [num_tok * num_lps]
         decoded_tokens = detokenize_non_incrementally(self.tokenizer,
-                                                      logprobs_token_ids)
+                                                      token_ids)
 
         # Make Logprob for prompt token.
         num_tokens, num_logprobs = logprobs.shape
         self.prompt_logprobs = [None] + [
             self._make_pos_logprob_dict(
                 logprobs[tok_idx].tolist(),
-                logprobs_token_ids[tok_idx].tolist(),
+                token_ids[tok_idx].tolist(),
                 # Deal with the flattening from above.
                 decoded_tokens[tok_idx * num_logprobs:],
                 num_logprobs,
@@ -282,15 +278,15 @@ class IncrementalDetokenizer:
 
         # 3) Make Sample Logprobs.
         logprobs = self._update_sample_logprobs(
-            sampled_token_ids=new_token_ids,
-            logprobs_token_ids_lst=new_logprobs_token_ids,
-            logprobs_lst=new_logprobs,
+            new_token_ids,
+            new_logprobs_token_ids,
+            new_logprobs,
         )
 
         # 4) Make Prompt Logprobs.
         prompt_logprobs = self._update_prompt_logprobs(
-            logprobs_token_ids=new_prompt_logprobs_token_ids,
-            logprobs=new_prompt_logprobs,
+            new_prompt_logprobs_token_ids,
+            new_prompt_logprobs,
         )
 
         # 5) Makes the RequestOutput object with the new text.
