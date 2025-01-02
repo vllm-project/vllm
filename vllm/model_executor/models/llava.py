@@ -23,7 +23,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors)
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   ImageSize)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         InputProcessingContext,
                                         MultiModalDataItems, ProcessingCache,
@@ -221,13 +222,17 @@ class LlavaMultiModalProcessor(BaseLlavaMultiModalProcessor):
         image_token_id = hf_config.image_token_index
 
         def get_replacement(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image_size = images.get_image_size(item_idx)
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
 
-            num_image_tokens = self._get_num_image_tokens(
-                image_width=image_size.width,
-                image_height=image_size.height,
-            )
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                num_image_tokens = self._get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                )
 
             return [image_token_id] * num_image_tokens
 
