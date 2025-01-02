@@ -115,6 +115,10 @@ class Processor:
         precomputed_mm_inputs = None
         decoder_mm_data = decoder_inputs.multi_modal_data
         if isinstance(decoder_mm_data, MultiModalKwargs):
+            # The output of merged multi-modal processor (`decoder_mm_data`)
+            # contains the kwargs for all items from all modalities.
+            # This code separates them so that there is one set of kwargs
+            # per item per modality.
             precomputed_mm_inputs = [
                 MultiModalKwargs.from_items([item])
                 for modality in decoder_mm_data.modalities
