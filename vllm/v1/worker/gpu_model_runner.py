@@ -374,8 +374,11 @@ class GPUModelRunner:
             slot_mapping=slot_mapping,
         )
 
-        sampling_metadata = self._prepare_sampling(scheduler_output,
-                                                   query_start_loc)
+        # Make Sampling Metadata
+        sampling_metadata = self._prepare_sampling(
+            scheduler_output=scheduler_output,
+            sample_indices=query_start_loc[1:] - 1
+        )
         prompt_logprobs_metadata = self._prepare_prompt_logprobs(
             num_scheduled_tokens, req_indices)
 
@@ -384,7 +387,7 @@ class GPUModelRunner:
     def _prepare_sampling(
         self,
         scheduler_output: "SchedulerOutput",
-        query_start_loc: torch.Tensor,
+        sample_indices: torch.Tensor,
     ) -> SamplingMetadata:
         skip_copy = True
         if (scheduler_output.finished_req_ids
@@ -395,7 +398,7 @@ class GPUModelRunner:
             skip_copy = False
         # Create the sampling metadata.
         sampling_metadata = self.input_batch.make_sampling_metadata(
-            skip_copy, query_start_loc)
+            skip_copy, sample_indices)
         return sampling_metadata
 
     def _prepare_prompt_logprobs(
@@ -582,6 +585,7 @@ class GPUModelRunner:
 
             # Second, split the prompt logprobs
 
+        # Update Request State.
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -605,14 +609,21 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        return ModelRunnerOutput(
-            req_ids=cast(List[str], self.input_batch.req_ids[:num_reqs]),
+        # num_reqs entries should be non-None	
+        assert all(	
+            req_id is not None for req_id in	
+            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"	
+        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids=sampler_output.logprob_token_ids,
             logprobs=sampler_output.logprobs,
             prompt_logprobs=prompt_logprobs_output,
         )
+        return model_runner_output
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
