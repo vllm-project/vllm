@@ -82,10 +82,11 @@ def _is_flashinfer_available() -> bool:
         bool: True if FlashInfer is installed and available, False otherwise.
     """
     try:
-        from flashinfer import BatchDecodeMlaWithPagedKVCacheWrapper
+        from flashinfer import BatchDecodeMlaWithPagedKVCacheWrapper  # noqa:F401
         return True
     except ImportError:
         return False
+
 
 class SupportsHash(Protocol):
 
@@ -184,6 +185,7 @@ class ModelConfig:
         generation_config: Configuration parameter file for generation.
         disable_mla: Whether to disable MLA for DeepSeek models.
     """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -208,42 +210,43 @@ class ModelConfig:
         factors.append(self.rope_theta)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
-    def __init__(self,
-                 model: str,
-                 task: Union[TaskOption, Literal["draft"]],
-                 tokenizer: str,
-                 tokenizer_mode: str,
-                 trust_remote_code: bool,
-                 dtype: Union[str, torch.dtype],
-                 seed: int,
-                 allowed_local_media_path: str = "",
-                 revision: Optional[str] = None,
-                 code_revision: Optional[str] = None,
-                 rope_scaling: Optional[Dict[str, Any]] = None,
-                 rope_theta: Optional[float] = None,
-                 tokenizer_revision: Optional[str] = None,
-                 max_model_len: Optional[int] = None,
-                 spec_target_max_model_len: Optional[int] = None,
-                 quantization: Optional[str] = None,
-                 quantization_param_path: Optional[str] = None,
-                 enforce_eager: Optional[bool] = None,
-                 max_seq_len_to_capture: Optional[int] = None,
-                 max_logprobs: int = 20,
-                 disable_sliding_window: bool = False,
-                 skip_tokenizer_init: bool = False,
-                 served_model_name: Optional[Union[str, List[str]]] = None,
-                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-                 use_async_output_proc: bool = True,
-                 config_format: ConfigFormat = ConfigFormat.AUTO,
-                 hf_overrides: Optional[HfOverrides] = None,
-                 mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-                 disable_mm_preprocessor_cache: bool = False,
-                 override_neuron_config: Optional[Dict[str, Any]] = None,
-                 override_pooler_config: Optional["PoolerConfig"] = None,
-                 logits_processor_pattern: Optional[str] = None,
-                 generation_config: Optional[str] = None,
-                    disable_mla: bool = False,
-                 ) -> None:
+    def __init__(
+        self,
+        model: str,
+        task: Union[TaskOption, Literal["draft"]],
+        tokenizer: str,
+        tokenizer_mode: str,
+        trust_remote_code: bool,
+        dtype: Union[str, torch.dtype],
+        seed: int,
+        allowed_local_media_path: str = "",
+        revision: Optional[str] = None,
+        code_revision: Optional[str] = None,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_theta: Optional[float] = None,
+        tokenizer_revision: Optional[str] = None,
+        max_model_len: Optional[int] = None,
+        spec_target_max_model_len: Optional[int] = None,
+        quantization: Optional[str] = None,
+        quantization_param_path: Optional[str] = None,
+        enforce_eager: Optional[bool] = None,
+        max_seq_len_to_capture: Optional[int] = None,
+        max_logprobs: int = 20,
+        disable_sliding_window: bool = False,
+        skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
+        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        use_async_output_proc: bool = True,
+        config_format: ConfigFormat = ConfigFormat.AUTO,
+        hf_overrides: Optional[HfOverrides] = None,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        disable_mm_preprocessor_cache: bool = False,
+        override_neuron_config: Optional[Dict[str, Any]] = None,
+        override_pooler_config: Optional["PoolerConfig"] = None,
+        logits_processor_pattern: Optional[str] = None,
+        generation_config: Optional[str] = None,
+        disable_mla: bool = False,
+    ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -742,10 +745,9 @@ class ModelConfig:
 
     @property
     def is_deepseek_v2(self) -> bool:
-        return hasattr(
-            self.hf_text_config,
-            "model_type") and (self.hf_text_config.model_type
-                                      in ('deepseek_v2', 'deepseek_v3'))
+        return hasattr(self.hf_text_config,
+                       "model_type") and (self.hf_text_config.model_type
+                                          in ('deepseek_v2', 'deepseek_v3'))
 
     def get_head_size(self) -> int:
         # TODO remove hard code

@@ -479,13 +479,11 @@ class DeepseekV2MLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
         # (NV -> H)
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.v_head_dim,
-            # self.o_proj = ReplicatedLinear(self.num_local_heads * self.v_head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj")
+        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
+                                        self.hidden_size,
+                                        bias=False,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.o_proj")
 
         rope_scaling["rope_type"] = 'deepseek_yarn'
         self.rotary_emb = get_rope(qk_rope_head_dim,
@@ -516,9 +514,13 @@ class DeepseekV2MLAAttention(nn.Module):
 
         kv_b_proj_weight = self.kv_b_proj.weight.T
         assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim)
-        ), f"{kv_b_proj_weight.shape} != {(self.kv_lora_rank, self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim))}"
+            self.kv_lora_rank, self.num_local_heads *
+            (self.qk_nope_head_dim + self.v_head_dim)), (
+                f"{kv_b_proj_weight.shape=}, "
+                f"{self.kv_lora_rank=}, "
+                f"{self.num_local_heads=}, "
+                f"{self.qk_nope_head_dim=}, "
+                f"{self.v_head_dim=}")
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
             self.num_local_heads,
@@ -536,7 +538,8 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # TODO(simon): support append/chunked prefill by two kernels, or using the decode kernel somehow.
+        # TODO(simon): support append/chunked prefill by two kernels,
+        # or using the decode kernel somehow.
         if attn_metadata.prefill_metadata:
             return self.forward_prefill(positions, hidden_states, kv_cache,
                                         attn_metadata)
@@ -641,7 +644,6 @@ class DeepseekV2MLAAttention(nn.Module):
                         device=q.device)
         q[..., :self.kv_lora_rank] = q_nope
         q[..., self.kv_lora_rank:] = q_pe
-        # q = q.view(B, self.num_local_heads * (self.kv_lora_rank + self.qk_rope_head_dim))
 
         k = kv_a.unsqueeze(1)
         # The padding is only used for kv storage.
