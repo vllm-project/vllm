@@ -45,7 +45,7 @@ from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import LayerForwardContext, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -1745,3 +1745,15 @@ def memory_profiling(
     result.non_torch_increase_in_bytes = current_cuda_memory_bytes - baseline_memory_in_bytes - weights_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
     result.profile_time = diff.timestamp
     result.non_kv_cache_memory_in_bytes = result.non_torch_increase_in_bytes + result.torch_peak_increase_in_bytes + result.weights_memory_in_bytes  # noqa
+
+
+def register_kv_cache(ctx: Dict[str, "LayerForwardContext"],
+                      kv_cache: List[torch.Tensor]) -> None:
+    # Two things needed to be handled here:
+    # 1. Some models have non-attention layers, e.g., Jamba
+    # 2. Pipeline parallelism, each rank only has a subset of layers
+    from vllm.model_executor.models.utils import extract_layer_index
+    layer_name_sorted = sorted(ctx.keys(), key=extract_layer_index)
+    for i, layer_name in enumerate(layer_name_sorted):
+        forward_ctx = ctx[layer_name]
+        forward_ctx.kv_cache = kv_cache[i]

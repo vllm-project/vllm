@@ -1,14 +1,14 @@
 import asyncio
 import os
 import socket
-from typing import AsyncIterator, Tuple
+from typing import TYPE_CHECKING, AsyncIterator, Tuple
 
 import pytest
 import torch
 
 from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
                         get_open_port, memory_profiling, merge_async_iterators,
-                        supports_kw)
+                        supports_kw, register_kv_cache)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
@@ -306,3 +306,29 @@ def test_memory_profiling():
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)
+
+
+def test_register_gpu_kv_cache():
+    from vllm.config import LayerForwardContext
+    from vllm.attention import Attention
+
+    # example from Jamba PP=2
+    ctx = {
+        'model.layers.20.attn':
+        LayerForwardContext(
+            attn_module=Attention(32, 128, 0.1),
+            kv_cache=None,
+        ),
+        'model.layers.28.attn':
+        LayerForwardContext(
+            attn_module=Attention(32, 128, 0.1),
+            kv_cache=None,
+        )
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    register_kv_cache(ctx, kv_cache)
+    assert ctx['model.layers.20.attn'].kv_cache is kv_cache[0]
+    assert ctx['model.layers.28.attn'].kv_cache is kv_cache[1]
