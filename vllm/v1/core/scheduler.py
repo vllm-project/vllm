@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
+import torch
+
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalKwargs
@@ -432,13 +434,16 @@ class Scheduler:
                 stopped = self._check_stop(request)
 
                 # Extract sample logprobs if needed.
-                # TODO(rob): does it make sense to pythonize here?
-                logprobs_token_ids = (logprobs_token_ids_cpu[req_index]
-                                      if logprobs_token_ids_cpu else None)
-                logprobs = logprobs_cpu[req_index] if logprobs_cpu else None
+                logprobs_token_ids: List[torch.Tensor] = []
+                logprobs: List[torch.Tensor] = []
+                if request.sampling_params.logprobs:
+                    assert logprobs_token_ids_cpu is not None
+                    assert logprobs_cpu is not None
+                    # Here we assume there is 1 generated token per step.
+                    logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
+                    logprobs = logprobs_cpu[req_index]
 
                 # Extract prompt logprobs for this req if needed.
-                # TODO(rob): does it make sense to pythonize here?
                 # FIXME(rob): handle partial request. Currently we throw away
                 # the prompt logprobs for the partial request.
                 prompt_logprobs_token_ids, prompt_logprobs = (

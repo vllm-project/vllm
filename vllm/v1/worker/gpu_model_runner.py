@@ -378,6 +378,7 @@ class GPUModelRunner:
         # Make Sampling and Prompt Logprobs Metadata.
         sampling_metadata, prompt_logprobs_metadata = self._prepare_sampling(
             scheduler_output=scheduler_output,
+            # Here we assume there is one generated token per step.
             sample_indices=query_start_loc[1:] - 1,
             req_indices=req_indices,
         )

@@ -48,7 +48,7 @@ class IncrementalDetokenizer:
     # Logprobs for this request
     logprobs: Optional[SampleLogprobs]
     prompt_logprobs: Optional[PromptLogprobs]
-    cumulative_logprob: float
+    cumulative_logprob: Optional[float]
     num_logprobs: int
     num_prompt_logprobs: int
 
@@ -101,19 +101,20 @@ class IncrementalDetokenizer:
             prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
+            cumulative_logprob=(0. if request.logprobs else None),
             logprobs=([] if request.logprobs else None),
-            prompt_logprobs=([] if request.prompt_logprobs else None),
-            cumulative_logprob=0.,
+            # NOTE(rob): prompt logprobs of first token is always None.
+            prompt_logprobs=([None] if request.prompt_logprobs else None),
             num_logprobs=request.logprobs,
             num_prompt_logprobs=request.prompt_logprobs,
         )
 
-    def _make_sample_logprobs(
+    def _update_sample_logprobs(
         self,
         sampled_token_ids: List[int],
         logprobs_token_ids_lst: List[torch.Tensor],
         logprobs_lst: List[torch.Tensor],
-    ) -> SampleLogprobs:
+    ) -> Optional[SampleLogprobs]:
         """
         Create formatted SampleLogprobs objects from the raw
         EngineCore outputs after pythonizing + detokenizing.
@@ -128,14 +129,20 @@ class IncrementalDetokenizer:
             logprobs_lst: List of tensors of logprobs of 
                 shape [topk+1] for to sampled + topk token ids    
         Returns:
-            SampleLogprobs: List[Dict[str, Logprob]]
+            SampleLogprobs: List[Dict[str, Logprob]]: New only.
         """
 
-        # NOTE(rob): the lists are of length > 1 if a single step
-        # of EngineCore generates > 1 token (e.g. spec decoding).
-        assert len(sampled_token_ids) == len(logprobs_token_ids_lst)
-        assert len(sampled_token_ids) == len(logprobs_lst)
-        output_list: SampleLogprobs = []
+        if self.num_logprobs == 0:
+            assert (len(logprobs_token_ids_lst) == 0
+                    and len(logprobs_lst) == 0)
+            return None
+        assert self.logprobs is not None
+
+        # NOTE(rob): the lists are of length > 1 if EngineCore
+        # generates > 1 token per step (e.g. in spec decoding).
+        num_new_tokens = len(sampled_token_ids)
+        assert num_new_tokens == len(logprobs_token_ids_lst)
+        assert num_new_tokens == len(logprobs_lst)
         for sampled_token_id, logprobs, logprobs_token_ids in zip(
                 sampled_token_ids, logprobs_lst, logprobs_token_ids_lst):
 
@@ -162,7 +169,7 @@ class IncrementalDetokenizer:
                 for idx in range(self.num_logprobs)
             }
 
-            # Make the sampled token Logprob object if not in topk.
+            # Make the sampled Logprob object if not in topk.
             if sampled_token_id not in topk_logprobs_dict:
                 # TODO(rob): do we need to plumb up the rank for
                 # the sample Logprob? It is not used in the
@@ -173,15 +180,18 @@ class IncrementalDetokenizer:
                     rank=None,
                     decoded_token=token)
 
-            output_list.append(topk_logprobs_dict)
+            # Update logprobs for this sequence position.
+            self.logprobs.append(topk_logprobs_dict)
+            # FIXME(rob): update cumulative logprob.
 
-        return output_list
+        # Return just the newly generated sample logprobs.
+        return self.logprobs[-num_new_tokens:]
 
-    def _make_prompt_logprobs(
+    def _update_prompt_logprobs(
         self,
-        token_ids: torch.Tensor,
-        logprobs: torch.Tensor,
-    ) -> PromptLogprobs:
+        logprobs_token_ids: Optional[torch.Tensor],
+        logprobs: Optional[torch.Tensor],
+    ) -> Optional[PromptLogprobs]:
         """
         Create formatted PromptLogprobs objects from the raw
         EngineCore outputs after pythonizing + detokenizing.
@@ -196,38 +206,53 @@ class IncrementalDetokenizer:
             PromptLogprobs: List[Dict[int, Logprob]]
         """
 
-        pass
-        # prompt_logprob_token_ids_lst = token_ids.tolist()
-        # decoded_tokens
-        # decoded_tokens = self.token_ids.con
-        # pass
+        # Skip if this request is not using logprobs.
+        if self.num_prompt_logprobs == 0:
+            return None
 
-        # for
+        # Skip if last step did not generate prompt lps (decode).
+        if logprobs_token_ids is None:
+            return None
+        assert logprobs is not None
 
-        # logprob_cnt = self.max_request_prompt_logprobs
-        # prompt_logprobs: List[Optional[Dict[int, Logprob]]] = [
-        #     self._pythonize_sequence_position(plp_tok_values,
-        #                                       plp_tok_token_ids, detokenize)
-        #     for plp_tok_values, plp_tok_token_ids in zip(
-        #         # Slice out top prompt logprobs
-        #         prompt_logprob_values[:, 0:logprob_cnt],
-        #         prompt_logprob_token_ids[:, 0:logprob_cnt])
-        # ]
-        # if not self.request_prompt_logprobs:
-        #     # Ensure that None is the first prompt logprob
-        #     prompt_logprobs = cast(List[Optional[Dict[int, Logprob]]],
-        #                            [None]) + prompt_logprobs
-        # assert self.request_prompt_logprobs is not None
-        # self.request_prompt_logprobs.extend(prompt_logprobs)
-        # return prompt_logprobs
+        # Since EngineCore does not stream partial requests,
+        # Detokenizer gets all the prompt logprobs at once, thus
+        # self.prompt_logprobs=[None].
+        assert (self.prompt_logprobs is not None
+                and len(self.prompt_logprobs == 1))
+
+        # Decode the tokens (*non-incrementally).
+        # Flattened: [prompt_len, num_logprobs] ->
+        #            [prompt_len * num_logprobs]
+        decoded_tokens = self.tokenizer.batch_decode(
+            logprobs_token_ids.reshape(-1, 1))
+
+        # Make Logprob for each prompt token.
+        num_tokens, num_logprobs = logprobs.shape
+        assert num_logprobs == self.num_prompt_logprobs
+        for token_idx in range(num_tokens):
+            topk_logprobs = logprobs[token_idx].tolist()
+            topk_token_ids = logprobs_token_ids[token_idx].tolist()
+            # NOTE: Sampler uses torch.topk(sorted=True), so idx=rank.
+            self.prompt_logprobs.append({
+                topk_token_ids[idx]: Logprob(
+                    logprob=topk_logprobs[idx],
+                    rank=idx,
+                    decoded_token=decoded_tokens[num_tokens * num_logprobs +
+                                                 idx],
+                )
+                for idx in range(num_logprobs)
+            })
+
+        return self.prompt_logprobs
 
     def add_tokens(
         self,
         new_token_ids: List[int],
         finish_reason: Optional[str],
         stop_reason: Optional[Union[int, str, None]],
-        new_logprobs_token_ids: Optional[List[torch.Tensor]],
-        new_logprobs: Optional[List[torch.Tensor]],
+        new_logprobs_token_ids: List[torch.Tensor],
+        new_logprobs: List[torch.Tensor],
         new_prompt_logprobs_token_ids: Optional[torch.Tensor],
         new_prompt_logprobs: Optional[torch.Tensor],
     ) -> Optional[RequestOutput]:
@@ -281,28 +306,17 @@ class IncrementalDetokenizer:
                 stop_reason = stop_str
 
         # 3) Make Sample Logprobs.
-        logprobs = None
-        if new_logprobs:
-            assert new_logprobs_token_ids is not None
-            assert self.logprobs is not None
-            logprobs = self._make_sample_logprobs(
-                sampled_token_ids=new_token_ids,
-                logprobs_token_ids_lst=new_logprobs_token_ids,
-                logprobs_lst=new_logprobs)
-            self.logprobs.append(logprobs)
-            # TODO(rob): update cumulative logprob.
-            # self.cumulative_logprob
+        logprobs = self._update_sample_logprobs(
+            sampled_token_ids=new_token_ids,
+            logprobs_token_ids_lst=new_logprobs_token_ids,
+            logprobs_lst=new_logprobs,
+        )
 
         # 4) Make Prompt Logprobs.
-        prompt_logprobs = None
-        if new_prompt_logprobs:
-            # EngineCore does not stream out partial prefill,
-            # so all prompt logprobs come in one step.
-            assert (self.prompt_logprobs is not None
-                    and len(self.prompt_logprobs) == 0)
-            assert new_prompt_logprobs_token_ids is not None
-            self.prompt_logprobs = self._make_prompt_logprobs(
-                new_prompt_logprobs_token_ids, new_prompt_logprobs)
+        prompt_logprobs = self._update_prompt_logprobs(
+            logprobs_token_ids=new_prompt_logprobs_token_ids,
+            logprobs=new_prompt_logprobs,
+        )
 
         # 5) Makes the RequestOutput object with the new text.
         finished = bool(finish_reason)
@@ -315,7 +329,6 @@ class IncrementalDetokenizer:
         token_ids = new_token_ids if delta else self.output_token_ids
         logprobs = logprobs if delta else self.logprobs
         prompt_logprobs = prompt_logprobs if delta else self.prompt_logprobs
-        cumulative_logprob = self.cumulative_logprob
 
         request_output = RequestOutput.new(
             self.request_id,
@@ -325,7 +338,7 @@ class IncrementalDetokenizer:
             token_ids,
             logprobs,
             prompt_logprobs,
-            cumulative_logprob,
+            self.cumulative_logprob,
             finished,
         )
 
