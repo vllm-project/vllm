@@ -491,12 +491,12 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         "hidden_dim": "intermediate_size",
     }
 
-    def recurse_elems(elem: Any):
-        if isinstance(elem, dict):
+    def recurse_elems(elem: Any, wrap_to_hf_config: bool = True):
+        if isinstance(elem, dict) and wrap_to_hf_config:
             config_dict = {}
             for key, value in elem.items():
                 key = config_mapping.get(key, key)
-                config_dict[key] = recurse_elems(value)
+                config_dict[key] = recurse_elems(value, wrap_to_hf_config=False)
             return PretrainedConfig(**config_dict)
         else:
             return elem
@@ -508,6 +508,12 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
     config_dict["max_position_embeddings"] = config_dict.get(
         "max_position_embeddings", 128_000)
+
+    if config_dict.get("quantization") is not None:
+        config_dict["quantization_config"] = {
+            "quant_method": "fp8",
+            "activation_scheme": "static"
+        }
 
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
@@ -527,6 +533,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict.update(kwargs)
 
     config = recurse_elems(config_dict)
+
     return config
 
 
