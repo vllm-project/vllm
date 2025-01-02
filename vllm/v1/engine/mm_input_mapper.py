@@ -1,7 +1,6 @@
 from typing import Any, Dict, List, Optional
 
 import PIL
-import torch
 from blake3 import blake3
 
 from vllm.config import ModelConfig
@@ -103,7 +102,6 @@ class MMInputMapperClient:
                         {"image": [image_inputs[input_id]]},
                         mm_processor_kwargs=mm_processor_kwargs,
                     )
-                    mm_input["image"] = torch.tensor([])
 
                 if self.use_cache:
                     # Add to cache
