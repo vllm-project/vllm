@@ -203,7 +203,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
                             f"Expected type: {typ}, but "
                             f"found type: {type(items)}")
 
-        return items
+        return items  # type: ignore[return-value]
 
 
 ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
