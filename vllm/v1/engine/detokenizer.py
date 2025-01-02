@@ -249,12 +249,12 @@ class IncrementalDetokenizer:
     def add_tokens(
         self,
         new_token_ids: List[int],
-        finish_reason: Optional[str],
-        stop_reason: Optional[Union[int, str, None]],
         new_logprobs_token_ids: List[torch.Tensor],
         new_logprobs: List[torch.Tensor],
         new_prompt_logprobs_token_ids: Optional[torch.Tensor],
         new_prompt_logprobs: Optional[torch.Tensor],
+        finish_reason: Optional[str],
+        stop_reason: Optional[Union[int, str, None]],
     ) -> Optional[RequestOutput]:
         """
         Update RequestState for the request_id by:
