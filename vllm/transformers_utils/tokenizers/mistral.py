@@ -225,6 +225,7 @@ class MistralTokenizer:
         self,
         prompt: str,
         add_special_tokens: bool = False,
+        split_special_tokens: bool = False,
         truncation: bool = False,
         max_length: Optional[int] = None,
     ):

@@ -1251,8 +1251,14 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
         default=True,
         description=(
             "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."),
-    )
+            "the prompt."))
+    split_special_tokens: bool = Field(
+        default=False,
+        description=(
+            "If set to true, special tokens in the prompt will be split. "
+            "For example for Qwen2.5, |fim_prefix|> is a special token "
+            "and is by default tokenized to a single token [151661]. With "
+            "this flag set to true, it becomes [27,91,69,318,37151,91,29]"))
 
 
 class TokenizeChatRequest(OpenAIBaseModel):
