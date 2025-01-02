@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import product
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from pathlib import Path
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -655,12 +656,17 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
     print("== All Results ====")
     print_timers(timers)
 
-    # Result file dump
-    timestamp = int(time.time())
-    pkl_file = f"lora_bench-{timestamp}.pkl"
-    print(f"Writing benchmarks to {pkl_file}")
-    with open(pkl_file, "wb") as f:
-        pickle.dump(timers, f)
+    if args.output_directory:
+        # Result file dump
+        od = Path(args.output_directory) 
+        if not od.exists():
+            od.mkdir()
+
+        timestamp = int(time.time())
+        pkl_file = od / f"lora_bench-{timestamp}.pkl"
+        print(f"Writing benchmarks to {pkl_file}")
+        with open(pkl_file, "wb") as f:
+            pickle.dump(timers, f)
 
 
 def as_benchmark_contexts(hidden_sizes: List[int], lora_ranks: List[int],
@@ -803,6 +809,8 @@ if __name__ == '__main__':
                        nargs="+",
                        type=int,
                        default=DEFAULT_BATCH_SIZES)
+        p.add_argument('-o', '--output-directory',
+                       type=str)
 
     parser = FlexibleArgumentParser(
         description="""
