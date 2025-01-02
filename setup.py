@@ -34,9 +34,9 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-if not sys.platform.startswith("linux"):
+if not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
     logger.warning(
-        "vLLM only supports Linux platform (including WSL). "
+        "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
