@@ -437,6 +437,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             else:
                 self.lm_head = ParallelLMHead(config.vocab_size,
                                               config.hidden_size,
+                                              True,
                                               quant_config=quant_config,
                                               prefix=maybe_prefix(
                                                   prefix, "lm_head"))
@@ -459,8 +460,14 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+<<<<<<< HEAD
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
+=======
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors,
+                                   inputs_embeds, self.lm_head.bias)
+>>>>>>> 0d69ec2f ((vllm) add input embedding)
         return hidden_states
 
     def compute_logits(
