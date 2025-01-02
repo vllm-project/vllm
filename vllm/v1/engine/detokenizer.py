@@ -19,11 +19,6 @@ logger = init_logger(__name__)
 
 @dataclass
 class IncrementalDetokenizer:
-    """Track and implement detokenization for a single request.
-    
-    Also handles Pythonization (conversion to OpenAI-API-compatible Python
-    data structures) of logprobs Numpy arrays computed for the request.
-    """
 
     # Generation data
     output_text: str
