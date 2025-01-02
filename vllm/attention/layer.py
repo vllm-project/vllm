@@ -231,20 +231,13 @@ def unified_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     kv_cache: torch.Tensor,
-    attn_type: str,
     layer_name: str,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.dynamic_forward_context
     self = forward_context.static_forward_context[layer_name]
-    return self.impl.forward(query,
-                             key,
-                             value,
-                             kv_cache,
-                             attn_metadata,
-                             self._k_scale,
-                             self._v_scale,
-                             attn_type=attn_type)
+    return self.impl.forward(query, key, value, kv_cache, attn_metadata,
+                             self._k_scale, self._v_scale)
 
 
 def unified_attention_fake(

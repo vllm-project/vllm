@@ -770,7 +770,7 @@ class MllamaTextCrossAttention(nn.Module):
             self.scaling,
             self.num_local_key_value_heads,
             prefix=f"{prefix}.attn",
-            ttn_type=AttentionType.ENCODER_DECODER,
+            attn_type=AttentionType.ENCODER_DECODER,
         )
 
     def forward(
