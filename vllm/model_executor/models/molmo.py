@@ -1080,7 +1080,7 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
         out = processor.process(prompt, image)
     else:
         out = processor.process(None, image, tokens=inputs["prompt_token_ids"])
-        
+
     # If there is no image, return directly.
     if image is None:
         new_prompt_token_ids = out["input_ids"].tolist()
@@ -1091,7 +1091,7 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
             prompt_token_ids=new_prompt_token_ids,
             prompt=prompt,
         )
-    
+
     image_processor = processor.image_processor
     max_total_crops = 1 + image_processor.max_crops
     images, image_input_idx, image_masks = pad_images(
