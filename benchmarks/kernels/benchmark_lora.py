@@ -180,10 +180,10 @@ class OpType(Enum):
             OpType.BGMV_SHRINK, OpType.BGMV_EXPAND, OpType.BGMV_EXPAND_SLICE
         ]
 
-    def num_slices(self) -> int:
+    def num_slices(self) -> List[int]:
         if self.is_expand_slice_fn():
-            return 3
-        return 1
+            return [2, 3]
+        return [1]
 
     def mkn(self, batch_size: int, seq_length: int, hidden_size: int,
             lora_rank: int) -> Tuple[int, int, int]:
@@ -274,7 +274,8 @@ class BenchmarkContext:
             'k': k,
             'n': n,
             'num_loras': self.num_loras,
-            'sort_by_lora': self.sort_by_lora_id
+            'sort_by_lora': self.sort_by_lora_id,
+            'num_slices' : self.num_slices,
         }
         return json.dumps(desc)
 
@@ -640,14 +641,14 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
 
             seq_len_timers = []
             for bench_op in bench_ops:
-                _ctx = bench_ctx.with_seq_length(seq_len).with_num_slices(
-                    bench_op.num_slices())
-                seq_len_timers.append(
-                    bench_baseline(_ctx, args.arg_pool_size, bench_op,
-                                   args.with_cuda_graph))
-                seq_len_timers.append(
-                    bench_optype(_ctx, args.arg_pool_size, bench_op,
-                                 args.with_cuda_graph))
+                for num_slices in bench_op.num_slices():
+                    _ctx = bench_ctx.with_seq_length(seq_len).with_num_slices(num_slices)
+                    seq_len_timers.append(
+                        bench_baseline(_ctx, args.arg_pool_size, bench_op,
+                                       args.with_cuda_graph))
+                    seq_len_timers.append(
+                        bench_optype(_ctx, args.arg_pool_size, bench_op,
+                                     args.with_cuda_graph))
 
             print_timers(seq_len_timers)
             timers.extend(seq_len_timers)
