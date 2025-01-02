@@ -17,7 +17,7 @@ class NPUExecutor(GPUExecutor):
             "Chunked prefill is not yet supported for NPU backend")
         assert not self.speculative_config, (
             "Speculative decoding is not yet supported for NPU backend")
-
+        self.use_ray_compiled_dag = envs.VLLM_USE_RAY_COMPILED_DAG
         # Instantiate the worker and load the model to the device.
         self.driver_worker = self._create_worker()
         self.driver_worker.init_device()

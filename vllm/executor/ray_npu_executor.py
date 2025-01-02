@@ -1,16 +1,19 @@
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Tuple
 
 import ray._private.ray_constants as ray_constants
+from itertools import islice, repeat
 
 import vllm.envs as envs
 from vllm.executor.npu_executor import NPUExecutor
 from vllm.executor.ray_gpu_executor import RayGPUExecutor, RayGPUExecutorAsync
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async)
-
+import asyncio
+from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
+                        get_ip, get_open_port, make_async)
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 if TYPE_CHECKING:
@@ -23,6 +26,9 @@ class RayNPUExecutor(RayGPUExecutor, NPUExecutor):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
+        self.use_ray_compiled_dag = envs.VLLM_USE_RAY_COMPILED_DAG
+        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
+
         if (self.parallel_config.tensor_parallel_size == 1
                 and self.parallel_config.pipeline_parallel_size == 1):
             # For single GPU case, we use a ray worker with constrained memory.
@@ -224,9 +230,240 @@ class RayNPUExecutor(RayGPUExecutor, NPUExecutor):
             else:
                 self.non_driver_workers.append(worker)
 
+    def _driver_execute_model(
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
+        """Run execute_model in the driver worker.
+
+        Passing None will cause the driver to stop the model execution
+        loop running in each of the remote workers.
+        """
+        assert not self.use_ray_spmd_worker, (
+            "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1")
+        return self.driver_worker.execute_method("execute_model",
+                                                 execute_model_req)
+
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        print("ray_npu_excutor: excute_model")
+        if not self.use_ray_spmd_worker:
+            return super().execute_model(execute_model_req)
+
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
+
+        serialized_data = self.input_encoder.encode(execute_model_req)
+        outputs = ray.get(self.forward_dag.execute(serialized_data))
+        output = self.output_decoder.decode(outputs[0])
+        return output
+
+    def _run_workers(
+        self,
+        method: str,
+        *args,
+        async_run_tensor_parallel_workers_only: bool = False,
+        all_args: Optional[List[Tuple[Any, ...]]] = None,
+        all_kwargs: Optional[List[Dict[str, Any]]] = None,
+        max_concurrent_workers: Optional[int] = None,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers. Can be used in the following
+        ways:
+
+        Args:
+        - async_run_tensor_parallel_workers_only: If True the method will be
+          run only in the remote TP workers, not the driver worker.
+          It will also be run asynchronously and return a list of futures
+          rather than blocking on the results.
+        - args/kwargs: All workers share the same args/kwargs
+        - all_args/all_kwargs: args/kwargs for each worker are specified
+          individually
+        """
+        if self.use_ray_spmd_worker:
+            assert not async_run_tensor_parallel_workers_only, (
+                "async_run_tensor_parallel_workers_only is not supported for "
+                "spmd mode.")
+
+        if max_concurrent_workers:
+            raise NotImplementedError(
+                "max_concurrent_workers is not supported yet.")
+
+        count = len(self.workers) if not \
+            async_run_tensor_parallel_workers_only \
+            else len(self.non_driver_workers)
+        # If using SPMD worker, all workers are the same, so we should execute
+        # the args on all workers. Otherwise, we skip the first worker's args
+        # because those args will go to the driver worker.
+        first_worker_args_index: int = 0 if self.use_ray_spmd_worker else 1
+        all_worker_args = repeat(args, count) if all_args is None \
+            else islice(all_args, first_worker_args_index, None)
+        all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
+            else islice(all_kwargs, first_worker_args_index, None)
+
+        # Start the ray workers first.
+        ray_workers = self.workers
+        if async_run_tensor_parallel_workers_only:
+            ray_workers = self.non_driver_workers
+        ray_worker_outputs = [
+            worker.execute_method.remote(method, *worker_args, **worker_kwargs)
+            for (worker, worker_args, worker_kwargs
+                 ) in zip(ray_workers, all_worker_args, all_worker_kwargs)
+        ]
+
+        if async_run_tensor_parallel_workers_only:
+            # Just return futures
+            return ray_worker_outputs
+
+        driver_worker_output = []
+        # In SPMD mode, the driver worker is the same as any other worker,
+        # so we only explicitly execute on the driver worker if using a
+        # non-SPMD worker class.
+        if not self.use_ray_spmd_worker:
+            driver_args = args if all_args is None else all_args[0]
+            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
+
+            # Start the driver worker after all the ray workers.
+            driver_worker_output = [
+                self.driver_worker.execute_method(method, *driver_args,
+                                                  **driver_kwargs)
+            ]
+
+        # Get the results of the ray workers.
+        if self.workers:
+            ray_worker_outputs = ray.get(ray_worker_outputs)
+
+        return driver_worker_output + ray_worker_outputs
+
+    def _compiled_ray_dag(self, enable_asyncio: bool):
+        assert self.parallel_config.use_ray
+        self._check_ray_adag_installation()
+        from ray.dag import InputNode, MultiOutputNode
+        from ray.experimental.channel.torch_tensor_type import TorchTensorType
+
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
+        with InputNode() as input_data:
+            # Example DAG: PP=2, TP=4
+            # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
+            #                         -> 1 -> (ExecuteModelReq, IntermediateOutput) -> 5 -> SamplerOutput   # noqa: E501
+            #                         -> 2 -> (ExecuteModelReq, IntermediateOutput) -> 6 -> SamplerOutput   # noqa: E501
+            #                         -> 3 -> (ExecuteModelReq, IntermediateOutput) -> 7 -> SamplerOutput   # noqa: E501
+
+            # All workers in the first TP group will take in the
+            # ExecuteModelRequest as input.
+            outputs = [input_data for _ in self.pp_tp_workers[0]]
+            for pp_rank, tp_group in enumerate(self.pp_tp_workers):
+                # Each PP worker takes in the output of the previous PP worker,
+                # and the TP group executes in SPMD fashion.
+                outputs = [
+                    worker.execute_model_spmd.
+                    bind(  # type: ignore[attr-defined]
+                        outputs[i]) for i, worker in enumerate(tp_group)
+                ]
+
+                last_pp_rank = len(self.pp_tp_workers) - 1
+                if pp_rank < last_pp_rank:
+                    # Specify how intermediate tensors should be passed
+                    # between pp stages, no need to specify for the last
+                    # pp stage.
+                    transport = "hccl" \
+                        if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL \
+                        else "auto"
+                    outputs = [
+                        output.with_type_hint(
+                            TorchTensorType(transport=transport))
+                        for output in outputs
+                    ]
+
+            forward_dag = MultiOutputNode(outputs)
+
+        return forward_dag.experimental_compile(
+            enable_asyncio=enable_asyncio,
+            _overlap_gpu_communication=envs.
+            VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
+    
+    def shutdown(self) -> None:
+        if hasattr(self, "forward_dag") and self.forward_dag is not None:
+            self.forward_dag.teardown()
+            import ray
+            for worker in self.workers:
+                ray.kill(worker)
+            self.forward_dag = None
 
 class RayNPUExecutorAsync(RayNPUExecutor, RayGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.driver_exec_method = make_async(self.driver_worker.execute_method)
+        self.use_ray_compiled_dag = envs.VLLM_USE_RAY_COMPILED_DAG
+        print(f"use_ray_compiled_dag: {self.use_ray_compiled_dag}")
+        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
+        if not self.use_ray_compiled_dag:
+            self.driver_exec_method = make_async(
+                self.driver_worker.execute_method)
+
+    async def execute_model_async(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        if not self.use_ray_spmd_worker:
+            return await super().execute_model_async(execute_model_req)
+
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
+
+        serialized_data = self.input_encoder.encode(execute_model_req)
+        dag_future = await self.forward_dag.execute_async(serialized_data)
+        output = await dag_future[0]
+        return self.output_decoder.decode(output)
+
+    async def _driver_execute_model_async(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        assert not self.use_ray_spmd_worker, (
+            "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1")
+        if not self.tp_driver_workers:
+            return await self.driver_exec_method("execute_model",
+                                                 execute_model_req)
+        if self.pp_locks is None:
+            # This locks each pipeline parallel stage so multiple virtual
+            # engines can't execute on the same stage at the same time
+            # We create the locks here to avoid creating them in the constructor
+            # which uses a different asyncio loop.
+            self.pp_locks = [
+                asyncio.Lock()
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
+
+        tasks = [
+            asyncio.create_task(
+                _run_task_with_lock(self.driver_exec_method, self.pp_locks[0],
+                                    "execute_model", execute_model_req))
+        ]
+        for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
+                                                start=1):
+            tasks.append(
+                asyncio.create_task(
+                    _run_task_with_lock(driver_worker.execute_method.remote,
+                                        self.pp_locks[pp_rank],
+                                        "execute_model", execute_model_req)))
+
+        results = await asyncio.gather(*tasks)
+
+        # Only the last PP stage has the final results.
+        return results[-1]
+
+    async def _start_worker_execution_loop(self):
+        assert not self.use_ray_spmd_worker, (
+            "worker loop is disabled for VLLM_USE_RAY_SPMD_WORKER=1")
+        coros = [
+            worker.execute_method.remote("start_worker_execution_loop")
+            for worker in self.non_driver_workers
+        ]
+        return await asyncio.gather(*coros)
+
+    def __del__(self):
+        self.shutdown()
