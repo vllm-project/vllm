@@ -1,5 +1,5 @@
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import (Callable, Iterable, List, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -9,7 +9,6 @@ from transformers import BatchFeature, PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.inputs import InputContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -87,8 +86,8 @@ class AriaVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        pixel_mask: Optional[torch.BoolTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.BoolTensor]]:
+        pixel_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
 
         vit_oup = self.vision_model(
@@ -100,7 +99,8 @@ class AriaVisionModel(nn.Module):
 
         return vit_oup, image_atts
 
-    def _create_patch_attention_mask(self, pixel_mask):
+    def _create_patch_attention_mask(
+            self, pixel_mask: Optional[torch.Tensor]) -> torch.Tensor:
         if pixel_mask is None:
             return None
 
@@ -115,7 +115,8 @@ class AriaVisionModel(nn.Module):
         )
         return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
-    def _create_image_attention_mask(self, patch_attention_mask):
+    def _create_image_attention_mask(
+            self, patch_attention_mask: torch.Tensor) -> torch.Tensor:
         if patch_attention_mask is None:
             return None
 
@@ -125,13 +126,13 @@ class AriaVisionModel(nn.Module):
 
 class FFN(nn.Module):
 
-    def __init__(self, embed_dim, ff_dim, output_dim):
+    def __init__(self, embed_dim: int, ff_dim: int, output_dim: int) -> None:
         super().__init__()
         self.linear_in = ColumnParallelLinear(embed_dim, ff_dim, bias=False)
         self.linear_out = RowParallelLinear(ff_dim, output_dim, bias=False)
         self.act = get_act_fn("gelu_new")
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.linear_in(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states, _ = self.linear_out(hidden_states)
@@ -140,7 +141,7 @@ class FFN(nn.Module):
 
 class CrossAttention(nn.Module):
 
-    def __init__(self, kv_dim, embed_dim, num_heads, drop_out_rate=0):
+    def __init__(self, kv_dim: int, embed_dim: int, num_heads: int) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -149,12 +150,16 @@ class CrossAttention(nn.Module):
 
         self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads)
         self.linear = nn.Linear(embed_dim, embed_dim)
-        self.dropout = nn.Dropout(drop_out_rate)
 
         self.layer_norm = nn.LayerNorm(embed_dim)
         self.ln_kv = nn.LayerNorm(kv_dim)
 
-    def forward(self, x, hidden_states, attn_mask=None, add_residual=False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         normed_hidden_states = self.layer_norm(hidden_states)
         query = self.q_proj(normed_hidden_states).permute(1, 0, 2)
 
@@ -169,11 +174,7 @@ class CrossAttention(nn.Module):
 
         attn_output = attn_output.permute(1, 0, 2)
 
-        if add_residual:
-            attn_output = hidden_states + self.dropout(
-                self.linear(attn_output))
-        else:
-            attn_output = self.dropout(self.linear(attn_output))
+        attn_output = self.linear(attn_output)
 
         return attn_output
 
@@ -201,14 +202,14 @@ class AriaProjector(nn.Module):
 
     def __init__(
         self,
-        patch_to_query_dict,
-        embed_dim,
-        num_heads,
-        kv_dim,
-        ff_dim,
-        output_dim,
-        norm_layer=nn.LayerNorm,
-    ):
+        patch_to_query_dict: dict[int, int],
+        embed_dim: int,
+        num_heads: int,
+        kv_dim: int,
+        ff_dim: int,
+        output_dim: int,
+        norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
+    ) -> None:
         super().__init__()
         self.patch_to_query_dict = patch_to_query_dict
         self.embed_dim = embed_dim
@@ -224,7 +225,11 @@ class AriaProjector(nn.Module):
         self.ln_ffn = norm_layer(embed_dim)
         self.ffn = FFN(embed_dim, ff_dim, output_dim)
 
-    def forward(self, x, attn_mask=None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         bs = x.shape[0]
         queries = self.query.unsqueeze(0).repeat(bs, 1, 1)
 
@@ -442,12 +447,17 @@ def build_mm_projector(config: PretrainedConfig):
     )
 
 
-def get_max_aria_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config()
-    return max(hf_config.projector_patch_to_query_dict.values())
-
-
 class AriaMultiModalProcessor(BaseMultiModalProcessor):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def _get_num_image_tokens(self) -> int:
+        hf_config = self.ctx.get_hf_config()
+        return max(hf_config.projector_patch_to_query_dict.values())
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        return {"image": self._get_num_image_tokens()}
 
     def _get_mm_fields_config(
         self,
@@ -468,13 +478,13 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
         hf_config = self.ctx.get_hf_config()
         image_token_id = hf_config.image_token_index
 
-        max_image_tokens = get_max_aria_image_tokens(self.ctx)
+        num_image_tokens = self._get_num_image_tokens()
 
         return [
             PromptReplacement(
                 modality="image",
                 target=[image_token_id],
-                replacement=[image_token_id] * max_image_tokens,
+                replacement=[image_token_id] * num_image_tokens,
             )
         ]
 
@@ -504,7 +514,6 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_aria_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(AriaMultiModalProcessor)
 class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """

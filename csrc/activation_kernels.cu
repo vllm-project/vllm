@@ -63,6 +63,8 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 }  // namespace vllm
 
 // Launch activation and gating kernel.
+// Use ACT_FIRST (bool) indicating whether to apply the activation function
+// first.
 #define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                 \
   int d = input.size(-1) / 2;                                            \
   int64_t num_tokens = input.numel() / input.size(-1);                   \
