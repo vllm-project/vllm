@@ -13,7 +13,6 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalInputsV2
 
 
-
 class TextPrompt(TypedDict):
     """Schema for a text prompt."""
 
@@ -177,16 +176,20 @@ class TokenInputs(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-def is_token_inputs(inputs: Union[TokenInputs, MultiModalInputsV2]
-                    ) -> TypeGuard[TokenInputs]:
+
+def is_token_inputs(
+        inputs: Union[TokenInputs,
+                      MultiModalInputsV2]) -> TypeGuard[TokenInputs]:
     """
     Helper function to make sure mypy narrows down the type to
     TokenInputs.
     """
     return inputs["type"] == "token"
 
-def is_multimodal_inputs(inputs: Union[TokenInputs, MultiModalInputsV2]
-                         ) -> TypeGuard[MultiModalInputsV2]:
+
+def is_multimodal_inputs(
+    inputs: Union[TokenInputs, MultiModalInputsV2]
+) -> TypeGuard[MultiModalInputsV2]:
     """
     Helper function to make sure mypy narrows down the type to
     MultiModalInputsV2.
