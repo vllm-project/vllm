@@ -4,7 +4,8 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List, Literal,
                     Optional, Tuple, Union, cast)
 
 import torch
-from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never, TypeGuard
+from typing_extensions import (NotRequired, TypedDict, TypeVar, assert_never,
+                               TypeGuard)
 
 if TYPE_CHECKING:
     from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
@@ -176,7 +177,8 @@ class TokenInputs(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-def is_multimodal_inputs(inputs: Union[TokenInputs, MultiModalInputsV2]) -> TypeGuard[MultiModalInputsV2]:
+def is_multimodal_inputs(inputs: Union[TokenInputs, MultiModalInputsV2]
+                         ) -> TypeGuard[MultiModalInputsV2]:
     """Helper function to make sure mypy narrows down the type."""
     return inputs["type"] == "multimodal"
 
