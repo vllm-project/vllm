@@ -138,8 +138,6 @@ class IncrementalDetokenizer:
         # NOTE(rob): the lists are of length > 1 if EngineCore
         # generates > 1 token per step (e.g. in spec decoding).
         num_new_tokens = len(sampled_token_ids)
-        assert num_new_tokens == len(logprobs_token_ids_lst)
-        assert num_new_tokens == len(logprobs_lst)
         for sampled_token_id, logprobs, logprobs_token_ids in zip(
                 sampled_token_ids, logprobs_lst, logprobs_token_ids_lst):
 
@@ -153,33 +151,26 @@ class IncrementalDetokenizer:
             topk_token_ids = logprobs_token_ids[1:].tolist()
             topk_logprobs = logprobs[1:].tolist()
 
-            # Make the Logprob objects.
+            # Detokenize (non-incrementally).
             decoded_tokens = self.tokenizer.batch_decode(
                 topk_token_ids.reshape(-1, 1))
-            # Sampler uses torch.topk() which sorts, so idx=rank.
-            topk_logprobs_dict = {
-                topk_token_ids[idx]: Logprob(
-                    logprob=topk_logprobs[idx],
-                    rank=idx,
-                    decoded_token=decoded_tokens[idx],
-                )
-                for idx in range(self.num_logprobs)
-            }
 
-            # Make the sampled Logprob object if not in topk.
-            if sampled_token_id not in topk_logprobs_dict:
-                # TODO(rob): do we need to plumb up the rank for
-                # the sample Logprob? It is not used in the
-                # Chat Completions API for instance.
+            # Make the Logprob objects for each position.
+            pos_logprobs_dict = self._make_pos_logprob_dict(
+                topk_logprobs, topk_token_ids, decoded_tokens,
+                self.num_logprobs)
+
+            # Add the sampled Logprob if it was not in topk
+            if sampled_token_id not in pos_logprobs_dict:
                 token = self.tokenizer.decode(sampled_token_id)
-                topk_logprobs_dict[sampled_token_id] = Logprob(
+                pos_logprobs_dict[sampled_token_id] = Logprob(
                     logprob=sampled_token_logprob,
-                    rank=None,
+                    rank=None, # TODO: is this needed?
                     decoded_token=token)
 
             # Update logprobs for this sequence position.
-            self.logprobs.append(topk_logprobs_dict)
-            # FIXME(rob): update cumulative logprob.
+            self.logprobs.append(pos_logprobs_dict)
+            self.cumulative_logprob += sampled_token_logprob
 
         # Return just the newly generated sample logprobs.
         return self.logprobs[-num_new_tokens:]
