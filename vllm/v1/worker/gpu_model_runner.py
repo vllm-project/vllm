@@ -13,11 +13,11 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, is_pin_memory_available)
+                        LayerBlockType, cdiv, is_pin_memory_available,
+                        register_kv_cache)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
@@ -754,12 +754,6 @@ class GPUModelRunner:
                             dtype=self.kv_cache_dtype,
                             device=self.device))
         # register kv_cache for forward_context
-        if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
-            # TODO(Chen): In pipeline parallelism, layer_name 'layers.i.xxx'
-            # is mapped to kv_caches[i - start_layer_idx]. Need to implement
-            # and verify after supporting PP in v1
-            raise NotImplementedError("Pipeline parallelism is not supported.")
-        ctx = self.vllm_config.compilation_config.static_forward_context
-        for layer_name, forward_ctx in ctx.items():
-            layer_id = extract_layer_index(layer_name)
-            forward_ctx.kv_cache = self.kv_caches[layer_id]
+        register_kv_cache(
+            self.vllm_config.compilation_config.static_forward_context,
+            self.kv_caches)

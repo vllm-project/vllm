@@ -52,7 +52,7 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import LayerForwardContext, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -1947,3 +1947,15 @@ def get_mp_context():
     _check_multiproc_method()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
+
+
+def register_kv_cache(ctx: Dict[str, "LayerForwardContext"],
+                      kv_cache: List[torch.Tensor]) -> None:
+    # Two things needed to be handled here:
+    # 1. Some models have non-attention layers, e.g., Jamba
+    # 2. Pipeline parallelism, each rank only has a subset of layers
+    from vllm.model_executor.models.utils import extract_layer_index
+    layer_name_sorted = sorted(ctx.keys(), key=extract_layer_index)
+    for i, layer_name in enumerate(layer_name_sorted):
+        forward_ctx = ctx[layer_name]
+        forward_ctx.kv_cache = kv_cache[i]
