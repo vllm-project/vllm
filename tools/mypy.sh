@@ -30,3 +30,4 @@ run_mypy vllm/prompt_adapter
 run_mypy vllm/spec_decode
 run_mypy vllm/worker
 run_mypy vllm/v1
+run_mypy vllm/inputs
