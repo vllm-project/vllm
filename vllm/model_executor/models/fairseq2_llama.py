@@ -18,16 +18,12 @@ from typing import Iterable, Set, Tuple
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
+from vllm.model_executor.models.llama import LlamaForCausalLM
 
 from .utils import AutoWeightsLoader, WeightsMapper
 
 
 class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
-
-    def _init_model(self, vllm_config: VllmConfig, prefix: str = ""):
-        return LlamaModel(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
