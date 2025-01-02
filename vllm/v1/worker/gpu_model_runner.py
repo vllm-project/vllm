@@ -374,13 +374,13 @@ class GPUModelRunner:
             slot_mapping=slot_mapping,
         )
 
-        # Make Sampling Metadata
-        sampling_metadata = self._prepare_sampling(
+        # Make Sampling and Prompt Logprobs Metadata.
+        sampling_metadata, prompt_logprobs_metadata = self._prepare_sampling(
             scheduler_output=scheduler_output,
-            sample_indices=query_start_loc[1:] - 1
+            sample_indices=query_start_loc[1:] - 1,
+            num_scheduled_tokens=num_scheduled_tokens,
+            req_indices=req_indices,
         )
-        prompt_logprobs_metadata = self._prepare_prompt_logprobs(
-            num_scheduled_tokens, req_indices)
 
         return attn_metadata, sampling_metadata, prompt_logprobs_metadata
 
@@ -388,7 +388,9 @@ class GPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
         sample_indices: torch.Tensor,
-    ) -> SamplingMetadata:
+        num_scheduled_tokens: np.array,
+        req_indices: np.ndarray,
+    ) -> Tuple[SamplingMetadata, Optional[PromptLogprobsMetadata]]:
         skip_copy = True
         if (scheduler_output.finished_req_ids
                 or scheduler_output.preempted_req_ids):
@@ -399,20 +401,12 @@ class GPUModelRunner:
         # Create the sampling metadata.
         sampling_metadata = self.input_batch.make_sampling_metadata(
             skip_copy, sample_indices)
-        return sampling_metadata
-
-    def _prepare_prompt_logprobs(
-        self,
-        num_scheduled_tokens: np.array,
-        req_indices: np.ndarray,
-    ) -> Optional[PromptLogprobsMetadata]:
-        # NOTE(rob): Since this function uses the values of
-        # input_batch.temp/top_p/top_k, which are mutated in
-        # self._prepare_sampling, it should be called AFTER.
-
-        # Create the prompt logprobs metadata.
-        return self.input_batch.make_prompt_logprobs_metadata(
+        
+        # Create the prompt logprobs metdata.
+        prompt_lps_metdata = self.input_batch.make_prompt_logprobs_metadata(
             num_scheduled_tokens, req_indices)
+
+        return sampling_metadata, prompt_lps_metdata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -552,7 +546,7 @@ class GPUModelRunner:
         sample_hidden_states = hidden_states[sampling_metadata.sample_indicies]
         sample_logits = self.model.compute_logits(sample_hidden_states, None)
 
-        # Sample the next token.
+        # Sample the next token and get logprobs if needed.
         sampler_output = self.model.sample(
             logits=sample_logits,
             sampling_metadata=sampling_metadata,
