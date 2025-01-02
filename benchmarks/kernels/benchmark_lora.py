@@ -6,8 +6,8 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import product
-from typing import Any, Callable, Dict, List, Optional, Tuple
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -275,7 +275,7 @@ class BenchmarkContext:
             'n': n,
             'num_loras': self.num_loras,
             'sort_by_lora': self.sort_by_lora_id,
-            'num_slices' : self.num_slices,
+            'num_slices': self.num_slices,
         }
         return json.dumps(desc)
 
@@ -642,7 +642,8 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
             seq_len_timers = []
             for bench_op in bench_ops:
                 for num_slices in bench_op.num_slices():
-                    _ctx = bench_ctx.with_seq_length(seq_len).with_num_slices(num_slices)
+                    _ctx = bench_ctx.with_seq_length(seq_len).with_num_slices(
+                        num_slices)
                     seq_len_timers.append(
                         bench_baseline(_ctx, args.arg_pool_size, bench_op,
                                        args.with_cuda_graph))
@@ -659,7 +660,7 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
 
     if args.output_directory:
         # Result file dump
-        od = Path(args.output_directory) 
+        od = Path(args.output_directory)
         if not od.exists():
             od.mkdir()
 
@@ -810,8 +811,7 @@ if __name__ == '__main__':
                        nargs="+",
                        type=int,
                        default=DEFAULT_BATCH_SIZES)
-        p.add_argument('-o', '--output-directory',
-                       type=str)
+        p.add_argument('-o', '--output-directory', type=str)
 
     parser = FlexibleArgumentParser(
         description="""
