@@ -1,9 +1,9 @@
 import enum
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import msgspec
-import numpy.typing as npt
+import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
@@ -56,9 +56,10 @@ class EngineCoreOutput(
     request_id: str
     new_token_ids: List[int]
     finished: bool
-    logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]]
-    prompt_logprobs: Optional[npt.NDArray]
-    prompt_logprobs_token_ids: Optional[npt.NDArray]
+    logprobs: Optional[torch.Tensor]
+    logprobs_token_ids: Optional[torch.Tensor]
+    prompt_logprobs: Optional[torch.Tensor]
+    prompt_logprobs_token_ids: Optional[torch.Tensor]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
 

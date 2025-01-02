@@ -394,6 +394,9 @@ class Scheduler:
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
+        logprobs_token_ids_cpu = model_runner_output.logprob_token_ids_cpu
+        logprobs_cpu = model_runner_output.logprobs_cpu
+        prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
@@ -428,13 +431,31 @@ class Scheduler:
                 # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
 
+                # Extract sample logprobs if needed.
+                # TODO(rob): does it make sense to pythonize here?
+                do_lps = logprobs_cpu is not None
+                logprobs_token_ids = (logprobs_token_ids_cpu[req_index]
+                                      if do_lps else None)
+                logprobs = logprobs_cpu[req_index] if do_lps else None
+
+                # Extract prompt logprobs for this req if needed.
+                # TODO(rob): does it make sense to pythonize here?
+                # FIXME(rob): handle partial request. Currently we throw away
+                # the prompt logprobs for the partial request.
+                prompt_logprobs_token_ids, prompt_logprobs = (
+                    prompt_logprobs_dict.get(req_id, default=(None,None)))
+
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
                     request_id=req_id,
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason)
+                    stop_reason=request.stop_reason,
+                    logprobs_token_ids=logprobs_token_ids,
+                    logprobs=logprobs,
+                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    prompt_logprobs=prompt_logprobs)
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.

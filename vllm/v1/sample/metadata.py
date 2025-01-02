@@ -28,14 +28,12 @@ class SamplingMetadata:
 
 @dataclass
 class PromptLogprobsMetadata:
-    
+
     req_ids: List[str]
     masks: List[int]
     logits_process_metadatas: List[LogitsProcessMetadata]
     num_prompt_logprobs: List[int]
 
     def zipped(self):
-        return zip(self.req_ids,
-                   self.masks,
-                   self.logits_process_metadatas,
+        return zip(self.req_ids, self.masks, self.logits_process_metadatas,
                    self.num_prompt_logprobs)

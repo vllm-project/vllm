@@ -552,20 +552,24 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
-        # Compute prompt logprobs if requested.
-        # NOTE(rob): this implementation computes the prompt logprobs for
-        # each active prompt separately, which is suboptimal. However,
-        # there are typically < 5 active prefills in a batch and prompt
-        # logprobs are a rare feature (used by lm-eval-harness), so
-        # prioritize simplicity over performance.
-        prompt_logprobs_output: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
-        for (req_id, mask, logits_process_metadata, num_logprobs) in prompt_logprobs_metadata.zipped():
-            # Compute logits.
-            logits = self.model.sampler.compute_logits(
-                hidden_states[mask], None)
-            # Compute logprobs.
-            prompt_logprobs_output[req_id] = self.model.sampler.get_prompt_logprobs(
-                logits, logits_process_metadata, num_logprobs)
+        # Compute prompt logprobs if needed.
+        # NOTE(rob): compute prompt logprobs for each req separately,
+        # which is suboptimal. However, prompt logprobs are rare (used
+        # by lm-eval-harness) and we have few prefill per batch,
+        # so prioritize simplicity.
+        prompt_lps_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        if prompt_logprobs_metadata:
+            for req_id, mask, metadata, num_logprobs in prompt_logprobs_metadata.zipped(
+            ):
+                # TODO: make prompt lp metadata here?
+
+                # Compute logits.
+                logits = self.model.sampler.compute_logits(
+                    hidden_states[mask], None)
+                # Compute prompt logprobs.
+                prompt_lps_dict[
+                    req_id] = self.model.sampler.get_prompt_logprobs(
+                        logits, metadata, num_logprobs)
 
         # Update Request State.
         sampled_token_ids = sampler_output.sampled_token_ids
@@ -603,7 +607,7 @@ class GPUModelRunner:
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=sampler_output.logprob_token_ids,
             logprobs_cpu=sampler_output.logprobs,
-            prompt_logprobs=prompt_logprobs_output,
+            prompt_logprobs_dict=prompt_lps_dict,
         )
         return model_runner_output
 

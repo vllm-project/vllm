@@ -289,7 +289,8 @@ class InputBatch:
         num_prompt_logprobs = []
 
         # TODO(rob): should we move this to _update_states?
-        for req_id, req_num_prompt_logprobs in self.num_prompt_logprobs.items():
+        for req_id, req_num_prompt_logprobs in self.num_prompt_logprobs.items(
+        ):
             req_idx = self.req_id_to_index[req_id]
 
             # Make the logits mask for the request prefills.
@@ -310,13 +311,12 @@ class InputBatch:
             masks.append(mask)
             num_prompt_logprobs.append(req_num_prompt_logprobs)
             logits_process_metadatas.append(
-                LogitsProcessMetadata(
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    no_top_p=no_top_p,
-                    no_top_k=no_top_k))
-        
+                LogitsProcessMetadata(temperature=temperature,
+                                      top_p=top_p,
+                                      top_k=top_k,
+                                      no_top_p=no_top_p,
+                                      no_top_k=no_top_k))
+
         return PromptLogprobsMetadata(
             req_ids=req_ids,
             logits_process_metadatas=logits_process_metadatas,
