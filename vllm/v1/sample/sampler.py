@@ -154,9 +154,12 @@ class Sampler(nn.Module):
         greedy_sampled = self.greedy_sample(probs)
         random_sampled = self.random_sample(probs,
                                             sampling_metadata.generators)
-        temperature = sampling_metadata.logits_process_metadata.temperature
-        sampled = torch.where(temperature < _SAMPLING_EPS, greedy_sampled,
-                              random_sampled)
+        sampled = torch.where(
+            sampling_metadata.logits_process_metadata.temperature <
+            _SAMPLING_EPS,
+            greedy_sampled,
+            random_sampled,
+        )
         return sampled
 
 
