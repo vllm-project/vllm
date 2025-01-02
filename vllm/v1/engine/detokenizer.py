@@ -108,39 +108,6 @@ class IncrementalDetokenizer:
             num_prompt_logprobs=request.prompt_logprobs,
         )
 
-    def _pythonize_sequence_position(
-        self,
-        logprob_values: npt.NDArray,
-        logprob_token_ids: npt.NDArray,
-        detokenize: bool,
-    ) -> Dict[int, Logprob]:
-        """Pythonize the numpy (np) logprobs & token ids for a sequence position
-        
-        Outputs the OpenAI-API-compatible representation of the top tokens and
-        their logprobs at a single position in a sequence.
-
-        Optionally detokenize (compute logprob `decoded_token`)
-
-        Args:
-          logprob_values: np logprob values
-          logprob_token_ids: np logprob token ids
-          detokenize: if True, detokenize logprob top token ids
-
-        Return:
-          mapping from top token id to Logprob data structure
-        """
-        logprob_values = logprob_values.tolist()
-        logprob_token_ids = logprob_token_ids.tolist()
-        logprob_token_strs = (cast(List[Optional[str]],
-                                   self._detokenize_ids(logprob_token_ids)) if
-                              detokenize else [None] * len(logprob_token_ids))
-
-        return {
-            lpt: Logprob(lpv, (idx + 1), lpstr)
-            for idx, (lpv, lpt, lpstr) in enumerate(
-                zip(logprob_values, logprob_token_ids, logprob_token_strs))
-        }
-
     def _make_sample_logprobs(
         self,
         sampled_token_ids: List[int],
@@ -175,30 +142,30 @@ class IncrementalDetokenizer:
         """
 
         # NOTE(rob): the lists are of length > 1 if a single step
-        # of engine core generates > 1 token (e.g. spec decoding).
+        # of EngineCore generates > 1 token (e.g. spec decoding).
         assert len(sampled_token_ids) == len(logprobs_token_ids_lst)
         assert len(sampled_token_ids) == len(logprobs_lst)
         output_list: SampleLogprobs = []
         for sampled_token_id, logprobs, logprobs_token_ids in zip(
             sampled_token_ids, logprobs_lst, logprobs_token_ids_lst):
 
-            # Sampler cats the lps of sampled tok before the topk lps.
+            # Sampler concatenates the logprobs of the sampled token
+            # ahead of the topk tokens.
             assert sampled_token_id == logprobs_token_ids[0].item(), (
                 "Sampler cats the sampled tokens logprobs in front of "
                 f"the topk logprobs, but got {sampled_token_id=} and "
                 f"{logprobs_token_ids[0].item()=}")
 
-            # Pythonize the torch tensors..
+            # Pythonize.
             sampled_token_logprob = logprobs[0].item()
             topk_token_ids = logprobs_token_ids[1:].tolist()
             topk_logprobs = logprobs[1:].tolist()
 
             # Make the Logprob objects.
-            # Detokenize *non-incrementally* for simplicity.
-            decoded_tokens = self.tokenizer.batch_decode(
-                topk_token_ids.reshape(-1,1))
-            # torch.topk used to select lps returns them
-            # in sorted order, so we can use idx for rank.
+            # Detokenize *non-incrementally*
+            decoded_tokens = self.tokenizer.batch_decode(topk_token_ids.reshape(-1,1))
+            # Sampler uses torch.topk to select the logprobs, whihch
+            # returns them in sorted order, so we can use idx for rank.
             topk_logprobs_dict = {
                 topk_token_ids[idx]: Logprob(
                     logprob=topk_logprobs[idx], rank=idx,
@@ -206,10 +173,12 @@ class IncrementalDetokenizer:
                 ) for idx in range(self.num_logprobs)
             }
 
-            # If the sampled token was not in the topk, add it.
+            # Add a Logprob object for the sampled token if it
+            # is not already in the top k.
             if sampled_token_id not in topk_logprobs_dict:
-                # TODO(rob): is rank for sample Logprob needed? 
-                # it is not used in Chat Completions.
+                # TODO(rob): do we need to plumb up the rank for 
+                # the sample Logprob? It is not used in the 
+                # Chat Completions API for instance.
                 token = self.tokenizer.decode(sampled_token_id)
                 topk_logprobs_dict[sampled_token_id] = Logprob(
                     logprob=sampled_token_logprob,
@@ -281,11 +250,11 @@ class IncrementalDetokenizer:
     ) -> Optional[RequestOutput]:
         """
         Update RequestState for the request_id by:
-            1) Detokenize the new token ids incrementally
-            2) Evaluate stop criteria
-            3) Detokenize sample logprobs non-incrementally
-            4) Detokenize prompt logprobs non-incrementally
-            5) Update the `RequestOutput` object with new text
+            1) Detokenize the new token ids incrementally.
+            2) Evaluate stop criteria.
+            3) Detokenize sample logprobs non-incrementally.
+            4) Detokenize prompt logprobs non-incrementally.
+            5) Make the `RequestOutput` object with new text.
         """
 
         # 1) Detokenize the new token ids incrementally.
@@ -348,7 +317,7 @@ class IncrementalDetokenizer:
                 prompt_logprobs_token_ids,
                 prompt_logprobs)
 
-        # 5) Update the RequestOutput object with the new text.
+        # 5) Makes the RequestOutput object with the new text.
         finished = bool(finish_reason)
         if self.output_kind == RequestOutputKind.FINAL_ONLY \
             and not finished:
