@@ -1,6 +1,5 @@
 import torch
 import pickle
-import numpy as np
 from typing import Any
 from msgspec import msgpack
 
@@ -38,7 +37,6 @@ class MsgpackDecoder:
     
     def decode(self, obj: Any):
         return self.decoder.decode(obj)
-
 
 
 def custom_enc_hook(obj: Any) -> Any:
