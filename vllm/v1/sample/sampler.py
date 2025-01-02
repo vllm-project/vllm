@@ -18,7 +18,7 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        logits = self.process_logits(logits,
+        logits = self._process_logits(logits,
                                      sampling_metadata.logits_process_metadata)
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
@@ -27,8 +27,10 @@ class Sampler(nn.Module):
 
         # Compute the logprobs if requested.
         # NOTE: CPU-GPU synchronization happens here.
-        logprob_token_ids, logprobs = self.compute_logprobs(
-            logits, sampling_metadata.max_num_logprobs)
+        logprob_token_ids, logprobs = self._compute_logprobs(
+            logit=logits,
+            max_num_logprobs=sampling_metadata.max_num_logprobs,
+            sampled_token_ids=sampled)
 
         # NOTE: CPU-GPU synchronization happens here.
         sampler_output = SamplerOutput(
@@ -37,8 +39,23 @@ class Sampler(nn.Module):
             logprobs=logprobs,
         )
         return sampler_output
+    
+    def compute_prompt_logprobs(
+        self,
+        logits: torch.Tensor,
+        logits_process_metadata: LogitsProcessMetadata,
+        num_logprobs: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        logits = self._process_logits(logits, logits_process_metadata)
 
-    def compute_logprobs(
+        # NOTE: CPU-GPU synchronization happens here.
+        logprob_token_ids, logprobs = self._compute_logprobs(
+            logits=logits,
+            max_num_logprobs=num_logprobs)
+
+        return logprob_token_ids, logprobs
+        
+    def _compute_logprobs(
         self,
         logits: torch.Tensor,
         max_num_logprobs: int,
@@ -63,7 +80,7 @@ class Sampler(nn.Module):
         else:
             return None, None
 
-    def process_logits(
+    def _process_logits(
         self,
         logits: torch.Tensor,
         logits_process_metadata: LogitsProcessMetadata,

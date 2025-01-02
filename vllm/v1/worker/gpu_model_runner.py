@@ -403,10 +403,10 @@ class GPUModelRunner:
             skip_copy, sample_indices)
 
         # Create the prompt logprobs metdata.
-        prompt_lps_metdata = self.input_batch.make_prompt_logprobs_metadata(
+        prompt_lps_metadata = self.input_batch.make_prompt_logprobs_metadata(
             num_scheduled_tokens, req_indices)
 
-        return sampling_metadata, prompt_lps_metdata
+        return sampling_metadata, prompt_lps_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -559,8 +559,7 @@ class GPUModelRunner:
         # logprobs are a rare feature (used by lm-eval-harness), so
         # prioritize simplicity over performance.
         prompt_logprobs_output: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
-        for (req_id, mask, num_logprobs,
-             logits_process_metadata) in prompt_logprobs_metadata.zipped():
+        for (req_id, mask, logits_process_metadata, num_logprobs) in prompt_logprobs_metadata.zipped():
             # Compute logits.
             logits = self.model.sampler.compute_logits(
                 hidden_states[mask], None)
