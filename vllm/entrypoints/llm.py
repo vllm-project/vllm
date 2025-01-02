@@ -9,7 +9,12 @@ from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 import cloudpickle
 import torch.nn as nn
 from tqdm import tqdm
+<<<<<<< HEAD
 from typing_extensions import TypeVar, deprecated
+=======
+from typing_extensions import deprecated
+import torch
+>>>>>>> 0d69ec2f ((vllm) add input embedding)
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
@@ -377,7 +382,12 @@ class LLM:
                        Optional[Union[str, list[str]]]] = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
+<<<<<<< HEAD
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
+=======
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+>>>>>>> 0d69ec2f ((vllm) add input embedding)
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -441,6 +451,9 @@ class LLM:
         else:
             parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
                                   prompts)
+
+        if prompt_embeds is not None:
+            parsed_prompts.prompt_embeds = prompt_embeds
 
         if isinstance(guided_options_request, dict):
             if len(guided_options_request) > 1:
@@ -1233,8 +1246,14 @@ class LLM:
     # LEGACY
     def _convert_v1_inputs(
         self,
+<<<<<<< HEAD
         prompts: Optional[Union[str, list[str]]],
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]],
+=======
+        prompts: Optional[Union[str, List[str]]],
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]],
+        prompt_embeds: Optional[torch.Tensor] = None,
+>>>>>>> 0d69ec2f ((vllm) add input embedding)
     ):
         # skip_tokenizer_init is now checked in engine
 
