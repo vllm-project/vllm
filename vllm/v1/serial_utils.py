@@ -4,8 +4,6 @@ from typing import Any
 from msgspec import msgpack
 
 CUSTOM_TYPE_CODE_PICKLE = 1
-PICKLE_TYPES = torch.Tensor
-
 
 class PickleEncoder:
 
@@ -40,7 +38,7 @@ class MsgpackDecoder:
 
 
 def custom_enc_hook(obj: Any) -> Any:
-    if isinstance(obj, PICKLE_TYPES):
+    if isinstance(obj, torch.Tensor):
         # NOTE(rob): it is fastest to use numpy + pickle
         # when serializing torch tensors.
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
