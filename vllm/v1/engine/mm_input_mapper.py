@@ -8,7 +8,7 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalKwargs, MultiModalRegistry)
-from vllm.v1.utils import LRUDictCache
+from vllm.utils import LRUCache
 
 logger = init_logger(__name__)
 
@@ -43,8 +43,8 @@ class MMInputMapperClient:
         self.mm_registry.init_mm_limits_per_prompt(model_config)
 
         # Init cache
-        self.use_cache = model_config.mm_cache_preprocessor
-        self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.use_cache = not model_config.disable_mm_preprocessor_cache
+        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
         self.mm_debug_cache_hit_ratio_steps = None
@@ -119,8 +119,8 @@ class MMInputMapperClient:
 class MMInputMapperServer:
 
     def __init__(self, model_config):
-        self.use_cache = model_config.mm_cache_preprocessor
-        self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.use_cache = not model_config.disable_mm_preprocessor_cache
+        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
     def process_inputs(
         self,
@@ -151,12 +151,45 @@ class MMHasher:
     def __init__(self):
         pass
 
-    def hash(self, prompt: PromptType) -> Optional[List[str]]:
+    def hash_dummy_mm_data(
+            self,
+            mm_data: Optional[MultiModalDataDict]) -> Optional[List[str]]:
+        """Hash user-defined dummy multimodal data used for profiling."""
+
+        if mm_data is None:
+            return None
+
+        image_inputs = mm_data['image']
+
+        # This is a temporary workaround for models (e.g, Molmo) that
+        # process multimodal data in the input processor (therefore
+        # image_inputs is MultiModalKwargs instead of raw input format).
+        # `raw_mm_data` with the original input format is expected
+        # in this case.
+        if isinstance(image_inputs, dict):
+            assert "raw_mm_data" in image_inputs and isinstance(
+                image_inputs["raw_mm_data"], PIL.Image.Image)
+            image_inputs = image_inputs.pop("raw_mm_data")
+
+        return self.hash_images(image_inputs)
+
+    def hash_prompt_mm_data(self, prompt: PromptType) -> Optional[List[str]]:
+        """Hash multimodal data in the user input prompt if they exist."""
+
         if "multi_modal_data" not in prompt:
             return None
 
         mm_data = prompt["multi_modal_data"]
+        if not mm_data:
+            # mm_data can be None or an empty dict.
+            return None
+
         image_inputs = mm_data["image"]
+
+        return self.hash_images(image_inputs)
+
+    def hash_images(self, image_inputs) -> Optional[List[str]]:
+        """Hash PIL image objects to strings."""
         if not isinstance(image_inputs, list):
             image_inputs = [image_inputs]
         assert len(image_inputs) > 0

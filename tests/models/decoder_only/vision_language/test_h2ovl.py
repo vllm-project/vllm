@@ -8,7 +8,7 @@ from transformers import AutoConfig
 # Import the functions to test
 from vllm.model_executor.models.h2ovl import (calculate_num_blocks,
                                               image_to_pixel_values_wrapper)
-from vllm.multimodal.utils import rescale_image_size
+from vllm.multimodal.image import rescale_image_size
 
 models = [
     "h2oai/h2ovl-mississippi-800m",  # Replace with your actual model names

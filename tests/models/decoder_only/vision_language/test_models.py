@@ -140,10 +140,7 @@ VLM_TEST_SETTINGS = {
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
         tokenizer_mode="slow",
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-        ),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         dtype="bfloat16",
         prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
         img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
@@ -179,6 +176,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
@@ -212,7 +210,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
         patch_hf_runner=model_utils.glm_patch_hf_runner,
-        marks=[large_gpu_mark(min_gb=48)],
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "h2ovl": VLMTestInfo(
         models = [
@@ -261,6 +259,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],

@@ -9,7 +9,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    convert_to_channelwise)
+    convert_to_channelwise, sparse_cutlass_supported)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter,
@@ -39,6 +39,11 @@ class CompressedTensors24(CompressedTensorsScheme):
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+
+        if not sparse_cutlass_supported():
+            raise ValueError(
+                "Sparse CUTLASS not supported. vLLM must be built with"
+                "CUDA 12.2 or later to use this feature")
 
         self.output_dtype = params_dtype
         layer.logical_widths = output_partition_sizes

@@ -19,7 +19,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -72,6 +72,8 @@ class GPUModelRunner:
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
+        self.num_query_heads = model_config.get_num_attention_heads(
+            parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
@@ -79,8 +81,14 @@ class GPUModelRunner:
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
-        # NOTE: mm_input_mapper is only used for memory profiling.
-        self.mm_input_mapper = MMInputMapperClient(self.model_config)
+
+        # NOTE: mm_input_mapper_client and mm_hasher are only used for memory
+        # profiling.
+        self.mm_input_mapper_client = MMInputMapperClient(self.model_config)
+        self.mm_hasher = MMHasher()
+        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
+            cache_config.enable_prefix_caching
+
         self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
         self.encoder_cache_size = self.scheduler_config.encoder_cache_size
 
@@ -99,6 +107,7 @@ class GPUModelRunner:
             max_num_blocks_per_req=self.max_num_blocks_per_req,
             device=self.device,
             pin_memory=self.pin_memory,
+            vocab_size=model_config.get_vocab_size(),
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
@@ -110,6 +119,10 @@ class GPUModelRunner:
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
             reversed(self.vllm_config.compilation_config.capture_sizes))
+
+        # Cache the device properties.
+        self.device_properties = torch.cuda.get_device_properties(self.device)
+        self.num_sms = self.device_properties.multi_processor_count
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -124,7 +137,8 @@ class GPUModelRunner:
             device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
-        self.arange_np = np.arange(max(self.max_num_reqs, self.max_model_len),
+        self.arange_np = np.arange(max(self.max_num_reqs + 1,
+                                       self.max_model_len),
                                    dtype=np.int32)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
@@ -348,6 +362,88 @@ class GPUModelRunner:
             self.device, non_blocking=True)
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True).long()
+
+        # Prepare for cascade attention if needed.
+        common_prefix_len = (scheduler_output.num_common_prefix_blocks *
+                             self.block_size)
+        if common_prefix_len == 0:
+            # Common case.
+            use_cascade = False
+        else:
+            # NOTE(woosuk): Cascade attention uses two attention kernels: one
+            # for the common prefix and the other for the rest. For the first
+            # kernel, we concatenate all the query tokens (possibly from
+            # different requests) and treat them as if they are from the same
+            # request. Then, we use bi-directional attention to process the
+            # common prefix in the KV cache. Importantly, this means that the
+            # first kernel does not do any masking.
+
+            # Consider the following example:
+            # Request 1's input query: [D, E, X]
+            # Request 1's kv cache: [A, B, C, D, E, X]
+            # Request 1's num_computed_tokens: 3 (i.e., [A, B, C])
+            # Request 2's input query: [E, Y]
+            # Request 2's kv cache: [A, B, C, D, E, Y]
+            # Request 2's num_computed_tokens: 4 (i.e., [A, B, C, D])
+
+            # If we use [A, B, C, D, E] as the common prefix, then the
+            # first kernel will compute the bi-directional attention between
+            # input query [D, E, X, E, Y] and common prefix [A, B, C, D, E].
+            # However, this is wrong because D in Request 1 should not attend to
+            # E in the common prefix (i.e., we need masking).
+            # To avoid this, [A, B, C, D] should be the common prefix.
+            # That is, the common prefix should be capped by the minimum
+            # num_computed_tokens among the requests, and plus one to include
+            # the first token of the query.
+
+            # In practice, we use [A, B, C] as the common prefix, instead of
+            # [A, B, C, D] (i.e., the common prefix is capped by the minimum
+            # num_computed_tokens, without plus one).
+            # This is because of an implementation detail: We want to always
+            # use two kernels for cascade attention. Let's imagine:
+            # Request 3's input query: [D]
+            # Request 3's kv cache: [A, B, C, D]
+            # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
+            # If we use [A, B, C, D] as the common prefix for Request 1-3,
+            # then Request 3 will be processed only by the first kernel,
+            # and the second kernel will get an empty input. While this is not
+            # a fundamental problem, our current implementation does not support
+            # this case.
+            common_prefix_len = min(
+                common_prefix_len,
+                self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
+            # common_prefix_len should be a multiple of the block size.
+            common_prefix_len = (common_prefix_len // self.block_size *
+                                 self.block_size)
+            use_cascade = FlashAttentionBackend.use_cascade_attention(
+                common_prefix_len=common_prefix_len,
+                query_lens=num_scheduled_tokens,
+                num_query_heads=self.num_query_heads,
+                num_kv_heads=self.num_kv_heads,
+                use_alibi=False,  # FIXME
+                use_sliding_window=self.sliding_window is not None,
+                num_sms=self.num_sms,
+            )
+
+        if use_cascade:
+            # TODO: Optimize.
+            cu_prefix_query_lens = torch.tensor(
+                [0, total_num_scheduled_tokens],
+                dtype=torch.int32,
+                device=self.device)
+            cu_prefix_kv_lens = torch.tensor([0, common_prefix_len],
+                                             dtype=torch.int32,
+                                             device=self.device)
+            cu_suffix_kv_lens = (
+                self.seq_start_loc_np[:num_reqs + 1] -
+                self.arange_np[:num_reqs + 1] * common_prefix_len)
+            cu_suffix_kv_lens = torch.from_numpy(cu_suffix_kv_lens).to(
+                self.device)
+        else:
+            cu_prefix_query_lens = None
+            cu_prefix_kv_lens = None
+            cu_suffix_kv_lens = None
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
@@ -356,6 +452,11 @@ class GPUModelRunner:
             seq_start_loc=seq_start_loc,
             block_table=self.input_batch.block_table[:num_reqs],
             slot_mapping=slot_mapping,
+            use_cascade=use_cascade,
+            common_prefix_len=common_prefix_len,
+            cu_prefix_query_lens=cu_prefix_query_lens,
+            cu_prefix_kv_lens=cu_prefix_kv_lens,
+            cu_suffix_kv_lens=cu_suffix_kv_lens,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -377,7 +478,12 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        req_id_output_token_ids: Dict[str, List[int]] = \
+            {req_id: req.output_token_ids \
+                for req_id, req in self.requests.items()}
+
+        sampling_metadata = self.input_batch.make_sampling_metadata(
+            req_id_output_token_ids, skip_copy)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -628,11 +734,6 @@ class GPUModelRunner:
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
-            dummy_mm_kwargs, _ = self.mm_input_mapper.process_inputs(
-                mm_data=dummy_mm_data,
-                mm_hashes=None,
-                mm_processor_kwargs=None,
-                precomputed_mm_inputs=None)
 
             # NOTE: Currently model is profiled with a single non-text
             # modality even when it supports multiple.
@@ -640,16 +741,60 @@ class GPUModelRunner:
                 self.mm_registry.get_max_tokens_per_item_by_modality(
                     self.model_config).values())
 
-            max_num_mm_items = min(
+            max_num_mm_items_encoder_budget = min(
                 self.max_num_encoder_input_tokens,
                 self.encoder_cache_size) // max_tokens_per_mm_item
+
+            max_mm_items_per_req = max(
+                self.mm_registry.get_mm_limits_per_prompt(
+                    self.model_config).values())
+
+            # NOTE: We do not consider max_num_batched_tokens on purpose
+            # because the multimodal embeddings can be generated in advance
+            # and chunked prefilled.
+            max_num_mm_items_decoder_budget = self.max_num_reqs * \
+                max_mm_items_per_req
+
+            max_num_mm_items = min(max_num_mm_items_encoder_budget,
+                                   max_num_mm_items_decoder_budget)
 
             # Dummy data definition in V0 may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
             # they are scheduled to be processed separately.
+
+            # Case when models have a merged processor, their dummy data is
+            # already batched `MultiModalKwargs`, therefore we need to "unbatch"
+            # and take the first item in each batched tensor.
+            # TODO (ywang96): This is somewhat hacky. Refactor this to be
+            # consistent with the other case.
+            if isinstance(dummy_mm_data, MultiModalKwargs):
+                dummy_mm_kwargs = {
+                    k: v[0].unsqueeze(0)
+                    for k, v in dummy_mm_data.items()
+                }
+
+            # Case when models have dummy data explicitly defined as
+            # `MultiModalDataDict`, so they need to be processed through input
+            # mapper.
+            else:
+                # Compute MM hashes (if enabled)
+                mm_hashes = None
+                if self.use_hash:
+                    mm_hashes = self.mm_hasher.hash_dummy_mm_data(
+                        dummy_mm_data)
+
+                mm_kwargs_list = self.mm_input_mapper_client.process_inputs(
+                    mm_data=dummy_mm_data,
+                    mm_hashes=mm_hashes,
+                    mm_processor_kwargs=None,
+                    precomputed_mm_inputs=None)
+
+                # Take the first `MultiModalKwargs`
+                dummy_mm_kwargs = mm_kwargs_list[0]
+
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
-                [dummy_mm_kwargs[0]] * max_num_mm_items)
+                [dummy_mm_kwargs] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
                 batched_dummy_mm_inputs, device=self.device)
 
