@@ -268,7 +268,7 @@ class SingletonInputsAdapter:
     def prompt(self) -> Optional[str]:
         inputs = self.inputs
 
-        if inputs["type"] == "token" or inputs["type"] == "multimodal":
+        if is_token_inputs(inputs) or is_multimodal_inputs(inputs):
             return inputs.get("prompt")
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -277,7 +277,7 @@ class SingletonInputsAdapter:
     def prompt_token_ids(self) -> List[int]:
         inputs = self.inputs
 
-        if inputs["type"] == "token" or inputs["type"] == "multimodal":
+        if is_token_inputs(inputs) or is_multimodal_inputs(inputs):
             return inputs.get("prompt_token_ids", [])
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -286,7 +286,7 @@ class SingletonInputsAdapter:
     def token_type_ids(self) -> List[int]:
         inputs = self.inputs
 
-        if inputs["type"] == "token" or inputs["type"] == "multimodal":
+        if is_token_inputs(inputs) or is_multimodal_inputs(inputs):
             return inputs.get("token_type_ids", [])
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -295,7 +295,7 @@ class SingletonInputsAdapter:
     def prompt_embeds(self) -> Optional[torch.Tensor]:
         inputs = self.inputs
 
-        if inputs["type"] == "token" or inputs["type"] == "multimodal":
+        if is_token_inputs(inputs) or is_multimodal_inputs(inputs):
             return None
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -304,10 +304,9 @@ class SingletonInputsAdapter:
     def multi_modal_data(self) -> "MultiModalDataDict":
         inputs = self.inputs
 
-        if inputs["type"] == "token":
+        if is_token_inputs(inputs):
             return inputs.get("multi_modal_data", {})
-
-        if inputs["type"] == "multimodal":
+        elif is_multimodal_inputs(inputs):
             return inputs.get("mm_kwargs", {})
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -316,10 +315,9 @@ class SingletonInputsAdapter:
     def multi_modal_inputs(self) -> Union[Dict, "MultiModalKwargs"]:
         inputs = self.inputs
 
-        if inputs["type"] == "token":
+        if is_token_inputs(inputs):
             return inputs.get("multi_modal_inputs", {})
-
-        if inputs["type"] == "multimodal":
+        elif is_multimodal_inputs(inputs):
             return inputs.get("mm_kwargs", {})
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -331,7 +329,6 @@ class SingletonInputsAdapter:
         if is_token_inputs(inputs):
             return inputs.get("multi_modal_hashes", [])
         elif is_multimodal_inputs(inputs):
-            # only the case when we use MultiModalInputsV2
             return inputs.get("mm_hashes", [])
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -340,10 +337,9 @@ class SingletonInputsAdapter:
     def multi_modal_placeholders(self) -> "MultiModalPlaceholderDict":
         inputs = self.inputs
 
-        if inputs["type"] == "token":
+        if is_token_inputs(inputs):
             return inputs.get("multi_modal_placeholders", {})
-
-        if inputs["type"] == "multimodal":
+        elif is_multimodal_inputs(inputs):
             return inputs.get("mm_placeholders", {})
 
         assert_never(inputs)  # type: ignore[arg-type]
@@ -352,10 +348,9 @@ class SingletonInputsAdapter:
     def mm_processor_kwargs(self) -> Dict[str, Any]:
         inputs = self.inputs
 
-        if inputs["type"] == "token":
+        if is_token_inputs(inputs):
             return inputs.get("mm_processor_kwargs", {})
-
-        if inputs["type"] == "multimodal":
+        elif is_multimodal_inputs(inputs):
             return {}
 
         assert_never(inputs)  # type: ignore[arg-type]
