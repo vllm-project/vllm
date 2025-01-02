@@ -443,7 +443,7 @@ class Scheduler:
                 # FIXME(rob): handle partial request. Currently we throw away
                 # the prompt logprobs for the partial request.
                 prompt_logprobs_token_ids, prompt_logprobs = (
-                    prompt_logprobs_dict.get(req_id, default=(None,None)))
+                    prompt_logprobs_dict.get(req_id, default=(None, None)))
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(

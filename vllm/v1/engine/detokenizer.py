@@ -24,9 +24,6 @@ class IncrementalDetokenizer:
     output_text: str
     tokens: List[str]
     token_ids: List[int]
-    logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
-    cumulative_logprob: Optional[float]
 
     # Stop strings
     stop: List[str]
@@ -49,11 +46,12 @@ class IncrementalDetokenizer:
     # Tokenizer for this request
     tokenizer: AnyTokenizer
 
-    # Maximum number of sample logprobs for this request
-    max_request_sample_logprobs: Optional[int]
-
-    # Maximum number of prompt logprobs for this request
-    max_request_prompt_logprobs: Optional[int]
+    # Logprobs for this request
+    logprobs: List[SampleLogprobs]
+    prompt_logprobs: List[PromptLogprobs]
+    cumulative_logprob: float
+    num_logprobs: int
+    num_prompt_logprobs: int
 
     # Accounting for stop string buffering
     stop_buffer_length: int
@@ -61,7 +59,6 @@ class IncrementalDetokenizer:
 
     @property
     def output_token_ids(self) -> List[int]:
-        """Return generated tokens"""
         assert len(self.token_ids) >= len(self.prompt_token_ids)
         return self.token_ids[len(self.prompt_token_ids):]
 
@@ -86,13 +83,6 @@ class IncrementalDetokenizer:
         else:
             stop_buffer_length = 0
 
-        # Flags for whether to detokenize sample logprobs and prompt logprobs,
-        # respectively.
-        do_request_logprobs = (request.logprobs is not None
-                               and request.logprobs > 0)
-        do_request_prompt_logprobs = (request.prompt_logprobs is not None
-                                      and request.prompt_logprobs > 0)
-
         return cls(
             output_text="",
             tokens=tokens,
@@ -112,11 +102,12 @@ class IncrementalDetokenizer:
             prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
-            max_request_sample_logprobs=request.logprobs,
-            max_request_prompt_logprobs=request.prompt_logprobs,
-            request_logprobs=[] if do_request_logprobs else None,
-            request_prompt_logprobs=[] if do_request_prompt_logprobs else None,
-            request_cumulative_logprob=0 if do_request_logprobs else None)
+            logprobs=[],
+            prompt_logprobs=[],
+            cumulative_logprob=0.,
+            num_logprobs=request.logprobs,
+            num_prompt_logprobs=request.prompt_logprobs,
+        )
 
     def _detokenize_ids(
         self,
