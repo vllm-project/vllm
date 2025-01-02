@@ -4,8 +4,8 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List, Literal,
                     Optional, Tuple, Union, cast)
 
 import torch
-from typing_extensions import (NotRequired, TypedDict, TypeVar, assert_never,
-                               TypeGuard)
+from typing_extensions import (NotRequired, TypedDict, TypeGuard, TypeVar,
+                               assert_never)
 
 if TYPE_CHECKING:
     from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
