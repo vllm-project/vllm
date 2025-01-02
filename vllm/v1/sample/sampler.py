@@ -41,17 +41,25 @@ class Sampler(nn.Module):
     def compute_logprobs(
         self,
         logits: torch.Tensor,
-        max_num_logprobs: int
+        max_num_logprobs: int,
+        sampled_token_ids: Optional[torch.Tensor] = None,
+        sampled_logprobs: Optional[torch.Tensor] = None,
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         if max_num_logprobs > 0:
             logprobs = self.get_logprobs(logits)
             # FIXME: Mask the sampled token_id, get topk logprobs,
             # and concatenate the topk with the sampled token_id.
-            topk_logprobs, topk_indices = torch.topk(logprobs,
-                                                     max_num_logprobs,
-                                                     dim=-1)
+            topk_logprobs, topk_indices = torch.topk(
+                logprobs, max_num_logprobs, dim=-1)
             # Use int32 to reduce the tensor size.
             topk_indices = topk_indices.to(torch.int32)
+
+            # Concatenate with the sampled token_id if provided.
+            if sampled_logprobs:
+                topk_indices = torch.cat([topk_indices,
+                                          sampled_token_ids])
+                topk_logprobs = torch.cat([topk_logprobs,
+                                           sampled_logprobs])
 
             return topk_indices.cpu(), topk_logprobs.cpu()
         else:

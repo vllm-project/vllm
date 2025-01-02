@@ -613,8 +613,8 @@ class GPUModelRunner:
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprob_token_ids=sampler_output.logprob_token_ids,
-            logprobs=sampler_output.logprobs,
+            logprob_token_ids_cpu=sampler_output.logprob_token_ids,
+            logprobs_cpu=sampler_output.logprobs,
             prompt_logprobs=prompt_logprobs_output,
         )
         return model_runner_output
