@@ -1,3 +1,4 @@
+import ctypes
 import importlib.util
 import logging
 import os
@@ -13,7 +14,7 @@ from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
-from torch.utils.cpp_extension import CUDA_HOME
+from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
 
 def load_module_from_path(module_name, path):
@@ -249,6 +250,74 @@ class cmake_build_ext(build_ext):
             self.copy_file(file, dst_file)
 
 
+class repackage_wheel(build_ext):
+    """Extracts libraries and other files from an existing wheel."""
+    default_wheel = "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+
+    def run(self) -> None:
+        wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",
+                                   self.default_wheel)
+
+        assert _is_cuda(
+        ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+
+        import zipfile
+
+        if os.path.isfile(wheel_location):
+            wheel_path = wheel_location
+            print(f"Using existing wheel={wheel_path}")
+        else:
+            # Download the wheel from a given URL, assume
+            # the filename is the last part of the URL
+            wheel_filename = wheel_location.split("/")[-1]
+
+            import tempfile
+
+            # create a temporary directory to store the wheel
+            temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
+            wheel_path = os.path.join(temp_dir, wheel_filename)
+
+            print(f"Downloading wheel from {wheel_location} to {wheel_path}")
+
+            from urllib.request import urlretrieve
+
+            try:
+                urlretrieve(wheel_location, filename=wheel_path)
+            except Exception as e:
+                from setuptools.errors import SetupError
+
+                raise SetupError(
+                    f"Failed to get vLLM wheel from {wheel_location}") from e
+
+        with zipfile.ZipFile(wheel_path) as wheel:
+            files_to_copy = [
+                "vllm/_C.abi3.so",
+                "vllm/_moe_C.abi3.so",
+                "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
+                "vllm/vllm_flash_attn/flash_attn_interface.py",
+                "vllm/vllm_flash_attn/__init__.py",
+                # "vllm/_version.py", # not available in nightly wheels yet
+            ]
+            file_members = filter(lambda x: x.filename in files_to_copy,
+                                  wheel.filelist)
+
+            for file in file_members:
+                print(f"Extracting and including {file.filename} "
+                      "from existing wheel")
+                package_name = os.path.dirname(file.filename).replace("/", ".")
+                file_name = os.path.basename(file.filename)
+
+                if package_name not in package_data:
+                    package_data[package_name] = []
+
+                wheel.extract(file)
+                if file_name.endswith(".py"):
+                    # python files shouldn't be added to package_data
+                    continue
+
+                package_data[package_name].append(file_name)
+
+
 def _is_hpu() -> bool:
     is_hpu_available = True
     try:
@@ -311,25 +380,31 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def get_hipcc_rocm_version():
-    # Run the hipcc --version command
-    result = subprocess.run(['hipcc', '--version'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True)
+def get_rocm_version():
+    # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
+    # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
+    try:
+        librocm_core_file = Path(ROCM_HOME) / "lib" / "librocm-core.so"
+        if not librocm_core_file.is_file():
+            return None
+        librocm_core = ctypes.CDLL(librocm_core_file)
+        VerErrors = ctypes.c_uint32
+        get_rocm_core_version = librocm_core.getROCmVersion
+        get_rocm_core_version.restype = VerErrors
+        get_rocm_core_version.argtypes = [
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        major = ctypes.c_uint32()
+        minor = ctypes.c_uint32()
+        patch = ctypes.c_uint32()
 
-    # Check if the command was executed successfully
-    if result.returncode != 0:
-        print("Error running 'hipcc --version'")
+        if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
+                                  ctypes.byref(patch)) == 0):
+            return "%d.%d.%d" % (major.value, minor.value, patch.value)
         return None
-
-    # Extract the version using a regular expression
-    match = re.search(r'HIP version: (\S+)', result.stdout)
-    if match:
-        # Return the version string
-        return match.group(1)
-    else:
-        print("Could not find HIP version in the output")
+    except Exception:
         return None
 
 
@@ -387,9 +462,13 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version(
-        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-    )
+    # TODO: Revisit this temporary approach: https://github.com/vllm-project/vllm/issues/9182#issuecomment-2404860236
+    try:
+        version = get_version(
+            write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+        )
+    except LookupError:
+        version = "0.0.0"
 
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
@@ -397,18 +476,20 @@ def get_vllm_version() -> str:
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
     elif _is_cuda():
-        cuda_version = str(get_nvcc_cuda_version())
-        if cuda_version != MAIN_CUDA_VERSION:
-            cuda_version_str = cuda_version.replace(".", "")[:3]
-            # skip this for source tarball, required for pypi
-            if "sdist" not in sys.argv:
-                version += f"{sep}cu{cuda_version_str}"
+        if envs.VLLM_USE_PRECOMPILED:
+            version += f"{sep}precompiled"
+        else:
+            cuda_version = str(get_nvcc_cuda_version())
+            if cuda_version != MAIN_CUDA_VERSION:
+                cuda_version_str = cuda_version.replace(".", "")[:3]
+                # skip this for source tarball, required for pypi
+                if "sdist" not in sys.argv:
+                    version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
-        # Get the HIP version
-        hipcc_version = get_hipcc_rocm_version()
-        if hipcc_version != MAIN_CUDA_VERSION:
-            rocm_version_str = hipcc_version.replace(".", "")[:3]
-            version += f"{sep}rocm{rocm_version_str}"
+        # Get the Rocm Version
+        rocm_version = get_rocm_version() or torch.version.hip
+        if rocm_version and rocm_version != MAIN_CUDA_VERSION:
+            version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
     elif _is_neuron():
         # Get the Neuron version
         neuron_version = str(get_neuronxcc_version())
@@ -514,12 +595,17 @@ if _build_custom_ops():
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
-if envs.VLLM_USE_PRECOMPILED:
-    ext_modules = []
-    package_data["vllm"].append("*.so")
 
 if _no_device():
     ext_modules = []
+
+if not ext_modules:
+    cmdclass = {}
+else:
+    cmdclass = {
+        "build_ext":
+        repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+    }
 
 setup(
     name="vllm",
@@ -554,10 +640,11 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
         "video": ["decord"]  # Required for video processing
     },
-    cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
+    cmdclass=cmdclass,
     package_data=package_data,
     entry_points={
         "console_scripts": [

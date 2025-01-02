@@ -11,7 +11,6 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, update_environment_variables)
@@ -43,6 +42,9 @@ class WorkerBase(ABC):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
+        from vllm.platforms import current_platform
+        self.current_platform = current_platform
 
     @abstractmethod
     def init_device(self) -> None:
@@ -73,17 +75,17 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
-    @current_platform.inference_mode()
     def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker.
 
         You can stop the loop by executing a driver worker with an empty output.
         See `stop_remote_worker_execution_loop` for more details.
         """
-        while True:
-            output = self.execute_model(execute_model_req=None)
-            if output is None:
-                return None
+        with self.current_platform.inference_mode():
+            while True:
+                output = self.execute_model(execute_model_req=None)
+                if output is None:
+                    return None
 
     @abstractmethod
     def execute_model(
@@ -351,6 +353,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
+            assert isinstance(output, IntermediateTensors)
             if (self.observability_config is not None
                     and self.observability_config.collect_model_execute_time):
                 output.tensors["model_execute_time"] = torch.tensor(
@@ -438,7 +441,7 @@ class WorkerWrapperBase:
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
-        enable_trace_function_call_for_thread()
+        enable_trace_function_call_for_thread(self.vllm_config)
 
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'
@@ -451,7 +454,7 @@ class WorkerWrapperBase:
         self.worker = worker_class(*args, **kwargs)
         assert self.worker is not None
 
-    def execute_method(self, method, *args, **kwargs):
+    def execute_method(self, method: str, *args, **kwargs):
         try:
             target = self if self.worker is None else self.worker
             executor = getattr(target, method)
@@ -465,6 +468,9 @@ class WorkerWrapperBase:
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e
+
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
 
 
 def extract_previous_hidden_states(

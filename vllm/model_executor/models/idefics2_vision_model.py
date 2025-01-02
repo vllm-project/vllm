@@ -21,8 +21,8 @@ import torch
 from torch import nn
 from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2Config, Idefics2VisionConfig)
-from xformers import ops as xops
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -69,7 +69,8 @@ class Idefics2VisionEmbeddings(nn.Module):
                 patch_attention_mask: torch.BoolTensor,
                 tgt_sizes: Optional[torch.IntTensor] = None) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
-        patch_embeds = self.patch_embedding(pixel_values)
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
         max_nb_patches_h, max_nb_patches_w = (
             max_im_h // self.patch_size,
@@ -141,35 +142,18 @@ class Idefics2VisionAttention(nn.Module):
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-        self.is_causal = False
+        self.attn = MultiHeadAttention(self.num_heads_per_partition,
+                                       self.head_dim, self.scale)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, q_len, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(
             hidden_states
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
-        query_states = query_states.view(batch_size, q_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        key_states = key_states.view(batch_size, q_len,
-                                     self.num_heads_per_partition,
-                                     self.head_dim)
-        value_states = value_states.view(batch_size, q_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        # see: https://facebookresearch.github.io/xformers/components/ops.html
-        out = xops.memory_efficient_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            p=self.dropout,
-            scale=self.scale,
-        )
-        out = out.view(batch_size, q_len, -1)
+        out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
         return attn_output
 
@@ -326,7 +310,8 @@ class Idefics2VisionTransformer(nn.Module):
         hidden_states = self.embeddings(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
-            tgt_sizes=tgt_sizes)
+            tgt_sizes=tgt_sizes,
+        )
         encoder_outputs = self.encoder(hidden_states)
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state

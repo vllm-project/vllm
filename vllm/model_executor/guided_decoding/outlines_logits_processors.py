@@ -21,11 +21,12 @@ from typing import Callable, DefaultDict, Dict, List, Union
 
 import numpy as np
 import torch
-from lark import Lark
 from outlines import grammars
 from outlines.caching import cache
-from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
-from outlines.fsm.json_schema import build_regex_from_schema
+from outlines.fsm.guide import (CFGGuide, CFGState, Generate, Guide,
+                                RegexGuide, Write)
+from outlines.fsm.parsing import PartialLark
+from outlines_core.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
@@ -34,7 +35,9 @@ class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide):
         self._guide: Guide = guide
-        self._fsm_state: DefaultDict[int, int] = defaultdict(int)
+        # CFGState is used for the FSM state for CFGGuide
+        self._fsm_state: DefaultDict[int, Union[int,
+                                                CFGState]] = defaultdict(int)
 
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
@@ -54,15 +57,13 @@ class BaseLogitsProcessor:
             # On the first time this is called, we simply re-create
             # the Lark object.
             if isinstance(self._guide, CFGGuide):
-                self._guide.parser = Lark(
+                self._guide.parser = PartialLark(
                     self._guide.cfg_string,
                     parser="lalr",
-                    lexer="contextual",
-                    propagate_positions=False,
-                    maybe_placeholders=False,
-                    regex=True,
                     import_paths=[grammars.GRAMMAR_PATH],
                 )
+                self._fsm_state[seq_id] = CFGState(
+                    parser_state=self._guide.parser.parse(""), prev_token=None)
 
         instruction = self._guide.get_next_instruction(
             state=self._fsm_state[seq_id])
@@ -99,7 +100,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
     def _get_guide(cls, regex_string: str,
                    tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
-        return RegexGuide(regex_string, tokenizer)
+        return RegexGuide.from_regex(regex_string, tokenizer)
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the regex-structured generation.
@@ -200,7 +201,8 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
         string = tokenizer.convert_tokens_to_string([token])
 
         # A hack to handle missing spaces to HF's Llama tokenizers
-        if token.startswith(SPIECE_UNDERLINE) or token == "<0x20>":
+        if (type(token) is str and token.startswith(SPIECE_UNDERLINE)
+                or token == "<0x20>"):
             return " " + string
 
         return string
@@ -211,6 +213,9 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
         """Sync vLLM's decoder with the outlines by returning list."""
 
         def new_decoder(inp_tokens: List[int]) -> List[str]:
+            if (isinstance(inp_tokens, list) and len(inp_tokens) == 1
+                    and isinstance(inp_tokens[0], list)):
+                inp_tokens = inp_tokens[0]
             return [decoder(inp_tokens)]
 
         return new_decoder

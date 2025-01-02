@@ -103,13 +103,21 @@ CONFIGS: Dict[str, ServerConfig] = {
         "supports_rocm":
         False,
     },
-    "granite8b": {
+    "granite-3.0-8b": {
         "model":
         "ibm-granite/granite-3.0-8b-instruct",
         "arguments": [
             "--tool-call-parser", "granite", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
         ],
+    },
+    "granite-3.1-8b": {
+        "model": "ibm-granite/granite-3.1-8b-instruct",
+        "arguments": [
+            "--tool-call-parser",
+            "granite",
+        ],
+        "supports_parallel": True,
     },
     "internlm": {
         "model":

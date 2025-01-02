@@ -4,31 +4,32 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
 
 import torch
 import torch.nn as nn
-from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionConfig,
-                          apply_chunking_to_forward)
+from transformers import (BatchFeature, Blip2Config, Blip2Processor,
+                          Blip2QFormerConfig, apply_chunking_to_forward)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.utils import consecutive_placeholder_ranges
-from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputsV2, MultiModalKwargs,
+                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement)
+from vllm.sequence import IntermediateTensors
 
-from .blip import (BlipVisionModel, dummy_image_for_blip,
-                   get_max_blip_image_tokens)
+from .blip import BlipVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
 # We use this internally as placeholders since there is no image token
 # defined on the HuggingFace repo
-BLIP2_IMAGE_TOKEN = "<image>"
-BLIP2_IMAGE_TOKEN_ID = 50265
+_IMAGE_TOKEN_ID = 50265
 
 
 class Blip2ImagePixelInputs(TypedDict):
@@ -395,92 +396,91 @@ class Blip2QFormerModel(nn.Module):
         return sequence_output
 
 
-def get_blip2_image_feature_size(hf_config: Blip2Config) -> int:
-    return hf_config.num_query_tokens
+class Blip2MultiModalProcessor(BaseMultiModalProcessor):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
+    def _get_num_image_tokens(self) -> int:
+        hf_config = self.ctx.get_hf_config(Blip2Config)
+        return hf_config.num_query_tokens
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        return {"image": self._get_num_image_tokens()}
+
+    def _get_hf_processor(self) -> Blip2Processor:
+        return self.ctx.get_hf_processor(Blip2Processor)
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        max_image_tokens = self._get_num_image_tokens()
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target="</s>",
+                replacement="<image>" * max_image_tokens + "</s>",
+            )
+        ]
+
+    def apply(
+        self,
+        prompt_text: str,
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalInputsV2:
+        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
+
+        # Only <image> tokens should be considered as placeholders,
+        # so we ignore the trailing bos_token
+        result["mm_placeholders"] = {
+            modality: [
+                PlaceholderRange(offset=p["offset"], length=p["length"] - 1)
+                for p in ps
+            ]
+            for modality, ps in result["mm_placeholders"].items()
+        }
+
+        return result
+
+    def _get_dummy_mm_inputs(
+        self,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        hf_config = self.ctx.get_hf_config(Blip2Config)
+        vision_config = hf_config.vision_config
+
+        max_image_size = vision_config.image_size
+        num_images = mm_counts.get("image", 0)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=max_image_size,
+                                   height=max_image_size,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text="",
+            mm_data=mm_data,
+        )
 
 
-def get_max_blip2_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(Blip2Config)
-    vision_config = hf_config.vision_config
-
-    if isinstance(vision_config, Blip2VisionConfig):
-        return get_max_blip_image_tokens(vision_config)
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
-def dummy_seq_data_for_blip2(
-    hf_config: Blip2Config,
-    seq_len: int,
-    num_images: int,
-    *,
-    image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
-):
-    if image_feature_size_override is None:
-        image_feature_size = get_blip2_image_feature_size(hf_config)
-    else:
-        image_feature_size = image_feature_size_override
-
-    return SequenceData.from_prompt_token_counts(
-        (image_token_id, image_feature_size * num_images),
-        (0, seq_len - image_feature_size * num_images),
-    ), {
-        "image":
-        consecutive_placeholder_ranges(num_items=num_images,
-                                       item_size=image_feature_size)
-    }
-
-
-def dummy_data_for_blip2(ctx: InputContext, seq_len: int,
-                         mm_counts: Mapping[str, int]):
-    hf_config = ctx.get_hf_config(Blip2Config)
-    vision_config = hf_config.vision_config
-    num_images = mm_counts["image"]
-
-    seq_data, ranges = dummy_seq_data_for_blip2(
-        hf_config,
-        seq_len,
-        num_images,
-        image_token_id=BLIP2_IMAGE_TOKEN_ID,
-    )
-
-    if isinstance(vision_config, Blip2VisionConfig):
-        mm_data = dummy_image_for_blip(vision_config, num_images)
-
-        return DummyData(seq_data, mm_data, ranges)
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
-def input_processor_for_blip2(ctx: InputContext, inputs: DecoderOnlyInputs):
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
-
-    hf_config = ctx.get_hf_config(Blip2Config)
-    image_feature_size = get_blip2_image_feature_size(hf_config)
-
-    # The original model places image tokens at the front
-    # https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/blip_2/modeling_blip_2.py#L1514
-    new_token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
-    new_token_ids += inputs["prompt_token_ids"]
-
-    new_prompt = inputs.get("prompt")
-    if new_prompt is not None:
-        new_prompt = BLIP2_IMAGE_TOKEN * image_feature_size + new_prompt
-
-    return token_inputs(prompt_token_ids=new_token_ids,
-                        prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
-
-
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_blip2_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_blip2)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
+@MULTIMODAL_REGISTRY.register_processor(Blip2MultiModalProcessor)
 class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -511,9 +511,10 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
         self.language_model = init_vllm_registered_model(
-            config.text_config,
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"))
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -609,6 +610,25 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         return self.language_projection(query_output)
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                _IMAGE_TOKEN_ID)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -616,6 +636,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[SamplerOutput, IntermediateTensors]:
         """Run forward pass for BLIP-2.
@@ -648,32 +669,24 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         See also:
             :class:`Blip2ImageInputs`
         """
+
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
-        else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
 
-            if image_input is not None:
-                vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
-                    BLIP2_IMAGE_TOKEN_ID)
-
-                input_ids = None
-            else:
-                inputs_embeds = None
-
-        hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  kv_caches,
+                                                  attn_metadata,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
 
         return hidden_states
 
