@@ -3,8 +3,6 @@ import time
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 
-dtype = "float"
-
 # Create a Whisper encoder/decoder model instance
 llm = LLM(
     model="openai/whisper-large-v3",
