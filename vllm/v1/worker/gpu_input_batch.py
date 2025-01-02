@@ -116,7 +116,6 @@ class InputBatch:
         # generator should not be included in the dictionary.
         self.generators: Dict[int, torch.Generator] = {}
 
-        
         self.num_logprobs: Dict[str, int] = {}
         # NOTE(rob): num_prompt_logprobs ONLY includes reqs
         # that are currently in the prefill phase.
