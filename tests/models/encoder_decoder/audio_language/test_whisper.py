@@ -120,9 +120,8 @@ def run_test(
 
 @fork_new_process_for_each_test
 @pytest.mark.core_model
-@pytest.mark.parametrize("model",
-                         ["openai/whisper-small",
-                          "openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize(
+    "model", ["openai/whisper-small", "openai/whisper-large-v3-turbo"])
 def test_models(model) -> None:
     run_test(model, tensor_parallel_size=1)
 
