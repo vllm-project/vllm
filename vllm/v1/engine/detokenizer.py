@@ -233,7 +233,7 @@ class IncrementalDetokenizer:
         for token_idx in range(num_tokens):
             topk_logprobs = logprobs[token_idx].tolist()
             topk_token_ids = logprobs_token_ids[token_idx].tolist()
-            # NOTE: Sampler uses torch.topk(sorted=True), so idx=rank.
+            # Sampler uses torch.topk(sorted=True), so idx=rank.
             self.prompt_logprobs.append({
                 topk_token_ids[idx]: Logprob(
                     logprob=topk_logprobs[idx],
