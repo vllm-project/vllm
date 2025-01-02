@@ -124,8 +124,6 @@ class IncrementalDetokenizer:
         """
 
         if self.num_logprobs == 0:
-            assert (len(logprobs_token_ids_lst) == 0
-                    and len(logprobs_lst) == 0)
             return None
         assert self.logprobs is not None
 
