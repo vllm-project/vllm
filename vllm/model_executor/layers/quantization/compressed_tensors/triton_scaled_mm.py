@@ -126,9 +126,9 @@ def triton_scaled_mm(input: torch.Tensor,
                      scale_b: torch.Tensor,
                      out_dtype: Type[torch.dtype],
                      bias: Optional[torch.Tensor] = None,
-                     block_size_m: int = 32,
-                     block_size_n: int = 32,
-                     block_size_k: int = 32) -> torch.Tensor:
+                     block_size_m: int = 128,
+                     block_size_n: int = 128,
+                     block_size_k: int = 128) -> torch.Tensor:
     M, K = input.shape
     N = weight.shape[1]
 
