@@ -250,7 +250,7 @@ ENV VLLM_USAGE_SOURCE production-docker-image
 # define sagemaker first, so it is not default from `docker build`
 FROM vllm-openai-base AS vllm-sagemaker
 
-COPY ./sagemaker-entrypoint.sh .
+COPY examples/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
 ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
