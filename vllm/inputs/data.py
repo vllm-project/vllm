@@ -4,8 +4,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List, Literal,
                     Optional, Tuple, Union, cast)
 
 import torch
-from typing_extensions import (NotRequired, TypedDict, TypeIs, TypeVar,
-                               assert_never)
+from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
 
 if TYPE_CHECKING:
     from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
@@ -177,26 +176,6 @@ class TokenInputs(TypedDict):
     """
 
 
-def is_token_inputs(
-        inputs: Union[TokenInputs,
-                      "MultiModalInputsV2"]) -> TypeIs[TokenInputs]:
-    """
-    Helper function to make sure mypy narrows down the type to
-    TokenInputs.
-    """
-    return inputs["type"] == "token"
-
-
-def is_multimodal_inputs(
-    inputs: Union[TokenInputs, "MultiModalInputsV2"]
-) -> TypeIs["MultiModalInputsV2"]:
-    """
-    Helper function to make sure mypy narrows down the type to
-    MultiModalInputsV2.
-    """
-    return inputs["type"] == "multimodal"
-
-
 def token_inputs(
     prompt_token_ids: List[int],
     token_type_ids: Optional[List[int]] = None,
@@ -328,11 +307,11 @@ class SingletonInputsAdapter:
     def multi_modal_hashes(self) -> List[str]:
         inputs = self.inputs
 
-        if is_token_inputs(inputs):
+        if inputs["type"] == "token":
             return inputs.get("multi_modal_hashes", [])
-        elif is_multimodal_inputs(inputs):
+        elif inputs["type"] == "multimodal":
             # only the case when we use MultiModalInputsV2
-            return inputs.get("mm_hashes", [])
+            return inputs.get("mm_hashes", [])  # type: ignore[return-value]
 
         assert_never(inputs)  # type: ignore[arg-type]
 
