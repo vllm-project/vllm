@@ -309,7 +309,8 @@ class SingletonInputsAdapter:
 
         if inputs["type"] == "token":
             return inputs.get("multi_modal_hashes", [])
-        elif inputs["type"] == "multimodal":
+
+       if inputs["type"] == "multimodal":
             # only the case when we use MultiModalInputsV2
             return inputs.get("mm_hashes", [])  # type: ignore[return-value]
 
