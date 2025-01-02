@@ -113,7 +113,7 @@ class Scheduler:
         req_index = 0
         while req_index < len(self.running):
             # Only the last request in the RUNNING queue can be "partial".
-            assert len(partial_req_id) == 0
+            assert len(partial_req_ids) == 0
             assert token_budget > 0
             request = self.running[req_index]
             num_new_tokens = request.num_tokens - request.num_computed_tokens
