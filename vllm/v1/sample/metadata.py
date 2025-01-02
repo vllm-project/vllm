@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, List
 
+import numpy
 import torch
 
 
@@ -17,6 +18,8 @@ class LogitsProcessMetadata:
 @dataclass
 class SamplingMetadata:
 
+    # Indicies in the batch needing 
+    sample_indicies: torch.Tensor
     all_greedy: bool
     all_random: bool
     logits_process_metadata: LogitsProcessMetadata
@@ -27,7 +30,13 @@ class SamplingMetadata:
 @dataclass
 class PromptLogprobsMetadata:
 
+    # Mask of the indices needed for prompt logprobs.
+    prompt_logprobs_mask: numpy.ndarray[bool]
+
+    # Note: req_ids must be in order of the requests
+    # in prompt_indicies.
     req_ids: List[str]
-    req_indicies: List[int]
+    prompt_lens: Dict[str, int]
+
     logits_process_metadata: LogitsProcessMetadata
     max_num_logprobs: int

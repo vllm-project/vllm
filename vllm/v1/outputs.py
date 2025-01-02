@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 
 @dataclass
@@ -9,16 +9,8 @@ class SamplerOutput:
     sampled_token_ids: List[int]
 
     # [num_reqs, max_num_logprobs]
-    logprob_token_ids: List[int]
-    logprobs: List[int]
-
-
-@dataclass
-class PromptLogprobsOutput:
-
-    # req_id -> [max_num_prompt_logprobs]
-    logprob_token_ids: Dict[str, List[int]]
-    logprobs: Dict[str, List[float]]
+    logprob_token_ids: List[List[int]]
+    logprobs: List[List[int]]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -38,6 +30,6 @@ class ModelRunnerOutput:
     logprob_token_ids: List[List[int]]
     logprobs: List[List[float]]
 
-    # req_id -> [max_num_prompt_logprobs]
-    prompt_logprob_token_ids: Dict[str, List[int]]
-    prompt_logprobs: Dict[str, List[float]]
+    # req_id -> (prompt_logprobs_token_ids, prompt_logprobs)
+    # [num_reqs, max_num_prompt_logprobs]
+    prompt_logprobs: Dict[str, Tuple[List[List[int], List[List[float]]]]]

@@ -59,7 +59,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         prompt_logprobs_metadata: PromptLogprobsMetadata,
-    ) -> PromptLogprobsOutput:
+    ) -> Tuple[List[List[int]], List[List[int]]]:
         # Apply logits processor.
         logits = self._process_logits(
             logits, prompt_logprobs_metadata.logits_process_metadata)
@@ -69,8 +69,7 @@ class Sampler(nn.Module):
         logprob_token_ids, logprobs = self._compute_logprobs(
             logits, prompt_logprobs_metadata.max_num_logprobs)
 
-        return PromptLogprobsOutput(logprob_token_ids=logprob_token_ids,
-                                    logprobs=logprobs)
+        return logprob_token_ids, logprobs
 
     def _compute_logprobs(
             self, logits: torch.Tensor,
@@ -171,8 +170,8 @@ class Sampler(nn.Module):
         random_sampled = self.random_sample(probs,
                                             sampling_metadata.generators)
         temperature = sampling_metadata.logits_process_metadata.temperature
-        sampled = torch.where(temperature < _SAMPLING_EPS,
-                              greedy_sampled, random_sampled)
+        sampled = torch.where(temperature < _SAMPLING_EPS, greedy_sampled,
+                              random_sampled)
         return sampled
 
 

@@ -8,7 +8,9 @@ import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.metadata import (LogitsProcessMetadata,
+                                     SamplingMetadata,
+                                     PromptLogprobsMetadata)
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
@@ -110,16 +112,17 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
 
-        # Logprobs-related.
-        # NOTE(rob): The prompt logprobs trackers only include reqs that
-        # are actively generating logprobs (i.e. in prefill phase).
-        self.num_logprobs: Dict[str, int] = {}
-        self.num_prompt_logprobs: Dict[str, int] = {}
-
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
         self.generators: Dict[int, torch.Generator] = {}
+
+        # Logprobs-related.
+        # NOTE(rob): The prompt logprobs trackers only include reqs that
+        # are actively generating logprobs (i.e. they in prefill phase).
+        self.num_logprobs: Dict[str, int] = {}
+        self.num_prompt_logprobs: Dict[str, int] = {}
+
 
     def add_request(
         self,
@@ -166,12 +169,13 @@ class InputBatch:
         if request.generator is not None:
             self.generators[req_index] = request.generator
 
-        num_logprobs = sampling_params.logprobs
-        num_prompt_logprobs = sampling_params.prompt_logprobs
-        if num_logprobs and num_logprobs > 0:
-            self.num_logprobs[req_id] = num_logprobs
-        if num_prompt_logprobs and num_prompt_logprobs > 0:
-            self.num_prompt_logprobs[req_id] = num_prompt_logprobs
+        if sampling_params.logprobs:
+            self.num_logprobs[req_id] = sampling_params.logprobs
+        if sampling_params.prompt_logprobs:
+            # TODO(rob): handle prefix caching and recomputation.
+            # We need to re-run the prefill if requesting prompt
+            # logprobs w/ prefix caching.
+            self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
 
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -245,6 +249,7 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
+        query_start_loc: torch.Tensor,
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -255,19 +260,33 @@ class InputBatch:
             self.top_k[:self.num_reqs].copy_(
                 self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
 
-        num_reqs = self.num_reqs
-
         return SamplingMetadata(
-            temperature=self.temperature[:num_reqs],
+            sample_indicies=query_start_loc[1:] - 1,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=self.top_p[:self.num_reqs],
-            top_k=self.top_k[:self.num_reqs],
-            no_top_p=self.no_top_p,
-            no_top_k=self.no_top_k,
+            logits_process_metadata=LogitsProcessMetadata(
+                temperature=self.temperature[:self.num_reqs],
+                top_p=self.top_p[:self.num_reqs],
+                top_k=self.top_k[:self.num_reqs],
+                no_top_p=self.no_top_p,
+                no_top_k=self.no_top_k),
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
         )
+
+    def make_prompt_logprobs_metadata(
+        self) -> Optional[PromptLogprobsMetadata]:
+
+        if self.max_num_prompt_logprobs:
+
+            return PromptLogprobsMetadata(
+                req_ids=list(self.num_prompt_logprobs.keys()),
+
+                max_num_logprobs=self.max_num_prompt_logprobs,
+            )
+        else:
+            return None
+
 
     @property
     def num_reqs(self) -> int:
@@ -297,11 +316,3 @@ class InputBatch:
     def max_num_prompt_logprobs(self) -> int:
         return (max(self.num_prompt_logprobs.values())
                 if self.num_prompt_logprobs else 0)
-
-    @property
-    def no_logprob(self) -> bool:
-        return len(self.num_logprobs) == 0
-
-    @property
-    def no_prompt_logprob(self) -> bool:
-        return len(self.num_prompt_logprobs) == 0

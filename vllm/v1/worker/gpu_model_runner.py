@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -21,7 +21,7 @@ from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput, SamplerOutput
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.metadata import SamplingMetadata, PromptLogprobsMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -208,13 +208,10 @@ class GPUModelRunner:
             self.input_batch.block_table_cpu[
                 req_index, start_index:end_index] = req_data.new_block_ids
 
-            # TODO(rob): is there a cleaner way to do this?
-            # If the request is still in the prompt phase and requires
-            # prompt logprobs, include it in active_prompt_logprobs.
-            if (req_id == scheduler_output.partial_req_id
-                    and req_id in self.input_batch.num_prompt_logprobs):
-                self.input_batch.active_prompt_logprobs[req_id] = (
-                    self.input_batch.num_prompt_logprobs[req_id])
+            # Remove from prompt logprobs once out of prefill phase.
+            if (req_id in self.input_batch.num_prompt_logprobs
+                    and req_id != scheduler_output.partial_req_id):
+                del self.input_batch.num_prompt_logprobs[req_id]
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -270,7 +267,9 @@ class GPUModelRunner:
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Tuple[FlashAttentionMetadata, np.ndarray[bool]]:
+    ) -> Tuple[FlashAttentionMetadata,
+               SamplingMetadata,
+               Optional[PromptLogprobsMetadata]]:
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -376,25 +375,31 @@ class GPUModelRunner:
             slot_mapping=slot_mapping,
         )
 
-        # Get mask of indices that need logits for sampling.
-        sample_logits_mask = query_start_loc[1:] - 1
+        sampling_metadata = self._prepare_sampling(scheduler_output, query_start_loc)
+        prompt_logprobs_metadata = self._prepare_prompt_logprobs(req_indices)
 
-        # Get mask of indices that need logits for prompt logprobs.
-        # NOTE(rob): we should avoid loops over all reqs in this fn,
-        # but the size of num_prompt_logprobs is small since it is
-        # only requests that are currently in the prefill phase.
-        prompt_logprobs_indicies = [
+        return attn_metadata, sampling_metadata, prompt_logprobs_metadata
+
+    def _prepare_prompt_logprobs(
+        self,
+        req_indices: np.ndarray,
+    ) -> PromptLogprobsMetadata:
+        
+        # Indicies of requests that need prompt logprobs.
+        # NOTE(rob): We should avoid loops over all reqs, this just
+        # loops over requests that currently need prompt logprobs,
+        prompt_logprobs_req_idxs = [
             self.input_batch.req_id_to_index[req_id]
-            for req_id in self.input_batch.num_prompt_logprobs
-        ]
-        prompt_logits_mask = torch.from_numpy(
-            np.isin(req_indices, prompt_logprobs_indicies))
+            for req_id in self.input_batch.num_prompt_logprobs]
 
-        return attn_metadata, sample_logits_mask, prompt_logits_mask
+        prompt_logprobs_mask = np.isin(
+            req_indices, prompt_logprobs_req_idxs)
+        
 
     def _prepare_sampling(
         self,
         scheduler_output: "SchedulerOutput",
+        query_start_loc: torch.Tensor,
     ) -> SamplingMetadata:
         skip_copy = True
         if (scheduler_output.finished_req_ids
@@ -404,7 +409,8 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        sampling_metadata = self.input_batch.make_sampling_metadata(
+            skip_copy, query_start_loc)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -509,9 +515,6 @@ class GPUModelRunner:
             num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
 
-        sampling_metadata, prompt_logprobs_metadata = self._prepare_sampling(
-            scheduler_output, num_input_tokens, attn_metadata.query_start_loc)
-
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -554,6 +557,29 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
+        # Compute prompt logprobs if requested.
+        prompt_logprobs_output = {}
+        if prompt_logprobs_metadata.max_num_logprobs > 0:
+            # First, compute the prompt logprobs all together.
+            prompt_hidden_states = hidden_states[prompt_logits_mask]
+            prompt_logits = self.model.compute_logits(prompt_hidden_states,
+                                                      None)
+            prompt_logprobs_token_ids, prompt_logprobs = self.model.sampler.get_prompt_logprobs(
+                prompt_logits, prompt_logprobs_metadata)
+
+            # Second, split the prompt logprobs
+            # NOTE(rob): We should avoid looping over all reqs for performance,
+            # this only loops over current prefills which need prompt lps.
+            # NOTE(rob): Here, we assume that req_ids are in order.
+            start_pos = 0
+            for req_id in zip(self.prompt_logprobs_metadata.req_ids):
+                end_pos = start_pos + prompt_logprobs_metadata.prompt_lens[
+                    req_id]
+                prompt_logprobs_output[req_id] = (
+                    prompt_logprobs_token_ids[start_pos:end_pos],
+                    prompt_logprobs[start_pos:end_pos])
+                start_pos = end_pos
+
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -577,21 +603,13 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        # Compute prompt logprobs.
-        prompt_hidden_states = hidden_states[prompt_logits_mask]
-        prompt_logits = self.model.compute_logits(prompt_hidden_states, None)
-        # TODO(rob): Why is the sampler part of the model definition?
-        prompt_logprobs_output = self.model.sampler.get_prompt_logprobs(
-            prompt_logits, prompt_logprobs_metadata)
-
         return ModelRunnerOutput(
             req_ids=cast(List[str], self.input_batch.req_ids[:num_reqs]),
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids=sampler_output.logprob_token_ids,
             logprobs=sampler_output.logprobs,
-            prompt_logprob_token_ids=prompt_logprobs_output.logprob_token_ids,
-            prompt_logprobs=prompt_logprobs_output.logprobs,
+            prompt_logprobs=prompt_logprobs_output,
         )
 
     def load_model(self) -> None:
