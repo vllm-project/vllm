@@ -466,5 +466,5 @@ def merge_and_sort_placeholders_from_modalities(
                 "supported.")
         merged.extend(placeholder_list)
 
-    # Return the order of the keys and the merged result
+    # Return the order of modalities and the merged placeholder ranges
     return [modality for modality, _ in sorted_lists_with_modality], merged
