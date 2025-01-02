@@ -18,25 +18,8 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        """Implement sampling.
-        
-        Apply temperature, top-k and top-p.
-        Sample from the probability distribution implied by `logits`.
-        Only sample at sequence offsets where new tokens are decoded.
-        In the process, compute sample and prompt logprobs (if required.)
-
-        Args:
-          logits: model output logits which imply probability distribution.
-          sampling_metadata: sampling config settings
-        
-        Returns:
-          Sampler output. Sampled tokens and sample/prompt logprobs
-          (if requested)
-        """
-
-        # Sample next token.
-        logits = self.process_logits(logits,
-                                     sampling_metadata.logits_process_metadata)
+        logits = self.process_logits(
+            logits, sampling_metadata.logits_process_metadata)
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
         # Use int32 to reduce the tensor size.

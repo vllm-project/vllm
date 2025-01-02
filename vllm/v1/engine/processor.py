@@ -50,11 +50,10 @@ class Processor:
             cache_config.enable_prefix_caching
         self.mm_hasher = MMHasher()
 
-    def _assert_valid_sample_logprobs_prompt_logprobs(
+    def _validate_logprobs(
         self,
         params: Union[SamplingParams, PoolingParams],
-        max_logprobs: int,
-    ):
+    ) -> None:
         """Validate requested number of sample logprobs & prompt logprobs
         
         Fails with ValueError if to many logprobs are requested.
@@ -64,13 +63,22 @@ class Processor:
           max_logprobs: max number of logprobs or prompt logprobs
         """
 
-        if isinstance(params, SamplingParams) and (
-            (params.logprobs and params.logprobs > max_logprobs) or
-            (params.prompt_logprobs
-             and params.prompt_logprobs > max_logprobs)):
+        if not isinstance(params, SamplingParams):
+            return
 
-            raise ValueError(f"Cannot request more than "
-                             f"{max_logprobs} logprobs or prompt logprobs.")
+        max_logprobs = self.model_config.max_logprobs
+
+        # Validate sample logprobs.
+        if (params.logprobs and params.logprobs > max_logprobs):
+            raise ValueError(
+                f"Requested sample logprobs of {params.logprobs}, "
+                f"which is greated than max allowed: {max_logprobs}")
+
+        # Validate prompt logprobs.
+        if (params.prompt_logprobs and params.prompt_logprobs > max_logprobs):
+            raise ValueError(
+                f"Requested prompt logprobs of {params.prompt_logprobs}, "
+                f"which is greated than max allowed: {max_logprobs}")
 
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
     # This ideally should releases the GIL, so we should not block the
@@ -86,31 +94,12 @@ class Processor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
-        """Process the input prompt into engine (& possibly tokenizer) requests
-        
-        Args:
-          request_id: request ID
-          prompt: input prompt str
-          params: sampling or pooling commands
-          arrival_time: time when inputs arrived; will be computed if `None`
-          is passed in
-          max_logprobs_permitted_by_engine: the max number of sample or prompt
-          logprobs a request may ask for
-          lora_request: LoRA request structure
-          trace_headers: trace info
-          prompt_adapter_request: prompt adapter request structure
-          priority: currently unsupported; must be zero & is by default.
-
-        Returns:
-          Detokenizer request structure
-          Engine request structure
-        """
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
-        self._assert_valid_sample_logprobs_prompt_logprobs(
-            params, self.model_config.max_logprobs)
+        # TODO(rob): Add more param validation here.
+        self._validate_logprobs(params)
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -177,8 +166,8 @@ class Processor:
             sampling_params.output_kind,
             sampling_params.stop,
             sampling_params.include_stop_str_in_output,
-            sampling_params.logprobs,
-            sampling_params.prompt_logprobs,
+            sampling_params.logprobs or 0,
+            sampling_params.prompt_logprobs or 0,
         )
 
         # Make Request for EngineCore.
