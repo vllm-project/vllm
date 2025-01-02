@@ -462,12 +462,12 @@ class Detokenizer:
             # Detokenize and update state.
             request_output = detokenizer.add_tokens(
                 new_sampled_token_ids=engine_core_output.new_token_ids,
+                finish_reason=engine_core_output.finish_reason,
+                stop_reason=engine_core_output.stop_reason,
                 new_sample_logprobs=engine_core_output.logprobs,
                 new_prompt_logprobs=engine_core_output.prompt_logprobs,
                 new_prompt_logprob_token_ids=engine_core_output.
                 prompt_logprobs_token_ids,
-                finish_reason=engine_core_output.finish_reason,
-                stop_reason=engine_core_output.stop_reason,
             )
 
             if request_output is not None:
