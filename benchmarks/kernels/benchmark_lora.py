@@ -537,7 +537,9 @@ class BenchmarkTensors:
             })
         return {'kwargs_list': kwargs_list}
 
-    def bench_fn_kwargs(self, op_type: OpType, add_inputs: Optional[bool] = None) -> Dict[str, Any]:
+    def bench_fn_kwargs(self,
+                        op_type: OpType,
+                        add_inputs: Optional[bool] = None) -> Dict[str, Any]:
         if op_type.is_shrink_fn():
             assert add_inputs is None
         else:
@@ -577,7 +579,10 @@ def bench_optype(ctx: BenchmarkContext,
         bt.sanity_check()
 
     # BenchmarkTensors -> Dict (kwargs)
-    kwargs_list = [bt.bench_fn_kwargs(op_type, add_inputs=expand_fn_add_inputs) for bt in bench_tensors]
+    kwargs_list = [
+        bt.bench_fn_kwargs(op_type, add_inputs=expand_fn_add_inputs)
+        for bt in bench_tensors
+    ]
 
     # Merge into a single kwargs and quality arguments as ArgPool
     kwargs = {k: ArgPool([]) for k in kwargs_list[0]}
@@ -585,8 +590,10 @@ def bench_optype(ctx: BenchmarkContext,
         for k, v in _kwargs.items():
             kwargs[k].values.append(v)
 
-    describe_args = f"add_inputs={expand_fn_add_inputs}" if expand_fn_add_inputs is not None else ""
-    description = f"{op_type.name}({describe_args}) ({bench_tensors[0].io_types()})"
+    describe_args = (f"add_inputs={expand_fn_add_inputs}"
+                     if expand_fn_add_inputs is not None else "")
+    description = (
+        f"{op_type.name}({describe_args}) ({bench_tensors[0].io_types()})")
     cuda_graph_params = CudaGraphBenchParams(
         num_ops_in_cuda_graph=arg_pool_size) if with_cuda_graph else None
     with Bench(cuda_graph_params,
@@ -666,12 +673,13 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
                                        args.with_cuda_graph))
 
                     # Benchmark bench_op
-                    expand_fn_add_inputs = [None] if bench_op.is_shrink_fn() else args.expand_fn_add_inputs 
+                    expand_fn_add_inputs = [
+                        None
+                    ] if bench_op.is_shrink_fn() else args.expand_fn_add_inputs
                     for add_input_arg in expand_fn_add_inputs:
                         seq_len_timers.append(
                             bench_optype(_ctx, args.arg_pool_size, bench_op,
-                                         args.with_cuda_graph,
-                                         add_input_arg))
+                                         args.with_cuda_graph, add_input_arg))
 
             print_timers(seq_len_timers)
             timers.extend(seq_len_timers)
