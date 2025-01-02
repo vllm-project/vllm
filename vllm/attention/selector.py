@@ -114,25 +114,12 @@ def _cached_get_attn_backend(
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
 
-    attention_cls = which_attn_to_use(head_size, dtype, kv_cache_dtype,
-                                      block_size, is_attention_free, use_v1)
-    assert attention_cls != "", (
-        f"Invalid attention backend for {current_platform.device_name}")
-
-    return resolve_obj_by_qualname(attention_cls)
-
-
-def which_attn_to_use(head_size: int,
-                      dtype: torch.dtype,
-                      kv_cache_dtype: Optional[str],
-                      block_size: int,
-                      is_attention_free: bool,
-                      use_v1: bool = False) -> str:
-    """Returns which flash attention backend to use."""
     # If there are no attention layers (e.g. we are running Mamba),
     # use the placeholder NO_ATTENTION
     if is_attention_free:
-        return "vllm.attention.backends.placeholder_attn.PlaceholderAttentionBackend"  # noqa: E501
+        from vllm.attention.backends.placeholder_attn import (
+            PlaceholderAttentionBackend)
+        return PlaceholderAttentionBackend
 
     # Check whether a particular choice of backend was
     # previously forced.
@@ -151,9 +138,12 @@ def which_attn_to_use(head_size: int,
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
     # get device-specific attn_backend
-    return current_platform.get_attn_backend_cls(selected_backend, head_size,
-                                                 dtype, kv_cache_dtype,
-                                                 block_size, use_v1)
+    attention_cls = current_platform.get_attn_backend_cls(
+        selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1)
+    if not attention_cls:
+        raise ValueError(
+            f"Invalid attention backend for {current_platform.device_name}")
+    return resolve_obj_by_qualname(attention_cls)
 
 
 @contextmanager
