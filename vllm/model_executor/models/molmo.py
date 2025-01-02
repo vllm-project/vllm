@@ -1060,9 +1060,7 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
     prompt = inputs.get("prompt")
     multi_modal_data = inputs.get("multi_modal_data")
     image = None if multi_modal_data is None else multi_modal_data.get("image")
-    # If there is no image, return directly.
-    if image is None:
-        return inputs
+
     model_config = ctx.model_config
     processor = cached_get_processor(
         ctx.model_config.model,
@@ -1082,6 +1080,16 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
         out = processor.process(prompt, image)
     else:
         out = processor.process(None, image, tokens=inputs["prompt_token_ids"])
+    #
+    if image is None:
+        new_prompt_token_ids = out["input_ids"].tolist()
+        prompt = inputs.get("prompt")
+        if prompt is None:
+            prompt = tokenizer.decode(new_prompt_token_ids)
+        return token_inputs(
+            prompt_token_ids=new_prompt_token_ids,
+            prompt=prompt,
+        )
 
     image_processor = processor.image_processor
     max_total_crops = 1 + image_processor.max_crops
@@ -1114,11 +1122,9 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
                 offset = i
             size += 1
     image_data["image_start_end"] = (offset, offset + size)
-
     prompt = inputs.get("prompt")
     if prompt is None:
         prompt = tokenizer.decode(new_prompt_token_ids)
-
     return token_inputs(
         prompt_token_ids=new_prompt_token_ids,
         prompt=prompt,
