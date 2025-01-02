@@ -34,6 +34,7 @@ DEFAULT_LORA_RANKS = [16]
 DEFAULT_NUM_LORAS = [1, 2, 3, 4]
 DEFAULT_SORT_BY_LORA_IDS = [False, True]
 DEFAULT_SEQ_LENGTHS = [1]
+DEFAULT_EXPAND_FN_ADD_INPUTS = [True, False]
 
 
 ## Utilities
@@ -442,7 +443,7 @@ class BenchmarkTensors:
             'scaling': 1.0,
         }
 
-    def as_sgmv_expand_kwargs(self) -> Dict[str, Any]:
+    def as_sgmv_expand_kwargs(self, add_inputs: bool) -> Dict[str, Any]:
         assert len(self.lora_weights_lst) == 1
 
         self.convert_to_sgmv_benchmark_tensors()
@@ -460,7 +461,7 @@ class BenchmarkTensors:
             'batches': num_seqs,
             'max_seq_length': max_seq_len,
             'token_nums': num_tokens,
-            'add_inputs': True,
+            'add_inputs': add_inputs,
         }
 
     def as_bgmv_shrink_kwargs(self) -> Dict[str, Any]:
@@ -474,7 +475,7 @@ class BenchmarkTensors:
             'scaling': 1.0
         }
 
-    def as_bgmv_expand_kwargs(self):
+    def as_bgmv_expand_kwargs(self, add_inputs: bool):
         assert len(self.lora_weights_lst) == 1
         self.to_device(self.input.device)
         return {
@@ -482,10 +483,10 @@ class BenchmarkTensors:
             'lora_b_weights': self.lora_weights_lst[0],
             'output_tensor': self.output,
             'lora_indices_tensor': self.token_lora_mapping,
-            'add_inputs': True
+            'add_inputs': add_inputs
         }
 
-    def as_sgmv_expand_slice_kwargs(self) -> Dict[str, Any]:
+    def as_sgmv_expand_slice_kwargs(self, add_inputs: bool) -> Dict[str, Any]:
         assert len(self.lora_weights_lst) > 1
         self.convert_to_sgmv_benchmark_tensors()
         self.sanity_check()
@@ -511,11 +512,11 @@ class BenchmarkTensors:
                 'token_nums': num_tokens,
                 'slice_offset': i * slice_size,
                 'slice_size': slice_size,
-                'add_inputs': True,
+                'add_inputs': add_inputs,
             })
         return {'kwargs_list': kwargs_list}
 
-    def as_bgmv_expand_slice_kwargs(self) -> Dict[str, Any]:
+    def as_bgmv_expand_slice_kwargs(self, add_inputs: bool) -> Dict[str, Any]:
         assert len(self.lora_weights_lst) > 1
         num_slices = len(self.lora_weights_lst)
         slice_size = self.lora_weights_lst[0].shape[-2]  # n
@@ -532,32 +533,42 @@ class BenchmarkTensors:
                 'lora_indices_tensor': self.token_lora_mapping,
                 'slice_offset': i * slice_size,
                 'slice_size': slice_size,
-                'add_inputs': True
+                'add_inputs': add_inputs,
             })
         return {'kwargs_list': kwargs_list}
 
-    def bench_fn_kwargs(self, op_type: OpType) -> Dict[str, Any]:
+    def bench_fn_kwargs(self, op_type: OpType, add_inputs: Optional[bool] = None) -> Dict[str, Any]:
+        if op_type.is_shrink_fn():
+            assert add_inputs is None
+        else:
+            assert add_inputs is not None
+
         if op_type == OpType.SGMV_SHRINK:
             return self.as_sgmv_shrink_kwargs()
         if op_type == OpType.SGMV_EXPAND:
-            return self.as_sgmv_expand_kwargs()
+            return self.as_sgmv_expand_kwargs(add_inputs)
         if op_type == OpType.BGMV_SHRINK:
             return self.as_bgmv_shrink_kwargs()
         if op_type == OpType.BGMV_EXPAND:
-            return self.as_bgmv_expand_kwargs()
+            return self.as_bgmv_expand_kwargs(add_inputs)
         if op_type == OpType.SGMV_EXPAND_SLICE:
-            return self.as_sgmv_expand_slice_kwargs()
+            return self.as_sgmv_expand_slice_kwargs(add_inputs)
         if op_type == OpType.BGMV_EXPAND_SLICE:
-            return self.as_bgmv_expand_slice_kwargs()
+            return self.as_bgmv_expand_slice_kwargs(add_inputs)
         raise ValueError(f"Unrecognized optype {self}")
 
 
 def bench_optype(ctx: BenchmarkContext,
                  arg_pool_size: int,
                  op_type: OpType,
-                 with_cuda_graph: bool = False) -> TMeasurement:
+                 with_cuda_graph: bool = False,
+                 expand_fn_add_inputs: Optional[bool] = None) -> TMeasurement:
 
     assert arg_pool_size >= 1
+    if op_type.is_shrink_fn():
+        assert expand_fn_add_inputs is None
+    else:
+        assert expand_fn_add_inputs is not None
 
     # BenchmarkContext -> BenchmarkTensors
     bench_tensors : List[BenchmarkTensors] = \
@@ -566,7 +577,7 @@ def bench_optype(ctx: BenchmarkContext,
         bt.sanity_check()
 
     # BenchmarkTensors -> Dict (kwargs)
-    kwargs_list = [bt.bench_fn_kwargs(op_type) for bt in bench_tensors]
+    kwargs_list = [bt.bench_fn_kwargs(op_type, add_inputs=expand_fn_add_inputs) for bt in bench_tensors]
 
     # Merge into a single kwargs and quality arguments as ArgPool
     kwargs = {k: ArgPool([]) for k in kwargs_list[0]}
@@ -574,7 +585,8 @@ def bench_optype(ctx: BenchmarkContext,
         for k, v in _kwargs.items():
             kwargs[k].values.append(v)
 
-    description = f"{op_type.name}({bench_tensors[0].io_types()})"
+    describe_args = f"add_inputs={expand_fn_add_inputs}" if expand_fn_add_inputs is not None else ""
+    description = f"{op_type.name}({describe_args}) ({bench_tensors[0].io_types()})"
     cuda_graph_params = CudaGraphBenchParams(
         num_ops_in_cuda_graph=arg_pool_size) if with_cuda_graph else None
     with Bench(cuda_graph_params,
@@ -583,10 +595,14 @@ def bench_optype(ctx: BenchmarkContext,
         return bench.run()
 
 
-def bench_baseline(ctx: BenchmarkContext,
+def bench_torch_mm(ctx: BenchmarkContext,
                    arg_pool_size: int,
                    op_type: OpType,
                    with_cuda_graph: bool = False) -> TMeasurement:
+    """
+    Benchmark basic torch.mm as a roofline.
+    input op_type is used in determining the m, k, n dimensions for the matmul.
+    """
 
     batch_size, hidden_size, lora_rank, seq_length, dtype = (ctx.batch_size,
                                                              ctx.hidden_size,
@@ -644,12 +660,18 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
                 for num_slices in bench_op.num_slices():
                     _ctx = bench_ctx.with_seq_length(seq_len).with_num_slices(
                         num_slices)
+                    # Benchmark torch.mm as a roofline
                     seq_len_timers.append(
-                        bench_baseline(_ctx, args.arg_pool_size, bench_op,
+                        bench_torch_mm(_ctx, args.arg_pool_size, bench_op,
                                        args.with_cuda_graph))
-                    seq_len_timers.append(
-                        bench_optype(_ctx, args.arg_pool_size, bench_op,
-                                     args.with_cuda_graph))
+
+                    # Benchmark bench_op
+                    expand_fn_add_inputs = [None] if bench_op.is_shrink_fn() else args.expand_fn_add_inputs 
+                    for add_input_arg in expand_fn_add_inputs:
+                        seq_len_timers.append(
+                            bench_optype(_ctx, args.arg_pool_size, bench_op,
+                                         args.with_cuda_graph,
+                                         add_input_arg))
 
             print_timers(seq_len_timers)
             timers.extend(seq_len_timers)
@@ -811,6 +833,10 @@ if __name__ == '__main__':
                        nargs="+",
                        type=int,
                        default=DEFAULT_BATCH_SIZES)
+        p.add_argument("--expand-fn-add-inputs",
+                       nargs="+",
+                       type=get_bool,
+                       default=DEFAULT_EXPAND_FN_ADD_INPUTS)
         p.add_argument('-o', '--output-directory', type=str)
 
     parser = FlexibleArgumentParser(
