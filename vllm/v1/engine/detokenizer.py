@@ -1,8 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple, Union, cast
 
-import numpy as np
-import numpy.typing as npt
+import torch
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -276,32 +275,34 @@ class IncrementalDetokenizer:
 
     def add_tokens(
         self,
-        new_sampled_token_ids: List[int],
-        new_sample_logprobs: Optional[List[Tuple[npt.NDArray, npt.NDArray]]],
-        new_prompt_logprobs: Optional[npt.NDArray],
-        new_prompt_logprob_token_ids: Optional[npt.NDArray],
+        new_token_ids: List[int],
+        new_logprobs_token_ids: Optional[List[torch.Tensor]],
+        new_logprobs: Optional[List[torch.Tensor]],
+        prompt_logprobs_token_ids: Optional[torch.Tensor],
+        prompt_logprobss: Optional[torch.Tensor],
         finish_reason: Optional[str],
         stop_reason: Optional[Union[int, str, None]],
     ) -> Optional[RequestOutput]:
         """Update RequestState for the request_id.
 
-        1) If necessary, detokenize sample logprobs *non*-incrementally
-        2) If necessary, detokenize prompt logprobs *non*-incrementally
-        3) Detokenize the new token ids incrementally.
+        1) Detokenize sample logprobs non-incrementally if needed
+        2) Detokenize prompt logprobs non-incrementally if needed
+        3) Detokenize the new token ids incrementally
         4) Evaluate stop criteria
         5) Update the `RequestOutput` object with new text
 
+        NOTE(rob): in the current implementation of EngineCore,
+        the lists above will all be of length 1 since we can only
+        generate one token at a time.
+
         Args:
           new_token_ids: list of newly-sampled token ids
-          new_logprobs: list of (logprobs,token ids) top logprobs
-                        tuples for sampled tokens
-          new_prompt_logprobs: num_chunk_tokens x num_prompt_logprobs np array
-                               of prompt logprobs values
-          new_prompt_logprob_token_ids: num_chunk_tokens x num_prompt_logprobs
-                                        np array of top token ids
-          finish_reason: string representation of the reason request
-                         detokenization completed
-          stop_reason: reason that detokenization stopped
+          new_logprobs_token_ids: list of topk ids (1 for each new token)
+          new_logprobs: list of topk logprobs (1 for each new token)
+          prompt_logprob_token_ids: topk ids for each prompt token
+          prompt_logprobs: topk logprobs for each prompt token          
+          finish_reason: reason request finished in engine
+          stop_reason: reason request stopped in the stopped
 
         Returns:
           Returns request output instance, except i.e. when the request
@@ -309,28 +310,20 @@ class IncrementalDetokenizer:
           which has not occurred yet.
         """
 
-        # Only try to Pythonize sample logprobs if any were provided
-        do_request_sample_logprobs = new_sample_logprobs is not None and len(
-            new_sample_logprobs) > 0
-        if do_request_sample_logprobs:
-            assert new_sample_logprobs is not None
-            assert len(new_sample_logprobs) == len(new_sampled_token_ids)
-        # Only try to Pythonize prompt logprobs if any were provided
-        do_request_prompt_logprobs = new_prompt_logprobs is not None and len(
-            new_prompt_logprobs) > 0
-        if do_request_prompt_logprobs:
-            assert new_prompt_logprob_token_ids is not None
+        # 1) Pythonize & detokenize sample logprobs.
+        if new_logprobs:
+            assert new_logprobs_token_ids is not None
+            assert len(new_logprobs) == len(new_token_id)
 
-        if do_request_sample_logprobs:
-            # 1) Pythonize & detokenize sample logprobs
-            assert new_sample_logprobs is not None
             new_sample_logprobs = (
                 self._pythonize_maybe_detokenize_sample_logprobs_for_request(
                     new_sample_logprobs,
                     new_sampled_token_ids,
                     detokenize=True))
 
-        if do_request_prompt_logprobs:
+        if prompt_logprobs:
+            assert prompt_logprobs_token_ids is not None
+
             # 2) If necessary, detokenize prompt logprobs incrementally
             assert new_prompt_logprobs is not None
             assert new_prompt_logprob_token_ids is not None
@@ -345,7 +338,7 @@ class IncrementalDetokenizer:
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
         decoded_text = ""
-        for new_token_id in new_sampled_token_ids:
+        for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             (new_tokens, new_decoded_token_text, prefix_offset,
              read_offset) = detokenize_incrementally(
@@ -366,8 +359,8 @@ class IncrementalDetokenizer:
 
             decoded_text += new_decoded_token_text
 
+        # 4) Evaluate stop criteria.
         if self.stop:
-            # 4) Evaluate stop criteria.
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(decoded_text),
@@ -375,12 +368,11 @@ class IncrementalDetokenizer:
                 include_in_output=self.include_stop_str_in_output,
             )
             if stop is not None:
-                _, truncate_to = stop
+                stop_str, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
                 finish_reason = "stop"  # TODO: use constant
-
-        # TODO: handle stop_token_ids here too?
+                stop_reason = stop_str
 
         # 5) Update the RequestOutput object with the new text.
         finished = bool(finish_reason)
@@ -390,15 +382,13 @@ class IncrementalDetokenizer:
 
         delta = self.output_kind == RequestOutputKind.DELTA
         output_text = self._get_next_output_text(finished, delta)
-        # DELTA -> new sampled tokens and logprobs + current cumulative prompt
-        #          logprob
-        # FINAL -> all sampled tokens and logprobs + current cumulative prompt
-        #          logprob
-        token_ids = new_sampled_token_ids if delta else self.output_token_ids
-        logprobs = new_sample_logprobs if delta else self.request_logprobs
-        prompt_logprobs = (new_prompt_logprobs
-                           if delta else self.request_prompt_logprobs)
-        cumulative_logprob = self.request_cumulative_logprob
+
+        # DELTA -> return just newly created items.
+        # FINAL -> return the whole history so far.
+        token_ids = new_token_ids if delta else self.output_token_ids
+        logprobs = new_logprobs if delta else self.logprobs
+        prompt_logprobs = new_logprobs if delta else self.prompt_logprobs
+        cumulative_logprob = self.cumulative_logprob
 
         request_output = RequestOutput.new(
             self.request_id,
