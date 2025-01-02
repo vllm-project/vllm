@@ -286,20 +286,6 @@ class IncrementalDetokenizer:
             3) Detokenize sample logprobs non-incrementally
             4) Detokenize prompt logprobs non-incrementally
             5) Update the `RequestOutput` object with new text
-
-        Args:
-          new_token_ids: list of newly-sampled token ids
-          new_logprobs_token_ids: list of topk ids (1 for each new token)
-          new_logprobs: list of topk logprobs (1 for each new token)
-          prompt_logprob_token_ids: topk ids for each prompt token
-          prompt_logprobs: topk logprobs for each prompt token          
-          finish_reason: reason request finished in engine
-          stop_reason: reason request stopped in the stopped
-
-        Returns:
-          Returns request output instance, except i.e. when the request
-          is configured to only return a result on the final decode step
-          which has not occurred yet.
         """
 
         # 1) Detokenize the new token ids incrementally.
