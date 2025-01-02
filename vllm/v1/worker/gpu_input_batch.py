@@ -8,8 +8,7 @@ import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.v1.sample.metadata import (LogitsProcessMetadata,
-                                     SamplingMetadata,
+from vllm.v1.sample.metadata import (LogitsProcessMetadata, SamplingMetadata,
                                      PromptLogprobsMetadata)
 
 if TYPE_CHECKING:
@@ -122,7 +121,6 @@ class InputBatch:
         # are actively generating logprobs (i.e. they in prefill phase).
         self.num_logprobs: Dict[str, int] = {}
         self.num_prompt_logprobs: Dict[str, int] = {}
-
 
     def add_request(
         self,
@@ -285,27 +283,27 @@ class InputBatch:
 
         # Create masks for each request needing prompt logprobs.
         # TODO(rob): wrap this in torch tensor + move to GPU?
+        metas = {}
+        for req_id in self.num_prompt_logprobs:
+            req_index = self.req_id_to_index[req_id]
+            num_scheduled_tok = num_scheduled_tokens[req_index]
+            top_p = self.top_p
+
         logits_masks = {
             req_id: (req_indices == self.req_id_to_index[req_id])
             for req_id in self.num_prompt_logprobs
         }
 
-        # Expand temp, top_p, and top_k for the whole batch.
-        # NOTE(rob): to simplify implementation, process the logits
-        # for all batch elements when computing prompt logprobs.
-        # TODO(rob): I think these will come out flattened, need to
-        # reshape after calling repeat_interleave?
-        num_scheduled_tokens_torch = torch.from_numpy(
-            num_scheduled_tokens).to(self.temperature.device)
+        # Expand temp, top_p, and top_k for the whole batch
+        num_scheduled_tokens_torch = torch.from_numpy(num_scheduled_tokens).to(
+            self.temperature.device)
         temperature = torch.repeat_interleave(self.temperature,
                                               num_scheduled_tokens_torch)
         # Skip expansion if we are going to skip top_p/k anyways.
-        top_p = (self.top_p if self.no_top_p else
-                 torch.repeat_interleave(self.top_p,
-                                         num_scheduled_tokens_torch))
-        top_k = (self.top_k if self.no_top_k else
-                 torch.repeat_interleave(self.top_k,
-                                         num_scheduled_tokens_torch))
+        top_p = (self.top_p if self.no_top_p else torch.repeat_interleave(
+            self.top_p, num_scheduled_tokens_torch))
+        top_k = (self.top_k if self.no_top_k else torch.repeat_interleave(
+            self.top_k, num_scheduled_tokens_torch))
 
         return PromptLogprobsMetadata(
             logits_masks=logits_masks,

@@ -35,8 +35,8 @@ class Sampler(nn.Module):
         """
 
         # Sample next token.
-        logits = self.process_logits(
-            logits, sampling_metadata.logits_process_metadata)
+        logits = self.process_logits(logits,
+                                     sampling_metadata.logits_process_metadata)
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
         # Use int32 to reduce the tensor size.

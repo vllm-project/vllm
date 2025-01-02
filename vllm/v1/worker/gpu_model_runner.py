@@ -267,8 +267,7 @@ class GPUModelRunner:
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Tuple[FlashAttentionMetadata,
-               SamplingMetadata,
+    ) -> Tuple[FlashAttentionMetadata, SamplingMetadata,
                Optional[PromptLogprobsMetadata]]:
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -375,8 +374,8 @@ class GPUModelRunner:
             slot_mapping=slot_mapping,
         )
 
-        sampling_metadata = self._prepare_sampling(
-            scheduler_output, query_start_loc)
+        sampling_metadata = self._prepare_sampling(scheduler_output,
+                                                   query_start_loc)
         prompt_logprobs_metadata = self._prepare_prompt_logprobs(
             num_scheduled_tokens, req_indices)
 
@@ -405,9 +404,9 @@ class GPUModelRunner:
         req_indices: np.ndarray,
     ) -> Optional[PromptLogprobsMetadata]:
         # NOTE(rob): Since this function uses the values of
-        # input_batch.temp/top_p/top_k, which are mutated in 
+        # input_batch.temp/top_p/top_k, which are mutated in
         # self._prepare_sampling, it should be called AFTER.
-        
+
         # Create the prompt logprobs metadata.
         return self.input_batch.make_prompt_logprobs_metadata(
             num_scheduled_tokens, req_indices)
@@ -567,7 +566,7 @@ class GPUModelRunner:
             logits = self.model.sampler.compute_logits(hidden_states, None)
             logits = self.model.sampler.process_logits(
                 logits, prompt_logprobs_metadata.logits_process_metadata)
-            
+
             # Second, compute the logprobs for requests needing prompt lps.
             # NOTE(rob): We should avoid looping over all reqs, this loop
             # this only loops over active prefills which need prompt lps.
@@ -576,15 +575,12 @@ class GPUModelRunner:
                 req_logits = logits[logits_mask]
                 lp_token_ids, lps = self.model.sampler.compute_logprobs(
                     req_logits, self.input_batch.num_prompt_logprobs[req_id])
-    
-                
+
                 # TODO: remove the sample logprob by checking if this is a
                 # partial request or not.
                 prompt_logprobs[req_id] = (lp_token_ids, lps)
-                
 
             # Second, split the prompt logprobs
-            
 
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
