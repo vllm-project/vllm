@@ -11,7 +11,6 @@ from transformers import (BatchFeature, ChameleonConfig, ChameleonProcessor,
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import InputContext
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -31,7 +30,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
-from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
@@ -43,11 +41,6 @@ from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
 
-# These configs are not part of the model config but the preprocessor
-# and processor files, so we hardcode them in the model file for now.
-CHAMELEON_CROP_SIZE_HEIGHT = CHAMELEON_CROP_SIZE_WIDTH = 512
-CHAMELEON_IMAGE_SEQ_LENGTH = 1024
-
 
 class ChameleonImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -55,14 +48,17 @@ class ChameleonImagePixelInputs(TypedDict):
     """Shape: `(batch_size * num_images, num_channels, height, width)`"""
 
 
-def get_max_chameleon_image_tokens(ctx: InputContext):
-    return CHAMELEON_IMAGE_SEQ_LENGTH
-
-
 class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
 
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(max_mm_counts={"image": 1})
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
+    def _get_num_image_tokens(self) -> int:
+        processor = self._get_hf_processor()
+        return processor.image_seq_length
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        return {"image": self._get_num_image_tokens()}
 
     def _get_hf_processor(self) -> ChameleonProcessor:
         return self.ctx.get_hf_processor(ChameleonProcessor)
@@ -88,7 +84,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
                 target="<image>",
                 replacement="".join([
                     processor.image_start_token,
-                    processor.image_token * CHAMELEON_IMAGE_SEQ_LENGTH,
+                    processor.image_token * self._get_num_image_tokens(),
                     processor.image_end_token,
                 ]),
             )
@@ -98,12 +94,15 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
+        config = self.ctx.get_hf_config(ChameleonConfig)
+
+        width = height = config.vq_config.resolution
         num_images = mm_counts.get("image", 0)
 
         mm_data = {
             "image":
-            self._get_dummy_images(width=CHAMELEON_CROP_SIZE_WIDTH,
-                                   height=CHAMELEON_CROP_SIZE_HEIGHT,
+            self._get_dummy_images(width=width,
+                                   height=height,
                                    num_images=num_images)
         }
 
@@ -902,7 +901,6 @@ class ChameleonModel(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_chameleon_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(ChameleonMultiModalProcessor)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
@@ -931,9 +929,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.model.make_empty_intermediate_tensors)
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-
-        expected_dims = (3, CHAMELEON_CROP_SIZE_HEIGHT,
-                         CHAMELEON_CROP_SIZE_WIDTH)
+        vq_config: ChameleonVQVAEConfig = self.config.vq_config
+        expected_dims = (3, vq_config.resolution, vq_config.resolution)
         actual_dims = tuple(data.shape[1:])
 
         if actual_dims != expected_dims:
