@@ -275,18 +275,47 @@ class InputBatch:
         )
 
     def make_prompt_logprobs_metadata(
-        self) -> Optional[PromptLogprobsMetadata]:
+        self,
+        num_scheduled_tokens: np.ndarray,
+        req_indices: np.ndarray,
+    ) -> Optional[PromptLogprobsMetadata]:
 
-        if self.max_num_prompt_logprobs:
-
-            return PromptLogprobsMetadata(
-                req_ids=list(self.num_prompt_logprobs.keys()),
-
-                max_num_logprobs=self.max_num_prompt_logprobs,
-            )
-        else:
+        if not self.max_num_prompt_logprobs:
             return None
 
+        # Create masks for each request needing prompt logprobs.
+        # TODO(rob): wrap this in torch tensor + move to GPU?
+        logits_masks = {
+            req_id: (req_indices == self.req_id_to_index[req_id])
+            for req_id in self.num_prompt_logprobs
+        }
+
+        # Expand temp, top_p, and top_k for the whole batch.
+        # NOTE(rob): to simplify implementation, process the logits
+        # for all batch elements when computing prompt logprobs.
+        # TODO(rob): I think these will come out flattened, need to
+        # reshape after calling repeat_interleave?
+        num_scheduled_tokens_torch = torch.from_numpy(
+            num_scheduled_tokens).to(self.temperature.device)
+        temperature = torch.repeat_interleave(self.temperature,
+                                              num_scheduled_tokens_torch)
+        # Skip expansion if we are going to skip top_p/k anyways.
+        top_p = (self.top_p if self.no_top_p else
+                 torch.repeat_interleave(self.top_p,
+                                         num_scheduled_tokens_torch))
+        top_k = (self.top_k if self.no_top_k else
+                 torch.repeat_interleave(self.top_k,
+                                         num_scheduled_tokens_torch))
+
+        return PromptLogprobsMetadata(
+            logits_masks=logits_masks,
+            logits_process_metadata=LogitsProcessMetadata(
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                no_top_p=self.no_top_p,
+                no_top_k=self.no_top_k,
+            ))
 
     @property
     def num_reqs(self) -> int:

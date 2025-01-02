@@ -375,26 +375,12 @@ class GPUModelRunner:
             slot_mapping=slot_mapping,
         )
 
-        sampling_metadata = self._prepare_sampling(scheduler_output, query_start_loc)
-        prompt_logprobs_metadata = self._prepare_prompt_logprobs(req_indices)
+        sampling_metadata = self._prepare_sampling(
+            scheduler_output, query_start_loc)
+        prompt_logprobs_metadata = self._prepare_prompt_logprobs(
+            num_scheduled_tokens, req_indices)
 
         return attn_metadata, sampling_metadata, prompt_logprobs_metadata
-
-    def _prepare_prompt_logprobs(
-        self,
-        req_indices: np.ndarray,
-    ) -> PromptLogprobsMetadata:
-        
-        # Indicies of requests that need prompt logprobs.
-        # NOTE(rob): We should avoid loops over all reqs, this just
-        # loops over requests that currently need prompt logprobs,
-        prompt_logprobs_req_idxs = [
-            self.input_batch.req_id_to_index[req_id]
-            for req_id in self.input_batch.num_prompt_logprobs]
-
-        prompt_logprobs_mask = np.isin(
-            req_indices, prompt_logprobs_req_idxs)
-        
 
     def _prepare_sampling(
         self,
@@ -412,6 +398,19 @@ class GPUModelRunner:
         sampling_metadata = self.input_batch.make_sampling_metadata(
             skip_copy, query_start_loc)
         return sampling_metadata
+
+    def _prepare_prompt_logprobs(
+        self,
+        num_scheduled_tokens: np.array,
+        req_indices: np.ndarray,
+    ) -> Optional[PromptLogprobsMetadata]:
+        # NOTE(rob): Since this function uses the values of
+        # input_batch.temp/top_p/top_k, which are mutated in 
+        # self._prepare_sampling, it should be called AFTER.
+        
+        # Create the prompt logprobs metadata.
+        return self.input_batch.make_prompt_logprobs_metadata(
+            num_scheduled_tokens, req_indices)
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -501,7 +500,7 @@ class GPUModelRunner:
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, sample_logits_mask, prompt_logits_mask = (
+        attn_metadata, sampling_metadata, prompt_logprobs_metadata = (
             self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
@@ -548,7 +547,7 @@ class GPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
-        sample_hidden_states = hidden_states[sample_logits_mask]
+        sample_hidden_states = hidden_states[sampling_metadata.sample_indicies]
         sample_logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token.
@@ -559,26 +558,33 @@ class GPUModelRunner:
 
         # Compute prompt logprobs if requested.
         prompt_logprobs_output = {}
-        if prompt_logprobs_metadata.max_num_logprobs > 0:
-            # First, compute the prompt logprobs all together.
-            prompt_hidden_states = hidden_states[prompt_logits_mask]
-            prompt_logits = self.model.compute_logits(prompt_hidden_states,
-                                                      None)
-            prompt_logprobs_token_ids, prompt_logprobs = self.model.sampler.get_prompt_logprobs(
-                prompt_logits, prompt_logprobs_metadata)
+        if prompt_logprobs_metadata:
+            # NOTE(rob): the implementation computes logits that are not
+            # needed and uses a small loop to keep code simple for a low
+            # importance feature (primarily used for lm-eval evaluations).
+
+            # First, compute the logits for all elements of the batch
+            logits = self.model.sampler.compute_logits(hidden_states, None)
+            logits = self.model.sampler.process_logits(
+                logits, prompt_logprobs_metadata.logits_process_metadata)
+            
+            # Second, compute the logprobs for requests needing prompt lps.
+            # NOTE(rob): We should avoid looping over all reqs, this loop
+            # this only loops over active prefills which need prompt lps.
+            prompt_logprobs = {}
+            for req_id, logits_mask in logits_mask.items():
+                req_logits = logits[logits_mask]
+                lp_token_ids, lps = self.model.sampler.compute_logprobs(
+                    req_logits, self.input_batch.num_prompt_logprobs[req_id])
+    
+                
+                # TODO: remove the sample logprob by checking if this is a
+                # partial request or not.
+                prompt_logprobs[req_id] = (lp_token_ids, lps)
+                
 
             # Second, split the prompt logprobs
-            # NOTE(rob): We should avoid looping over all reqs for performance,
-            # this only loops over current prefills which need prompt lps.
-            # NOTE(rob): Here, we assume that req_ids are in order.
-            start_pos = 0
-            for req_id in zip(self.prompt_logprobs_metadata.req_ids):
-                end_pos = start_pos + prompt_logprobs_metadata.prompt_lens[
-                    req_id]
-                prompt_logprobs_output[req_id] = (
-                    prompt_logprobs_token_ids[start_pos:end_pos],
-                    prompt_logprobs[start_pos:end_pos])
-                start_pos = end_pos
+            
 
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
