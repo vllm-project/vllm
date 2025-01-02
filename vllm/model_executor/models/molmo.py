@@ -1060,7 +1060,8 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
     prompt = inputs.get("prompt")
     multi_modal_data = inputs.get("multi_modal_data")
     image = None if multi_modal_data is None else multi_modal_data.get("image")
-
+    if image is None:
+        return inputs
     model_config = ctx.model_config
     processor = cached_get_processor(
         ctx.model_config.model,
@@ -1083,43 +1084,12 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     image_processor = processor.image_processor
     max_total_crops = 1 + image_processor.max_crops
-    if image is not None:
-        images, image_input_idx, image_masks = pad_images(
-            max_total_crops,
-            out["images"],
-            out["image_input_idx"],
-            out.get("image_masks"),
-        )
-    else:
-        base_image_input_size = image_processor.base_image_input_size
-        image_patch_size = image_processor.image_patch_size
-        image_num_patch = (
-            base_image_input_size[0] // image_patch_size,
-            base_image_input_size[1] // image_patch_size,
-        )
-        n_pixels = image_patch_size * image_patch_size * 3
-        n_patches = image_num_patch[0] * image_num_patch[1]
-
-        image_length_w = image_processor.image_token_length_w
-        image_length_h = image_processor.image_token_length_h
-        tokens_per_image = image_length_w * image_length_h
-        images = torch.full(
-            (max_total_crops, n_patches, n_pixels),
-            -1,
-            dtype=torch.float32,
-        )
-        image_input_idx = torch.full(
-            (max_total_crops, tokens_per_image),
-            -1,
-            dtype=torch.int32,
-        )
-        if image_processor.image_padding_mask:
-            image_masks = torch.full(
-                (max_total_crops, n_patches),
-                -1,
-                dtype=torch.float32,
-            )
-
+    images, image_input_idx, image_masks = pad_images(
+        max_total_crops,
+        out["images"],
+        out["image_input_idx"],
+        out.get("image_masks"),
+    )
     image_data = dict(
         images=images,
         image_input_idx=image_input_idx,
