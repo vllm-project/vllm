@@ -165,7 +165,7 @@ class IncrementalDetokenizer:
                 token = self.tokenizer.decode(sampled_token_id)
                 pos_logprobs_dict[sampled_token_id] = Logprob(
                     logprob=sampled_token_logprob,
-                    rank=None, # TODO: is this needed?
+                    rank=None,  # TODO: is this needed?
                     decoded_token=token)
 
             # Update logprobs for this sequence position.
