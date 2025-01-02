@@ -272,24 +272,20 @@ class IncrementalDetokenizer:
     def add_tokens(
         self,
         new_token_ids: List[int],
+        finish_reason: Optional[str],
+        stop_reason: Optional[Union[int, str, None]],
         new_logprobs_token_ids: Optional[List[torch.Tensor]],
         new_logprobs: Optional[List[torch.Tensor]],
         prompt_logprobs_token_ids: Optional[torch.Tensor],
         prompt_logprobs: Optional[torch.Tensor],
-        finish_reason: Optional[str],
-        stop_reason: Optional[Union[int, str, None]],
     ) -> Optional[RequestOutput]:
-        """Update RequestState for the request_id.
-
-        1) Detokenize sample logprobs non-incrementally if needed
-        2) Detokenize prompt logprobs non-incrementally if needed
-        3) Detokenize the new token ids incrementally
-        4) Evaluate stop criteria
-        5) Update the `RequestOutput` object with new text
-
-        NOTE(rob): in the current implementation of EngineCore,
-        the lists above will all be of length 1 since we can only
-        generate one token at a time.
+        """
+        Update RequestState for the request_id by:
+            1) Detokenize the new token ids incrementally
+            2) Evaluate stop criteria
+            3) Detokenize sample logprobs non-incrementally
+            4) Detokenize prompt logprobs non-incrementally
+            5) Update the `RequestOutput` object with new text
 
         Args:
           new_token_ids: list of newly-sampled token ids
@@ -306,31 +302,7 @@ class IncrementalDetokenizer:
           which has not occurred yet.
         """
 
-        # 1) Make Sample Logprobs.
-        if new_logprobs:
-            sample_logprobs = self._make_sample_logprobs(
-                sampled_token_ids=new_token_ids,
-                logprobs_token_ids_lst=new_logprobs_token_ids,
-                logprobs=new_logprobs,
-            )
-            self.logprobs.append(sample_logprobs)
-            # TODO: update cumulative logprob.
-            # self.cumulative_logprob +=
-
-        # 2) Pythonize & detokenizer prompt logprobs.
-        if prompt_logprobs:
-            assert prompt_logprobs_token_ids is not None
-            prompt_logprobs = self._make_prompt_logprobs(
-                prompt_logprobs_token_ids,
-                prompt_logprobs,
-            )
-
-            # NOTE(rob): EngineCore does not stream out partial
-            # prefills, so all prompt logprobs come in one step.
-            assert len(self.prompt_logprobs) == 0
-            self.prompt_logprobs = prompt_logprobs
-
-        # 3) Detokenize the new token ids incrementally.
+        # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
         decoded_text = ""
@@ -355,7 +327,7 @@ class IncrementalDetokenizer:
 
             decoded_text += new_decoded_token_text
 
-        # 4) Evaluate stop criteria.
+        # 2) Evaluate stop criteria.
         if self.stop:
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
@@ -369,6 +341,26 @@ class IncrementalDetokenizer:
                     self.output_text = self.output_text[:truncate_to]
                 finish_reason = "stop"  # TODO: use constant
                 stop_reason = stop_str
+
+        # 3) Make Sample Logprobs.
+        if new_logprobs:
+            sample_logprobs = self._make_sample_logprobs(
+                sampled_token_ids=new_token_ids,
+                logprobs_token_ids_lst=new_logprobs_token_ids,
+                logprobs=new_logprobs)
+            self.logprobs.append(sample_logprobs)
+            # TODO: update cumulative logprob.
+            # self.cumulative_logprob
+
+        # 4) Pythonize & detokenizer prompt logprobs.
+        if prompt_logprobs:
+            # EngineCore does not stream out partial prefill,
+            # so all prompt logprobs come in one step.
+            assert len(self.prompt_logprobs) == 0
+            assert prompt_logprobs_token_ids is not None
+            self.prompt_logprobs = self._make_prompt_logprobs(
+                prompt_logprobs_token_ids,
+                prompt_logprobs)
 
         # 5) Update the RequestOutput object with the new text.
         finished = bool(finish_reason)
