@@ -50,32 +50,40 @@ class Request:
         self.num_computed_tokens = 0
 
         # Multi-modal input metadata.
-        all_modalities = ["image", "video", "audio"]
         mm_positions = self.inputs.multi_modal_placeholders
         if mm_positions:
+            available_modalities = mm_positions.keys()
             sorted_modalities, sorted_mm_positions = merge_and_sort_placeholders_from_modalities(  # noqa: E501
-                all_modalities, mm_positions)
+                list(available_modalities), mm_positions)
             self.mm_positions = sorted_mm_positions
         else:
+            sorted_modalities = []
             self.mm_positions = []
+
         # Output of the mm input mapper (e.g., image tensors).
         self.mm_inputs: List[MultiModalKwargs] = []
         if self.inputs.multi_modal_inputs:
-            if len(sorted_modalities) == 1:
-                self.mm_inputs = self.inputs.multi_modal_inputs
-            else:
-                for modality, count in sorted_modalities:
-                    for i in range(len(self.inputs.multi_modal_inputs)):
-                        if modality in self.inputs.multi_modal_inputs[i]:
-                            for j in range(count):
-                                self.inputs.multi_modal_inputs[i +
-                                                               j].pop(modality)
-                                self.mm_inputs.append(
-                                    self.inputs.multi_modal_inputs[i + j])
-                            break
-        assert len(self.mm_inputs) == len(self.inputs.multi_modal_inputs)
-        assert len(self.mm_inputs) == len(self.mm_positions)
+            # NOTE: We only need to sort multimodal kwargs when there
+            # are multiple modalities involved.
+            if len(sorted_modalities) > 1:
+                modality_order_dict = {
+                    modality: order
+                    for order, modality in enumerate(sorted_modalities)
+                }
 
+                # Sanity check to make sure each multimodal input
+                # has only one modality key.
+                for mm_input in self.inputs.multi_modal_inputs:
+                    assert len(mm_input.modalities) == 1
+
+                # Sort MultiModalKwags to match sorted_mm_positions
+                self.inputs.multi_modal_inputs.sort(
+                    key=lambda mm_input: modality_order_dict[list(
+                        mm_input.modalities)[0]])
+
+            self.mm_inputs = self.inputs.multi_modal_inputs
+
+        assert len(self.mm_inputs) == len(self.mm_positions)
         self.mm_hashes: List[str] = self.inputs.multi_modal_hashes
 
         # Cache the computed kv block hashes of the request to avoid

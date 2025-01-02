@@ -444,7 +444,11 @@ def consecutive_placeholder_ranges(
 
 def merge_and_sort_placeholders_from_modalities(
     modalities: list[str], mm_positions: "MultiModalPlaceholderDict"
-) -> tuple[list[tuple[str, int]], list[PlaceholderRange]]:
+) -> tuple[list[str], list[PlaceholderRange]]:
+
+    # For single modality, its placeholder ranges are already sorted.
+    if len(modalities) == 1:
+        return modalities, list(mm_positions[modalities[0]])
 
     placeholder_lists_with_modality = [(modality, mm_positions[modality])
                                        for modality in modalities
@@ -463,5 +467,4 @@ def merge_and_sort_placeholders_from_modalities(
         merged.extend(placeholder_list)
 
     # Return the order of the keys and the merged result
-    return [(modality, len(lst))
-            for modality, lst in sorted_lists_with_modality], merged
+    return [modality for modality, _ in sorted_lists_with_modality], merged
