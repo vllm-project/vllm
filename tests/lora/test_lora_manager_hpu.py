@@ -1,6 +1,7 @@
 import os
 from typing import Dict, List
 
+import habana_frameworks.torch  # noqa: F401
 import pytest
 import torch
 from safetensors.torch import load_file
