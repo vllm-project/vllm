@@ -70,10 +70,9 @@ class Sampler(nn.Module):
 
             # Concatenate with the sampled token_id if provided.
             if sampled_token_ids:
-                # TODO(rob): check if the concat is right.
-                # TODO(rob): we need to return the rank of the sampled token
-                # to be compatible with the OAI spec.
-                sampled_logprobs = logprobs[sampled_token_ids]
+                # TODO(rob): check if the indexing / concatting is right
+                # TODO(rob): do we need to return the rank of the sampled?
+                sampled_logprobs = logprobs[:, sampled_token_ids]
                 topk_indices = torch.cat([sampled_token_ids, topk_indices])
                 topk_logprobs = torch.cat([sampled_logprobs, topk_logprobs])
 
