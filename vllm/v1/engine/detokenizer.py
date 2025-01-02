@@ -24,9 +24,9 @@ class IncrementalDetokenizer:
     output_text: str
     tokens: List[str]
     token_ids: List[int]
-    request_logprobs: Optional[SampleLogprobs]
-    request_prompt_logprobs: Optional[PromptLogprobs]
-    request_cumulative_logprob: Optional[float]
+    logprobs: Optional[SampleLogprobs]
+    prompt_logprobs: Optional[PromptLogprobs]
+    cumulative_logprob: Optional[float]
 
     # Stop strings
     stop: List[str]
@@ -71,15 +71,6 @@ class IncrementalDetokenizer:
         tokenizer: AnyTokenizer,
         request: DetokenizerRequest,
     ) -> "IncrementalDetokenizer":
-        """Construct incremental detokenizer for a request.
-        
-        Args:
-          tokenizer: tokenizer provides detokenization methods
-          request: track detokenization progress of this request
-
-        Returns:
-          Incremental detokenizer for the request
-        """
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,

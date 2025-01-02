@@ -150,14 +150,8 @@ class LLMEngine:
 
         # 1) Process raw inputs into the request.
         detokenizer_req, engine_core_req = self.processor.process_inputs(
-            request_id=request_id,
-            prompt=prompt,
-            params=params,
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request,
-            priority=priority)
+            request_id, prompt, params, arrival_time, lora_request,
+            trace_headers, prompt_adapter_request, priority)
 
         # 2) Add the request to Detokenizer.
         self.detokenizer.add_request(detokenizer_req)
@@ -179,6 +173,8 @@ class LLMEngine:
             self.abort_request(requests_to_abort)
 
         return request_outputs
+
+    # TODO(rob): Can we get rid of these?
 
     def get_model_config(self):
         return self.model_config
