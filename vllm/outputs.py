@@ -145,18 +145,7 @@ class RequestOutput:
         cumulative_logprob: Optional[float],
         finished: bool = False,
     ) -> "RequestOutput":
-        """Initialize a new RequestOutput object.
-        
-        Args:
-          request_id
-          prompt: optional single prompt string
-          prompt_token_ids: optional list of prompt tokens
-          text: completion text
-          token_ids: completion token ids
-          logprobs: completion sample logprobs
-          prompt_logprobs: prompt logprobs
-          finished: whether the request is finished
-        """
+        """Initialize a new RequestOutput object."""
 
         # TODO: Support `n` > 1.
         completion_output = CompletionOutput(
