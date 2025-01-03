@@ -20,6 +20,6 @@ class RayXPUExecutor(RayExecutor):
         # FIXME: XPU do not support ray dag now.
         # Only the first worker (with rank 0) returns the execution result.
         # Others return None.
-        outputs = [ray.get(worker.execute_model(scheduler_output)) for worker in self.workers]
+        outputs = [ray.get(worker.execute_model.remote(scheduler_output)) for worker in self.workers]
         output = outputs[0]
         return output
