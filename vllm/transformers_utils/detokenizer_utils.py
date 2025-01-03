@@ -84,8 +84,8 @@ def detokenize_non_incrementally(
     # treats it as decoding batch N seq_len 1, such
     # that they all happen independently.
     flat_token_ids = token_ids.reshape(-1, 1)
-    # TODO(rob): deal with MistralTokenizer not doing
-    # batch_decode?
+    # TODO(andy): deal with MistralTokenizer not having
+    # batch_decode. Follow up if hard?
     return tokenizer.batch_decode(flat_token_ids)
 
 
