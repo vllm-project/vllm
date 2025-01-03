@@ -1,4 +1,5 @@
 import weakref
+from abc import ABC, abstractmethod
 from typing import List, Type
 
 import msgspec
@@ -19,7 +20,7 @@ from vllm.v1.utils import BackgroundProcHandle
 logger = init_logger(__name__)
 
 
-class EngineCoreClient:
+class EngineCoreClient(ABC):
     """
     EngineCoreClient: subclasses handle different methods for pushing 
         and pulling from the EngineCore for asyncio / multiprocessing.
@@ -53,8 +54,9 @@ class EngineCoreClient:
 
         return InprocClient(vllm_config, executor_class, log_stats)
 
+    @abstractmethod
     def shutdown(self):
-        raise NotImplementedError
+        ...
 
     def get_output(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
