@@ -10,8 +10,8 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import (get_open_zmq_ipc_path, make_zmq_socket,
-                        kill_process_tree)
+from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
+                        make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
@@ -145,10 +145,10 @@ class MPClient(EngineCoreClient):
         # handle at the API server level so we can return a better
         # error code to the clients calling VLLM.
         def sigusr1_handler(signum, frame):
-            logger.fatal(
-                "Got fatal signal from worker processes, shutting "
-                "down. See stack trace above for root cause issue.")
+            logger.fatal("Got fatal signal from worker processes, shutting "
+                         "down. See stack trace above for root cause issue.")
             kill_process_tree(os.getpid())
+
         signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         # Serialization setup.

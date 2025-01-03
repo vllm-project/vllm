@@ -34,7 +34,7 @@ class Worker:
         rank: int,
         distributed_init_method: str,
     ):
-        
+
         # TODO: use WorkerBase.__init__(self, vllm_config=vllm_config)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
