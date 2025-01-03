@@ -608,11 +608,13 @@ class BenchmarkTensors:
     def test_correctness(self, op_type: OpType,
                          expand_fn_add_inputs: Optional[bool]) -> bool:
         """
-        Test correctness of self.output against a grouped gemm reference implementation.
+        Test correctness of self.output against a grouped gemm reference
+        implementation.
 
-        For expand-related operations with add_inputs = True, since the benchmarking
-        setup runs the function multiple times, the accumulation into the self.output
-        is intractable. Correctness testing is skipped for that case.
+        For expand-related operations with add_inputs = True, since the
+        benchmarking setup runs the function multiple times, the accumulation
+        into the self.output is intractable. Correctness testing is skipped
+        for that case.
         """
 
         if op_type.is_shrink_fn():
@@ -621,7 +623,8 @@ class BenchmarkTensors:
             assert expand_fn_add_inputs is not None
 
         if expand_fn_add_inputs:
-            print (f"WARNING: Skipping correctness testing for {op_type} with add_inputs={expand_fn_add_inputs}")
+            print(f"WARNING: Skipping correctness testing for {op_type} with "
+                  f"add_inputs={expand_fn_add_inputs}")
             return True
 
         seq_lens_cpu = self.seq_lens.to(device="cpu")
@@ -704,7 +707,10 @@ def bench_optype(ctx: BenchmarkContext,
         timer = bench.run()
 
     if test_correctness:
-        assert all([bt.test_correctness(op_type, expand_fn_add_inputs) for bt in bench_tensors])
+        assert all([
+            bt.test_correctness(op_type, expand_fn_add_inputs)
+            for bt in bench_tensors
+        ])
 
     return timer
 
@@ -754,28 +760,36 @@ def bench_torch_mm(ctx: BenchmarkContext,
 # runner
 def use_cuda_graph_recommendation() -> str:
     return """
-            Triton kernels have a significant launch overhead with launched directly via python. 
-            This overhead is more noticeable for small the problem sizes. For these cases, it is 
-            recommended to use the script with `--cuda-graph-nops N` to benchmark N consecutive invocations 
-            of the benchmarking operations from inside a CUDA Graph. Note that the returned measurement 
-            is for N invocations of the operation.
+            Triton kernels have a significant launch overhead with
+            launched directly via python. This overhead is more noticeable
+            for small the problem sizes. For these cases, it is recommended
+            to use the script with `--cuda-graph-nops N` to benchmark N
+            consecutive invocations of the benchmarking operations from 
+            inside a CUDA Graph. Note that the returned measurement is for N 
+            invocations of the operation.
             """
 
-def print_timers(timers: List[TMeasurement], args: Optional[argparse.Namespace] = None):
+
+def print_timers(timers: List[TMeasurement],
+                 args: Optional[argparse.Namespace] = None):
     compare = TBenchmark.Compare(timers)
     compare.print()
 
     if args and args.cuda_graph_nops:
-        print (f"The timings reported above is for {args.cuda_graph_nops} consecutive invocations of the benchmarking functions. Please divide by {args.cuda_graph_nops} for single invocation timings ")
+        print(f"The timings reported above is for {args.cuda_graph_nops} "
+              "consecutive invocations of the benchmarking functions. "
+              "Please divide by {args.cuda_graph_nops} for single invocation "
+              "timings ")
 
 
 def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
 
     if args.cuda_graph_nops is not None:
         assert args.cuda_graph_nops > 0
-        print (f"Benchmarking {args.cuda_graph_nops} invocations inside a CUDA Graph")
+        print(f"Benchmarking {args.cuda_graph_nops} invocations inside a CUDA "
+              "Graph")
     else:
-        print (f"CUDA Graphs not enabled.\n{use_cuda_graph_recommendation()}")
+        print(f"CUDA Graphs not enabled.\n{use_cuda_graph_recommendation()}")
 
     timers = []
     for bench_ctx in bench_ctxs:
@@ -939,16 +953,17 @@ if __name__ == '__main__':
             type=int,
             default=32,
             help="Run profiles with a pool of input/output/meta tensors instead"
-            "of simply reusing the same tensors for all runs. A bigger arg-pool "
+            "of simply reusing the same tensors for all runs. A bigger arg-pool"
             "mitigates hardware caching effects during benchmarking.")
 
-        p.add_argument("--cuda-graph-nops",
-                       type=int,
-                       help=("when set profiling is done using cudagraph, "
-                             "with the given number of operations in a graph."
-                             "Note that the measurement returned is the time "
-                             "taken for N consecutive executions of the benchmarking "
-                             "functions, where N is the value of this argument."))
+        p.add_argument(
+            "--cuda-graph-nops",
+            type=int,
+            help=("when set profiling is done using cudagraph, "
+                  "with the given number of operations in a graph."
+                  "Note that the measurement returned is the time "
+                  "taken for N consecutive executions of the benchmarking "
+                  "functions, where N is the value of this argument."))
         p.add_argument("--num-loras",
                        nargs="+",
                        type=int,
