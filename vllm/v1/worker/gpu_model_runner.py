@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -370,22 +370,18 @@ class GPUModelRunner:
             slot_mapping=slot_mapping,
         )
 
-        # Make Sampling and Prompt Logprobs Metadata.
-        sampling_metadata, prompt_logprobs_metadata = self._prepare_sampling(
-            scheduler_output=scheduler_output,
-            # Here we assume there is one generated token per step.
-            sample_indices=query_start_loc[1:] - 1,
-            req_indices=req_indices,
-        )
-
-        return attn_metadata, sampling_metadata, prompt_logprobs_metadata
+        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
+        # request in the batch. While we should not sample any token from this
+        # partial request, we do so for simplicity. We will ignore the sampled
+        # token from the partial request.
+        # TODO: Support prompt logprobs.
+        logits_indices = query_start_loc[1:] - 1
+        return attn_metadata, logits_indices, req_indices
 
     def _prepare_sampling(
-        self,
+        self, 
         scheduler_output: "SchedulerOutput",
-        sample_indices: torch.Tensor,
-        req_indices: npt.NDArray,
-    ) -> Tuple[SamplingMetadata, Optional[PromptLogprobsMetadata]]:
+    ) -> SamplingMetadata:
         skip_copy = True
         if (scheduler_output.finished_req_ids
                 or scheduler_output.preempted_req_ids):
@@ -394,14 +390,21 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(
-            skip_copy, sample_indices)
-
+        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        return sampling_metadata
+    
+    def _prepare_prompt_logprobs(
+        self,
+        req_id: str,
+        scheduler_output: "SchedulerOutput",
+        req_indices: npt.NDArray,
+    ) -> PromptLogprobsMetadata:
+        
         # Create the prompt logprobs metadata.
-        prompt_lps_metadata = self.input_batch.make_prompt_logprobs_metadata(
-            scheduler_output.partial_req_ids, req_indices)
-
-        return sampling_metadata, prompt_lps_metadata
+        metadata = self.input_batch.make_prompt_logprobs_metadata(
+            req_id, scheduler_output.partial_req_ids, req_indices)
+        
+        return metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -491,7 +494,7 @@ class GPUModelRunner:
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, sampling_metadata, prompt_logprobs_metadata = (
+        attn_metadata, logits_indices, req_indices = (
             self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
@@ -538,7 +541,7 @@ class GPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
-        sample_hidden_states = hidden_states[sampling_metadata.sample_indicies]
+        sample_hidden_states = hidden_states[logits_indices]
         sample_logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
@@ -548,23 +551,29 @@ class GPUModelRunner:
         )
 
         # Compute prompt logprobs if needed.
-        # NOTE(rob): for clean code, compute prompt logprobs for each req
-        # separately, which is suboptimal. However, prompt logprobs are rare
-        # (used mostly by lm-eval-harness) and we have few prefill per batch,
-        # so we prioritize simplicity.
+        # NOTE(rob): for simplicity, suboptimally compute prompt logprobs
+        # for each req separately. Prompt logprobs are rare (used for eval),
+        # and we have few prefills per batch, so prioritize simple impl.
         prompt_lps_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
-        if prompt_logprobs_metadata:
-            for (req_id, mask, metadata,
-                 num_logprobs) in prompt_logprobs_metadata.zipped():
-                # TODO: make prompt lp metadata here?
+        if not self.input_batch.no_prompt_logprob:
+            for (req_id, num_prompt_logprobs) in self.input_batch.num_prompt_logprobs.items():
+                
+                # Prepare mask and logits processor.
+                metadata = self._prepare_prompt_logprobs(
+                    req_id, scheduler_output, req_indices)
 
                 # Compute logits.
                 logits = self.model.sampler.compute_logits(
-                    hidden_states[mask], None)
+                    hidden_states[metadata.prompt_indices], None)
+
                 # Compute prompt logprobs.
-                prompt_lps_dict[
-                    req_id] = self.model.sampler.get_prompt_logprobs(
-                        logits, metadata, num_logprobs)
+                prompt_lps_dict[req_id] = (
+                    self.model.sampler.get_prompt_logprobs(
+                        logits,
+                        metadata.logits_process_metadata, 
+                        num_prompt_logprobs,
+                    )
+                )
 
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over

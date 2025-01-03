@@ -17,7 +17,6 @@ class LogitsProcessMetadata:
 @dataclass
 class SamplingMetadata:
 
-    sample_indicies: torch.Tensor
     all_greedy: bool
     all_random: bool
     logits_process_metadata: LogitsProcessMetadata
@@ -28,11 +27,5 @@ class SamplingMetadata:
 @dataclass
 class PromptLogprobsMetadata:
 
-    req_ids: List[str]
-    masks: List[int]
-    logits_process_metadatas: List[LogitsProcessMetadata]
-    num_prompt_logprobs: List[int]
-
-    def zipped(self):
-        return zip(self.req_ids, self.masks, self.logits_process_metadatas,
-                   self.num_prompt_logprobs)
+    prompt_indices: torch.Tensor
+    logits_process_metadata: LogitsProcessMetadata

@@ -273,57 +273,35 @@ class InputBatch:
 
     def make_prompt_logprobs_metadata(
         self,
+        req_id: str,
         partial_req_ids: List[str],
         req_indices: npt.NDArray,
-    ) -> Optional[PromptLogprobsMetadata]:
+    ) -> PromptLogprobsMetadata:
+        req_idx = self.req_id_to_index[req_id]
 
-        if self.no_prompt_logprob:
-            return None
+        # Get the indices for this prefill in current batch.
+        all_indicies = torch.arange(req_indices.shape[0])
+        indices = all_indicies[req_indices == req_idx]
+        if req_id not in partial_req_ids:
+            # Remove the sample token if there is one.
+            indices = indices[:-1]
 
-        # Precompute the indicies.
-        all_indicies = np.arange(req_indices.shape[0])
-
-        # NOTE(rob): we should avoid loops like this in ModelRunner,
-        # but this ONLY loops over requests that are currently in
-        # prefill phase AND need prompt lps.
-        # Should we move this to _update_states or execute_model()
-        # to avoid another loop?
-        req_ids = []
-        masks = []
-        logits_process_metadatas = []
-        num_prompt_logprobs = []
-        for req_id in self.num_prompt_logprobs:
-            req_idx = self.req_id_to_index[req_id]
-
-            # Make the logits mask for this request's prefill.
-            mask = all_indicies[req_indices == req_idx].tolist()
-            if req_id not in partial_req_ids:
-                # Remove the sample token if there is one.
-                mask = mask[:-1]
-
-            # NOTE(rob): the tensors are shape 1, so we can use them in
-            # process_logits since they will be broadcasted to shape N.
-            temperature = self.temperature[req_idx]
-            top_p = self.top_p[req_idx]
-            top_k = self.top_k[req_idx]
-            no_top_p = req_id not in self.top_p_reqs
-            no_top_k = req_id not in self.top_k_reqs
-
-            req_ids.append(req_id)
-            masks.append(mask)
-            num_prompt_logprobs.append(self.num_prompt_logprobs[req_id])
-            logits_process_metadatas.append(
-                LogitsProcessMetadata(temperature=temperature,
-                                      top_p=top_p,
-                                      top_k=top_k,
-                                      no_top_p=no_top_p,
-                                      no_top_k=no_top_k))
+        # The tensors are shape 1, so we can use them in process_logits
+        # since they will be broadcasted to shape N.
+        temperature = self.temperature[req_idx]
+        top_p = self.top_p[req_idx]
+        top_k = self.top_k[req_idx]
+        no_top_p = req_id not in self.top_p_reqs
+        no_top_k = req_id not in self.top_k_reqs
 
         return PromptLogprobsMetadata(
-            req_ids=req_ids,
-            logits_process_metadatas=logits_process_metadatas,
-            masks=masks,
-            num_prompt_logprobs=num_prompt_logprobs)
+            prompt_indices=indices,
+            logits_process_metadata=LogitsProcessMetadata(
+                temperature=temperature,
+                top_p=top_p, top_k=top_k,
+                no_top_p=no_top_p, 
+                no_top_k=no_top_k),
+        )
 
     @property
     def num_reqs(self) -> int:
