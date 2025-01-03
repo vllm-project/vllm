@@ -95,6 +95,9 @@ def parse_singleton_prompt(
         elif "prompt" in prompt:
             return ParsedTextPrompt(type="text", content=prompt)
 
+        elif "prompt_embeds" in prompt:
+            return ParsedTokensPrompt(type="tokens", content=prompt)
+
     raise TypeError("inputs must be a string, TextPrompt, or TokensPrompt")
 
 
