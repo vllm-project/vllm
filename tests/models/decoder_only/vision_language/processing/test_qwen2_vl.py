@@ -15,17 +15,19 @@ def processor_for_qwen2_vl():
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
+# yapf: disable
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"), [
         ({}, 1426, (5704, 1176)),
         ({"min_pixels": 64**2, "max_pixels": 512**2}, 330, (1320, 1176)),
     ])
+# yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_override(
     processor_for_qwen2_vl,
     image_assets: _ImageAssets,
     model_id: str,
-    mm_processor_kwargs: dict[str, int],
+    mm_processor_kwargs: dict[str, object],
     expected_toks_per_img: int,
     expected_pixels_shape: tuple[int, int],
     num_imgs: int,

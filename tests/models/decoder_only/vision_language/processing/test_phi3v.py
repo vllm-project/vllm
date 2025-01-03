@@ -17,6 +17,7 @@ def processor_for_phi3v():
 
 
 @pytest.mark.parametrize("model_id", ["microsoft/Phi-3.5-vision-instruct"])
+# yapf: disable
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),
     [
@@ -25,6 +26,7 @@ def processor_for_phi3v():
         # the default num_crops of phi-3.5-vision is 4
         ({}, 757),
     ])
+# yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_override(
     processor_for_phi3v,
