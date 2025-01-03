@@ -271,6 +271,7 @@ class XGrammarLogitsProcessor:
                  scores: torch.Tensor) -> torch.Tensor:
         if self.ctx is None:
             self._ensure_ctx()
+            assert self.ctx is not None
 
         if len(self.matchers) == 0:
             self.matchers = [
@@ -285,6 +286,9 @@ class XGrammarLogitsProcessor:
         else:
             for i, matcher in enumerate(self.matchers):
                 if not matcher.is_terminated():
+                    if input_ids[
+                            -1] in self.ctx.tokenizer_info.special_token_ids:
+                        continue
                     sampled_token = input_ids[-1]
                     assert self.matchers[i].accept_token(sampled_token)
 
