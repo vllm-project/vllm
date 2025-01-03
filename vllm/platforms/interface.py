@@ -250,6 +250,13 @@ class Platform:
             return False
         return True
 
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        """
+        Return the punica wrapper for current platform.
+        """
+        raise NotImplementedError
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
