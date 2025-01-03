@@ -168,8 +168,6 @@ def test_incremental_detokenization(
                               output_kind=request_output_kind,
                               stop=[],
                               include_stop_str_in_output=False))
-            logprobs=logprobs,
-            prompt_logprobs=prompt_logprobs,
         for idx, (
             prompt,
             prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
@@ -257,8 +255,8 @@ def test_stop_string(
                 output_kind=RequestOutputKind.DELTA,
                 stop=STOP_STRINGS,
                 include_stop_str_in_output=include_stop_str_in_output,
-            logprobs=logprobs,
-            prompt_logprobs=prompt_logprobs,
+                logprobs=logprobs,
+                prompt_logprobs=prompt_logprobs,
             )) for idx, (
                 prompt,
                 prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
