@@ -126,11 +126,11 @@ class EngineCore:
             scheduler_output, output)
         return engine_core_outputs
 
-    def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
-
     def shutdown(self):
         self.model_executor.shutdown()
+
+    def profile(self, is_start: bool = True):
+        self.model_executor.profile(is_start)
 
 
 class EngineCoreProc(EngineCore):
