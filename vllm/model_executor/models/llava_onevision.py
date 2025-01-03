@@ -193,7 +193,7 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
         i2f = spatial_pool_stride * spatial_pool_stride
         max_total_frames -= num_images * i2f
 
-        return max(max_total_frames, 0) // max(num_videos, 1)
+        return max(max_total_frames, 1) // max(num_videos, 1)
 
     def _get_max_video_tokens(self) -> int:
         return self._get_max_frame_tokens() * self._get_max_video_frames()
