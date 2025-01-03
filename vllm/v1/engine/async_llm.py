@@ -296,9 +296,6 @@ class AsyncLLM(EngineClient):
             logger.exception("EngineCore output handler hit an error: %s", e)
             kill_process_tree(os.getpid())
 
-        finally:
-            logger.debug("AsyncLLM output handler shutting down.")
-
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""
 
