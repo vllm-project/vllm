@@ -843,10 +843,6 @@ class LLMEngine:
         sampling_params = self._build_logits_processors(
             sampling_params, lora_request)
 
-        # Defensive copy of SamplingParams, which are used by the sampler,
-        # this doesn't deep-copy LogitsProcessor objects
-        sampling_params = sampling_params.clone()
-
         sampling_params.update_from_generation_config(
             self.generation_config_fields, seq.eos_token_id)
 
@@ -876,8 +872,6 @@ class LLMEngine:
         priority: int = 0,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
-        # Defensive copy of PoolingParams, which are used by the pooler
-        pooling_params = pooling_params.clone()
         # Create the sequence group.
         seq_group = SequenceGroup(
             request_id=request_id,
