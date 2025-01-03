@@ -42,8 +42,6 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-
-        # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -178,8 +176,6 @@ class LLMEngine:
             self.abort_request(requests_to_abort)
 
         return request_outputs
-
-    # TODO(rob): Can we get rid of these?
 
     def get_model_config(self):
         return self.model_config
