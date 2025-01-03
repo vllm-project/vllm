@@ -1,9 +1,9 @@
 from typing import Dict
 
 import pytest
-import pytest_asyncio
 import requests
 
+from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.multimodal.utils import encode_image_base64, fetch_image
 
 from ...utils import VLLM_PATH, RemoteOpenAIServer
@@ -46,12 +46,6 @@ def server():
         yield remote_server
 
 
-@pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
-        yield async_client
-
-
 @pytest.fixture(scope="session")
 def base64_encoded_image() -> Dict[str, str]:
     return {
@@ -82,18 +76,20 @@ async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
         ],
     }]
 
-    response = requests.post(server.url_for("v1/embeddings"),
-                             json={
-                                 "model": model_name,
-                                 "messages": messages,
-                                 "encoding_format": "float"
-                             })
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "encoding_format": "float"
+        },
+    )
     response.raise_for_status()
+    embeddings = EmbeddingResponse.model_validate(response.json())
 
-    embeddings = response.json()
-    assert embeddings["id"] is not None
-    assert len(embeddings["data"]) == 1
-    assert len(embeddings["data"][0]["embedding"]) == 3072
-    assert embeddings["usage"]["completion_tokens"] == 0
-    assert embeddings["usage"]["prompt_tokens"] == 765
-    assert embeddings["usage"]["total_tokens"] == 765
+    assert embeddings.id is not None
+    assert len(embeddings.data) == 1
+    assert len(embeddings.data[0].embedding) == 3072
+    assert embeddings.usage.completion_tokens == 0
+    assert embeddings.usage.prompt_tokens == 764
+    assert embeddings.usage.total_tokens == 764

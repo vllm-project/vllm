@@ -1,9 +1,9 @@
-import atexit
 import os
 import pickle
 import signal
 import sys
 import time
+import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
@@ -17,13 +17,12 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.executor.multiproc_worker_utils import (
-    _add_prefix, get_mp_context, set_multiprocessing_worker_envs)
+    _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_open_port,
-                        get_open_zmq_ipc_path)
+from vllm.utils import (get_distributed_init_method, get_mp_context,
+                        get_open_port, get_open_zmq_ipc_path, zmq_socket_ctx)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import make_zmq_socket
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -37,7 +36,7 @@ class MultiprocExecutor(Executor):
     def __init__(self, vllm_config: VllmConfig) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
-        atexit.register(self.shutdown)
+        self._finalizer = weakref.finalize(self, self.shutdown)
 
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
@@ -195,14 +194,10 @@ class MultiprocExecutor(Executor):
                 os.remove(socket_path)
 
     def shutdown(self):
-        if atexit:
-            # in case shutdown was called explicitly, we don't need to call it
-            # again
-            atexit.unregister(self.shutdown)
         """Properly shut down the executor and its workers"""
         if getattr(self, 'shutting_down', False):
             self.shutting_down = True
-            for w in self.workers:  #TODO: not sure if needed
+            for w in self.workers:
                 w.worker_response_mq = None
             self._ensure_worker_termination()
 
@@ -254,7 +249,7 @@ class WorkerProc:
         worker_response_mq_handle = self.worker_response_mq.export_handle()
 
         # Send Readiness signal to EngineCore process.
-        with make_zmq_socket(ready_path, zmq.constants.PUSH) as ready_socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
             payload = pickle.dumps(worker_response_mq_handle,
                                    protocol=pickle.HIGHEST_PROTOCOL)
             ready_socket.send_string(WorkerProc.READY_STR)
@@ -356,7 +351,7 @@ class WorkerProc:
         ready_path: str,
     ) -> Optional[Handle]:
         """Wait until the Worker is ready."""
-        with make_zmq_socket(ready_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
 
             # Wait for Worker to send READY.
             while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:

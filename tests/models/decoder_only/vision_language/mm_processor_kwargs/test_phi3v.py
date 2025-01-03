@@ -4,7 +4,7 @@ from typing import Optional
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.inputs import InputContext, InputProcessingContext
+from vllm.inputs import InputProcessingContext
 from vllm.model_executor.models.phi3v import _IMAGE_TOKEN_ID
 
 from .....conftest import _ImageAssets
@@ -20,54 +20,16 @@ def processor_for_phi3v():
     return Phi3VMultiModalProcessor
 
 
-@pytest.fixture()
-def get_max_phi3v_image_tokens():
-    from vllm.model_executor.models.phi3v import get_max_phi3v_image_tokens
-    return get_max_phi3v_image_tokens
-
-
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("num_crops,expected_max_tokens", [
-    (4, 781),
-    (16, 2653),
-])
-def test_max_tokens_override(get_max_phi3v_image_tokens, model: str,
-                             num_crops: int, expected_max_tokens: int):
-    """Ensure get_max_phi3v_image_tokens handles num_crops properly."""
-    # NOTE: mm_processor_kwargs on the context in this test is unused, since
-    # this is testing the mapper directly. In practice, the processor kwargs
-    # are wrapped in a closure when calling the max tokens func. We explicitly
-    # do NOT use the mm_processor_kwargs in the model context here to ensure
-    # that the max image tokens implementation is referencing a mix of the
-    # kwargs to the function and the original mm_processor_kwargs in case
-    # values are somehow updated and end up in a bad state.
-    ctx = build_model_context(
-        model_name=model,
-        tokenizer_name=model,
-        trust_remote_code=True,
-        mm_processor_kwargs=None,
-    )
-
-    actual_max_tokens = get_max_phi3v_image_tokens(
-        InputContext(ctx.model_config),
-        num_crops=num_crops,
-    )
-
-    assert expected_max_tokens == actual_max_tokens
-
-
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
-    "num_crops,expected_toks_per_img,num_imgs",
+    "num_crops,expected_toks_per_img",
     [
-        (4, 757, 1),
-        (4, 757, 2),
-        (16, 1921, 1),
-        (16, 1921, 2),
+        (4, 757),
+        (16, 1921),
         # the default num_crops of phi-3.5-vision is 4
-        (None, 757, 2),
-        (None, 757, 2),
+        (None, 757),
     ])
+@pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_override(processor_for_phi3v, image_assets: _ImageAssets,
                             model: str, num_crops: Optional[int],
                             expected_toks_per_img: int, num_imgs: int):
@@ -79,6 +41,7 @@ def test_processor_override(processor_for_phi3v, image_assets: _ImageAssets,
         model_name=model,
         tokenizer_name=model,
         trust_remote_code=True,
+        limit_mm_per_prompt={"image": num_imgs},
     )
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     ctx = InputProcessingContext(ctx.model_config, tokenizer)
