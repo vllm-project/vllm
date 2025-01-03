@@ -47,7 +47,8 @@ class Sampler(nn.Module):
         sampled = sampled.to(torch.int32)
 
         if needs_logprobs:
-            # Compute topk and sample logprobs.
+            # Get sampled and topk token logprobs.
+            # NOTE: CPU<>GPU sync happens here.
             logprob_token_ids, logprobs = self.get_logprobs(
                 raw_logits,
                 sampling_metadata.max_num_logprobs,
@@ -58,26 +59,10 @@ class Sampler(nn.Module):
         # NOTE: CPU-GPU synchronization happens here.
         sampler_output = SamplerOutput(
             sampled_token_ids=sampled.tolist(),
-            logprob_token_ids=logprob_token_ids or logprob_token_ids.cpu(),
-            logprobs=logprobs or logprobs.cpu(),
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs,
         )
         return sampler_output
-
-    def get_prompt_logprobs(
-        self,
-        logits: torch.Tensor,
-        logits_process_metadata: LogitsProcessMetadata,
-        num_logprobs: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        logits = self.apply_temperature(logits,
-                                        logits_process_metadata.temperature)
-        logits = self.apply_top_k_top_p(logits, logits_process_metadata)
-
-        # NOTE: CPU-GPU synchronization happens here.
-        logprob_token_ids, logprobs = self._compute_logprobs(
-            logits=logits, max_num_logprobs=num_logprobs)
-
-        return logprob_token_ids, logprobs
 
     def apply_temperature(
         self,
@@ -131,8 +116,9 @@ class Sampler(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Compute logprobs.
         logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
-        topk_logprobs, topk_indices = torch.topk(
-            logprobs, num_logprobs, dim=-1)
+        topk_logprobs, topk_indices = torch.topk(logprobs,
+                                                 num_logprobs,
+                                                 dim=-1)
         # Use int32 to reduce the tensor size.
         topk_indices = topk_indices.to(torch.int32)
 
@@ -144,7 +130,7 @@ class Sampler(nn.Module):
             topk_indices = torch.cat([sampled_token_ids, topk_indices])
             topk_logprobs = torch.cat([sampled_logprobs, topk_logprobs])
 
-        return topk_logprobs, topk_indices
+        return topk_logprobs.cpu(), topk_indices.cpu()
 
     def apply_penalties(
         self,
