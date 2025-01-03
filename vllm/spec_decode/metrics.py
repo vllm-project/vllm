@@ -117,7 +117,7 @@ class AsyncMetricsCollector:
         if self._rank != 0:
             return False
 
-        return now - self._last_metrics_collect_time >= self._rejsample_metrics_collect_interval_s  # noqa: E501
+        return now - self._last_metrics_collect_time >= 0.1  # noqa: E501
 
     def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
         """Copy rejection/typical-acceptance sampling metrics

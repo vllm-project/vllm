@@ -23,7 +23,7 @@ class DummyInputLayerNorm(nn.Module):
         return x
 
 
-class DummOutputNorm(nn.Module):
+class DummyOutputNorm(nn.Module):
 
     def forward(self, x, residual):
         x = x + residual
@@ -36,8 +36,9 @@ class EAGLE(nn.Module):
     
     Differences from reference implementation:
     1. In reference, LlamaDecoderLayer implementation doesn't have 
-       input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427) 
-       but we do as HF implementation also does.
+       input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427).
+       Following this approach, our implementation also disables
+       the input_layernormfor the first decoder layer.
     2. We allow any decoder layer to be used in EAGLE whereas in reference 
        decoder layer is fixed to be LlamaDecoderLayer.
     3. We have an optional token_map which reduces draft vocab to most 
@@ -67,7 +68,7 @@ class EAGLE(nn.Module):
         # Modify layer normalization and residual connections as suggested
         # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
         self.model.model.layers[0].input_layernorm = DummyInputLayerNorm()
-        self.model.model.norm = DummOutputNorm()
+        self.model.model.norm = DummyOutputNorm()
 
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size
