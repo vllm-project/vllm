@@ -134,7 +134,7 @@ class AsyncLLM(EngineClient):
         )
 
     def shutdown(self):
-        """Shutdown background resources."""
+        """Shutdown, cleaning up the background proc and IPC."""
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
