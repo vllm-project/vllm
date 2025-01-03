@@ -38,7 +38,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.distributed import parallel_state
+from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
@@ -239,6 +239,8 @@ class Qwen2VisionAttention(nn.Module):
         super().__init__()
         # Per attention head and per partition values.
         world_size = parallel_state.get_tensor_model_parallel_world_size()
+        self.tp_size = world_size
+        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
         self.num_attention_heads_per_partition = dist_utils.divide(
@@ -261,6 +263,29 @@ class Qwen2VisionAttention(nn.Module):
             raise RuntimeError(
                 f"Qwen2-VL does not support {self.attn_backend} backend now.")
 
+    def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        # [s, b, 3 * head * head_dim]
+        seq_len, bs, _ = qkv.shape
+        if self.tp_size > 1:
+            qkv = tensor_model_parallel_all_gather(qkv)
+
+        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
+        q, k, v = qkv.chunk(3, dim=2)
+
+        # 3 * [s, b, head * head_dim]
+        if self.tp_size > 1:
+            splitter = partial(dist_utils.split_tensor_along_last_dim,
+                               num_partitions=self.tp_size)
+            q = splitter(q)[self.tp_rank]
+            k = splitter(k)[self.tp_rank]
+            v = splitter(v)[self.tp_rank]
+
+        # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
+        new_shape = (seq_len, bs, self.num_attention_heads_per_partition,
+                     self.hidden_size_per_attention_head)
+        q, k, v = (x.view(*new_shape) for x in (q, k, v))
+        return q, k, v
+
     def forward(
         self,
         x: torch.Tensor,
@@ -268,32 +293,11 @@ class Qwen2VisionAttention(nn.Module):
         rotary_pos_emb: torch.Tensor,
     ) -> torch.Tensor:
 
-        s, b = x.size()[:-1]
-        # [s, b, c] --> [s, b,3 * head * head_dim]
+        # [s, b, c] --> [s, b, 3 * head * head_dim]
         x, _ = self.qkv(x)
 
-        new_x_shape = x.size()[:-1] + (
-            3,
-            self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
-        )
-        x = x.view(*new_x_shape)
-        # NOTE: A  way to ensure the loaded weights and bias remains unchanged.
-        # Although this introduces reshape operations that impact performance,
-        # reshaping the weights would not be conducive to supporting like BNB.
-        # [s, b, 3, head, head_dim] --> [s, b, head, 3, head_dim]
-        x = x.transpose(2, 3)
-        # [s, b, head, 3, head_dim] --> [s, b, head, 3 * head_dim]
-        new_x_shape = (
-            s,
-            b,
-            self.num_attention_heads_per_partition,
-            3 * self.hidden_size_per_attention_head,
-        )
-        x = x.reshape(*new_x_shape)
-
-        # [s, b, head, 3 * head_dim] --> 3 [s, b, head, head_dim]
-        q, k, v = dist_utils.split_tensor_along_last_dim(x, 3)
+        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
+        q, k, v = self.split_qkv(x)
         batch_size = q.shape[1]
 
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
