@@ -1046,9 +1046,11 @@ class BaseMultiModalProcessor(ABC):
             )
 
         mm_placeholders = dict[str, list[PlaceholderRange]]()
-        err_suffix = ("This suggests a problem with your implementation of "
-                      "the merged multi-modal processor for this model, "
-                      "particularly in the `_get_prompt_replacements` method.")
+        err_suffix = (
+            "Either the prompt text has missing/incorrect tokens for "
+            "multi-modal inputs, or there is a problem with your "
+            "implementation of merged multi-modal processor for this model, "
+            "particularly in the `_get_prompt_replacements` method.")
 
         for modality, placeholders in full_groupby_modality(all_placeholders):
             if modality not in mm_items:
