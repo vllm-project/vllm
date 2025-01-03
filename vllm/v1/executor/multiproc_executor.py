@@ -350,7 +350,7 @@ class WorkerProc:
             logger.debug("Worker interrupted.")
 
         except Exception:
-            # worker_busy_loop sends exceptions exceptons to Executor
+            # worker_busy_loop sends exceptons to Executor
             # for shutdown, but if there is an error in startup or an
             # error with IPC itself, we need to alert the parent.
             psutil.Process().parent().send_signal(signal.SIGQUIT)
