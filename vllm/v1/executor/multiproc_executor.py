@@ -353,7 +353,6 @@ class WorkerProc:
             # worker_busy_loop sends exceptions exceptons to Executor
             # for shutdown, but if there is an error in startup or an
             # error with IPC itself, we need to alert the parent.
-            # itself, we need to alert the parent so we can shut down.
             psutil.Process().parent().send_signal(signal.SIGQUIT)
             raise
 
