@@ -49,9 +49,6 @@ class Processor:
             cache_config.enable_prefix_caching
         self.mm_hasher = MMHasher()
 
-    # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
-    # This ideally should releases the GIL, so we should not block the
-    # asyncio loop while this is running.
     def process_inputs(
         self,
         request_id: str,
