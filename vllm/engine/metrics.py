@@ -257,6 +257,11 @@ class Metrics:
             name="vllm:spec_decode_num_emitted_tokens_total",
             documentation="Number of emitted tokens.",
             labelnames=labelnames))
+        self.gauge_spec_decode_mean_accepted_tokens = self._gauge_cls(
+            name="vllm:spec_decode_mean_accepted_tokens",
+            documentation="Mean length of speculative tokens.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
 
         # Deprecated in favor of vllm:prompt_tokens_total
         self.gauge_avg_prompt_throughput = self._gauge_cls(
@@ -504,13 +509,16 @@ class LoggingStatLogger(StatLoggerBase):
     def _format_spec_decode_metrics_str(
             self, metrics: "SpecDecodeWorkerMetrics") -> str:
 
-        return ("Speculative metrics: "
-                f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
-                f"System efficiency: {metrics.system_efficiency:.3f}, "
-                f"Number of speculative tokens: {metrics.num_spec_tokens}, "
-                f"Number of accepted tokens: {metrics.accepted_tokens}, "
-                f"Number of draft tokens: {metrics.draft_tokens}, "
-                f"Number of emitted tokens: {metrics.emitted_tokens}.")
+        return (
+            "Speculative metrics: "
+            f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
+            f"System efficiency: {metrics.system_efficiency:.3f}, "
+            f"Number of speculative tokens: {metrics.num_spec_tokens}, "
+            f"Number of accepted tokens: {metrics.accepted_tokens}, "
+            f"Number of draft tokens: {metrics.draft_tokens}, "
+            f"Number of emitted tokens: {metrics.emitted_tokens}."
+            f"Mean accepted tokens length: {metrics.mean_accepted_tokens:.3f}."
+        )
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         raise NotImplementedError
@@ -692,6 +700,9 @@ class PrometheusStatLogger(StatLoggerBase):
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_emitted_tokens,
                     self.spec_decode_metrics.emitted_tokens)
+                self._log_gauge(
+                    self.metrics.gauge_spec_decode_mean_accepted_tokens,
+                    self.spec_decode_metrics.mean_accepted_tokens)
 
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
