@@ -3,6 +3,7 @@ import time
 from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -215,6 +216,11 @@ class GPUModelRunner:
             req_state.block_ids.extend(req_data.new_block_ids)
             self.input_batch.block_table_cpu[
                 req_index, start_index:end_index] = req_data.new_block_ids
+
+            # Remove from prompt logprobs once out of prefill phase.
+            if (req_id in self.input_batch.num_prompt_logprobs
+                    and req_id not in scheduler_output.partial_req_ids):
+                del self.input_batch.num_prompt_logprobs[req_id]
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -464,7 +470,7 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices
+        return attn_metadata, logits_indices, req_indices
 
     def _prepare_sampling(
         self,
@@ -485,6 +491,28 @@ class GPUModelRunner:
         sampling_metadata = self.input_batch.make_sampling_metadata(
             req_id_output_token_ids, skip_copy)
         return sampling_metadata
+
+    def _prepare_prompt_indices(
+        self,
+        req_id: str,
+        scheduler_output: "SchedulerOutput",
+        req_indices: npt.NDArray,
+    ) -> npt.NDArray:
+        """Get the indices of a prompt in the batch."""
+
+        # NOTE(rob): req_indices is the req_idx of each token.
+        # If we have 3 sequences in the batch of lens [2, 5, 3],
+        # req_indices = [0, 0, 1, 1, 1, 1, 1, 2, 2, 2].
+        # Thus, prompt_indices is where req_indices == req_idx.
+        req_idx = self.input_batch.req_id_to_index[req_id]
+        indices = self.arange_np[:req_indices.shape[0]]
+        prompt_indices = indices[req_indices == req_idx]
+
+        # Remove the sample token if there is one.
+        if req_id not in scheduler_output.partial_req_ids:
+            prompt_indices = prompt_indices[:-1]
+
+        return prompt_indices
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -574,7 +602,8 @@ class GPUModelRunner:
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        attn_metadata, logits_indices, req_indices = (
+            self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -620,8 +649,8 @@ class GPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
+        sample_hidden_states = hidden_states[logits_indices]
+        logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(scheduler_output)
@@ -629,6 +658,24 @@ class GPUModelRunner:
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+
+        # Compute prompt logprobs if needed.
+        # NOTE(rob): for simplicity, compute prompt logprobs for each
+        # prompt separately. Prompt logprobs are rare (used for eval),
+        # and few prefills per batch, so prioritize simple over optimal.
+        prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        for (request_id, num_prompt_logprobs
+             ) in self.input_batch.num_prompt_logprobs.items():
+
+            # Compute of the prompt.
+            prompt_indices = self._prepare_prompt_indices(
+                request_id, scheduler_output, req_indices)
+            prompt_hidden_states = hidden_states[prompt_indices]
+            logits = self.model.compute_logits(prompt_hidden_states, None)
+
+            # Compute prompt logprobs.
+            prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
+                logits, num_prompt_logprobs)
 
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
@@ -654,15 +701,6 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        if sampler_output.logprob_token_ids is None:
-            logprob_token_ids = None
-        else:
-            logprob_token_ids = sampler_output.logprob_token_ids.cpu()
-        if sampler_output.logprobs is None:
-            logprobs = None
-        else:
-            logprobs = sampler_output.logprobs.cpu()
-
         # num_reqs entries should be non-None
         assert all(
             req_id is not None for req_id in
@@ -673,8 +711,9 @@ class GPUModelRunner:
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
+            logprob_token_ids_cpu=sampler_output.logprob_token_ids,
+            logprobs_cpu=sampler_output.logprobs,
+            prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
 

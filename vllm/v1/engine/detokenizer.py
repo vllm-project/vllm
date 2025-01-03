@@ -1,12 +1,16 @@
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
+import torch
+
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
+from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
+    AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally,
+    detokenize_non_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
@@ -42,6 +46,12 @@ class IncrementalDetokenizer:
     # Tokenizer for this request
     tokenizer: AnyTokenizer
 
+    # Logprobs for this request
+    logprobs: Optional[SampleLogprobs]
+    prompt_logprobs: Optional[PromptLogprobs]
+    cumulative_logprob: Optional[float]
+    num_logprobs: int
+
     # Accounting for stop string buffering
     stop_buffer_length: int
     _last_output_text_offset: int = 0
@@ -72,6 +82,7 @@ class IncrementalDetokenizer:
         else:
             stop_buffer_length = 0
 
+        logprobs = request.sampling_params.logprobs
         return cls(
             output_text="",
             tokens=tokens,
@@ -92,18 +103,139 @@ class IncrementalDetokenizer:
             prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
+            cumulative_logprob=(0. if logprobs else None),
+            logprobs=([] if logprobs else None),
+            prompt_logprobs=None,
+            num_logprobs=(logprobs or 0),
         )
+
+    def _update_sample_logprobs(
+        self,
+        sampled_token_ids: List[int],
+        token_ids_lst: List[torch.Tensor],
+        logprobs_lst: List[torch.Tensor],
+    ) -> Optional[SampleLogprobs]:
+        """
+        Lists are only of length >1 if EngineCore made
+        >1 tokens in prior step (e.g. in spec decoding).
+
+        Tensors are:
+            token_ids: [topk + 1]: topk token ids at pos
+            logprobs:  [topk + 1]: topk logprobs at pos
+        """
+
+        if self.num_logprobs == 0:
+            return None
+        assert self.logprobs is not None
+
+        for sampled_token_id, logprobs, token_ids in zip(
+                sampled_token_ids, logprobs_lst, token_ids_lst):
+
+            # Split into sampled vs top_k.
+            assert sampled_token_id == token_ids[0].item(), (
+                "Sampler concats the sampled token logprob in front of "
+                f"the topk logprobs, but got {sampled_token_id=} and "
+                f"{token_ids[0].item()=}")
+            sampled_token_logprob = logprobs[0].item()
+            topk_token_ids = token_ids[1:]
+            topk_logprobs = logprobs[1:]
+
+            # Detokenize non-incrementally.
+            decoded_tokens = detokenize_non_incrementally(
+                self.tokenizer, topk_token_ids)
+
+            # Make the Logprob objects the position.
+            pos_logprobs_dict = self._make_pos_logprob_dict(
+                topk_token_ids.tolist(), topk_logprobs.tolist(),
+                decoded_tokens, self.num_logprobs)
+
+            # Add the sampled Logprob if it was not in topk.
+            if sampled_token_id not in pos_logprobs_dict:
+                token = self.tokenizer.decode(sampled_token_id)
+                pos_logprobs_dict[sampled_token_id] = Logprob(
+                    logprob=sampled_token_logprob,
+                    rank=None,  # TODO: is this needed?
+                    decoded_token=token)
+
+            self.logprobs.append(pos_logprobs_dict)
+            self.cumulative_logprob += sampled_token_logprob
+
+        # Return just the newly generated sample logprobs.
+        num_new_tokens = len(sampled_token_ids)
+        return self.logprobs[-num_new_tokens:]
+
+    def _update_prompt_logprobs(
+        self,
+        token_ids: Optional[torch.Tensor],
+        logprobs: Optional[torch.Tensor],
+    ) -> Optional[PromptLogprobs]:
+
+        # Skip if no prompt logprobs were generated.
+        if token_ids is None:
+            return None
+        assert logprobs is not None
+
+        # EngineCore does not stream until entire prompt complete,
+        # so Detokenizer should get all prompt lps at once.
+        assert self.prompt_logprobs is None
+
+        # Detokenize non-incrementally.
+        # NOTE(rob): the output is flattened:
+        # [num_tok, num_lps] -> [num_tok * num_lps]
+        decoded_tokens = detokenize_non_incrementally(self.tokenizer,
+                                                      token_ids)
+
+        # Make Logprob for each tokens. The first Logprob is None.
+        num_tokens, num_logprobs = logprobs.shape
+        self.prompt_logprobs = [None] + [
+            self._make_pos_logprob_dict(
+                logprobs[tok_idx].tolist(),
+                token_ids[tok_idx].tolist(),
+                # Deal with the flattening from above.
+                decoded_tokens[tok_idx * num_logprobs:],
+                num_logprobs,
+            ) for tok_idx in range(num_tokens)
+        ]
+
+        return self.prompt_logprobs
+
+    @staticmethod
+    def _make_pos_logprob_dict(
+        logprobs: List[float],
+        token_ids: List[int],
+        decoded_tokens: List[str],
+        num_logprobs: int,
+    ) -> Dict[int, Logprob]:
+        """Make a Logprob dictionary for a position in the sequence."""
+
+        # Sampler uses torch.topk() which sorts so the
+        # index in lists is equivalent to rank.
+        return {
+            token_ids[idx]: Logprob(
+                logprob=logprobs[idx],
+                rank=idx,
+                decoded_token=decoded_tokens[idx],
+            )
+            for idx in range(num_logprobs)
+        }
 
     def add_tokens(
         self,
         new_token_ids: List[int],
+        new_logprobs_token_ids: List[torch.Tensor],
+        new_logprobs: List[torch.Tensor],
+        new_prompt_logprobs_token_ids: Optional[torch.Tensor],
+        new_prompt_logprobs: Optional[torch.Tensor],
         finish_reason: Optional[str],
         stop_reason: Optional[Union[int, str, None]],
     ) -> Optional[RequestOutput]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
-            2) Update the RequestOutput with the new text.
+            2) Evaluate stop criteria.
+            3) Detokenize sample logprobs non-incrementally.
+            4) Detokenize prompt logprobs non-incrementally.
+            5) Make the `RequestOutput` object with new text.
         """
 
         # 1) Detokenize the new token ids incrementally.
@@ -146,9 +278,20 @@ class IncrementalDetokenizer:
                 finish_reason = "stop"  # TODO: use constant
                 stop_reason = stop_str
 
-        # TODO: handle stop_token_ids here too?
+        # 3) Make Sample Logprobs.
+        logprobs = self._update_sample_logprobs(
+            new_token_ids,
+            new_logprobs_token_ids,
+            new_logprobs,
+        )
 
-        # 3) Update the RequestOutput object with the new text.
+        # 4) Make Prompt Logprobs.
+        prompt_logprobs = self._update_prompt_logprobs(
+            new_prompt_logprobs_token_ids,
+            new_prompt_logprobs,
+        )
+
+        # 5) Makes the RequestOutput object with the new text.
         finished = bool(finish_reason)
         if self.output_kind == RequestOutputKind.FINAL_ONLY \
             and not finished:
@@ -157,6 +300,8 @@ class IncrementalDetokenizer:
         delta = self.output_kind == RequestOutputKind.DELTA
         output_text = self._get_next_output_text(finished, delta)
         token_ids = new_token_ids if delta else self.output_token_ids
+        logprobs = logprobs if delta else self.logprobs
+        prompt_logprobs = prompt_logprobs if delta else self.prompt_logprobs
 
         request_output = RequestOutput.new(
             self.request_id,
@@ -164,6 +309,9 @@ class IncrementalDetokenizer:
             self.prompt_token_ids,
             output_text,
             token_ids,
+            logprobs,
+            prompt_logprobs,
+            self.cumulative_logprob,
             finished,
         )
 
@@ -255,6 +403,11 @@ class Detokenizer:
             # Detokenize and update state.
             request_output = detokenizer.add_tokens(
                 new_token_ids=engine_core_output.new_token_ids,
+                new_logprobs=engine_core_output.logprobs,
+                new_logprobs_token_ids=engine_core_output.logprobs_token_ids,
+                new_prompt_logprobs=engine_core_output.prompt_logprobs,
+                new_prompt_logprobs_token_ids=(
+                    engine_core_output.prompt_logprobs_token_ids),
                 finish_reason=engine_core_output.finish_reason,
                 stop_reason=engine_core_output.stop_reason,
             )

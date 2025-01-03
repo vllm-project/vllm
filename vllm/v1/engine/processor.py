@@ -49,6 +49,31 @@ class Processor:
             cache_config.enable_prefix_caching
         self.mm_hasher = MMHasher()
 
+    def _validate_logprobs(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        if not isinstance(params, SamplingParams):
+            return
+
+        max_logprobs = self.model_config.max_logprobs
+        # Validate sample logprobs.
+        if (params.logprobs and params.logprobs > max_logprobs):
+            raise ValueError(
+                f"Requested sample logprobs of {params.logprobs}, "
+                f"which is greater than max allowed: {max_logprobs}")
+
+        # Validate prompt logprobs.
+        if (params.prompt_logprobs and params.prompt_logprobs > max_logprobs):
+            raise ValueError(
+                f"Requested prompt logprobs of {params.prompt_logprobs}, "
+                f"which is greater than max allowed: {max_logprobs}")
+
+    def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
+
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
     # This ideally should releases the GIL, so we should not block the
     # asyncio loop while this is running.
@@ -65,12 +90,11 @@ class Processor:
     ) -> EngineCoreRequest:
 
         # TODO(woosuk): Support pooling models.
-        # TODO(woosuk): Check max_logprobs
         # TODO(woosuk): Support encoder-decoder models.
 
-        if lora_request is not None and not self.lora_config:
-            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
-                             "not enabled!")
+        self._validate_logprobs(params)
+        self._validate_lora(lora_request)
+
         if arrival_time is None:
             arrival_time = time.time()
         assert priority == 0, "vLLM V1 does not support priority at the moment."
