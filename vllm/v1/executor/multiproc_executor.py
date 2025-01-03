@@ -391,8 +391,9 @@ class WorkerProc:
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
 
-        method, args, kwargs = self.rpc_broadcast_mq.dequeue()
         while True:
+            method, args, kwargs = self.rpc_broadcast_mq.dequeue()
+
             try:
                 if self.rank == 0:
                     raise ValueError("SIMULATE CUDA ERROR")
