@@ -709,7 +709,8 @@ def bench_optype(ctx: BenchmarkContext,
     if test_correctness:
         assert all([
             bt.test_correctness(op_type, expand_fn_add_inputs)
-            for bt in bench_tensors
+            for bt in bench_tensors[:cuda_graph_nops if cuda_graph_nops
+                                    is not None else arg_pool_size]
         ])
 
     return timer
@@ -778,7 +779,7 @@ def print_timers(timers: List[TMeasurement],
     if args and args.cuda_graph_nops:
         print(f"The timings reported above is for {args.cuda_graph_nops} "
               "consecutive invocations of the benchmarking functions. "
-              "Please divide by {args.cuda_graph_nops} for single invocation "
+              f"Please divide by {args.cuda_graph_nops} for single invocation "
               "timings ")
 
 
