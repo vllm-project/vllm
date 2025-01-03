@@ -719,7 +719,7 @@ class BaseMultiModalProcessor(ABC):
         """
         raise NotImplementedError
 
-    def _find_placeholders(
+    def _find_placeholders_by_modality(
         self,
         all_prompt_repls: Sequence[_BoundPromptReplacement],
         new_token_ids: list[int],
@@ -930,10 +930,11 @@ class BaseMultiModalProcessor(ABC):
         """
         A flag which can be overridden so that
         :meth:`_apply_prompt_replacements` is always called even if we
-        detect that HF has performed processing via :meth:`_find_placeholders`.
+        detect that HF has performed processing via
+        :meth:`_find_placeholders_by_modality`.
 
-        This is useful in cases where :meth:`_find_placeholders` cannot be
-        reliably used to detect whether HF has performed processing or not.
+        This is useful in cases where :meth:`_find_placeholders_by_modality`
+        cannot be reliably used to detect whether HF has performed processing.
         """
         return False
 
@@ -986,8 +987,11 @@ class BaseMultiModalProcessor(ABC):
             token_ids = _encode(tokenizer, text)
             matched_repls = [match.prompt_repl for match in text_matches]
 
-        placeholders = self._find_placeholders(matched_repls, token_ids,
-                                               mm_item_counts)
+        placeholders = self._find_placeholders_by_modality(
+            matched_repls,
+            token_ids,
+            mm_item_counts,
+        )
 
         return token_ids, text, placeholders
 
@@ -1043,12 +1047,15 @@ class BaseMultiModalProcessor(ABC):
         )
         prompt_repls = self._bind_prompt_replacements(unbound_prompt_repls)
 
+        mm_item_counts = mm_items.get_all_counts()
+        mm_placeholders = self._find_placeholders_by_modality(
+            prompt_repls,
+            prompt_ids,
+            mm_item_counts,
+        )
+
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        mm_item_counts = mm_items.get_all_counts()
-        mm_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
-                                                  mm_item_counts)
-
         try:
             self._validate_placeholders(mm_placeholders, mm_item_counts)
         except ValueError:

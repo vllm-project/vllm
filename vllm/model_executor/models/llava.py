@@ -716,8 +716,11 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         )
         orig_repls = self._bind_prompt_replacements(unbound_orig_repls)
 
-        mm_placeholders = self._find_placeholders(orig_repls, prompt_ids,
-                                                  mm_item_counts)
+        mm_placeholders = self._find_placeholders_by_modality(
+            orig_repls,
+            prompt_ids,
+            mm_item_counts,
+        )
 
         self._validate_placeholders(mm_placeholders, mm_item_counts)
 
