@@ -187,6 +187,7 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGINT, signal_handler)
 
         parent_process = psutil.Process().parent()
+        engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
             engine_core.run_busy_loop()
@@ -198,6 +199,10 @@ class EngineCoreProc(EngineCore):
             traceback = get_exception_traceback()
             logger.error("EngineCore hit an exception: %s", traceback)
             parent_process.send_signal(signal.SIGQUIT)
+
+        finally:
+            if engine_core is not None:
+                engine_core.shutdown()
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
