@@ -389,7 +389,6 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
-
         while True:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
