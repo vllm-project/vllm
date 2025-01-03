@@ -98,9 +98,6 @@ class InprocClient(EngineCoreClient):
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
 
-    def shutdown(self):
-        self.engine_core.shutdown()
-
     def get_output(self) -> List[EngineCoreOutput]:
         return self.engine_core.step()
 
@@ -109,6 +106,9 @@ class InprocClient(EngineCoreClient):
 
     def abort_requests(self, request_ids: List[str]) -> None:
         self.engine_core.abort_requests(request_ids)
+
+    def shutdown(self):
+        self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
