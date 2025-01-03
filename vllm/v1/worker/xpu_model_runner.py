@@ -1,9 +1,18 @@
+
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+
+import numpy as np
 import torch
 
-from vllm.config import VllmConfig
-from vllm.inputs import INPUT_REGISTRY, InputRegistry
+from vllm.config import CompilationLevel, VllmConfig
+from vllm.inputs import INPUT_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
+                        LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend
+from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 
 class XPUModelRunner(GPUModelRunner):
@@ -14,8 +23,134 @@ class XPUModelRunner(GPUModelRunner):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        super().__init__(vllm_config, device)
-        self.use_cuda_graph = False
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
+
+        model_config = self.model_config
+        cache_config = self.cache_config
+        scheduler_config = self.scheduler_config
+        parallel_config = self.parallel_config
+        self.device = device
+        self.pin_memory = is_pin_memory_available()
+        self.dtype = self.model_config.dtype
+        if cache_config.cache_dtype == "auto":
+            self.kv_cache_dtype = self.dtype
+        else:
+            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+                cache_config.cache_dtype]
+
+        self.is_multimodal_model = model_config.is_multimodal_model
+        self.sliding_window = model_config.get_sliding_window()
+        self.block_size = cache_config.block_size
+        self.max_model_len = model_config.max_model_len
+        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = scheduler_config.max_num_seqs
+
+        # Model-related.
+        self.num_attn_layers = model_config.get_num_layers_by_block_type(
+            parallel_config, LayerBlockType.attention)
+        self.num_query_heads = model_config.get_num_attention_heads(
+            parallel_config)
+        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        self.head_size = model_config.get_head_size()
+        self.hidden_size = model_config.get_hidden_size()
+
+        # Multi-modal data support
+        self.input_registry = INPUT_REGISTRY
+        self.mm_registry = MULTIMODAL_REGISTRY
+
+        # NOTE: mm_input_mapper_client and mm_hasher are only used for memory
+        # profiling.
+        self.mm_input_mapper_client = MMInputMapperClient(self.model_config)
+        self.mm_hasher = MMHasher()
+        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
+            cache_config.enable_prefix_caching
+
+        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
+        self.encoder_cache_size = self.scheduler_config.encoder_cache_size
+
+        # Lazy initialization
+        # self.model: nn.Module  # Set after load_model
+        self.kv_caches: List[torch.Tensor] = []
+        # req_id -> (input_id -> encoder_output)
+        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+
+        # Request states.
+        self.requests: Dict[str, CachedRequestState] = {}
+        # Persistent batch.
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=model_config.get_vocab_size(),
+        )
+
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+                               == CompilationLevel.PIECEWISE
+                               and not self.model_config.enforce_eager)
+        # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
+        # The convention is different.
+        # self.cudagraph_batch_sizes sorts in ascending order.
+        # The batch sizes in the config are in descending order.
+        self.cudagraph_batch_sizes = list(
+            reversed(self.vllm_config.compilation_config.capture_sizes))
+
+        # Persistent buffers for CUDA graphs.
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.device)
+        self.positions = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int64,
+                                     device=self.device)
+        self.inputs_embeds = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=self.device)
+
+        # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        self.arange_np = np.arange(max(self.max_num_reqs + 1,
+                                       self.max_model_len),
+                                   dtype=np.int32)
+        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
+        # a faster version of creating a new tensor every time. Thus, we should
+        # not make any assumptions about the values in these tensors.
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int32,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.input_ids_np = self.input_ids_cpu.numpy()
+        self.positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.positions_np = self.positions_cpu.numpy()
+        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+        self.seq_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                             dtype=torch.int32,
+                                             device="cpu",
+                                             pin_memory=self.pin_memory)
+        self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
+
 
     @torch.inference_mode()
     def profile_run(self) -> None:
