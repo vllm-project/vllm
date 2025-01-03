@@ -9,7 +9,6 @@ from transformers import (BatchFeature, Blip2Config, Blip2Processor,
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
-from vllm.inputs import InputContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -397,12 +396,17 @@ class Blip2QFormerModel(nn.Module):
         return sequence_output
 
 
-def get_max_blip2_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(Blip2Config)
-    return hf_config.num_query_tokens
-
-
 class Blip2MultiModalProcessor(BaseMultiModalProcessor):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
+    def _get_num_image_tokens(self) -> int:
+        hf_config = self.ctx.get_hf_config(Blip2Config)
+        return hf_config.num_query_tokens
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        return {"image": self._get_num_image_tokens()}
 
     def _get_hf_processor(self) -> Blip2Processor:
         return self.ctx.get_hf_processor(Blip2Processor)
@@ -423,7 +427,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        max_image_tokens = get_max_blip2_image_tokens(self.ctx)
+        max_image_tokens = self._get_num_image_tokens()
 
         return [
             PromptReplacement(
@@ -476,7 +480,6 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_blip2_image_tokens)
 @MULTIMODAL_REGISTRY.register_processor(Blip2MultiModalProcessor)
 class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 

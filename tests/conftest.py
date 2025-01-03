@@ -40,6 +40,7 @@ logger = init_logger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
+_SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
@@ -175,6 +176,12 @@ def example_prompts() -> List[str]:
     for filename in _TEST_PROMPTS:
         prompts += _read_prompts(filename)
     return prompts
+
+
+@pytest.fixture
+def example_system_message() -> str:
+    with open(_SYS_MSG) as f:
+        return f.read()
 
 
 class DecoderPromptType(Enum):
