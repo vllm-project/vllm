@@ -43,7 +43,7 @@ metadata:
   name: hf-token-secret
   namespace: default
 type: Opaque
-data:
+stringData:
   token: "REPLACE_WITH_TOKEN"
 ```
 
