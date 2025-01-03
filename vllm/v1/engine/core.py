@@ -203,7 +203,6 @@ class EngineCoreProc(EngineCore):
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
-                engine_core = None
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""

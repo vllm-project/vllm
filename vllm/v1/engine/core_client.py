@@ -1,4 +1,6 @@
-from typing import List, Optional, Type
+import weakref
+from abc import ABC, abstractmethod
+from typing import List, Type
 
 import msgspec
 import zmq
@@ -18,7 +20,7 @@ from vllm.v1.utils import BackgroundProcHandle
 logger = init_logger(__name__)
 
 
-class EngineCoreClient:
+class EngineCoreClient(ABC):
     """
     EngineCoreClient: subclasses handle different methods for pushing 
         and pulling from the EngineCore for asyncio / multiprocessing.
@@ -52,8 +54,9 @@ class EngineCoreClient:
 
         return InprocClient(vllm_config, executor_class, log_stats)
 
+    @abstractmethod
     def shutdown(self):
-        pass
+        ...
 
     def get_output(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
@@ -107,9 +110,6 @@ class InprocClient(EngineCoreClient):
     def shutdown(self):
         self.engine_core.shutdown()
 
-    def __del__(self):
-        self.shutdown()
-
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
 
@@ -139,10 +139,14 @@ class MPClient(EngineCoreClient):
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.
-        if asyncio_mode:
-            self.ctx = zmq.asyncio.Context()
-        else:
-            self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.ctx = (
+            zmq.asyncio.Context()  # type: ignore[attr-defined]
+            if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
+
+        # Note(rob): shutdown function cannot be a bound method,
+        # else the gc cannot collect the object.
+        self._finalizer = weakref.finalize(self, lambda x: x.destroy(linger=0),
+                                           self.ctx)
 
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
@@ -153,7 +157,6 @@ class MPClient(EngineCoreClient):
                                             zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        self.proc_handle: Optional[BackgroundProcHandle]
         self.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
@@ -166,12 +169,11 @@ class MPClient(EngineCoreClient):
             })
 
     def shutdown(self):
-        # Shut down the zmq context.
-        self.ctx.destroy(linger=0)
-
-        if hasattr(self, "proc_handle") and self.proc_handle:
+        """Clean up background resources."""
+        if hasattr(self, "proc_handle"):
             self.proc_handle.shutdown()
-            self.proc_handle = None
+
+        self._finalizer()
 
 
 class SyncMPClient(MPClient):

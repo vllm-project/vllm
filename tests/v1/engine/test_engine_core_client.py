@@ -142,9 +142,6 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         client.abort_requests([request.request_id])
 
-        # Shutdown the client.
-        client.shutdown()
-
 
 @pytest.mark.asyncio
 async def test_engine_core_client_asyncio(monkeypatch):
@@ -200,6 +197,3 @@ async def test_engine_core_client_asyncio(monkeypatch):
             else:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
                     f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-
-        # Shutdown the client.
-        client.shutdown()
