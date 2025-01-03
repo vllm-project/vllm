@@ -1,3 +1,5 @@
+import os
+import signal
 import weakref
 from abc import ABC, abstractmethod
 from typing import List, Type
@@ -8,7 +10,8 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import get_open_zmq_ipc_path, make_zmq_socket
+from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
+                        make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
@@ -134,6 +137,20 @@ class MPClient(EngineCoreClient):
         executor_class: Type[Executor],
         log_stats: bool = False,
     ):
+        # The child processes will send SIGUSR1 when unrecoverable
+        # errors happen. We kill the process tree here so that the
+        # stack trace is very evident.
+        # TODO(rob): rather than killing the main process, we should
+        # figure out how to raise an AsyncEngineDeadError and
+        # handle at the API server level so we can return a better
+        # error code to the clients calling VLLM.
+        def sigusr1_handler(signum, frame):
+            logger.fatal("Got fatal signal from worker processes, shutting "
+                         "down. See stack trace above for root cause issue.")
+            kill_process_tree(os.getpid())
+
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
+
         # Serialization setup.
         self.encoder = PickleEncoder()
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
