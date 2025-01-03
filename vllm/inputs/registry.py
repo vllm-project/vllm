@@ -419,7 +419,7 @@ class InputRegistry:
             # Be more strict in V2
             assert "mm_kwargs" in inputs
         else:
-            assert_never(inputs["type"])
+            assert_never(inputs["type"])  # type: ignore[arg-type]
 
     def process_input(self, model_config: "ModelConfig",
                       inputs: ProcessorInputs) -> ProcessorInputs:

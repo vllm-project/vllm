@@ -234,8 +234,8 @@ RUN mv vllm test_docs/
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
-# openai api server alternative
-FROM vllm-base AS vllm-openai
+# base openai image with additional requirements, for any subsequent openai-style images
+FROM vllm-base AS vllm-openai-base
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -246,6 +246,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
+
+# define sagemaker first, so it is not default from `docker build`
+FROM vllm-openai-base AS vllm-sagemaker
+
+COPY examples/sagemaker-entrypoint.sh .
+RUN chmod +x sagemaker-entrypoint.sh
+ENTRYPOINT ["./sagemaker-entrypoint.sh"]
+
+FROM vllm-openai-base AS vllm-openai
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################

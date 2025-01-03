@@ -1136,7 +1136,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.prompt_adapter_manager.create_prompt_adapter_manager(
                     self.model))
 
-        if self.kv_cache_dtype == "fp8" and current_platform.is_rocm():
+        if self.kv_cache_dtype == "fp8" and (current_platform.is_rocm()
+                                             or current_platform.is_cuda()):
             # Currently only ROCm accepts kv-cache scaling factors
             # via quantization_param_path and this will be deprecated
             # in the future.
