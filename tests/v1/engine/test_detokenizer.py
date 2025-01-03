@@ -7,9 +7,9 @@ from transformers import AutoTokenizer
 from tests.v1.engine.utils import (generate_dummy_prompt_logprobs,
                                    generate_dummy_sample_logprobs,
                                    validate_requests_logprobs)
-from vllm.sampling_params import RequestOutputKind
-from vllm.v1.engine import EngineCoreOutput
-from vllm.v1.engine.detokenizer import Detokenizer, DetokenizerRequest
+from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine.detokenizer import Detokenizer
 
 # Number of sample logprobs to request when testing sample logprobs
 NUM_SAMPLE_LOGPROBS = 5
@@ -153,18 +153,24 @@ def test_incremental_detokenization(
 
     # Make N requests.
     requests = [
-        DetokenizerRequest(
-            request_id=f"request-{idx}",
-            prompt=prompt,
-            prompt_token_ids=prompt_tokens,
-            skip_special_tokens=False,
-            spaces_between_special_tokens=False,
-            output_kind=request_output_kind,
-            stop=[],
-            include_stop_str_in_output=False,
+        EngineCoreRequest(request_id=f"request-{idx}",
+                          prompt=prompt,
+                          prompt_token_ids=prompt_tokens,
+                          arrival_time=0,
+                          mm_inputs=None,
+                          mm_hashes=None,
+                          mm_placeholders=None,
+                          eos_token_id=None,
+                          lora_request=None,
+                          sampling_params=SamplingParams(
+                              skip_special_tokens=False,
+                              spaces_between_special_tokens=False,
+                              output_kind=request_output_kind,
+                              stop=[],
+                              include_stop_str_in_output=False))
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
-        ) for idx, (
+        for idx, (
             prompt,
             prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
@@ -235,20 +241,27 @@ def test_stop_string(
 
     # Make N requests.
     requests = [
-        DetokenizerRequest(
+        EngineCoreRequest(
             request_id=f"request-{idx}",
             prompt=prompt,
             prompt_token_ids=prompt_tokens,
-            skip_special_tokens=False,
-            spaces_between_special_tokens=False,
-            output_kind=RequestOutputKind.DELTA,
-            stop=STOP_STRINGS,
-            include_stop_str_in_output=include_stop_str_in_output,
+            arrival_time=0,
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            eos_token_id=None,
+            lora_request=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=RequestOutputKind.DELTA,
+                stop=STOP_STRINGS,
+                include_stop_str_in_output=include_stop_str_in_output,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
-        ) for idx, (
-            prompt,
-            prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+            )) for idx, (
+                prompt,
+                prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
 
     # Add requests to the detokenizer.

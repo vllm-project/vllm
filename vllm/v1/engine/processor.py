@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Mapping, Optional, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
@@ -12,9 +12,8 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 
 
@@ -34,8 +33,8 @@ class Processor:
         self.lora_config = lora_config
         self.tokenizer = tokenizer
 
-        self.generation_config_fields = _load_generation_config_dict(
-            model_config)
+        self.generation_config_fields = model_config.try_get_generation_config(
+        )
         self.input_preprocessor = InputPreprocessor(model_config,
                                                     self.tokenizer,
                                                     mm_registry)
@@ -88,7 +87,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
+    ) -> EngineCoreRequest:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
@@ -104,7 +103,7 @@ class Processor:
         # Compute MM hashes (if enabled)
         mm_hashes = None
         if self.use_hash:
-            mm_hashes = self.mm_hasher.hash_prompt(prompt)
+            mm_hashes = self.mm_hasher.hash_prompt_mm_data(prompt)
 
         # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(
@@ -138,32 +137,29 @@ class Processor:
 
         # For merged preprocessor, mm_data is already mm_inputs
         precomputed_mm_inputs = None
-        if isinstance(decoder_inputs.multi_modal_data, MultiModalKwargs):
-            precomputed_mm_inputs = [decoder_inputs.multi_modal_data]
+        decoder_mm_data = decoder_inputs.multi_modal_data
+        if isinstance(decoder_mm_data, MultiModalKwargs):
+            # The output of merged multi-modal processor (`decoder_mm_data`)
+            # contains the kwargs for all items from all modalities.
+            # This code separates them so that there is one set of kwargs
+            # per item per modality.
+            precomputed_mm_inputs = [
+                MultiModalKwargs.from_items([item])
+                for modality in decoder_mm_data.modalities
+                for item in decoder_mm_data.get_items(modality)
+            ]
 
         # Apply MM mapper
         mm_inputs = None
-        if len(decoder_inputs.multi_modal_data) > 0:
+        if len(decoder_mm_data) > 0:
             mm_inputs = self.mm_input_mapper_client.process_inputs(
-                decoder_inputs.multi_modal_data, mm_hashes,
-                decoder_inputs.mm_processor_kwargs, precomputed_mm_inputs)
+                decoder_mm_data,
+                mm_hashes,
+                decoder_inputs.mm_processor_kwargs,
+                precomputed_mm_inputs,
+            )
 
-        # Make Request for Detokenizer.
-        detokenizer_request = DetokenizerRequest(
-            request_id,
-            decoder_inputs.prompt,
-            decoder_inputs.prompt_token_ids,
-            sampling_params.skip_special_tokens,
-            sampling_params.spaces_between_special_tokens,
-            sampling_params.output_kind,
-            sampling_params.stop,
-            sampling_params.include_stop_str_in_output,
-            sampling_params.logprobs or 0,
-            sampling_params.prompt_logprobs or 0,
-        )
-
-        # Make Request for EngineCore.
-        engine_core_request = EngineCoreRequest(
+        return EngineCoreRequest(
             request_id,
             decoder_inputs.prompt,
             decoder_inputs.prompt_token_ids,
@@ -175,8 +171,6 @@ class Processor:
             arrival_time,
             lora_request,
         )
-
-        return detokenizer_request, engine_core_request
 
     def _validate_model_inputs(self, inputs: ProcessorInputs):
         if is_encoder_decoder_inputs(inputs):
@@ -207,16 +201,3 @@ class Processor:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
-
-
-def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
-    config = try_get_generation_config(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=model_config.revision,
-    )
-
-    if config is None:
-        return {}
-
-    return config.to_diff_dict()

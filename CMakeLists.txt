@@ -223,13 +223,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        GIT_TAG 8aa95dbb888be6d81c6fbf7169718c5244b53227
+        GIT_TAG v3.6.0
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW FALSE
+        GIT_SHALLOW TRUE
     )
   endif()
   FetchContent_MakeAvailable(cutlass)
@@ -550,7 +550,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 04325b6798bcc326c86fb35af62d05a9c8c8eceb
+          GIT_TAG 96266b1111111f3d11aabefaf3bacbab6a89d03c
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

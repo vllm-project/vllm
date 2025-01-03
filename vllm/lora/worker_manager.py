@@ -91,7 +91,17 @@ class WorkerLoRAManager(AbstractWorkerManager):
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
+
+            expected_lora_modules = list(set(expected_lora_modules))
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
+
+            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
+            # to ensure correct loading of lora weights.
+            hf_to_vllm_mapper = None
+            if (hasattr(model, "hf_to_vllm_mapper")
+                    and model.hf_to_vllm_mapper is not None):
+                hf_to_vllm_mapper = model.hf_to_vllm_mapper
+
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
@@ -103,7 +113,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 self.lora_config.lora_extra_vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
-            )
+                weights_mapper=hf_to_vllm_mapper)
+
         except Exception as e:
             raise RuntimeError(f"Loading lora {lora_path} failed") from e
         if lora.rank > self.lora_config.max_lora_rank:
