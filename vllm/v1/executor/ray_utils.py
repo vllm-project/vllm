@@ -52,8 +52,9 @@ try:
             import torch
             assert self.worker is not None, "Worker is not initialized"
             if not self.compiled_dag_cuda_device_set:
-                torch.cuda.set_device(self.worker.device)
-                self.compiled_dag_cuda_device_set = True
+                if current_platform.is_cuda():
+                    torch.cuda.set_device(self.worker.device)
+                    self.compiled_dag_cuda_device_set = True
 
         def execute_model(
             self,
