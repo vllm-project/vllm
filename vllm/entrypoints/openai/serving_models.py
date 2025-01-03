@@ -144,11 +144,26 @@ class OpenAIServingModels:
                                    lora_path=lora_path)
 
         # Validate that the adapter can be loaded into the engine
+        # This will also pre-load it for incoming requests
         try:
             await self.engine_client.add_lora(lora_request)
+        except ValueError as e:
+            # Adapter not found or lora configuration errors
+            if "No adapter found" in str(e):
+                return create_error_response(message=str(e),
+                                             err_type="NotFoundError",
+                                             status_code=HTTPStatus.NOT_FOUND)
+            else:
+                return create_error_response(
+                    message=str(e),
+                    err_type="BadRequestError",
+                    status_code=HTTPStatus.BAD_REQUEST)
         except BaseException as e:
+            # Some other unexpected problem loading the adapter, e.g. malformed
+            # input files.
+            # More detailed error messages for the user would be nicer here
             return create_error_response(message=str(e),
-                                         err_type="InvalidUserInput",
+                                         err_type="BadRequestError",
                                          status_code=HTTPStatus.BAD_REQUEST)
 
         self.lora_requests.append(lora_request)
@@ -207,8 +222,8 @@ class OpenAIServingModels:
             return create_error_response(
                 message=
                 f"The lora adapter '{request.lora_name}' cannot be found.",
-                err_type="InvalidUserInput",
-                status_code=HTTPStatus.BAD_REQUEST)
+                err_type="NotFoundError",
+                status_code=HTTPStatus.NOT_FOUND)
 
         return None
 

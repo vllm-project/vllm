@@ -215,6 +215,7 @@ async def main(args):
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
+        engine_client=engine,
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=None,

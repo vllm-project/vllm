@@ -14,7 +14,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCLoadAdapterRequest,
+                                         RPCAdapterLoadedResponse, RPCError,
+                                         RPCLoadAdapterRequest,
                                          RPCProcessRequest, RPCStartupRequest,
                                          RPCStartupResponse,
                                          RPCUProfileRequest)
@@ -296,8 +297,9 @@ class MQLLMEngine:
                                is_engine_errored=False,
                                exception=e)
             self._send_outputs(rpc_err)
-        # Otherwise, echo back the request if successful
-        self._send_outputs([request])
+        # Otherwise, send back the successful load message
+        self._send_outputs(
+            RPCAdapterLoadedResponse(request_id=request.request_id))
 
     def _health_check(self):
         # Send unhealthy if engine has already errored
@@ -311,7 +313,11 @@ class MQLLMEngine:
             self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
-        """Send List of RequestOutput to RPCClient."""
+        """Send outputs back to the engine client. These can be:
+        - Exceptions
+        - A list of generation outputs
+        - A response from loading a lora adapter
+        """
         if outputs:
             try:
                 from ray.exceptions import RayTaskError

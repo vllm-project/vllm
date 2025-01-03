@@ -25,7 +25,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCLoadAdapterRequest,
+                                         RPCAdapterLoadedResponse, RPCError,
+                                         RPCLoadAdapterRequest,
                                          RPCProcessRequest, RPCStartupRequest,
                                          RPCStartupResponse,
                                          RPCUProfileRequest)
@@ -242,15 +243,21 @@ class MQLLMEngineClient(EngineClient):
                         if queue is not None:
                             queue.put_nowait(exception)
                 else:
-                    # Put each output into the appropriate steam.
-                    for request_output in request_outputs:
-                        queue = self.output_queues.get(
-                            request_output.request_id)
-                        if queue is not None:
-                            queue.put_nowait(request_output)
+                    # Put each output into the appropriate queue.
+                    if isinstance(request_outputs, RPCAdapterLoadedResponse):
+                        self._add_output(request_outputs)
+                    else:
+                        for request_output in request_outputs:
+                            self._add_output(request_output)
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient output handler.")
+
+    def _add_output(self, request_output: Union[RequestOutput,
+                                                RPCAdapterLoadedResponse]):
+        queue = self.output_queues.get(request_output.request_id)
+        if queue is not None:
+            queue.put_nowait(request_output)
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""

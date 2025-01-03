@@ -128,10 +128,16 @@ class RPCLoadAdapterRequest:
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
+@dataclass
+class RPCAdapterLoadedResponse:
+    request_id: str
+
+
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest]
 
-REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
+REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
+                          RPCError]
 
 
 def ENGINE_DEAD_ERROR(
