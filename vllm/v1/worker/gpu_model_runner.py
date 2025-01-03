@@ -499,18 +499,17 @@ class GPUModelRunner:
         req_indices: npt.NDArray,
     ) -> torch.Tensor:
 
-        # req_indices is the req_idx of each batched token.
-        # So if we have 3 sequences of lens [2, 5, 3],
-        # req_indices = [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-
+        # NOTE(rob): req_indices is the req_idx of each token.
+        # If we have 3 sequences in the batch of lens [2, 5, 3],
+        # req_indices = [0, 0, 1, 1, 1, 1, 1, 2, 2, 2].
+        # Thus, prompt_indices is where req_indices == req_idx.
         req_idx = self.input_batch.req_id_to_index[req_id]
-
-        # Get the indices for this (prefill) req in current batch.
-        num_tokens = req_indices.shape[0]
-        prompt_indices = self.arange_np[:num_tokens][req_indices == req_idx]
-        if req_id not in scheduler_output.partial_req_ids:
-            # Remove the sample token if there is one.
-            indices = indices[:-1]
+        indices = self.arange_np[:req_indices.shape[0]]
+        prompt_indices = indices[req_indices == req_idx]
+        
+        # Remove the sample token if there is one.
+        if req_id not in scheduler_output.partial_req_ids:    
+            prompt_indices = prompt_indices[:-1]
 
         return prompt_indices
 
