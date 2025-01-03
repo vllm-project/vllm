@@ -187,7 +187,7 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
     ) -> int:
         max_total_tokens = self.ctx.model_config.max_model_len
         max_total_frames = int(max_total_tokens / self._get_max_frame_tokens())
-        return (max_total_frames - num_images) // num_videos
+        return (max_total_frames - num_images) // max(num_videos, 1)
 
     def _get_max_video_tokens(self) -> int:
         return self._get_max_frame_tokens() * self._get_max_video_frames()

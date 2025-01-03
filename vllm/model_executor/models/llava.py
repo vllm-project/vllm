@@ -27,8 +27,7 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize)
 from vllm.multimodal.processing import (InputProcessingContext,
                                         MultiModalDataItems, ProcessingCache,
-                                        ProcessorInputs, PromptReplacement,
-                                        full_groupby_modality)
+                                        ProcessorInputs, PromptReplacement)
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
@@ -717,13 +716,14 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         )
         orig_repls = self._bind_prompt_replacements(unbound_orig_repls)
 
-        all_placeholders = self._find_placeholders(orig_repls, prompt_ids,
-                                                   mm_item_counts)
-        assert len(all_placeholders) == mm_item_counts.get("image", 0)
+        mm_placeholders = self._find_placeholders(orig_repls, prompt_ids,
+                                                  mm_item_counts)
 
-        mm_placeholders = {
-            modality: [item.to_range() for item in items]
-            for modality, items in full_groupby_modality(all_placeholders)
+        self._validate_placeholders(mm_placeholders, mm_item_counts)
+
+        mm_placeholder_ranges = {
+            modality: [item.to_range() for item in placeholders]
+            for modality, placeholders in mm_placeholders.items()
         }
 
         return MultiModalInputsV2(
@@ -731,7 +731,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             prompt=prompt_text,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
-            mm_placeholders=mm_placeholders,
+            mm_placeholders=mm_placeholder_ranges,
         )
 
 

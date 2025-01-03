@@ -184,10 +184,10 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         ]
 
     def _always_apply_prompt_replacements(self) -> bool:
-        # HF never applies prompt replacements, so we have to do it ourselves
-        # _find_placeholders may incorrectly think that HF has already performed
-        # processing for multi-audio input when the input audios are short
-        # (the corresponding placeholders may take up fewer tokens than
+        # HF never applies prompt replacements, so we have to do it ourselves.
+        # NOTE: `_find_placeholders` may incorrectly think that HF has already
+        # performed processing for multi-audio input when the input audios are
+        # short (the corresponding placeholders may take up fewer tokens than
         # the number of audio items)
         return True
 
