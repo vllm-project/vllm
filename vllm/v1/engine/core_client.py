@@ -139,21 +139,21 @@ class MPClient(EngineCoreClient):
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.
-        ctx = (
+        self.ctx = (
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
 
         # Note(rob): shutdown function cannot be a bound method,
         # else the gc cannot collect the object.
         self._finalizer = weakref.finalize(self, lambda x: x.destroy(linger=0),
-                                           ctx)
+                                           self.ctx)
 
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-        self.output_socket = make_zmq_socket(ctx, output_path,
+        self.output_socket = make_zmq_socket(self.ctx, output_path,
                                              zmq.constants.PULL)
-        self.input_socket = make_zmq_socket(ctx, input_path,
+        self.input_socket = make_zmq_socket(self.ctx, input_path,
                                             zmq.constants.PUSH)
 
         # Start EngineCore in background process.

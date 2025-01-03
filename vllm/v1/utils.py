@@ -103,10 +103,10 @@ class BackgroundProcHandle:
         process_kwargs["output_path"] = output_path
 
         # Run busy loop in background process.
-        proc = context.Process(target=target_fn, kwargs=process_kwargs)
-        self._finalizer = weakref.finalize(self, shutdown, proc, input_path,
-                                           output_path)
-        proc.start()
+        self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
+        self._finalizer = weakref.finalize(self, shutdown, self.proc,
+                                           input_path, output_path)
+        self.proc.start()
 
         # Wait for startup.
         if reader.recv()["status"] != "READY":
@@ -128,7 +128,7 @@ def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
         if proc.is_alive():
             kill_process_tree(proc.pid)
 
-    # Remove zmq ipc socket files
+    # Remove zmq ipc socket files.
     ipc_sockets = [output_path, input_path]
     for ipc_socket in ipc_sockets:
         socket_file = ipc_socket.replace("ipc://", "")
