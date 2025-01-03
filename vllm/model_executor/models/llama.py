@@ -32,7 +32,9 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.distributed.kv_transfer.utils import (
+    PDDisaggStage,
     ForwardPassType,
+    get_pd_stage,
     prepare_kv_cache_transport,
     finalize_kv_cache_transport,
 )
@@ -60,6 +62,8 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+
+fake_sampler_output = None
 
 
 class LlamaMLP(nn.Module):
@@ -352,8 +356,7 @@ class LlamaModel(nn.Module):
     ) -> Union[torch.Tensor, IntermediateTensors]:
 
         fp_type, kv_cache_transporter, input_token_hashes, offsets = (
-            prepare_kv_cache_transport(input_ids, attn_metadata,
-                                       self.cache_config))
+            prepare_kv_cache_transport(attn_metadata, self.cache_config))
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -377,6 +380,17 @@ class LlamaModel(nn.Module):
             kv_cache_transporter.synchronize()
 
             return hidden_states
+
+        # with multiple sequences, it is possible some have cache and some don't
+        # TODO: might need to change scheduler so  sequences with/without cache
+        # do not mix
+        if fp_type == ForwardPassType.PREFILL and attn_metadata.seq_lens == 1:
+            last_hs_key = kv_cache_transporter.get_hidden_states_cache_key(
+                input_token_hashes[-1])
+            # hidden states is the last piece to write to cache
+            # if it exists, we assume the kv cache is saved
+            if kv_cache_transporter.key_exists(last_hs_key):
+                return hidden_states
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
@@ -624,7 +638,21 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def sample(self, logits: torch.Tensor,
                sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
+
+        # In PD disagg scenarios, the prefill just compute the hidden states
+        # the sampling and token generation is left to the decode side.
+        # so we just retutnr a dummy output here to save cost
+        if get_pd_stage() == PDDisaggStage.PREFILL:
+            global fake_sampler_output
+            if fake_sampler_output is not None:
+                return fake_sampler_output
+
         next_tokens = self.sampler(logits, sampling_metadata)
+
+        if get_pd_stage(
+        ) == PDDisaggStage.PREFILL and fake_sampler_output is None:
+            fake_sampler_output = next_tokens
+
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,

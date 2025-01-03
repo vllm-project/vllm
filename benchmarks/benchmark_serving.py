@@ -138,10 +138,19 @@ def sample_booksum_requests(
     tokenizer: PreTrainedTokenizerBase,
     fix_prompt_len: int = 100,
     fixed_output_len: int = 1,
+    unique_prompt_perc: float = 1,
 ) -> List[Tuple[str, int, int, None]]:
 
     import csv
     import sys  # To access sys.maxsize if needed
+
+    if unique_prompt_perc <= 0 or unique_prompt_perc > 1:
+        raise ValueError("unique_prompt_perc must be in the range (0, 1].")
+
+    unique_prompt_count = round(num_requests * unique_prompt_perc)
+    if unique_prompt_count < 1:
+        raise ValueError(
+            "round(num_requests * unique_prompt_perc) must be at least 1.")
 
     # Set the maximum field size limit to a reasonable value
     MAX_FIELD_SIZE_LIMIT = 2_000_000  # Adjust this value as needed
@@ -151,18 +160,18 @@ def sample_booksum_requests(
 
     filtered_dataset: List[Tuple[str, int, int]] = []
 
+    longest_prompt_ids = None
+    longest_len = -1
+
     with open(
             dataset_path, newline=''
     ) as csvfile:  #, open("/tmp/prompt_15k_to_50k.csv", 'w', newline='') as outfile:
         csvreader = csv.DictReader(csvfile)
-        # fieldnames = csvreader.fieldnames
-        # writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-        # writer.writeheader()
 
+        base_prompt = None
         for row in csvreader:
-            if len(filtered_dataset) == num_requests:
-                break
             prompt = row[column_name]
+
             prompt_size = len(prompt.encode('utf-8'))
             if prompt_size > MAX_FIELD_SIZE_LIMIT:
                 print(
@@ -173,23 +182,47 @@ def sample_booksum_requests(
 
             prompt_len = len(prompt_token_ids)
 
-            # if 15000 <= prompt_len <= 50000:
-            #     writer.writerow(row)
+            if prompt_len > longest_len:
+                longest_len = prompt_len
+                longest_prompt_ids = prompt_token_ids
 
-            if prompt_len < fix_prompt_len:
+            if prompt_len < fix_prompt_len * 0.99 or prompt_len > fix_prompt_len * 1.01:
                 continue
 
-            if prompt_len / fix_prompt_len > 1.1:
-                continue
+            base_prompt = prompt
+            break
 
+        if base_prompt is None:
+            if longest_len <= fix_prompt_len or longest_prompt_ids is None:
+                raise ValueError(
+                    f"No prompt with length around {fix_prompt_len} found in the dataset."
+                )
+            else:
+                print(
+                    f"No prompt with length around {fix_prompt_len} found in the dataset. Replace with the longest prompt found chopped."
+                )
+                truncated_token_ids = longest_prompt_ids[:fix_prompt_len]
+                base_prompt = tokenizer.decode(truncated_token_ids,
+                                               skip_special_tokens=True)
+
+        print(f"Base prompt: {base_prompt[:50]}")
+
+        for i in range(unique_prompt_count):
+            prompt = str(i + 1) + " " + base_prompt
+            prompt_token_ids = tokenizer(prompt).input_ids
+            prompt_len = len(prompt_token_ids)
             filtered_dataset.append(
                 (prompt, prompt_len, fixed_output_len, None))
 
-    if len(filtered_dataset) < num_requests:
-        raise ValueError(
-            f"Only {len(filtered_dataset)} qualified entries found in the dataset. "
-            "Please consider decreasing the number of requests or using a different dataset."
-        )
+        while len(filtered_dataset) < num_requests:
+            filtered_dataset += filtered_dataset
+
+        filtered_dataset = filtered_dataset[:num_requests]
+
+        # shuffle the dataset so the repeated prompts are not in pattern
+        if unique_prompt_count < num_requests:
+            # use a specific seed for reproducibility
+            random.Random(0).shuffle(filtered_dataset)
 
     return filtered_dataset
 
@@ -941,6 +974,7 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             fix_prompt_len=args.booksum_fix_prompt_len,
             fixed_output_len=args.booksum_output_len,
+            unique_prompt_perc=args.booksum_unique_prompt_perc,
         )
 
     elif args.dataset_name == "sonnet":
@@ -1327,6 +1361,12 @@ if __name__ == "__main__":
                                type=int,
                                default=None,
                                help="Output length for each request..")
+
+    booksum_group.add_argument(
+        "--booksum-unique-prompt-perc",
+        type=float,
+        default=1,
+        help="the percentage of unique prompts in the test.")
 
     # group for dataset specific arguments
     sonnet_group = parser.add_argument_group("sonnet dataset options")

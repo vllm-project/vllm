@@ -17,6 +17,7 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
 from vllm.utils import Device, PyObjectCache
+from vllm.distributed.kv_transfer.utils import (PDDisaggStage, get_pd_stage)
 
 logger = init_logger(__name__)
 
@@ -360,6 +361,12 @@ class Scheduler:
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 
+        # Sequence groups in the kv_cache_pending state.
+        # requests that are waiting for the kv_cache to be filled.
+        self.kv_cache_pending: Deque[SequenceGroup] = deque()
+        # Sequence groups in the preempeted_kv_cache_pending state.
+        # requests that are preempted and waiting for the kv_cache to be filled.
+        self.preempted_kv_cache_pending: Deque[SequenceGroup] = deque()
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -433,8 +440,11 @@ class Scheduler:
         return 1
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
-        # Add sequence groups to the waiting queue.
-        self.waiting.append(seq_group)
+        # Add sequence groups to the waiting queue or kv_cache_pending queue.
+        if get_pd_stage() == PDDisaggStage.DECODE:
+            self.kv_cache_pending.append(seq_group)
+        else:
+            self.waiting.append(seq_group)
 
     def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the running queue.
@@ -499,13 +509,15 @@ class Scheduler:
 
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
-            self.swapped) != 0
+            self.swapped) != 0 or len(self.kv_cache_pending) != 0 or len(
+                self.preempted_kv_cache_pending) != 0
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
 
     def get_num_unfinished_seq_groups(self) -> int:
-        return len(self.waiting) + len(self.running) + len(self.swapped)
+        return len(self.waiting) + len(self.running) + len(self.swapped) + len(
+            self.kv_cache_pending) + len(self.preempted_kv_cache_pending)
 
     def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
@@ -919,8 +931,39 @@ class Scheduler:
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
 
-        waiting_queue = self.waiting
+        if get_pd_stage() == PDDisaggStage.DECODE:
+            if self.preempted_kv_cache_pending:
+                for seq_group in self.preempted_kv_cache_pending:
+                    seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
+                    seq.data = SequenceData.from_seqs(
+                        seq.data.get_prompt_token_ids())
+                    # no need to checkout last hash, as it has been checked before being preempted
+                    self.waiting.append(seq_group)
 
+                self.preempted_kv_cache_pending.clear()
+
+            kv_cache_pending = self.kv_cache_pending
+            leftover_kv_cache_pending: Deque[SequenceGroup] = deque()
+
+            kv_cache_transporter = self.cache_config.kv_cache_transporter
+            assert kv_cache_transporter is not None
+
+            while kv_cache_pending:
+                seq_group = kv_cache_pending.popleft()
+                waiting_seqs = seq_group.get_seqs(
+                    status=SequenceStatus.WAITING)
+                assert len(waiting_seqs) == 1
+                last_hash = waiting_seqs[0].last_prompt_hash
+                assert last_hash is not None and last_hash != ""
+                if kv_cache_transporter.check_kv_cache_ready(
+                        waiting_seqs[0].last_prompt_hash):
+                    self.waiting.append(seq_group)
+                else:
+                    leftover_kv_cache_pending.appendleft(seq_group)
+
+            self.kv_cache_pending.extendleft(leftover_kv_cache_pending)
+
+        waiting_queue = self.waiting
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
@@ -1098,7 +1141,11 @@ class Scheduler:
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
-        self.waiting.extendleft(running_scheduled.preempted)
+        if get_pd_stage() == PDDisaggStage.DECODE:
+            self.preempted_kv_cache_pending.extendleft(
+                running_scheduled.preempted)
+        else:
+            self.waiting.extendleft(running_scheduled.preempted)
         # Update new running requests.
         if len(prefills.seq_groups) > 0:
             self.running.extend([s.seq_group for s in prefills.seq_groups])

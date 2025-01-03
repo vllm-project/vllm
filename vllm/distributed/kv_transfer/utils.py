@@ -1,52 +1,66 @@
 from enum import Enum
 import math
 import os
-import torch
 from typing import List
 import hashlib
+import array
 
 from vllm.attention import AttentionMetadata
 
 PAGE_SIZE = 16
 
-class pd_separate_stage(Enum):
+
+class PDDisaggStage(Enum):
     PREFILL = "prefill"
     DECODE = "decode"
+    NONE = "none"
 
 
 class ForwardPassType(Enum):
     PREFILL = "prefill_pass"
     FIRST_DECODE = "first_decode_pass"
+    FOLLOWING_DECODE = "following_decode_pass"
     REGULAR = "regular_pass"
 
 
-def get_forward_pass_type(input_ids: torch.Tensor, attn_metadata: AttentionMetadata):
+def get_pd_stage() -> PDDisaggStage:
     pd_stage = os.environ.get("PD_SEPARATE_STAGE", "").lower()
-    is_profile_run = torch.any(input_ids == 0).item()
-    if pd_stage not in pd_separate_stage._value2member_map_ or is_profile_run:
-        return ForwardPassType.REGULAR
 
     if pd_stage == "prefill":
+        return PDDisaggStage.PREFILL
+    elif pd_stage == "decode":
+        return PDDisaggStage.DECODE
+    else:
+        return PDDisaggStage.NONE
+
+
+def get_forward_pass_type(attn_metadata: AttentionMetadata,
+                          cache_config) -> ForwardPassType:
+    pd_stage = get_pd_stage()
+    is_profile_run = cache_config.kv_cache_transporter is None
+    if pd_stage == PDDisaggStage.NONE or is_profile_run:
+        return ForwardPassType.REGULAR
+
+    if pd_stage == PDDisaggStage.PREFILL:
         return ForwardPassType.PREFILL
     else:
         if (attn_metadata.prefill_metadata is not None
-            and attn_metadata.decode_metadata is None):
+                and attn_metadata.decode_metadata is None):
             return ForwardPassType.FIRST_DECODE
+        else:
+            return ForwardPassType.FOLLOWING_DECODE
 
-    return ForwardPassType.REGULAR
 
+def prepare_kv_cache_transport(attn_metadata, cache_config):
 
-def prepare_kv_cache_transport(input_ids, attn_metadata, cache_config):
-
-    fp_type = get_forward_pass_type(input_ids, attn_metadata)
+    fp_type = get_forward_pass_type(attn_metadata, cache_config)
 
     input_token_hashes = []
     offsets = []
     kv_cache_transporter = cache_config.kv_cache_transporter
     if fp_type in (ForwardPassType.PREFILL, ForwardPassType.FIRST_DECODE):
-        input_token_hashes = compute_token_page_hashes(input_ids,
-                                                       attn_metadata.seq_lens,
-                                                       kv_cache_transporter.tokens_per_page)
+        input_token_hashes = getattr(attn_metadata, "token_hashes", None)
+        assert input_token_hashes is not None
 
         # Compute block ids for each page in the input sequence
         assert kv_cache_transporter is not None
@@ -61,10 +75,10 @@ def prepare_kv_cache_transport(input_ids, attn_metadata, cache_config):
             for page_num in range(num_pages):
                 start_token_idx = page_num * tokens_per_page
 
-                slot_mapping_value = attn_metadata.slot_mapping[seq_start_index +
-                                                      start_token_idx].item()
+                slot_mapping_value = attn_metadata.slot_mapping[
+                    seq_start_index + start_token_idx].item()
 
-                block_id = slot_mapping_value //tokens_per_page
+                block_id = slot_mapping_value // tokens_per_page
                 k_offset = block_id * page_size
                 offsets.append((k_offset, k_offset + k_or_v_total_size))
 
@@ -78,8 +92,8 @@ def prepare_kv_cache_transport(input_ids, attn_metadata, cache_config):
 
 def finalize_kv_cache_transport(fp_type, kv_cache_transporter,
                                 input_token_hashes, attn_metadata,
-                                hidden_states):
-    if fp_type == ForwardPassType.PREFILL:
+                                hidden_states) -> None:
+    if fp_type == ForwardPassType.PREFILL and kv_cache_transporter.tp_rank == 0:
         kv_cache_transporter.save_hidden_states(input_token_hashes,
                                                 attn_metadata.seq_lens,
                                                 hidden_states)
@@ -88,14 +102,15 @@ def finalize_kv_cache_transport(fp_type, kv_cache_transporter,
 
     return
 
-def compute_token_page_hashes(prompt_token_ids: torch.Tensor,
-                              prompt_seq_lengths: List[int],
-                              tokens_per_page=PAGE_SIZE) -> List[str]:
+
+def compute_token_page_hashes(prompt_ids: List[int],
+                              prompt_seq_lengths: List[int]) -> List[str]:
+
+    global PAGE_SIZE
+    tokens_per_page = PAGE_SIZE
 
     hashes = []
     seq_index = 0
-
-    prompt_ids = prompt_token_ids.cpu().numpy()
 
     for seq_len in prompt_seq_lengths:
         seq_tokens = prompt_ids[seq_index:seq_index + seq_len]
@@ -109,9 +124,11 @@ def compute_token_page_hashes(prompt_token_ids: torch.Tensor,
             tokens_in_page = seq_tokens[start_token:end_token]
 
             # Compute hash for the current page
-            tokens_bytes = tokens_in_page.tobytes()
+            tokens_bytes = array.array('l', tokens_in_page).tobytes()
             hash_input = prev_hash.encode('utf-8') + tokens_bytes
             current_hash = hashlib.sha256(hash_input).hexdigest()
+
+            prev_hash = current_hash
 
             hashes.append(current_hash)
 

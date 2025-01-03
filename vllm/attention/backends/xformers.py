@@ -229,7 +229,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
-            cross_block_tables=self.cross_block_tables)
+            cross_block_tables=self.cross_block_tables,
+            token_hashes=self.token_hashes)
         return self._cached_prefill_metadata
 
     @property
@@ -269,7 +270,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
-            cross_block_tables=self.cross_block_tables)
+            cross_block_tables=self.cross_block_tables,
+            token_hashes=[],
+        )
 
         # Batch may be composed of prefill|decodes, adjust query start indices
         # to refer to the start of decodes when the two are split apart.

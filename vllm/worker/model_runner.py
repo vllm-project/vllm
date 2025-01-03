@@ -56,6 +56,9 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict, dump_input_when_exception)
 
+from vllm.distributed.kv_transfer.utils import (PDDisaggStage, get_pd_stage)
+from vllm.distributed.kv_transfer.utils import compute_token_page_hashes
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -915,6 +918,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         attn_metadata = self.attn_metadata_builder.build(
             seq_lens, query_lens, cuda_graph_pad_size, batch_size)
 
+        self.set_input_token_hashes_in_metadata(attn_metadata, input_tokens,
+                                                seq_lens)
+
         # LoRA data.
         lora_requests = set()
         lora_mapping = None
@@ -982,6 +988,30 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             finished_requests_ids=self.finished_requests_ids,
             prompt_adapter_mapping=prompt_adapter_mapping,
             prompt_adapter_requests=prompt_adapter_requests)
+
+    def set_input_token_hashes_in_metadata(self,
+                                           attn_metadata: AttentionMetadata,
+                                           input_tokens: List[int],
+                                           seq_lens: List[int]):
+        """
+        set input token hashes to the attention metadata in PD disagg scenarios.
+        """
+
+        # not compute token hashes if not PD disagg scenarios or profile run
+        # in the profile run, the first input token is 0
+        if get_pd_stage(
+        ) == PDDisaggStage.NONE or input_tokens is None or input_tokens[0] == 0:
+            return
+
+        # only calculate token hashes for prefill or first decode
+        if attn_metadata.prefill_metadata is None:
+            # clear the token hashes if they are no longer needed
+            if len(attn_metadata.token_hashes) > 0:
+                attn_metadata.token_hashes = []
+            return
+
+        attn_metadata.token_hashes = compute_token_page_hashes(
+            input_tokens, seq_lens)
 
 
 class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):

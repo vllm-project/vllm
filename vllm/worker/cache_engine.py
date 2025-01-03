@@ -2,7 +2,6 @@
 from typing import List
 
 import torch
-import os
 
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
@@ -66,7 +65,10 @@ class CacheEngine:
             self.num_gpu_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
-        if os.environ.get("PD_SEPARATE_STAGE", "") != "":
+        # use local imports to avoid circular imports
+        from vllm.distributed.kv_transfer.utils import (PDDisaggStage,
+                                                        get_pd_stage)
+        if get_pd_stage() != PDDisaggStage.NONE:
             self.set_kv_cache_transporter()
 
     def set_kv_cache_transporter(self):

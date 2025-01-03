@@ -276,6 +276,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            token_hashes=[],
         )
 
 

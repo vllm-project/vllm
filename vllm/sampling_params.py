@@ -1,6 +1,5 @@
 """Sampling parameters for text generation."""
 import copy
-import os
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -407,7 +406,10 @@ class SamplingParams(
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
 
-        if os.environ.get("PD_SEPARATE_STAGE", "").lower() == "prefill":
+        # use local imports to avoid circular imports
+        from vllm.distributed.kv_transfer.utils import (PDDisaggStage,
+                                                        get_pd_stage)
+        if get_pd_stage() == PDDisaggStage.PREFILL:
             if self.max_tokens is None or self.max_tokens != 1:
                 logger.warning("Prefill run only generates one token. "
                                "max_tokens is set to 1.")

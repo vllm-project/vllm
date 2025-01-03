@@ -433,6 +433,14 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
 
+        # using local import to aoivd circular import
+        from vllm.distributed.kv_transfer.utils import (
+            PDDisaggStage, get_pd_stage, compute_token_page_hashes)
+
+        if get_pd_stage() != PDDisaggStage.NONE:
+            self.prompt_token_hashes = compute_token_page_hashes(
+                self.prompt_token_ids, [len(self.prompt_token_ids)])
+
     @property
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
@@ -473,6 +481,10 @@ class Sequence:
     def prompt_adapter_id(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_id \
                         if self.prompt_adapter_request else 0
+
+    @property
+    def last_prompt_hash(self) -> str:
+        return self.prompt_token_hashes[-1] if self.prompt_token_hashes else ""
 
     def get_output_text_to_return(self, buffer_length: int,
                                   delta: bool) -> str:

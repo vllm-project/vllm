@@ -124,6 +124,8 @@ class AttentionMetadata:
     multi_modal_placeholder_index_maps: Optional[Dict[
         str, MultiModalPlaceholderMap.IndexMap]]
 
+    token_hashes: List[str]
+
     @property
     @abstractmethod
     def prefill_metadata(self) -> Optional["AttentionMetadata"]:
