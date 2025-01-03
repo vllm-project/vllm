@@ -1,11 +1,11 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Tuple, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from vllm.v1.outputs import SamplerOutput
-from vllm.v1.sample.metadata import LogitsProcessMetadata, SamplingMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import (apply_all_penalties,
                                           apply_min_token_penalties)
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
@@ -101,8 +101,7 @@ class Sampler(nn.Module):
 
         greedy_sampled = self.greedy_sample(logits)
         sampled = torch.where(
-            sampling_metadata.logits_process_metadata.temperature <
-            _SAMPLING_EPS,
+            sampling_metadata.temperature < _SAMPLING_EPS,
             greedy_sampled,
             random_sampled,
         )
