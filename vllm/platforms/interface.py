@@ -250,6 +250,15 @@ class Platform:
             return False
         return True
 
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator for distributed communication.
+        Use `CommunicatorBase` by default if `use_device_specific_communicator`
+        is enabled.
+        """
+        return "vllm.distributed.device_communicators.base_communicator.CommunicatorBase"  # noqa: E501
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
