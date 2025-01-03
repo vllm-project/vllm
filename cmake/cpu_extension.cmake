@@ -31,7 +31,6 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
     )
 endif()
 
-
 if(MACOSX_FOUND)
     list(APPEND CXX_COMPILE_FLAGS
         "-Xpreprocessor"
@@ -43,21 +42,15 @@ else()
         "-DVLLM_CPU_EXTENSION")
 endif()
 
-if (MACOSX_FOUND)
-    execute_process(COMMAND uname -m
-                    RESULT_VARIABLE CPUINFO_RET
-                    OUTPUT_VARIABLE CPUINFO)
-else()
-    
+if (NOT MACOSX_FOUND)
     execute_process(COMMAND cat /proc/cpuinfo
                     RESULT_VARIABLE CPUINFO_RET
                     OUTPUT_VARIABLE CPUINFO)
+    if (NOT CPUINFO_RET EQUAL 0)
+        message(FATAL_ERROR "Failed to check CPU features via /proc/cpuinfo")
+    endif()
 endif()
 
-
-if (NOT CPUINFO_RET EQUAL 0)
-    message(FATAL_ERROR "Failed to check CPU features via /proc/cpuinfo")
-endif()
 
 function (find_isa CPUINFO TARGET OUT)
     string(FIND ${CPUINFO} ${TARGET} ISA_FOUND)
@@ -79,13 +72,16 @@ endfunction()
 
 is_avx512_disabled(AVX512_DISABLED)
 
-find_isa(${CPUINFO} "avx2" AVX2_FOUND)
-find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
-find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
-find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
-find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
-find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
-find_isa(${CPUINFO} "arm64" APPLE_SILICON_FOUND)
+if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+    set(APPLE_SILICON_FOUND TRUE)
+else()
+    find_isa(${CPUINFO} "avx2" AVX2_FOUND)
+    find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
+    find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
+    find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
+    find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
+    find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
+endif()
 
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
@@ -172,7 +168,7 @@ message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 if(ENABLE_NUMA)
     list(APPEND LIBS numa)
 else()
-    message("NUMA is disabled")
+    message(STATUS "NUMA is disabled")
     add_compile_definitions(-DVLLM_NUMA_DISABLED)
 endif()
 
