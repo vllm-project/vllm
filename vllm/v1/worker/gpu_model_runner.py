@@ -840,12 +840,6 @@ class GPUModelRunner:
         gc.collect()
 
     def capture_model(self) -> None:
-        if not self.use_cuda_graph:
-            logger.warning(
-                "Skipping CUDA graph capture. Please add "
-                "-O %s to use CUDA graphs.", CompilationLevel.PIECEWISE)
-            return
-
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
