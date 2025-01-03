@@ -491,7 +491,7 @@ MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]
 A dictionary containing placeholder ranges.
 """
 
-MultiModalHashDict = Mapping[str, Sequence[str]]
+MultiModalHashDict = Mapping[str, list[str]]
 """
 A dictionary containing hashes for items in each modality.
 """
