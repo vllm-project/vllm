@@ -112,7 +112,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
-               lora_request: Optional[LoRARequest] = None) -> List[int]:
+               lora_request: Optional[LoRARequest] = None,
+               add_special_tokens: Optional[bool] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.
@@ -132,7 +133,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             ret = ray.get(
                 actor.encode.remote(request_id=request_id,
                                     prompt=prompt,
-                                    lora_request=lora_request))
+                                    lora_request=lora_request,
+                                    add_special_tokens=add_special_tokens))
         except ActorDiedError as e:
             # If the actor is dead, we first try to reinitialize it.
             logger.warning("%s died with ActorDiedError, reinitializing.",
@@ -143,7 +145,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                 ret = ray.get(
                     actor.encode.remote(request_id=request_id,
                                         prompt=prompt,
-                                        lora_request=lora_request))
+                                        lora_request=lora_request,
+                                        add_special_tokens=add_special_tokens))
             except ActorDiedError as e:
                 logger.error(
                     "%s died for second time in a row, marking "
@@ -160,7 +163,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             self,
             prompt: str,
             request_id: Optional[str] = None,
-            lora_request: Optional[LoRARequest] = None) -> List[int]:
+            lora_request: Optional[LoRARequest] = None,
+            add_special_tokens: Optional[bool] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.
@@ -177,9 +181,11 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         actor_is_alive = True
         original_actor = actor
         try:
-            ret = await actor.encode.remote(request_id=request_id,
-                                            prompt=prompt,
-                                            lora_request=lora_request)
+            ret = await actor.encode.remote(
+                request_id=request_id,
+                prompt=prompt,
+                lora_request=lora_request,
+                add_special_tokens=add_special_tokens)
         except ActorDiedError as e:
             # If the actor is dead, we first try to reinitialize it.
             logger.warning("%s died with ActorDiedError, reinitializing.",
@@ -187,9 +193,11 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                            exc_info=e)
             actor = self._init_actor()
             try:
-                ret = await actor.encode.remote(request_id=request_id,
-                                                prompt=prompt,
-                                                lora_request=lora_request)
+                ret = await actor.encode.remote(
+                    request_id=request_id,
+                    prompt=prompt,
+                    lora_request=lora_request,
+                    add_special_tokens=add_special_tokens)
             except ActorDiedError as e:
                 logger.error(
                     "%s died for second time in a row, marking "
