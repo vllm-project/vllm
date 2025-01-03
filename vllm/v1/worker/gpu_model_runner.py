@@ -492,12 +492,13 @@ class GPUModelRunner:
             req_id_output_token_ids, skip_copy)
         return sampling_metadata
 
-    def _prepare_prompt_logprobs(
+    def _prepare_prompt_indices(
         self,
         req_id: str,
         scheduler_output: "SchedulerOutput",
         req_indices: npt.NDArray,
     ) -> npt.NDArray:
+        """Get the indices of a prompt in the batch."""
 
         # NOTE(rob): req_indices is the req_idx of each token.
         # If we have 3 sequences in the batch of lens [2, 5, 3],
@@ -660,17 +661,15 @@ class GPUModelRunner:
 
         # Compute prompt logprobs if needed.
         # NOTE(rob): for simplicity, compute prompt logprobs for each
-        # request separately. Prompt logprobs are rare (used for eval),
+        # prompt separately. Prompt logprobs are rare (used for eval),
         # and few prefills per batch, so prioritize simple over optimal.
         prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
         for (request_id, num_prompt_logprobs
              ) in self.input_batch.num_prompt_logprobs.items():
 
-            # Prepare mask and logits processor.
-            prompt_indices = self._prepare_prompt_logprobs(
+            # Compute of the prompt.
+            prompt_indices = self._prepare_prompt_indices(
                 request_id, scheduler_output, req_indices)
-
-            # Compute logits.
             prompt_hidden_states = hidden_states[prompt_indices]
             logits = self.model.compute_logits(prompt_hidden_states, None)
 

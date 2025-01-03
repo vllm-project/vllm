@@ -181,11 +181,11 @@ class IncrementalDetokenizer:
 
         # Detokenize non-incrementally.
         # NOTE(rob): the output is flattened:
-        #   [num_tok, num_lps] -> [num_tok * num_lps]
+        # [num_tok, num_lps] -> [num_tok * num_lps]
         decoded_tokens = detokenize_non_incrementally(self.tokenizer,
                                                       token_ids)
 
-        # Make Logprob for prompt token.
+        # Make Logprob for each tokens. The first Logprob is None.
         num_tokens, num_logprobs = logprobs.shape
         self.prompt_logprobs = [None] + [
             self._make_pos_logprob_dict(
