@@ -167,7 +167,7 @@ class MPClient(EngineCoreClient):
                 "executor_class": executor_class,
                 "log_stats": log_stats,
             })
-
+    
     def shutdown(self):
         """Clean up background resources."""
 
