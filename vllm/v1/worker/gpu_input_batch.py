@@ -4,13 +4,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 import numpy as np
-import numpy.typing as npt
 import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.v1.sample.metadata import (LogitsProcessMetadata,
-                                     PromptLogprobsMetadata, SamplingMetadata)
+from vllm.v1.sample.metadata import SamplingMetadata
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
