@@ -16,7 +16,7 @@ from transformers import BatchFeature, ProcessorMixin
 
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, encode_tokens
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
 from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -57,24 +57,6 @@ class PromptReplacement:
         )
 
 
-def _encode(
-    tokenizer: AnyTokenizer,
-    text: str,
-    *,
-    add_special_tokens: bool = False,
-) -> list[int]:
-    """
-    Backend-agnostic equivalent of HF's
-    :code:`tokenizer.encode(text, add_special_tokens=...)`.
-    """
-    if isinstance(tokenizer, MistralTokenizer):
-        return tokenizer.tokenizer.encode(text,
-                                          bos=add_special_tokens,
-                                          eos=add_special_tokens)
-
-    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
-
-
 @lru_cache(maxsize=2048)
 def _cached_encode(
     tokenizer: AnyTokenizer,
@@ -82,7 +64,9 @@ def _cached_encode(
     *,
     add_special_tokens: bool = False,
 ) -> list[int]:
-    return _encode(tokenizer, text, add_special_tokens=add_special_tokens)
+    return encode_tokens(tokenizer,
+                         text,
+                         add_special_tokens=add_special_tokens)
 
 
 def _decode(
@@ -983,7 +967,9 @@ class BaseMultiModalProcessor(ABC):
                 mm_item_counts,
             )
 
-            token_ids = _encode(tokenizer, text)
+            token_ids = encode_tokens(tokenizer,
+                                      text,
+                                      add_special_tokens=False)
             matched_repls = [match.prompt_repl for match in text_matches]
 
         placeholders = self._find_placeholders(matched_repls, token_ids,
