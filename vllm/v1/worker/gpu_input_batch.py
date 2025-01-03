@@ -247,7 +247,6 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
-        sample_indices: torch.Tensor,
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -258,7 +257,6 @@ class InputBatch:
             self.top_k[:self.num_reqs].copy_(
                 self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
         return SamplingMetadata(
-            sample_indicies=sample_indices,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
             logits_process_metadata=LogitsProcessMetadata(
@@ -298,8 +296,9 @@ class InputBatch:
             prompt_indices=indices,
             logits_process_metadata=LogitsProcessMetadata(
                 temperature=temperature,
-                top_p=top_p, top_k=top_k,
-                no_top_p=no_top_p, 
+                top_p=top_p,
+                top_k=top_k,
+                no_top_p=no_top_p,
                 no_top_k=no_top_k),
         )
 
