@@ -614,11 +614,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
         return data
 
 
+class OpenAIPromptSegment(OpenAIBaseModel):
+    text: str
+    split_special_tokens: bool
+
+
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str
-    prompt: Union[List[int], List[List[int]], str, List[str]]
+    prompt: Union[List[int], List[List[int]], str, List[str],
+                  List[OpenAIPromptSegment]]
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0

@@ -209,6 +209,23 @@ The following extra parameters are supported:
 :end-before: end-completion-extra-params
 ```
 
+In addition, the format of the `prompt` has been extended: You can pass a list of segments, each specifying if
+special tokens should be included or split:
+
+```ts
+{
+  ...
+  prompt: [
+        { text: "<|fim_prefix|>", split_special_tokens: false },
+        { text: prefix, split_special_tokens: true },
+        { text: "<|fim_suffix|>", split_special_tokens: false },
+        { text: suffix, split_special_tokens: true },
+        { text: "<|fim_middle|>", split_special_tokens: false },
+      ]
+  ...
+}
+```
+
 (chat-api)=
 ### Chat API
 

@@ -18,6 +18,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               ErrorResponse,
+                                              OpenAIPromptSegment,
                                               RequestResponseMetadata,
                                               UsageInfo)
 # yapf: enable
@@ -28,7 +29,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators
+from vllm.utils import is_list_of, merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -99,10 +100,22 @@ class OpenAIServingCompletion(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
+            prompt: Union[str, List[str], List[int], List[List[int]]]
+            if isinstance(request.prompt, list) and is_list_of(
+                    request.prompt, OpenAIPromptSegment):
+                prompt = [
+                    id for segment in request.prompt
+                    for id in tokenizer(segment.text,
+                                        split_special_tokens=segment.
+                                        split_special_tokens).input_ids
+                ]
+            else:
+                prompt = request.prompt
+
             request_prompts, engine_prompts = await self._preprocess_completion(
                 request,
                 tokenizer,
-                request.prompt,
+                prompt,
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
