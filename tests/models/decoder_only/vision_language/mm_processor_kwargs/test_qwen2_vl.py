@@ -3,7 +3,7 @@ from typing import Any, Dict, Tuple
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.inputs import InputContext, InputProcessingContext
+from vllm.inputs import InputProcessingContext
 
 from .....conftest import _ImageAssets
 from ....utils import build_model_context
@@ -20,39 +20,6 @@ MAX_PIXELS = "max_pixels"
 def processor_for_qwen2_vl():
     from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalProcessor
     return Qwen2VLMultiModalProcessor
-
-
-@pytest.fixture()
-def get_max_qwen2_vl_image_tokens():
-    from vllm.model_executor.models.qwen2_vl import (
-        get_max_qwen2_vl_image_tokens)
-    return get_max_qwen2_vl_image_tokens
-
-
-@pytest.mark.parametrize("mm_processor_kwargs,expected_max_tokens", [
-    ({}, 16384),
-    ({
-        MIN_PIXELS: 64**2,
-        MAX_PIXELS: 512**2
-    }, 324),
-])
-@pytest.mark.parametrize("model", [MODEL])
-def test_qwen2_vl_max_image_tokens(
-    get_max_qwen2_vl_image_tokens,
-    model: str,
-    mm_processor_kwargs: Dict[str, Any],
-    expected_max_tokens: int,
-):
-    """Ensure that the max token calc handles min/max pixels properly."""
-    ctx = build_model_context(
-        model_name=model,
-        tokenizer_name=model,
-        mm_processor_kwargs=None,
-    )
-
-    actual_max_tokens = get_max_qwen2_vl_image_tokens(
-        InputContext(ctx.model_config), **mm_processor_kwargs)
-    assert actual_max_tokens == expected_max_tokens
 
 
 @pytest.mark.parametrize(
@@ -82,6 +49,7 @@ def test_processor_override(
         model_name=model,
         tokenizer_name=model,
         mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": num_imgs},
     )
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     ctx = InputProcessingContext(ctx.model_config, tokenizer)

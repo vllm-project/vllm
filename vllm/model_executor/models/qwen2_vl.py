@@ -29,7 +29,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from PIL import Image
 from transformers import BatchFeature
 from transformers.models.qwen2_vl import (Qwen2VLImageProcessor,
                                           Qwen2VLProcessor)
@@ -41,7 +40,6 @@ from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.inputs import InputContext
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
@@ -53,6 +51,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
@@ -650,8 +649,9 @@ def _get_vision_info(
     width: int,
     min_pixels: int,
     max_pixels: int,
+    *,
     do_resize: bool = True,
-    data_type_key: str = "image",
+    modality: str = "image",
     mm_count: int = 1,
 ):
     """Get information (resized height / width and number of vision tokens)
@@ -671,11 +671,12 @@ def _get_vision_info(
     else:
         resized_height, resized_width = height, width
 
-    if data_type_key == "image":
+    if modality == "image":
         grid_t = mm_count
-    else:
-        assert data_type_key == "video"
+    elif modality == "video":
         grid_t = max(mm_count // temporal_patch_size, 1)
+    else:
+        raise ValueError(f"Modality {modality} is not supported")
 
     grid_h = resized_height // patch_size
     grid_w = resized_width // patch_size
@@ -691,41 +692,11 @@ def _get_image_processor(hf_processor: Qwen2VLProcessor):
     return image_processor
 
 
-def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
-                               data_type_key: str,
-                               *,
-                               min_pixels: Optional[int] = None,
-                               max_pixels: Optional[int] = None) -> int:
-    hf_config = ctx.get_hf_config(Qwen2VLConfig)
-    vision_config = hf_config.vision_config
-
-    hf_processor = ctx.get_hf_processor(Qwen2VLProcessor)
-    image_processor = _get_image_processor(hf_processor)
-
-    _, _, max_llm_image_tokens = _get_vision_info(
-        vision_config,
-        height=9999999,
-        width=9999999,
-        min_pixels=min_pixels or image_processor.min_pixels,
-        max_pixels=max_pixels or image_processor.max_pixels,
-        data_type_key=data_type_key,
-    )
-    return max_llm_image_tokens
-
-
-get_max_qwen2_vl_image_tokens = partial(get_max_qwen2_vl_mm_tokens,
-                                        data_type_key="image")
-get_max_qwen2_vl_video_tokens = partial(get_max_qwen2_vl_mm_tokens,
-                                        data_type_key="video")
-
-
 class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
                                             dict[str, torch.Tensor]]):
 
     def __init__(self, data: dict, modality: str) -> None:
-        super().__init__(data)
-
-        self.modality = modality
+        super().__init__(data, modality)
 
         grid_thw = data[f"{modality}_grid_thw"]
         slice_idxs = [0] + grid_thw.prod(-1).cumsum_(0).tolist()
@@ -733,9 +704,6 @@ class Qwen2EmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
             slice(slice_idxs[i], slice_idxs[i + 1])
             for i in range(len(grid_thw))
         ]
-
-    def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r})")
 
     def get_count(self) -> int:
         return len(self.data[f"{self.modality}_grid_thw"])
@@ -791,6 +759,32 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None, "video": None}
+
+    def _get_max_mm_tokens(self, modality: str) -> int:
+        hf_config = self.ctx.get_hf_config(Qwen2VLConfig)
+        vision_config = hf_config.vision_config
+
+        hf_processor = self._get_hf_processor()
+        image_processor = _get_image_processor(hf_processor)
+
+        _, _, max_llm_image_tokens = _get_vision_info(
+            vision_config,
+            height=9999999,
+            width=9999999,
+            min_pixels=image_processor.min_pixels,
+            max_pixels=image_processor.max_pixels,
+            modality=modality,
+        )
+        return max_llm_image_tokens
+
+    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        return {
+            "image": self._get_max_mm_tokens("image"),
+            "video": self._get_max_mm_tokens("video"),
+        }
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2MultiModalDataParser()
@@ -882,12 +876,10 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
         hf_processor = self._get_hf_processor()
-        image_token: str = hf_processor.image_token
         image_processor = _get_image_processor(hf_processor)
 
-        data = {}
+        image_token: str = hf_processor.image_token
         resized_height, resized_width = smart_resize(
             height=9999999,
             width=9999999,
@@ -895,20 +887,21 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
             min_pixels=image_processor.min_pixels,
             max_pixels=image_processor.max_pixels,
         )
+        num_images = mm_counts.get("image", 0)
 
-        dummy_image = Image.new("RGB", (resized_width, resized_height),
-                                color=0)
-        data["image"] = [dummy_image] * num_images
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=resized_width,
+                                   height=resized_height,
+                                   num_images=num_images)
+        }
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,
-            mm_data=data,
+            mm_data=mm_data,
         )
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_qwen2_vl_image_tokens)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "video", get_max_qwen2_vl_video_tokens)
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor)
 class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsLoRA, SupportsPP):
@@ -925,15 +918,23 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     }
 
     # LoRA specific attributes
-    # TODO Support LoRA for the visual encoder in the future.
     supported_lora_modules = [
         "qkv_proj",
         "o_proj",
         "gate_up_proj",
         "down_proj",
+        # vision tower
+        "qkv",
+        "attn.proj",  # Distinguish patch_embed.proj
+        "fc1",
+        "fc2",
+        # projector
+        "mlp.0",
+        "mlp.2"
     ]
     embedding_modules = {}
     embedding_padding_modules = []
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "lm_head.": "language_model.lm_head.",
@@ -1230,3 +1231,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="visual.",
+            tower_model="visual.merger.")

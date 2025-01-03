@@ -23,6 +23,7 @@ run_mypy vllm/compilation
 run_mypy vllm/distributed
 run_mypy vllm/engine
 run_mypy vllm/executor
+run_mypy vllm/inputs
 run_mypy vllm/lora
 run_mypy vllm/model_executor
 run_mypy vllm/plugins
