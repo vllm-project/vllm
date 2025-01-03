@@ -729,6 +729,7 @@ def _test_processing_cache_correctness(
     ("llava-hf/llava-1.5-7b-hf", {"image": True}),
     ("llava-hf/llava-v1.6-mistral-7b-hf", {"image": True}),
     ("llava-hf/LLaVA-NeXT-Video-7B-hf", {"video": False}),
+    ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", {"image": True, "video": True}),  # noqa: E501
     ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image": True}),
     ("mistral-community/pixtral-12b", {"image": True}),
     ("Qwen/Qwen2-VL-2B-Instruct", {"image": True, "video": True}),

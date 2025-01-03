@@ -724,9 +724,9 @@ class BaseMultiModalProcessor(ABC):
         all_prompt_repls: Sequence[_BoundPromptReplacement],
         new_token_ids: list[int],
         mm_item_counts: Mapping[str, int],
-    ) -> list[_PlaceholderInfo]:
-        return list(
-            iter_placeholders(all_prompt_repls, new_token_ids, mm_item_counts))
+    ) -> Mapping[str, list[_PlaceholderInfo]]:
+        it = iter_placeholders(all_prompt_repls, new_token_ids, mm_item_counts)
+        return dict(full_groupby_modality(it))
 
     def _get_hf_mm_data(
         self,
@@ -942,7 +942,7 @@ class BaseMultiModalProcessor(ABC):
         token_ids: list[int],
         prompt_repls: Sequence[_BoundPromptReplacement],
         mm_item_counts: Mapping[str, int],
-    ) -> tuple[list[int], str, list[_PlaceholderInfo]]:
+    ) -> tuple[list[int], str, Mapping[str, list[_PlaceholderInfo]]]:
         tokenizer = self._get_tokenizer()
 
         token_matches = find_token_matches(token_ids, prompt_repls)
@@ -991,6 +991,24 @@ class BaseMultiModalProcessor(ABC):
 
         return token_ids, text, placeholders
 
+    def _validate_placeholders(
+        self,
+        mm_placeholders: Mapping[str, list[_PlaceholderInfo]],
+        mm_item_counts: Mapping[str, int],
+    ) -> None:
+        for modality, item_count in mm_item_counts.items():
+            placeholders = mm_placeholders.get(modality, [])
+
+            if len(placeholders) != item_count:
+                raise ValueError(
+                    f"Expected there to be {item_count} prompt replacements "
+                    f"corresponding to {item_count} {modality} items. Either "
+                    "the prompt text has missing/incorrect tokens for "
+                    "multi-modal inputs, or there is a problem with your "
+                    "implementation of merged multi-modal processor for this "
+                    "model (usually arising from an inconsistency between "
+                    "`_call_hf_processor` and `_get_prompt_replacements`).")
+
     def apply(
         self,
         prompt_text: str,
@@ -1028,53 +1046,43 @@ class BaseMultiModalProcessor(ABC):
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
         mm_item_counts = mm_items.get_all_counts()
-        all_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
-                                                   mm_item_counts)
+        mm_placeholders = self._find_placeholders(prompt_repls, prompt_ids,
+                                                  mm_item_counts)
 
-        if all_placeholders and not self._always_apply_prompt_replacements():
+        try:
+            self._validate_placeholders(mm_placeholders, mm_item_counts)
+        except ValueError:
+            is_hf_replaced = False
+        else:
+            is_hf_replaced = True
+
+        if is_hf_replaced and not self._always_apply_prompt_replacements():
             tokenizer = self._get_tokenizer()
             prompt_text = _decode(tokenizer, prompt_ids)
         else:
             (
                 prompt_ids,
                 prompt_text,
-                all_placeholders,
+                mm_placeholders,
             ) = self._apply_prompt_replacements(
                 prompt_ids,
                 prompt_repls,
                 mm_item_counts,
             )
 
-        mm_placeholders = dict[str, list[PlaceholderRange]]()
-        err_suffix = (
-            "Either the prompt text has missing/incorrect tokens for "
-            "multi-modal inputs, or there is a problem with your "
-            "implementation of merged multi-modal processor for this model, "
-            "particularly in the `_get_prompt_replacements` method.")
+        self._validate_placeholders(mm_placeholders, mm_item_counts)
 
-        for modality, placeholders in full_groupby_modality(all_placeholders):
-            if modality not in mm_items:
-                raise AssertionError(
-                    f"Expected no placeholders for {modality=}, "
-                    f"but found {placeholders=}. Input items: {mm_items}"
-                    f"\n{err_suffix}")
-
-            if len(placeholders) != len(mm_items[modality]):
-                raise AssertionError(
-                    f"Expected length of {placeholders=} for {modality=} "
-                    f"to equal that of input items: {mm_items[modality]}"
-                    f"\n{err_suffix}")
-
-            mm_placeholders[modality] = [
-                item.to_range() for item in placeholders
-            ]
+        mm_placeholder_ranges = {
+            modality: [item.to_range() for item in placeholders]
+            for modality, placeholders in mm_placeholders.items()
+        }
 
         return MultiModalInputsV2(
             type="multimodal",
             prompt=prompt_text,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
-            mm_placeholders=mm_placeholders,
+            mm_placeholders=mm_placeholder_ranges,
         )
 
     def _get_dummy_audios(
