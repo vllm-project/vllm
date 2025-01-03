@@ -16,11 +16,11 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, encode_tokens
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
+from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
                      MultiModalInputsV2, MultiModalKwargs,
                      MultiModalKwargsItem, PlaceholderRange)
 from .parse import MultiModalDataItems, MultiModalDataParser
-from .utils import hash_kwargs
 
 logger = init_logger(__name__)
 
@@ -508,9 +508,9 @@ class ProcessingCache:
         """
         self._maybe_log_cache_stats()
 
-        cache_key = hash_kwargs(model_id=model_id,
-                                **{modality: input_item},
-                                **input_kwargs)
+        cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
+                                                 **{modality: input_item},
+                                                 **input_kwargs)
         return self._cache.get(cache_key)
 
     def put(
@@ -525,9 +525,9 @@ class ProcessingCache:
         Put a processed multi-modal item into the cache
         according to its dependencies (see :meth:`get`).
         """
-        cache_key = hash_kwargs(model_id=model_id,
-                                **{modality: input_item},
-                                **input_kwargs)
+        cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
+                                                 **{modality: input_item},
+                                                 **input_kwargs)
         self._cache.put(cache_key, output_kwargs)
 
 
@@ -952,9 +952,10 @@ class BaseMultiModalProcessor(ABC):
         model_id = self.ctx.model_config.model
         mm_hashes = {
             modality: [
-                hash_kwargs(model_id=model_id,
-                            **{modality: item},
-                            **hf_processor_mm_kwargs) for item in items
+                MultiModalHasher.hash_kwargs(model_id=model_id,
+                                             **{modality: item},
+                                             **hf_processor_mm_kwargs)
+                for item in items
             ]
             for modality, items in mm_items.items()
         }
