@@ -37,13 +37,7 @@ class MultiprocExecutor(Executor):
     def __init__(self, vllm_config: VllmConfig) -> None:
 
         # The child processes will send SIGQUIT when unrecoverable
-        # errors happen. We kill the process tree here so that the
-        # stack trace is very evident.
-        # TODO: rather than killing the main process, we should
-        # figure out how to raise an AsyncEngineDeadError and
-        # handle at the API server level so we can return a better
-        # error code to the clients calling VLLM.
-
+        # errors happen.
         def sigquit_handler(signum, frame):
             logger.fatal(
                 "MulitprocExecutor got SIGQUIT from worker processes, shutting "
@@ -51,9 +45,10 @@ class MultiprocExecutor(Executor):
             # Propagate error up to parent process.
             parent_process = psutil.Process().parent()
             parent_process.send_signal(signal.SIGQUIT)
-            kill_process_tree(os.getpid())
+            self.shutdown()
 
         signal.signal(signal.SIGQUIT, sigquit_handler)
+
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
 
@@ -356,6 +351,7 @@ class WorkerProc:
             traceback = get_exception_traceback()
             logger.error("Worker hit an exception: %s", traceback)
             parent_process.send_signal(signal.SIGQUIT)
+            raise
 
         finally:
             # Clean up once worker exits busy loop
@@ -390,12 +386,17 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
+
+        i = 0
         while True:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
             try:
+                if i == 10:
+                    raise ValueError("SIMULATE CUDA EXCEPTION")
+                i += 1
                 output = getattr(self.worker, method)(*args, **kwargs)
-            except BaseException as e:
+            except Exception as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
                 continue
