@@ -65,11 +65,14 @@ class BlockTable:
         self.block_table.fill_(0)
         self.block_table_cpu.fill_(0)
 
-    def cuda(self) -> torch.Tensor:
+    def to_device(self) -> torch.Tensor:
+        """Ruturns the device tensor of the block table."""
         return self.block_table
 
     def cpu(self) -> torch.Tensor:
+        """Returns the CPU tensor of the block table."""
         return self.block_table_cpu
 
     def numpy(self) -> np.ndarray:
+        """Returns the numpy array of the block table."""
         return self.block_table_np
