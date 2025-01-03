@@ -491,6 +491,11 @@ MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]
 A dictionary containing placeholder ranges.
 """
 
+MultiModalHashDict = Mapping[str, Sequence[str]]
+"""
+A dictionary containing hashes for items in each modality.
+"""
+
 
 class MultiModalInputsV2(TypedDict):
     """
@@ -513,7 +518,7 @@ class MultiModalInputsV2(TypedDict):
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: NotRequired[list[str]]
+    mm_hashes: NotRequired[MultiModalHashDict]
     """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict

@@ -1,11 +1,13 @@
+import pickle
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Iterable, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 
 import numpy as np
 import numpy.typing as npt
 import torch
+from blake3 import blake3
 from PIL import Image
 
 import vllm.envs as envs
@@ -26,7 +28,7 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 _M = TypeVar("_M")
 
 if TYPE_CHECKING:
-    from ..multimodal import MultiModalPlaceholderDict
+    from ..multimodal import MultiModalHashDict, MultiModalPlaceholderDict
 
 
 class MediaConnector:
@@ -254,6 +256,58 @@ fetch_image = global_media_connector.fetch_image
 fetch_video = global_media_connector.fetch_video
 
 
+def serialize_item(obj: object) -> bytes:
+    # Simple cases
+    if isinstance(obj, str):
+        return obj.encode("utf-8")
+    if isinstance(obj, bytes):
+        return obj
+    if isinstance(obj, Image.Image):
+        return obj.tobytes()
+
+    # Convertible to NumPy arrays
+    if isinstance(obj, torch.Tensor):
+        obj = obj.numpy()
+    if isinstance(obj, (int, float)):
+        obj = np.array(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tobytes()
+
+    logger.warning(
+        "No serialization method found for %s. "
+        "Falling back to pickle.", type(obj))
+
+    return pickle.dumps(obj)
+
+
+def item_to_bytes(
+    key: str,
+    obj: object,
+) -> Iterable[tuple[bytes, bytes]]:
+    # Recursive cases
+    if isinstance(obj, (list, tuple)):
+        for i, elem in enumerate(obj):
+            yield from item_to_bytes(f"{key}.{i}", elem)
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from item_to_bytes(f"{key}.{k}", v)
+    else:
+        key_bytes = serialize_item(key)
+        value_bytes = serialize_item(obj)
+        yield key_bytes, value_bytes
+
+
+def hash_kwargs(**kwargs: object) -> str:
+    hasher = blake3()
+
+    for k, v in kwargs.items():
+        for k_bytes, v_bytes in item_to_bytes(k, v):
+            hasher.update(k_bytes)
+            hasher.update(v_bytes)
+
+    return hasher.hexdigest()
+
+
 def encode_audio_base64(
     audio: np.ndarray,
     sampling_rate: int,
@@ -442,13 +496,17 @@ def consecutive_placeholder_ranges(
     ]
 
 
-def merge_and_sort_placeholders_from_modalities(
-    mm_positions: "MultiModalPlaceholderDict"
-) -> tuple[list[str], list[PlaceholderRange]]:
+def merge_and_sort_mm_metadata_from_modalities(
+    mm_positions: "MultiModalPlaceholderDict",
+    mm_hashes: Optional["MultiModalHashDict"],
+) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:
     """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
     objects from all available modalities into a single list of 
     PlaceholderRange, sorted by their offset (starting index in the input 
     sequence) in the ascending order.
+
+    Optionally if a MultiModalHashDict is given, same operation will be 
+    applied to the object and the sorted list of hashes will be returned.
 
     Raises:
         ValueError: If the input prompt has interleaved placeholders from
@@ -459,29 +517,61 @@ def merge_and_sort_placeholders_from_modalities(
         list[str]: Sorted list of involved modalities.
         list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
             mm_positions.
+        Optional[list[str]]: Sorted list of all hashes from mm_hashes if 
+            given, None otherwise.
     """
 
     modalities = list(mm_positions.keys())
 
-    # For single modality, its placeholder ranges are already sorted.
+    assert len(modalities) > 0, "No modalities found in the mm_positions."
+
+    # For single modality, placeholder ranges and hashes are already sorted
+    # so we can return the list directly.
     if len(modalities) == 1:
-        return modalities, list(mm_positions[modalities[0]])
+        if mm_hashes is None:
+            return modalities, list(mm_positions[modalities[0]]), None
+        else:
+            return modalities, list(mm_positions[modalities[0]]), list(
+                mm_hashes[modalities[0]])
 
     placeholder_lists_with_modality = [(modality, mm_positions[modality])
                                        for modality in modalities
                                        if modality in mm_positions]
 
-    sorted_lists_with_modality = sorted(placeholder_lists_with_modality,
-                                        key=lambda x: x[1][0]['offset'])
+    if mm_hashes is None:
+        sorted_placeholder_lists = sorted(placeholder_lists_with_modality,
+                                          key=lambda x: x[1][0]['offset'])
+        sorted_hash_lists = None
+    else:
+        hashes_lists = [
+            mm_hashes[modality] for modality in modalities
+            if modality in mm_hashes
+        ]
+        sorted_pairs = sorted(zip(placeholder_lists_with_modality,
+                                  hashes_lists),
+                              key=lambda x: x[0][1][0]['offset'])
+        sorted_placeholder_tuple, sorted_hash_tuple = zip(*sorted_pairs)
+        sorted_placeholder_lists = list(sorted_placeholder_tuple)
+        sorted_hash_lists = list(sorted_hash_tuple)
 
-    # Verify if the sorted order avoids interleaving
-    merged: list[PlaceholderRange] = []
-    for modality, placeholder_list in sorted_lists_with_modality:
-        if merged and placeholder_list[0]['offset'] < merged[-1]['offset']:
+    sorted_modalities = [modality for modality, _ in sorted_placeholder_lists]
+
+    # Flatten sorted list of lists to a single list and verify there is no
+    # interleaving of placeholders from different modalities.
+    merged_placeholders: list[PlaceholderRange] = []
+    for modality, placeholder_list in sorted_placeholder_lists:
+        if merged_placeholders and placeholder_list[0][
+                'offset'] < merged_placeholders[-1]['offset']:
             raise ValueError(
                 "Interleaved mixed-modality inference is currently not "
                 "supported.")
-        merged.extend(placeholder_list)
+        merged_placeholders.extend(placeholder_list)
 
-    # Return the order of modalities and the merged placeholder ranges
-    return [modality for modality, _ in sorted_lists_with_modality], merged
+    if sorted_hash_lists is not None:
+        merged_hashes = []
+        for hash_list in sorted_hash_lists:
+            merged_hashes.extend(hash_list)
+    else:
+        merged_hashes = None
+
+    return sorted_modalities, merged_placeholders, merged_hashes

@@ -1,4 +1,3 @@
-import pickle
 import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -9,8 +8,6 @@ from typing import Any, NamedTuple, Optional, Protocol, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
-import torch
-from blake3 import blake3
 from PIL import Image
 from transformers import BatchFeature, ProcessorMixin
 
@@ -23,6 +20,7 @@ from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
                      MultiModalInputsV2, MultiModalKwargs,
                      MultiModalKwargsItem, PlaceholderRange)
 from .parse import MultiModalDataItems, MultiModalDataParser
+from .utils import hash_kwargs
 
 logger = init_logger(__name__)
 
@@ -492,56 +490,6 @@ class ProcessingCache:
             logger.debug("ProcessingCache: hit_ratio = %.2f",
                          cache_stats.hit_ratio)
 
-    def _serialize_item(self, obj: object) -> bytes:
-        # Simple cases
-        if isinstance(obj, str):
-            return obj.encode("utf-8")
-        if isinstance(obj, bytes):
-            return obj
-        if isinstance(obj, Image.Image):
-            return obj.tobytes()
-
-        # Convertible to NumPy arrays
-        if isinstance(obj, torch.Tensor):
-            obj = obj.numpy()
-        if isinstance(obj, (int, float)):
-            obj = np.array(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tobytes()
-
-        logger.warning(
-            "No serialization method found for %s. "
-            "Falling back to pickle.", type(obj))
-
-        return pickle.dumps(obj)
-
-    def _item_to_bytes(
-        self,
-        key: str,
-        obj: object,
-    ) -> Iterable[tuple[bytes, bytes]]:
-        # Recursive cases
-        if isinstance(obj, (list, tuple)):
-            for i, elem in enumerate(obj):
-                yield from self._item_to_bytes(f"{key}.{i}", elem)
-        elif isinstance(obj, dict):
-            for k, v in obj.items():
-                yield from self._item_to_bytes(f"{key}.{k}", v)
-        else:
-            key_bytes = self._serialize_item(key)
-            value_bytes = self._serialize_item(obj)
-            yield key_bytes, value_bytes
-
-    def _hash_kwargs(self, **kwargs: object) -> str:
-        hasher = blake3()
-
-        for k, v in kwargs.items():
-            for k_bytes, v_bytes in self._item_to_bytes(k, v):
-                hasher.update(k_bytes)
-                hasher.update(v_bytes)
-
-        return hasher.hexdigest()
-
     def get(
         self,
         model_id: str,
@@ -560,9 +508,9 @@ class ProcessingCache:
         """
         self._maybe_log_cache_stats()
 
-        cache_key = self._hash_kwargs(model_id=model_id,
-                                      **{modality: input_item},
-                                      **input_kwargs)
+        cache_key = hash_kwargs(model_id=model_id,
+                                **{modality: input_item},
+                                **input_kwargs)
         return self._cache.get(cache_key)
 
     def put(
@@ -577,9 +525,9 @@ class ProcessingCache:
         Put a processed multi-modal item into the cache
         according to its dependencies (see :meth:`get`).
         """
-        cache_key = self._hash_kwargs(model_id=model_id,
-                                      **{modality: input_item},
-                                      **input_kwargs)
+        cache_key = hash_kwargs(model_id=model_id,
+                                **{modality: input_item},
+                                **input_kwargs)
         self._cache.put(cache_key, output_kwargs)
 
 
@@ -998,6 +946,19 @@ class BaseMultiModalProcessor(ABC):
         """
         mm_items = self._to_mm_items(mm_data)
 
+        # Create MM hashes
+        # TODO: Use these hash keys for caching operations in apply_hf_processor
+        # instead of rehashing.
+        model_id = self.ctx.model_config.model
+        mm_hashes = {
+            modality: [
+                hash_kwargs(model_id=model_id,
+                            **{modality: item},
+                            **hf_processor_mm_kwargs) for item in items
+            ]
+            for modality, items in mm_items.items()
+        }
+
         prompt_ids, mm_kwargs = self._cached_apply_hf_processor(
             prompt_text,
             mm_items,
@@ -1058,6 +1019,7 @@ class BaseMultiModalProcessor(ABC):
             prompt=prompt_text,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
 
