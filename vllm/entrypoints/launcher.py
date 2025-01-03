@@ -7,10 +7,11 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 
 from vllm import envs
-from vllm.engine.async_llm_engine import AsyncEngineDeadError
-from vllm.engine.multiprocessing import MQEngineDeadError
+# from vllm.engine.async_llm_engine import AsyncEngineDeadError
+# from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
+from vllm.v1.engine.async_llm import EngineDeadError, EngineGenerateError
 
 logger = init_logger(__name__)
 
@@ -58,46 +59,46 @@ async def serve_http(app: FastAPI, **uvicorn_kwargs: Any):
         return server.shutdown()
 
 
+def start_termination(server: uvicorn.Server):
+    # See discussions here on shutting down a uvicorn server
+    # https://github.com/encode/uvicorn/discussions/1103
+    # In this case we cannot await the server shutdown here because
+    # this handler must first return to close the connection for
+    # this request.
+    logger.fatal("VLLM Engine failed, terminating server.")
+    server.should_exit = True
+
+
+# NOTE(rob): VLLM V1 AsyncLLM catches exceptions and returns
+# only two types: EngineGenerateError and EngineDeadError.
+#
+# EngineGenerateError is raised by the per request generate()
+# method. This error could be request specific (and therefore
+# recoverable - e.g. if there is an error in input processing).
+#
+# EngineDeadError is raised by the background output_handler
+# method. This error is global and therefore not recoverable.
+#
+# We register these @app.exception_handlers to return nice
+# responses to the end user if they occur and shut down if needed.
+# See https://fastapi.tiangolo.com/tutorial/handling-errors/
+# for more details on how exception handlers work.
 def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
-    """Adds handlers for fatal errors that should crash the server"""
 
-    @app.exception_handler(RuntimeError)
-    async def runtime_error_handler(request: Request, __):
-        """On generic runtime error, check to see if the engine has died.
-        It probably has, in which case the server will no longer be able to
-        handle requests. Trigger a graceful shutdown with a SIGTERM."""
-        engine = request.app.state.engine_client
-        if (not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine.errored
-                and not engine.is_running):
-            logger.fatal("AsyncLLMEngine has failed, terminating server "
-                         "process")
-            # See discussions here on shutting down a uvicorn server
-            # https://github.com/encode/uvicorn/discussions/1103
-            # In this case we cannot await the server shutdown here because
-            # this handler must first return to close the connection for
-            # this request.
-            server.should_exit = True
+    if envs.VLLM_USE_V1:
 
-        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+        @app.exception_handler(EngineGenerateError)
+        async def generate_error_handler(request: Request, __):
+            engine = request.app.state.engine_client
+            if (not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine.errored):
+                # Terminate if recoverable.
+                start_termination(server)
 
-    @app.exception_handler(AsyncEngineDeadError)
-    async def async_engine_dead_handler(_, __):
-        """Kill the server if the async engine is already dead. It will
-        not handle any further requests."""
-        if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH:
-            logger.fatal("AsyncLLMEngine is already dead, terminating server "
-                         "process")
-            server.should_exit = True
+            return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
-        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+        @app.exception_handler(EngineDeadError)
+        async def engine_dead_handler(_, __):
+            if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH:
+                start_termination(server)
 
-    @app.exception_handler(MQEngineDeadError)
-    async def mq_engine_dead_handler(_, __):
-        """Kill the server if the mq engine is already dead. It will
-        not handle any further requests."""
-        if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH:
-            logger.fatal("MQLLMEngine is already dead, terminating server "
-                         "process")
-            server.should_exit = True
-
-        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)

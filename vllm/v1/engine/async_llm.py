@@ -1,6 +1,7 @@
 import asyncio
-import os
+# import os
 import signal
+from functools import partial
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -18,13 +19,24 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import kill_process_tree
+# from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
+
+
+# NOTE(rob): raised when a generate() fails.
+class EngineGenerateError(Exception):
+    pass
+
+
+# NOTE(rob): raised when the engine dies, typically
+# by the background output handler loop. Unrecoverable.
+class EngineDeadError(Exception):
+    pass
 
 
 class AsyncLLM(EngineClient):
@@ -42,23 +54,17 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
     ) -> None:
 
-        # The child processes will send SIGQUIT when unrecoverable
-        # errors happen. We kill the process tree here so that the
-        # stack trace is very evident.
-        # TODO: rather than killing the main process, we should
-        # figure out how to raise an AsyncEngineDeadError and
-        # handle at the API server level so we can return a better
-        # error code to the clients calling VLLM.
+        # NOTE(rob): EngineCore sends SIGQUIT on unrecoverable errors.
         def sigquit_handler(signum, frame):
             logger.fatal(
                 "AsyncLLM got SIGQUIT from worker processes, shutting "
                 "down. See stack trace above for root cause issue.")
-            kill_process_tree(os.getpid())
+            self._propagate_error()
 
-        signal.signal(signal.SIGQUIT, sigquit_handler)
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGQUIT, partial(sigquit_handler))
 
-        assert start_engine_loop
-
+        self._errored = False
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
@@ -243,12 +249,17 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             while True:
-                # Note: drain queue without await if possible (avoids
+                # Note(rob): drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
-                # Note: both Detokenizer and EngineCore handle their
-                # own request cleanup based on finished.
+                # _run_output_handler() puts EngineDeadError into the queue
+                # if it encounters an unrecoverable issue in the EngineCore.
+                if isinstance(out, EngineDeadError):
+                    raise out
+
+                # NOTE(rob): both Detokenizer and EngineCore handle
+                # their own request cleanup based on finished.
                 if out.finished:
                     del self.rid_to_queue[request_id]
                     yield out
@@ -261,7 +272,17 @@ class AsyncLLM(EngineClient):
         # request if we end up here.
         except asyncio.CancelledError:
             await self.abort(request_id)
+            if self.log_requests:
+                logger.info("Request %s aborted.", request_id)
             raise
+
+        except Exception as e:
+            if self.log_requests:
+                logger.info("Request %s failed.", request_id)
+
+            # NOTE(rob): EngineGenerateError is handed by FastAPI
+            # exception handlers in vllm/entrypoints/launcher.py.
+            raise EngineGenerateError() from e
 
     def _process_request_outputs(self, request_outputs: List[RequestOutput]):
         """Process outputs by putting them into per-request queues."""
@@ -292,9 +313,29 @@ class AsyncLLM(EngineClient):
                 # 4) Abort any requests that finished due to stop strings.
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
+        except asyncio.CancelledError:
+            raise
+
         except Exception as e:
-            logger.exception("EngineCore output handler hit an error: %s", e)
-            kill_process_tree(os.getpid())
+            self._propagate_error(e)
+
+    def _propagate_error(self, exception: Optional[Exception] = None):
+        """Propagate to generate() tasks and raise EngineDeadError."""
+
+        # Set errored state and log if we have
+        self._errored = True
+        if exception:
+            logger.error("AsyncLLM run_output_handler failed",
+                         exc_info=exception)
+
+        # Put EngineDeadError() into
+        for _, q in self.rid_to_queue.items():
+            q.put_nowait(EngineDeadError())
+
+        raise EngineDeadError(
+            "AsyncLLM finished unexpectedly. This should never happen! "
+            "Please open an issue on Github. See stack trace above for the "
+            "actual cause.") from exception
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""
@@ -356,16 +397,12 @@ class AsyncLLM(EngineClient):
 
     @property
     def is_running(self) -> bool:
-        return True
-
-    @property
-    def is_stopped(self) -> bool:
-        return False
+        return not self.errored
 
     @property
     def errored(self) -> bool:
-        return False
+        return self._errored
 
     @property
     def dead_error(self) -> BaseException:
-        return Exception()  # TODO: implement
+        return EngineDeadError()
