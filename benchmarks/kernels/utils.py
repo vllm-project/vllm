@@ -129,13 +129,13 @@ class Bench:
         self.args_iterator.reset()
         args_it = self.args_iterator.__next__()
 
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
-                for _ in range(num_graph_ops):
-                    args, kwargs = next(args_it)
-                    self.fn(*args, **kwargs)
+        #stream = torch.cuda.current_stream()
+        #with torch.cuda.stream(stream):
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            for _ in range(num_graph_ops):
+                args, kwargs = next(args_it)
+                self.fn(*args, **kwargs)
         return g
 
     def run_cudagrah(self) -> TMeasurement:

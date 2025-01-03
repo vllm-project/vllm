@@ -608,9 +608,22 @@ class BenchmarkTensors:
     def test_correctness(self, op_type: OpType,
                          expand_fn_add_inputs: Optional[bool]) -> bool:
         """
-        Test correctness of the given benchmarking operation against a
-        grouped gemm reference implementation.
+        Test correctness of self.output against a grouped gemm reference implementation.
+
+        For expand-related operations with add_inputs = True, since the benchmarking
+        setup runs the function multiple times, the accumulation into the self.output
+        is intractable. Correctness testing is skipped for that case.
         """
+
+        if op_type.is_shrink_fn():
+            assert expand_fn_add_inputs is None
+        else:
+            assert expand_fn_add_inputs is not None
+
+        if expand_fn_add_inputs:
+            print (f"WARNING: Skipping correctness testing for {op_type} with add_inputs={expand_fn_add_inputs}")
+            return True
+
         seq_lens_cpu = self.seq_lens.to(device="cpu")
         prompt_lora_mapping_cpu = self.prompt_lora_mapping.to(device="cpu")
 
@@ -636,9 +649,6 @@ class BenchmarkTensors:
             hidden_size=hidden_size,
         )
 
-        op_type.bench_fn()(
-            **self.bench_fn_kwargs(op_type, expand_fn_add_inputs))
-
         rtol, atol = {
             torch.float16: (6e-2, 6e-2),
             torch.bfloat16: (6e-2, 6e-2),
@@ -650,9 +660,9 @@ class BenchmarkTensors:
 def bench_optype(ctx: BenchmarkContext,
                  arg_pool_size: int,
                  op_type: OpType,
-                 with_cuda_graph: bool = False,
+                 cuda_graph_nops: Optional[int] = None,
                  expand_fn_add_inputs: Optional[bool] = None,
-                 test_correcntess: bool = False) -> TMeasurement:
+                 test_correctness: bool = False) -> TMeasurement:
 
     assert arg_pool_size >= 1
     if op_type.is_shrink_fn():
@@ -666,9 +676,6 @@ def bench_optype(ctx: BenchmarkContext,
     for bt in bench_tensors:
         bt.sanity_check()
 
-    if test_correcntess:
-        assert bench_tensors[0].test_correctness(op_type, expand_fn_add_inputs)
-
     # BenchmarkTensors -> Dict (kwargs)
     kwargs_list = [
         bt.bench_fn_kwargs(op_type, add_inputs=expand_fn_add_inputs)
@@ -681,22 +688,31 @@ def bench_optype(ctx: BenchmarkContext,
         for k, v in _kwargs.items():
             kwargs[k].values.append(v)
 
+    cuda_graph_params = None
+    if cuda_graph_nops:
+        cuda_graph_params = CudaGraphBenchParams(cuda_graph_nops)
+
     describe_args = (f"add_inputs={expand_fn_add_inputs}"
                      if expand_fn_add_inputs is not None else "")
     description = (
         f"{op_type.name}({describe_args}) ({bench_tensors[0].io_types()})")
-    cuda_graph_params = CudaGraphBenchParams(
-        num_ops_in_cuda_graph=arg_pool_size) if with_cuda_graph else None
+
+    timer = None
     with Bench(cuda_graph_params,
                ctx.bench_label(), ctx.bench_sublabel(op_type), description,
                op_type.bench_fn(), **kwargs) as bench:
-        return bench.run()
+        timer = bench.run()
+
+    if test_correctness:
+        assert all([bt.test_correctness(op_type, expand_fn_add_inputs) for bt in bench_tensors])
+
+    return timer
 
 
 def bench_torch_mm(ctx: BenchmarkContext,
                    arg_pool_size: int,
                    op_type: OpType,
-                   with_cuda_graph: bool = False) -> TMeasurement:
+                   cuda_graph_nops: Optional[int] = None) -> TMeasurement:
     """
     Benchmark basic torch.mm as a roofline.
     input op_type is used in determining the m, k, n dimensions for the matmul.
@@ -726,8 +742,9 @@ def bench_torch_mm(ctx: BenchmarkContext,
     description = (f"torch.mm({dtype_to_str(dtype)}"
                    f"x{dtype_to_str(dtype)}"
                    f"=>{dtype_to_str(dtype)})")
-    cuda_graph_params = CudaGraphBenchParams(
-        num_ops_in_cuda_graph=arg_pool_size) if with_cuda_graph else None
+    cuda_graph_params = None
+    if cuda_graph_nops:
+        cuda_graph_params = CudaGraphBenchParams(cuda_graph_nops)
     with Bench(cuda_graph_params, ctx.bench_label(),
                ctx.bench_sublabel(op_type), description, torch.mm,
                **mm_kwargs) as bench:
@@ -735,12 +752,30 @@ def bench_torch_mm(ctx: BenchmarkContext,
 
 
 # runner
-def print_timers(timers: List[TMeasurement]):
+def use_cuda_graph_recommendation() -> str:
+    return """
+            Triton kernels have a significant launch overhead with launched directly via python. 
+            This overhead is more noticeable for small the problem sizes. For these cases, it is 
+            recommended to use the script with `--cuda-graph-nops N` to benchmark N consecutive invocations 
+            of the benchmarking operations from inside a CUDA Graph. Note that the returned measurement 
+            is for N invocations of the operation.
+            """
+
+def print_timers(timers: List[TMeasurement], args: Optional[argparse.Namespace] = None):
     compare = TBenchmark.Compare(timers)
     compare.print()
 
+    if args and args.cuda_graph_nops:
+        print (f"The timings reported above is for {args.cuda_graph_nops} consecutive invocations of the benchmarking functions. Please divide by {args.cuda_graph_nops} for single invocation timings ")
+
 
 def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
+
+    if args.cuda_graph_nops is not None:
+        assert args.cuda_graph_nops > 0
+        print (f"Benchmarking {args.cuda_graph_nops} invocations inside a CUDA Graph")
+    else:
+        print (f"CUDA Graphs not enabled.\n{use_cuda_graph_recommendation()}")
 
     timers = []
     for bench_ctx in bench_ctxs:
@@ -761,7 +796,7 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
                     # Benchmark torch.mm as a roofline
                     seq_len_timers.append(
                         bench_torch_mm(_ctx, args.arg_pool_size, bench_op,
-                                       args.with_cuda_graph))
+                                       args.cuda_graph_nops))
 
                     # Benchmark bench_op
                     expand_fn_add_inputs = [
@@ -770,7 +805,7 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
                     for add_input_arg in expand_fn_add_inputs:
                         seq_len_timers.append(
                             bench_optype(_ctx, args.arg_pool_size, bench_op,
-                                         args.with_cuda_graph, add_input_arg,
+                                         args.cuda_graph_nops, add_input_arg,
                                          args.test_correctness))
 
             print_timers(seq_len_timers)
@@ -778,7 +813,7 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
 
     # Result stdout dump
     print("== All Results ====")
-    print_timers(timers)
+    print_timers(timers, args)
 
     if args.output_directory:
         # Result file dump
@@ -904,11 +939,16 @@ if __name__ == '__main__':
             type=int,
             default=32,
             help="Run profiles with a pool of input/output/meta tensors instead"
-            "of simply reusing the same tensors for all runs")
+            "of simply reusing the same tensors for all runs. A bigger arg-pool "
+            "mitigates hardware caching effects during benchmarking.")
 
-        p.add_argument("--with-cuda-graph",
-                       action="store_true",
-                       help="when set profiling is done using cudagraph")
+        p.add_argument("--cuda-graph-nops",
+                       type=int,
+                       help=("when set profiling is done using cudagraph, "
+                             "with the given number of operations in a graph."
+                             "Note that the measurement returned is the time "
+                             "taken for N consecutive executions of the benchmarking "
+                             "functions, where N is the value of this argument."))
         p.add_argument("--num-loras",
                        nargs="+",
                        type=int,
@@ -951,17 +991,18 @@ if __name__ == '__main__':
                   "checked for correctness"))
 
     parser = FlexibleArgumentParser(
-        description="""
+        description=f"""
 Benchmark LoRA kernels:
+    {use_cuda_graph_recommendation()}
 
     list_bench example:
-        python3 benchmarks/kernels/benchmark_lora.py list_bench --arg-pool-size 32 --batch-sizes 1 16 32 --dtype torch.float16 --hidden-sizes 2048 --lora-ranks 16 --num-loras 1 4 --op-types bgmv_shrink bgmv_expand sgmv_shrink sgmv_expand sgmv_expand_slice bgmv_expand_slice --seq-lengths 1 16 --sort-by-lora-id 1 --with-cuda-graph
+        python3 benchmarks/kernels/benchmark_lora.py list_bench --arg-pool-size 32 --batch-sizes 1 16 32 --dtype torch.float16 --hidden-sizes 2048 --lora-ranks 16 --num-loras 1 4 --op-types bgmv_shrink bgmv_expand sgmv_shrink sgmv_expand sgmv_expand_slice bgmv_expand_slice --seq-lengths 1 16 --sort-by-lora-id 1 --cuda-graph-nops 32
 
     model_bench example:
-        python3 benchmarks/kernels/benchmark_lora.py model_bench --models meta-llama/Llama-3-8b  --arg-pool-size 32 --batch-sizes 1 16 32 --dtype torch.float16  --lora-ranks 16 --num-loras 1 4 --op-types bgmv_shrink bgmv_expand sgmv_shrink sgmv_expand sgmv_expand_slice bgmv_expand_slice --seq-lengths 1 16 --sort-by-lora-id 1 --with-cuda-graph 
+        python3 benchmarks/kernels/benchmark_lora.py model_bench --models meta-llama/Llama-3-8b  --arg-pool-size 32 --batch-sizes 1 16 32 --dtype torch.float16  --lora-ranks 16 --num-loras 1 4 --op-types bgmv_shrink bgmv_expand sgmv_shrink sgmv_expand sgmv_expand_slice bgmv_expand_slice --seq-lengths 1 16 --sort-by-lora-id 1 --cuda-graph-nops 32 
 
     range_bench example:
-        python3 benchmarks/kernels/benchmark_lora.py range_bench  --arg-pool-size 32 --batch-sizes 1 16 32 --dtype torch.float16   --num-loras 1 4 --op-types bgmv_shrink bgmv_expand sgmv_shrink sgmv_expand sgmv_expand_slice bgmv_expand_slice --seq-lengths 1 16 --sort-by-lora-id 1 --with-cuda-graph --hidden-sizes-start 1024 --hidden-sizes-end 4096 --hidden-sizes-increment 1024 --lora-ranks-start 8 --lora-ranks-end 24 --lora-ranks-increment 8 
+        python3 benchmarks/kernels/benchmark_lora.py range_bench  --arg-pool-size 32 --batch-sizes 1 16 32 --dtype torch.float16   --num-loras 1 4 --op-types bgmv_shrink bgmv_expand sgmv_shrink sgmv_expand sgmv_expand_slice bgmv_expand_slice --seq-lengths 1 16 --sort-by-lora-id 1 --cuda-graph-nops 32 --hidden-sizes-start 1024 --hidden-sizes-end 4096 --hidden-sizes-increment 1024 --lora-ranks-start 8 --lora-ranks-end 24 --lora-ranks-increment 8 
             """,  # noqa: E501
         formatter_class=argparse.RawTextHelpFormatter)
 
