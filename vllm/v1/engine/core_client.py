@@ -167,14 +167,13 @@ class MPClient(EngineCoreClient):
                 "executor_class": executor_class,
                 "log_stats": log_stats,
             })
-    
+
     def shutdown(self):
         """Clean up background resources."""
-
-        self._finalizer()
-
         if hasattr(self, "proc_handle"):
             self.proc_handle.shutdown()
+
+        self._finalizer()
 
 
 class SyncMPClient(MPClient):
