@@ -137,15 +137,9 @@ async def build_async_engine_client_from_engine_args(
     if (MQLLMEngineClient.is_unsupported_config(engine_args)
             or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
 
-        engine_client: Optional[EngineClient] = None
-        try:
-            engine_client = AsyncLLMEngine.from_engine_args(
-                engine_args=engine_args,
-                usage_context=UsageContext.OPENAI_API_SERVER)
-            yield engine_client
-        finally:
-            if engine_client and hasattr(engine_client, "shutdown"):
-                engine_client.shutdown()
+        yield AsyncLLMEngine.from_engine_args(
+            engine_args=engine_args,
+            usage_context=UsageContext.OPENAI_API_SERVER)
 
     # MQLLMEngine.
     else:
