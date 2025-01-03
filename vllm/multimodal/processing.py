@@ -935,7 +935,7 @@ class BaseMultiModalProcessor(ABC):
     def _bind_and_group_repls(
         self,
         prompt_repls: list[PromptReplacement],
-    ) -> Mapping[str, Sequence[_BoundPromptReplacement]]:
+    ) -> dict[str, list[_BoundPromptReplacement]]:
         tokenizer = self._get_tokenizer()
 
         it = (prompt_repl.bind(tokenizer) for prompt_repl in prompt_repls)
@@ -1090,23 +1090,17 @@ class BaseMultiModalProcessor(ABC):
             mm_item_counts,
         )
 
-        mm_missing_repl_counts = self._validate_placeholders(
-            hf_mm_placeholders,
-            mm_item_counts,
-            allow_missing=True,
-        )
-        has_missing_repls = any(count > 0
-                                for count in mm_missing_repl_counts.values())
-
-        # If HF processor already inserts placeholder tokens,
-        # there is no need for us to insert them
-        if (not has_missing_repls
-                and not self._always_apply_prompt_replacements()):
-            tokenizer = self._get_tokenizer()
-            prompt_text = _decode(tokenizer, prompt_ids)
-            mm_placeholders = hf_mm_placeholders
-        else:
+        if self._always_apply_prompt_replacements():
+            mm_missing_repl_counts = mm_item_counts
             mm_missing_repls = dict(mm_prompt_repls)
+        else:
+            mm_missing_repl_counts = self._validate_placeholders(
+                hf_mm_placeholders,
+                mm_item_counts,
+                allow_missing=True,
+            )
+
+            mm_missing_repls = dict[str, list[_BoundPromptReplacement]]()
             for modality, missing_repl_count in mm_missing_repl_counts.items():
                 if missing_repl_count == 0:
                     mm_missing_repls[modality] = []
@@ -1116,6 +1110,13 @@ class BaseMultiModalProcessor(ABC):
                     raise ValueError("Partial prompt replacement within "
                                      f"{modality=} is not supported")
 
+        # If HF processor already inserts placeholder tokens,
+        # there is no need for us to insert them
+        if all(len(repls) == 0 for repls in mm_missing_repls.items()):
+            tokenizer = self._get_tokenizer()
+            prompt_text = _decode(tokenizer, prompt_ids)
+            mm_placeholders = hf_mm_placeholders
+        else:
             (
                 prompt_ids,
                 prompt_text,
