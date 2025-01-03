@@ -146,7 +146,7 @@ class MPClient(EngineCoreClient):
         # error code to the clients calling VLLM.
         def sigusr1_handler(signum, frame):
             logger.fatal(
-                "Got SIGUSR1 from worker processes, shutting "
+                "Got fatal signal from worker processes, shutting "
                 "down. See stack trace above for root cause issue.")
             kill_process_tree(os.getpid())
         signal.signal(signal.SIGUSR1, sigusr1_handler)
