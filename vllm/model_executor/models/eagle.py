@@ -38,7 +38,7 @@ class EAGLE(nn.Module):
     1. In reference, LlamaDecoderLayer implementation doesn't have 
        input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427).
        Following this approach, our implementation also disables
-       the input_layernormfor the first decoder layer.
+       the input_layernorm for the first decoder layer.
     2. We allow any decoder layer to be used in EAGLE whereas in reference 
        decoder layer is fixed to be LlamaDecoderLayer.
     3. We have an optional token_map which reduces draft vocab to most 
