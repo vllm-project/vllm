@@ -97,6 +97,7 @@ class LLMEngine:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
 
+        print(f"{enable_multiprocessing=}")
         # Create the LLMEngine.
         return cls(vllm_config=vllm_config,
                    executor_class=executor_class,
