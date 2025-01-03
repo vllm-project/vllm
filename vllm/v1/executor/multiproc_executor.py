@@ -39,11 +39,11 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
 
-        # The child processes will send SIGQUIT when unrecoverable
+        # The child processes will send SIGUSR1 when unrecoverable
         # errors happen.
         def sigusr1_handler(signum, frame):
             logger.fatal(
-                "MulitprocExecutor got SIGQUIT from worker processes, shutting "
+                "MulitprocExecutor got SIGUSR1 from worker processes, shutting "
                 "down. See stack trace above for root cause issue.")
             # Propagate error up to parent process.
             parent_process = psutil.Process().parent()
@@ -350,10 +350,10 @@ class WorkerProc:
             logger.debug("Worker interrupted.")
 
         except Exception:
-            # worker_busy_loop sends exceptons to Executor
+            # worker_busy_loop sends exceptions exceptons to Executor
             # for shutdown, but if there is an error in startup or an
             # error with IPC itself, we need to alert the parent.
-            psutil.Process().parent().send_signal(signal.SIGQUIT)
+            psutil.Process().parent().send_signal(signal.SIGUSR1)
             raise
 
         finally:
