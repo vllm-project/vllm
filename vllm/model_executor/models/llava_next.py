@@ -155,6 +155,7 @@ class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
 
         unpadded_features = current_height * current_width
         newline_features = current_height
+
         return (unpadded_features, newline_features)
 
     def _get_pinpoint_with_most_features(self) -> tuple[int, ImageSize]:
