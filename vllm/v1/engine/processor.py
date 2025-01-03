@@ -9,6 +9,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
+from vllm.multimodal.utils import merge_and_sort_placeholders_from_modalities
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -135,13 +136,47 @@ class Processor:
                 precomputed_mm_inputs,
             )
 
+        # Merge and sort multimodal placeholders, inputs and hashes by
+        # their positions in the input sequence.
+        # NOTE: interleaved modalities are not supported.
+        mm_positions = decoder_inputs.multi_modal_placeholders
+        if mm_positions:
+            sorted_modalities, sorted_mm_positions = merge_and_sort_placeholders_from_modalities(  # noqa: E501
+                mm_positions)
+            self.mm_positions = sorted_mm_positions
+        else:
+            sorted_modalities = []
+            self.mm_positions = []
+
+        sorted_mm_inputs = None
+        if mm_inputs:
+            # NOTE: We only need to sort multimodal inputs/kwargs when
+            # there are multiple modalities involved.
+            if len(sorted_modalities) > 1:
+                modality_order_dict = {
+                    modality: order
+                    for order, modality in enumerate(sorted_modalities)
+                }
+
+                # Sanity check to make sure each multimodal input
+                # has only one modality key.
+                for mm_input in mm_inputs:
+                    assert len(mm_input.modalities) == 1
+
+                # Sort MultiModalKwags to match sorted_mm_positions
+                sorted_mm_inputs = sorted(mm_inputs,
+                                        key=lambda mm_input: modality_order_dict[
+                                            list(mm_input.modalities)[0]])
+            else:
+                sorted_mm_inputs = mm_inputs
+
         return EngineCoreRequest(
             request_id,
             decoder_inputs.prompt,
             decoder_inputs.prompt_token_ids,
-            mm_inputs,
+            sorted_mm_inputs,
             mm_hashes,
-            decoder_inputs.multi_modal_placeholders,
+            sorted_mm_positions,
             sampling_params,
             eos_token_id,
             arrival_time,
