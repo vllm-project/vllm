@@ -356,7 +356,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "BlocksparseFlashAttentionImpl")
-        self.attn_type = attn_type
 
     def forward(
         self,

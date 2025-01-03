@@ -247,7 +247,6 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
-            attn_type=self._attn_type,
         )
 
         # Fully Connected
