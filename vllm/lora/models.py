@@ -240,7 +240,8 @@ class LoRAModel(AdapterModel):
                                        framework="pt") as f:  # type: ignore
                 for lora_module in f.keys():  # noqa
                     module_name, is_lora_a, _ = parse_fine_tuned_lora_name(
-                        lora_module, enable_lora_modules_to_save, weights_mapper)
+                        lora_module, enable_lora_modules_to_save,
+                        weights_mapper)
                     part_name = module_name.split(".")[-1]
 
                     is_expected_module_to_save = (is_lora_a is None) and (

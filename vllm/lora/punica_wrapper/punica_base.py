@@ -480,3 +480,43 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
+
+    def bgmv_sample(self, hidden_states: torch.Tensor,
+                    lm_heads_all: torch.Tensor, lm_head_base: torch.Tensor):
+        '''
+        hidden_states - [num_tokens, hidden_dim]
+        lm_heads_all - [num_loras, vocab_size, hidden_dim]
+        the same as:
+        vocab_size=self.lm_head_tensors.shape[-2]
+        hidden_dim=hidden_states.size(0)
+        
+        logits = torch.zeros((hidden_dim, vocab_size),
+                                 dtype=torch.float32,
+                                 device=hidden_states.device)
+        
+        for i in range(len(hidden_states)):
+            if indices[i]==-1:
+                logits[i]=lm_head_base @ hidden_states[i]
+            else:
+                logits[i]=self.lm_head_tensors[indices[i]] @ hidden_states[i]
+        '''
+
+        # TODO: implement it based on torch ops
+        raise NotImplementedError
+
+    def bgmv_embedding(self, tokens: torch.LongTensor,
+                       embed_tokens_all: torch.Tensor,
+                       embed_tokens_base: torch.Tensor) -> torch.Tensor:
+        '''
+        embed_tokens_all - [num_loras, vocab_size, hidden_dim]
+            modules_to_save embeddings
+        embed_tokens_base - [vocab_size, hidden_dim] - base layer
+            embeddings will be applied to tokens with index=-1
+        tokens - [num_tokens]
+        returns:
+        embeddings: [num_tokens, hidden_dim]
+        
+        '''
+
+        # TODO: implement it based on torch ops
+        raise NotImplementedError

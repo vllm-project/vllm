@@ -37,10 +37,10 @@ class LoRALayerWeights:
         self.bias = bias
         self.embeddings_tensor = embeddings_tensor
 
+        self.scaling = scaling
+
         if (scaling is None) and (self.rank is not None):
             self.scaling = self.lora_alpha / self.rank
-        else:
-            self.scaling = scaling
 
     def optimize(self) -> "LoRALayerWeights":
         """Optimize the LoRA by merging the scaling into lora_b."""
@@ -108,18 +108,18 @@ class LoRALayerWeights:
             embeddings_tensor = None
         else:
             lora_a = torch.zeros([input_dim, rank],
-                                dtype=dtype,
-                                device=device,
-                                pin_memory=pin_memory)
+                                 dtype=dtype,
+                                 device=device,
+                                 pin_memory=pin_memory)
             lora_b = torch.zeros([rank, output_dim],
-                                dtype=dtype,
-                                device=device,
-                                pin_memory=pin_memory)
+                                 dtype=dtype,
+                                 device=device,
+                                 pin_memory=pin_memory)
             if bias_enabled:
                 bias = torch.zeros([output_dim],
-                                dtype=dtype,
-                                device=device,
-                                pin_memory=pin_memory)
+                                   dtype=dtype,
+                                   device=device,
+                                   pin_memory=pin_memory)
             else:
                 bias = None
 

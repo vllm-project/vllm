@@ -29,7 +29,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -105,7 +105,8 @@ class BaseLayerWithLoRA(nn.Module):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
+        lora_a: Optional[
+            torch.Tensor],  # lora_a=None in case of modules_to_save
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
@@ -1219,12 +1220,13 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        self._base_layer_replacement=None
+        self._base_layer_replacement = None
 
+        self._base_layer_kwargs = {
+            "num_embeddings": base_layer.num_embeddings,
+            "embedding_dim": base_layer.embedding_dim
+        }
 
-        self._base_layer_kwargs={"num_embeddings":base_layer.num_embeddings,
-                 "embedding_dim":base_layer.embedding_dim}
-        
     @property
     def padded_vocab_size(self):
         # number of embeddings with paddings and with max_lora_extra_vocab_size
@@ -1233,14 +1235,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA):
     @property
     def org_vocab_size(self):
         return self.base_layer.org_vocab_size
-
-    @property
-    def embedding_dim(self):
-        return self.base_layer.embedding_dim
-
-    @property
-    def bias(self):
-        return self.base_layer.bias
 
     @property
     def embedding_dim(self):
@@ -1312,9 +1306,11 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA):
         lora_a: Optional[torch.Tensor],
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor] = None,
     ):
         assert lora_a is None
         assert embeddings_tensor is None
+        assert bias is None, "bias is not implemented for ModulesToSave"
 
         self.reset_lora(index)
         self._lora_tensors[index, :lora_b.shape[0], :lora_b.shape[1]].copy_(

@@ -127,7 +127,7 @@ def test_llama3_loras_switches(
     with peft_runner(model, adapter_name, dtype=dtype) as peft_model:
         peft_outputs = peft_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
-        
+
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)

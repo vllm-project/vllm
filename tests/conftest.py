@@ -661,31 +661,7 @@ class PeftRunner(HfRunner):
         super().__init__(model_name,
                          dtype,
                          model_kwargs=model_kwargs,
-                         is_embedding_model=False,
-                         auto_cls=auto_cls,
-                         postprocess_inputs=postprocess_inputs)
-
-        self.model = PeftModel.from_pretrained(self.model,
-                                               model_id=adapter_name)
-
-
-class PeftRunner(HfRunner):
-
-    def __init__(
-        self,
-        model_name: str,
-        adapter_name: str,
-        dtype: str = "half",
-        *,
-        model_kwargs: Optional[Dict[str, Any]] = None,
-        auto_cls=AutoModelForCausalLM,
-        postprocess_inputs: Callable[[BatchEncoding],
-                                     BatchEncoding] = identity,
-    ) -> None:
-        super().__init__(model_name,
-                         dtype,
-                         model_kwargs=model_kwargs,
-                         is_embedding_model=False,
+                         is_sentence_transformer=False,
                          auto_cls=auto_cls,
                          postprocess_inputs=postprocess_inputs)
 
@@ -697,10 +673,6 @@ class PeftRunner(HfRunner):
 def hf_runner():
     return HfRunner
 
-
-@pytest.fixture(scope="session")
-def peft_runner():
-    return PeftRunner
 
 @pytest.fixture(scope="session")
 def peft_runner():

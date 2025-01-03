@@ -18,13 +18,13 @@ from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: argparse.Namespace):
-    
+
     engine_args = EngineArgs.from_cli_args(args)
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(**dataclasses.asdict(engine_args))
-    
+
     sampling_params = SamplingParams(
         n=args.n,
         temperature=1.0,

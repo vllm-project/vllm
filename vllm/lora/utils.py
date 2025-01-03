@@ -94,10 +94,10 @@ def replace_submodule(model: nn.Module, module_name: str,
 
 
 def parse_fine_tuned_lora_name(
-        name: str,
-        enable_lora_modules_to_save: bool = False,
-        weights_mapper: Optional[WeightsMapper] = None
-) -> Tuple[str, bool, bool]:
+    name: str,
+    enable_lora_modules_to_save: bool = False,
+    weights_mapper: Optional[WeightsMapper] = None
+) -> Tuple[str, Optional[bool], bool]:
     """Parse the name of lora weights.
 
     args:
@@ -124,11 +124,10 @@ def parse_fine_tuned_lora_name(
 
     parts = name.split(".")
 
-    
     if parts[-1] == "weight":
         if parts[-2] == "lora_A" or parts[-2] == "lora_B":
             return ".".join(parts[2:-2]), parts[-2] == "lora_A", False
-        
+
         if parts[-2] in ModulesToSaveWrapper.implemented_layers:
 
             if not enable_lora_modules_to_save:

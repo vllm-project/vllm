@@ -20,7 +20,6 @@ if HAS_TRITON:
     from vllm.lora.ops.sgmv_shrink import sgmv_shrink
     from vllm.lora.ops.bgmv_sample import bgmv_sample
     from vllm.lora.ops.bgmv_embed import bgmv_embed
-    
 
 from .punica_base import PunicaWrapperBase
 
@@ -359,7 +358,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                     self.sampler_indices,
                     add_inputs=True)
         y = y.view_as(y_org)
-    
+
     def bgmv_sample(self, hidden_states: torch.Tensor,
                     lm_heads_all: torch.Tensor, lm_head_base: torch.Tensor):
         '''
