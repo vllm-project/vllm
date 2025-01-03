@@ -1,6 +1,5 @@
 import asyncio
 import os
-import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -41,21 +40,6 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-
-        # The child processes will send SIGQUIT when unrecoverable
-        # errors happen. We kill the process tree here so that the
-        # stack trace is very evident.
-        # TODO: rather than killing the main process, we should
-        # figure out how to raise an AsyncEngineDeadError and
-        # handle at the API server level so we can return a better
-        # error code to the clients calling VLLM.
-        def sigquit_handler(signum, frame):
-            logger.fatal(
-                "AsyncLLM got SIGQUIT from worker processes, shutting "
-                "down. See stack trace above for root cause issue.")
-            kill_process_tree(os.getpid())
-
-        signal.signal(signal.SIGQUIT, sigquit_handler)
 
         assert start_engine_loop
 
