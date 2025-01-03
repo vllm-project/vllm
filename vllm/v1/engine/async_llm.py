@@ -1,7 +1,6 @@
 import asyncio
 # import os
 import signal
-from functools import partial
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -54,15 +53,16 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
     ) -> None:
 
-        # NOTE(rob): EngineCore sends SIGQUIT on unrecoverable errors.
-        def sigquit_handler(signum, frame):
+        # EngineCore sends SIGQUIT on unrecoverable errors.
+        def sigquit_handler():
             logger.fatal(
                 "AsyncLLM got SIGQUIT from worker processes, shutting "
                 "down. See stack trace above for root cause issue.")
             self._propagate_error()
+            self._errored = True
 
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGQUIT, partial(sigquit_handler))
+        loop.add_signal_handler(signal.SIGQUIT, sigquit_handler)
 
         self._errored = False
         self.log_requests = log_requests
@@ -141,12 +141,11 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
+        if handler := getattr(self, "output_handler", None):
+            handler.cancel()
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
-
-        if handler := getattr(self, "output_handler", None):
-            handler.cancel()
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
@@ -228,6 +227,10 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        if self.errored:
+            self._propagate_error()
+            raise EngineDeadError()
+
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
@@ -249,12 +252,9 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             while True:
-                # Note(rob): drain queue without await if possible (avoids
+                # NOTE(rob): drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
-
-                # _run_output_handler() puts EngineDeadError into the queue
-                # if it encounters an unrecoverable issue in the EngineCore.
                 if isinstance(out, EngineDeadError):
                     raise out
 
@@ -268,20 +268,25 @@ class AsyncLLM(EngineClient):
                 yield out
 
         # If the request is disconnected by the client, the
-        # generate() task will be canceled. So, we abort the
-        # request if we end up here.
+        # generate() task will be canceled so, we abort.
         except asyncio.CancelledError:
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
 
+        # EngineCore or output_handler pushed error. Raise so API Server
+        # can handle and shutdown in vllm/entrypoints/launcher.py.
+        except EngineDeadError:
+            if self.log_requests:
+                logger.info("Request %s failed.", request_id)
+            raise
+
+        # Error in the generate() task (possibly recoverable). Raise so API
+        # Server can handle and maybe shutdown vllm/entrypoints/launcher.py.
         except Exception as e:
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
-
-            # NOTE(rob): EngineGenerateError is handed by FastAPI
-            # exception handlers in vllm/entrypoints/launcher.py.
             raise EngineGenerateError() from e
 
     def _process_request_outputs(self, request_outputs: List[RequestOutput]):
@@ -298,7 +303,6 @@ class AsyncLLM(EngineClient):
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
-
         try:
             while True:
                 # 1) Pull EngineCoreOutput from the EngineCore.
@@ -314,10 +318,12 @@ class AsyncLLM(EngineClient):
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
         except asyncio.CancelledError:
+            logger.debug("Output handler interrupted.")
             raise
 
         except Exception as e:
             self._propagate_error(e)
+            raise EngineDeadError() from e
 
     def _propagate_error(self, exception: Optional[Exception] = None):
         """Propagate to generate() tasks and raise EngineDeadError."""
@@ -328,14 +334,10 @@ class AsyncLLM(EngineClient):
             logger.error("AsyncLLM run_output_handler failed",
                          exc_info=exception)
 
-        # Put EngineDeadError() into
+        # Put EngineDeadError() into each generate()'s queue,
+        # each of which will raise in their own context.
         for _, q in self.rid_to_queue.items():
             q.put_nowait(EngineDeadError())
-
-        raise EngineDeadError(
-            "AsyncLLM finished unexpectedly. This should never happen! "
-            "Please open an issue on Github. See stack trace above for the "
-            "actual cause.") from exception
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""

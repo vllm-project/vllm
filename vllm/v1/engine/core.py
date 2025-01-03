@@ -208,7 +208,11 @@ class EngineCoreProc(EngineCore):
         """Core busy loop of the EngineCore."""
 
         # Loop until process is sent a SIGINT or SIGTERM
+        i = 0
         while True:
+            if i == 10:
+                raise ValueError("TEST RUN")
+            i += 1
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
