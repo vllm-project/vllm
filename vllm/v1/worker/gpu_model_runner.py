@@ -497,7 +497,7 @@ class GPUModelRunner:
         req_id: str,
         scheduler_output: "SchedulerOutput",
         req_indices: npt.NDArray,
-    ) -> torch.Tensor:
+    ) -> npt.NDArray:
 
         # NOTE(rob): req_indices is the req_idx of each token.
         # If we have 3 sequences in the batch of lens [2, 5, 3],
@@ -506,9 +506,9 @@ class GPUModelRunner:
         req_idx = self.input_batch.req_id_to_index[req_id]
         indices = self.arange_np[:req_indices.shape[0]]
         prompt_indices = indices[req_indices == req_idx]
-        
+
         # Remove the sample token if there is one.
-        if req_id not in scheduler_output.partial_req_ids:    
+        if req_id not in scheduler_output.partial_req_ids:
             prompt_indices = prompt_indices[:-1]
 
         return prompt_indices
@@ -663,25 +663,20 @@ class GPUModelRunner:
         # request separately. Prompt logprobs are rare (used for eval),
         # and few prefills per batch, so prioritize simple over optimal.
         prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
-        if not self.input_batch.no_prompt_logprob:
-            for (request_id, num_prompt_logprobs
-                 ) in self.input_batch.num_prompt_logprobs.items():
+        for (request_id, num_prompt_logprobs
+             ) in self.input_batch.num_prompt_logprobs.items():
 
-                # Prepare mask and logits processor.
-                metadata = self._prepare_prompt_logprobs(
-                    request_id, scheduler_output, req_indices)
+            # Prepare mask and logits processor.
+            prompt_indices = self._prepare_prompt_logprobs(
+                request_id, scheduler_output, req_indices)
 
-                # Compute logits.
-                prompt_hidden_states = hidden_states[metadata.prompt_indices]
-                logits = self.model.sampler.compute_logits(
-                    prompt_hidden_states, None)
+            # Compute logits.
+            prompt_hidden_states = hidden_states[prompt_indices]
+            logits = self.model.compute_logits(prompt_hidden_states, None)
 
-                # Compute prompt logprobs.
-                # TODO(rob): Should we move the sampler out of the model?
-                prompt_logprobs_dict[
-                    request_id] = self.model.sampler.get_prompt_logprobs(
-                        logits, metadata.logits_process_metadata,
-                        num_prompt_logprobs)
+            # Compute prompt logprobs.
+            prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
+                logits, num_prompt_logprobs)
 
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over

@@ -82,6 +82,7 @@ class IncrementalDetokenizer:
         else:
             stop_buffer_length = 0
 
+        logprobs = request.sampling_params.logprobs
         return cls(
             output_text="",
             tokens=tokens,
@@ -102,10 +103,10 @@ class IncrementalDetokenizer:
             prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
-            cumulative_logprob=(0. if request.logprobs else None),
-            logprobs=([] if request.logprobs else None),
+            cumulative_logprob=(0. if logprobs else None),
+            logprobs=([] if logprobs else None),
             prompt_logprobs=None,
-            num_logprobs=request.logprobs,
+            num_logprobs=(logprobs or 0),
         )
 
     def _update_sample_logprobs(

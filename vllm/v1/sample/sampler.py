@@ -52,7 +52,7 @@ class Sampler(nn.Module):
             logprob_token_ids, logprobs = self.get_logprobs(
                 raw_logits,
                 sampling_metadata.max_num_logprobs,
-                sampled=sampled)
+                sampled_token_ids=sampled)
         else:
             logprob_token_ids, logprobs = None, None
 
