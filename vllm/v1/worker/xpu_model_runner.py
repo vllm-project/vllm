@@ -1,4 +1,3 @@
-
 from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import numpy as np
@@ -13,6 +12,10 @@ from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
+if TYPE_CHECKING:
+    from vllm.v1.core.scheduler import SchedulerOutput
 
 
 class XPUModelRunner(GPUModelRunner):
@@ -151,6 +154,146 @@ class XPUModelRunner(GPUModelRunner):
                                              pin_memory=self.pin_memory)
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
 
+    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        assert total_num_scheduled_tokens > 0
+        num_reqs = self.input_batch.num_reqs
+        assert num_reqs > 0
+
+        # OPTIMIZATION: Start copying the block table first.
+        # This way, we can overlap the copy with the following CPU operations.
+        self.input_batch.block_table[:num_reqs].copy_(
+            self.input_batch.block_table_cpu_tensor[:num_reqs],
+            non_blocking=True)
+
+        # Get the number of scheduled tokens for each request.
+        # TODO: The Python loop can be slow. Optimize.
+        num_scheduled_tokens = []
+        max_num_scheduled_tokens = 0
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_scheduled_tokens.append(num_tokens)
+            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
+                                           num_tokens)
+        num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
+        assert max_num_scheduled_tokens > 0
+
+        # Get request indices.
+        # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+        req_indices = np.repeat(self.arange_np[:num_reqs],
+                                num_scheduled_tokens)
+
+        # Get batched arange.
+        # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = np.concatenate(
+            [self.arange_np[:n] for n in num_scheduled_tokens])
+
+        # Get positions.
+        positions_np = self.positions_np[:total_num_scheduled_tokens]
+        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+               arange,
+               out=positions_np)
+
+        # Get token indices.
+        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
+        # where M is the max_model_len.
+        token_indices = (positions_np +
+                         req_indices * self.input_batch.token_ids_cpu.shape[1])
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
+                           0,
+                           torch.from_numpy(token_indices),
+                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
+
+        # Calculate the slot mapping.
+        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+        # where K is the max_num_blocks_per_req and the block size is 2.
+        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
+        # because M (max_model_len) is not necessarily divisible by block_size.
+        block_table_indices = (req_indices * self.max_num_blocks_per_req +
+                               positions_np // self.block_size)
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
+                         [block_table_indices].numpy())
+        block_offsets = positions_np % self.block_size
+        np.add(block_numbers * self.block_size,
+               block_offsets,
+               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+
+        # Prepare the attention metadata.
+        self.query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens,
+                  out=self.query_start_loc_np[1:num_reqs + 1])
+
+        seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+                    num_scheduled_tokens)
+        max_seq_len = seq_lens.max()
+        self.seq_start_loc_np[0] = 0
+        np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
+
+        # Copy the tensors to the GPU.
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        self.positions[:total_num_scheduled_tokens].copy_(
+            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(
+            self.device, non_blocking=True)
+        seq_start_loc = self.seq_start_loc_cpu[:num_reqs + 1].to(
+            self.device, non_blocking=True)
+        slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
+            self.device, non_blocking=True).long()
+
+        # TODO: enable cascade attention in the future.
+        common_prefix_len = 0
+        use_cascade = False
+
+        if use_cascade:
+            # TODO: Optimize.
+            cu_prefix_query_lens = torch.tensor(
+                [0, total_num_scheduled_tokens],
+                dtype=torch.int32,
+                device=self.device)
+            cu_prefix_kv_lens = torch.tensor([0, common_prefix_len],
+                                             dtype=torch.int32,
+                                             device=self.device)
+            cu_suffix_kv_lens = (
+                self.seq_start_loc_np[:num_reqs + 1] -
+                self.arange_np[:num_reqs + 1] * common_prefix_len)
+            cu_suffix_kv_lens = torch.from_numpy(cu_suffix_kv_lens).to(
+                self.device)
+        else:
+            cu_prefix_query_lens = None
+            cu_prefix_kv_lens = None
+            cu_suffix_kv_lens = None
+
+        attn_metadata = FlashAttentionMetadata(
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            query_start_loc=query_start_loc,
+            max_seq_len=max_seq_len,
+            seq_start_loc=seq_start_loc,
+            block_table=self.input_batch.block_table[:num_reqs],
+            slot_mapping=slot_mapping,
+            use_cascade=use_cascade,
+            common_prefix_len=common_prefix_len,
+            cu_prefix_query_lens=cu_prefix_query_lens,
+            cu_prefix_kv_lens=cu_prefix_kv_lens,
+            cu_suffix_kv_lens=cu_suffix_kv_lens,
+        )
+        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
+        # request in the batch. While we should not sample any token from this
+        # partial request, we do so for simplicity. We will ignore the sampled
+        # token from the partial request.
+        # TODO: Support prompt logprobs.
+        logits_indices = query_start_loc[1:] - 1
+        return attn_metadata, logits_indices
 
     @torch.inference_mode()
     def profile_run(self) -> None:
