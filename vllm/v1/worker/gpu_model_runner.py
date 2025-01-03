@@ -369,7 +369,6 @@ class GPUModelRunner:
             block_table=self.input_batch.block_table[:num_reqs],
             slot_mapping=slot_mapping,
         )
-
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled
