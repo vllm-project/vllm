@@ -43,8 +43,8 @@ class MultiprocExecutor(Executor):
         # errors happen.
         def sigusr1_handler(signum, frame):
             logger.fatal(
-                "MulitprocExecutor got SIGUSR1 from worker processes, shutting "
-                "down. See stack trace above for root cause issue.")
+                "MulitprocExecutor got fatal signal from worker processes, "
+                "shutting down. See stack trace above for root cause issue.")
             # Propagate error up to parent process.
             parent_process = psutil.Process().parent()
             parent_process.send_signal(signal.SIGUSR1)
