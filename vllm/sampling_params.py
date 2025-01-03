@@ -22,6 +22,7 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
+    FORCED = 3 # lbx add
 
 
 # maybe make msgspec?
@@ -123,6 +124,8 @@ class SamplingParams(
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
+        ppl_measurement: Measure perplexity towards the deterministic string
+            instead of probabilistic regressing.
         seed: Random seed to use for the generation.
         stop: List of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
@@ -177,6 +180,8 @@ class SamplingParams(
     top_p: float = 1.0
     top_k: int = -1
     min_p: float = 0.0
+    ppl_measurement: bool = False  # lbx add
+    future_context: Optional[List[int]] = None  # lbx add
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = None
     stop_token_ids: Optional[List[int]] = None
@@ -439,6 +444,10 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        # lbx add start
+        if self.ppl_measurement:
+            return SamplingType.FORCED
+        # lbx add end
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
@@ -475,6 +484,9 @@ class SamplingParams(
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
             f"seed={self.seed}, "
+            # lbx add start
+            f"ppl_measurement={self.ppl_measurement}, "
+            # lbx add end
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "

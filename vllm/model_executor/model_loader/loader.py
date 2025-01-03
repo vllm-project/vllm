@@ -108,7 +108,10 @@ def _initialize_model(
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
     model_class, _ = get_model_architecture(model_config)
-
+    quant_config = vllm_config.quant_config
+    if quant_config is not None:
+        kernal_name = quant_config.get_name()
+        print(f"vllm load model with {kernal_name} kernal")
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:

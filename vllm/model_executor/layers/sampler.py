@@ -464,6 +464,25 @@ def _greedy_sample(
         sample_idx += num_parent_seqs
     return results
 
+# lbx add
+def _forced_sample(
+    selected_seq_groups: List[SequenceGroupToSample],
+    samples: torch.Tensor,
+) -> List[Tuple[List[int], List[int]]]:
+    samples = samples.tolist()
+    sample_idx = 0
+    results = []
+    for seq_group in selected_seq_groups:
+        seq_ids = seq_group.seq_ids
+        num_parent_seqs = len(seq_ids)
+        assert num_parent_seqs == 1, (
+            "Deterministic sampling should have only one seq.")
+        parent_ids = list(range(num_parent_seqs))
+        next_token_ids = [samples[sample_idx]]
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    return results
+
 
 def _random_sample(
     selected_seq_groups: List[SequenceGroupToSample],
@@ -643,7 +662,7 @@ def _top_k_top_p_multinomial_with_flashinfer(
 
 
 def get_pythonized_sample_results(
-        sample_result_args: SampleResultArgsType) -> SampleResultType:
+        sample_result_args: SampleResultArgsType, forced_samples=None) -> SampleResultType:
     '''This function consumes GPU-side sampler results and computes
     Pythonized CPU-side sampler results (GPU -> CPU sync.)
 
@@ -680,6 +699,10 @@ def get_pythonized_sample_results(
         if sampling_type not in sample_metadata:
             continue
         (seq_group_id, seq_groups) = sample_metadata[sampling_type]
+        # lbx add start
+        if sampling_type == SamplingType.FORCED:
+            sample_results = _forced_sample(seq_groups, forced_samples)
+        # lbx add end
         if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
@@ -742,6 +765,7 @@ def _sample_with_torch(
 
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
+    forced_samples = None
     for sampling_type in SamplingType:
         sample_indices = categorized_sample_indices[sampling_type]
         num_tokens = len(sample_indices)
@@ -752,7 +776,15 @@ def _sample_with_torch(
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_id]
         sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
-        if sampling_type == SamplingType.GREEDY:
+
+        # lbx add start
+        if sampling_type == SamplingType.FORCED:
+            forced_samples = torch.tensor([
+                seq_groups[0].sampling_params.future_context[0][len(
+                    seq_groups[0].seq_data[seq_groups[0].seq_ids[0]].output_token_ids)]
+            ], device='cuda:0')
+        # lbx add end
+        elif sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
 
@@ -818,7 +850,7 @@ def _sample_with_torch(
         # This also converts the sampler output to a Python object.
         # Return Pythonized sampler result & sampled token ids
         return get_pythonized_sample_results(
-            maybe_deferred_args), sampled_token_ids_tensor
+            maybe_deferred_args, forced_samples), sampled_token_ids_tensor
     else:
         # Defer sampler result Pythonization; return deferred
         # Pythonization args & sampled token ids
