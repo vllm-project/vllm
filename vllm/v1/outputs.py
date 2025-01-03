@@ -35,5 +35,5 @@ class ModelRunnerOutput:
     logprobs_cpu: Optional[torch.Tensor]
 
     # req_id -> (prompt_logprobs_token_ids, prompt_logprobs)
-    # [num_reqs, max_num_prompt_logprobs]
+    # [prompt_len, num_prompt_logprobs]
     prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]]
