@@ -390,7 +390,6 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
-
         while True:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
@@ -403,7 +402,7 @@ class WorkerProc:
                     (WorkerProc.ResponseStatus.FAILURE, e))
                 traceback = get_exception_traceback()
                 logger.error("WorkerProc hit an exception: %s", traceback)
-                raise SystemExit()
+                continue
 
             self.worker_response_mq.enqueue(
                 (WorkerProc.ResponseStatus.SUCCESS, output))
