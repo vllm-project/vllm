@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 
 # Added by the IBM Team, 2024
 
-# Adapted from https://github.com/state-spaces/mamba/tree/main/mamba_ssm/ops/triton
+# Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/modules/ssd_minimal.py
 
 
 def segsum(x):
