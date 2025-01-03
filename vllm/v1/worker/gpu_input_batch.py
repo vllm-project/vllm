@@ -66,8 +66,9 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
+        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
         # Attention-related.
         self.block_table = torch.zeros(
@@ -189,6 +190,7 @@ class InputBatch:
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
+        self.num_tokens[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         num_blocks = len(request.block_ids)
@@ -290,14 +292,15 @@ class InputBatch:
             self.req_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            # TODO(woosuk): Optimize the copy of token_ids_cpu and
-            # block_table_cpu.
-            self.token_ids_cpu[empty_index] = self.token_ids_cpu[
-                last_req_index]
+            num_tokens = self.num_tokens[last_req_index]
+            self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
+                last_req_index, :num_tokens]
+            self.num_tokens[empty_index] = num_tokens
             self.num_prompt_tokens[empty_index] = \
                 self.num_prompt_tokens[last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
+            # TODO(woosuk): Optimize the copy of block_table_cpu.
             self.block_table_cpu[empty_index] = self.block_table_cpu[
                 last_req_index]
             self.temperature_cpu[empty_index] = self.temperature_cpu[
