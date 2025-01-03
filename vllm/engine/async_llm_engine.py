@@ -1257,6 +1257,10 @@ class AsyncLLMEngine(EngineClient):
         else:
             self.engine.model_executor._run_workers("stop_profile")
 
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
+        self.engine.add_lora(lora_request)
+
 
 # TODO(v1): Remove this class proxy when V1 goes default.
 if envs.VLLM_USE_V1:
