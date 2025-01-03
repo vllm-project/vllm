@@ -64,8 +64,8 @@ def test_minicpmv_tp2(minicpmv_lora_files, fully_sharded):
         MODEL_PATH,
         enable_lora=True,
         max_num_seqs=2,
-        max_loras=4,
-        max_lora_rank=64,
+        max_loras=2,
+        max_lora_rank=8,
         tensor_parallel_size=2,
         trust_remote_code=True,
         fully_sharded_loras=fully_sharded,
@@ -89,6 +89,7 @@ def test_minicpmv_tp4(minicpmv_lora_files, fully_sharded):
         max_lora_rank=64,
         tensor_parallel_size=4,
         trust_remote_code=True,
+        enforce_eager=True,
         fully_sharded_loras=fully_sharded,
         enable_chunked_prefill=True,
     )

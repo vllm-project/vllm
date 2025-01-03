@@ -64,8 +64,9 @@ def test_minicpmv_lora(minicpmv_lora_files):
         MODEL_PATH,
         max_num_seqs=2,
         enable_lora=True,
-        max_loras=4,
-        max_lora_rank=64,
+        max_loras=2,
+        max_lora_rank=8,
+        enforce_eager=True,
         trust_remote_code=True,
         enable_chunked_prefill=True,
     )
