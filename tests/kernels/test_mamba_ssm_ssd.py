@@ -14,8 +14,9 @@ from vllm.platforms import current_platform
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/modules/ssd_minimal.py
 
 
+# this is the segsum implementation taken from above
 def segsum(x):
-    """More stable segment sum calculation."""
+    """Calculates segment sum."""
     T = x.size(-1)
     x = repeat(x, "... d -> ... d e", e=T)
     mask = torch.tril(torch.ones(T, T, device=x.device, dtype=bool),
@@ -173,18 +174,20 @@ def generate_continous_batched_examples(example_lens_by_batch,
 
 @pytest.mark.parametrize("itype",
                          [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("n_heads", [4, 16, 32])
-@pytest.mark.parametrize("dim", [128, 512])
-@pytest.mark.parametrize("seq_len_chunk_size", [(128, 32)])
-def test_mamba_chunk_scan_single_example(dim, n_heads, seq_len_chunk_size,
+@pytest.mark.parametrize("n_heads", [3, 4, 11, 16, 32])
+@pytest.mark.parametrize("d_head", [5, 8, 19, 32, 128])
+@pytest.mark.parametrize("seq_len_chunk_size", [(119, 17), (128, 32)])
+def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
                                          itype):
 
     # this tests the kernels on a single example (no batching)
 
     # set seed
     batch_size = 1  # batch_size
+    # ssd_minimal_discrete requires chunk_size divide seqlen
+    # - this is only required for generating the reference seqs,
+    #   it is not an operational limitation.
     seqlen, chunk_size = seq_len_chunk_size
-    d_head = dim // n_heads
 
     A, dt, X, B, C = generate_random_inputs(batch_size, seqlen, n_heads,
                                             d_head, itype)
