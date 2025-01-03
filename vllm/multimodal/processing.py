@@ -16,7 +16,8 @@ from transformers import BatchFeature, ProcessorMixin
 
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
+                                               encode_tokens)
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
 from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -57,24 +58,6 @@ class PromptReplacement:
         )
 
 
-def _encode(
-    tokenizer: AnyTokenizer,
-    text: str,
-    *,
-    add_special_tokens: bool = False,
-) -> list[int]:
-    """
-    Backend-agnostic equivalent of HF's
-    :code:`tokenizer.encode(text, add_special_tokens=...)`.
-    """
-    if isinstance(tokenizer, MistralTokenizer):
-        return tokenizer.tokenizer.encode(text,
-                                          bos=add_special_tokens,
-                                          eos=add_special_tokens)
-
-    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
-
-
 @lru_cache(maxsize=2048)
 def _cached_encode(
     tokenizer: AnyTokenizer,
@@ -82,20 +65,9 @@ def _cached_encode(
     *,
     add_special_tokens: bool = False,
 ) -> list[int]:
-    return _encode(tokenizer, text, add_special_tokens=add_special_tokens)
-
-
-def _decode(
-    tokenizer: AnyTokenizer,
-    token_ids: list[int],
-    *,
-    skip_special_tokens: bool = False,
-) -> str:
-    """
-    Backend-agnostic equivalent of HF's
-    :code:`tokenizer.decode(token_ids, skip_special_tokens=...)`.
-    """
-    return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+    return encode_tokens(tokenizer,
+                         text,
+                         add_special_tokens=add_special_tokens)
 
 
 @lru_cache(maxsize=2048)
@@ -105,9 +77,9 @@ def _cached_decode(
     *,
     skip_special_tokens: bool = False,
 ) -> str:
-    return _decode(tokenizer,
-                   list(token_ids),
-                   skip_special_tokens=skip_special_tokens)
+    return decode_tokens(tokenizer,
+                         list(token_ids),
+                         skip_special_tokens=skip_special_tokens)
 
 
 class _HasModalityAttr(Protocol):
@@ -990,13 +962,13 @@ class BaseMultiModalProcessor(ABC):
                 mm_item_counts,
             )
 
-            text = _decode(tokenizer, token_ids)
+            text = decode_tokens(tokenizer, token_ids)
             matched_repls = {
                 modality: [match.prompt_repl for match in token_matches]
                 for modality, token_matches in mm_token_matches.items()
             }
         else:
-            text = _decode(tokenizer, token_ids)
+            text = decode_tokens(tokenizer, token_ids)
 
             mm_text_matches = {
                 modality: find_text_matches(text, prompt_repls)
@@ -1008,7 +980,9 @@ class BaseMultiModalProcessor(ABC):
                 mm_item_counts,
             )
 
-            token_ids = _encode(tokenizer, text)
+            token_ids = encode_tokens(tokenizer,
+                                      text,
+                                      add_special_tokens=False)
             matched_repls = {
                 modality: [match.prompt_repl for match in token_matches]
                 for modality, token_matches in mm_text_matches.items()
@@ -1114,7 +1088,7 @@ class BaseMultiModalProcessor(ABC):
         # there is no need for us to insert them
         if all(len(repls) == 0 for repls in mm_missing_repls.items()):
             tokenizer = self._get_tokenizer()
-            prompt_text = _decode(tokenizer, prompt_ids)
+            prompt_text = decode_tokens(tokenizer, prompt_ids)
             mm_placeholders = hf_mm_placeholders
         else:
             (
