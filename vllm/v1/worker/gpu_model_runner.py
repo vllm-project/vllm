@@ -555,7 +555,7 @@ class GPUModelRunner:
         # NOTE(rob): for simplicity, compute prompt logprobs for each
         # request separately. Prompt logprobs are rare (used for eval),
         # and few prefills per batch, so prioritize simple over optimal.
-        prompt_lps_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
         if not self.input_batch.no_prompt_logprob:
             for (request_id, num_prompt_logprobs
                  ) in self.input_batch.num_prompt_logprobs.items():
@@ -570,12 +570,11 @@ class GPUModelRunner:
                     prompt_hidden_states, None)
 
                 # Compute prompt logprobs.
-                prompt_lps_dict[
+                # TODO(rob): Why is this in the model?
+                prompt_logprobs_dict[
                     request_id] = self.model.sampler.get_prompt_logprobs(
-                        logits,
-                        metadata.logits_process_metadata,
-                        num_prompt_logprobs,
-                    )
+                        logits, metadata.logits_process_metadata,
+                        num_prompt_logprobs)
 
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
@@ -612,7 +611,7 @@ class GPUModelRunner:
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=sampler_output.logprob_token_ids,
             logprobs_cpu=sampler_output.logprobs,
-            prompt_logprobs_dict=prompt_lps_dict,
+            prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
 

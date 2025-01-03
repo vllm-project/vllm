@@ -41,7 +41,7 @@ class Sampler(nn.Module):
         )
         return sampler_output
 
-    def compute_prompt_logprobs(
+    def get_prompt_logprobs(
         self,
         logits: torch.Tensor,
         logits_process_metadata: LogitsProcessMetadata,
