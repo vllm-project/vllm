@@ -344,16 +344,16 @@ class WorkerProc:
             worker.worker_busy_loop()
 
         except SystemExit:
-            # Avoid re-raising SystemExit more than once, such
-            # that we have a cleaner stack trace.
+            # worker_busy_loop sends exceptions to Executor and raises 
+            # SystemExit.
             shutdown_requested = True
             logger.debug("Worker interrupted.")
 
         except Exception:
-            # While busy loop handles exceptions and alerts EngineCore,
-            # if there is an error in startup process (e.g. OOM)
-            # or there an with the IPC itself, alert parent
-            # so we can shut down the whole system.
+            # worker_busy_loop sends exceptions exceptons to Executor
+            # for shutdown, but if there is an error in startup or an
+            # error with IPC
+            # itself, we need to alert the parent so we can shut down.
             psutil.Process().parent().send_signal(signal.SIGQUIT)
             raise
 
