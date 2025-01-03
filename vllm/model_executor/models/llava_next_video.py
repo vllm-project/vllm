@@ -75,10 +75,10 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
 
     def _get_max_frame_tokens(self) -> int:
         hf_config = self._get_hf_config()
-        vision_encoder_info = self._vision_encoder_info
+        spatial_pool_stride = hf_config.spatial_pool_stride
 
-        patch_grid_length = vision_encoder_info.get_patch_grid_length()
-        pooled_grid_length = patch_grid_length / hf_config.spatial_pool_stride
+        patch_grid_length = self._vision_encoder_info.get_patch_grid_length()
+        pooled_grid_length = patch_grid_length / spatial_pool_stride
 
         return int(pooled_grid_length * pooled_grid_length)
 

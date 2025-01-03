@@ -156,11 +156,9 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
 
     def _get_max_frame_tokens(self) -> int:
         hf_config = self._get_hf_config()
-        vision_encoder_info = self._vision_encoder_info
-
-        patch_grid_length = vision_encoder_info.get_patch_grid_length()
-
         spatial_pool_stride = getattr(hf_config, "spatial_pool_stride", 2)
+
+        patch_grid_length = self._vision_encoder_info.get_patch_grid_length()
         pooled_grid_length = patch_grid_length / spatial_pool_stride
 
         return math.ceil(pooled_grid_length) * math.ceil(pooled_grid_length)
@@ -185,9 +183,17 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
         num_images: int = 0,
         num_videos: int = 1,
     ) -> int:
+        hf_config = self._get_hf_config()
+        spatial_pool_stride = getattr(hf_config, "spatial_pool_stride", 2)
+
         max_total_tokens = self.ctx.model_config.max_model_len
         max_total_frames = int(max_total_tokens / self._get_max_frame_tokens())
-        return (max_total_frames - num_images) // max(num_videos, 1)
+
+        # How many tokens are one image worth relative to one video frame
+        i2f = spatial_pool_stride * spatial_pool_stride
+        max_total_frames -= num_images * i2f
+
+        return max(max_total_frames, 0) // max(num_videos, 1)
 
     def _get_max_video_tokens(self) -> int:
         return self._get_max_frame_tokens() * self._get_max_video_frames()

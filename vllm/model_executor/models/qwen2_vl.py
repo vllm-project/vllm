@@ -772,9 +772,17 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         num_images: int = 0,
         num_videos: int = 1,
     ) -> int:
+        hf_config = self.ctx.get_hf_config(Qwen2VLConfig)
+        temporal_patch_size = hf_config.vision_config.temporal_patch_size
+
         max_total_tokens = self.ctx.model_config.max_model_len
         max_total_frames = int(max_total_tokens / self._get_max_image_tokens())
-        return (max_total_frames - num_images) // max(num_videos, 1)
+
+        # How many tokens are one image worth relative to one video frame
+        i2f = temporal_patch_size * temporal_patch_size
+        max_total_frames -= num_images * i2f
+
+        return max(max_total_frames, 0) // max(num_videos, 1)
 
     def _get_max_video_tokens(self) -> int:
         return self._get_max_image_tokens() * self._get_max_video_frames()
