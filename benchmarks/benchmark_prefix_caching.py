@@ -192,7 +192,9 @@ def main(args):
 
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len, detokenize=args.detokenize)
+    sampling_params = SamplingParams(temperature=0,
+                                     max_tokens=args.output_len,
+                                     detokenize=args.detokenize)
 
     print("Testing filtered requests")
     prompts = repeat_and_sort_requests(filtered_requests,
