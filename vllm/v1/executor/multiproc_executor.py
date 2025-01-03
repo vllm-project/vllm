@@ -41,16 +41,16 @@ class MultiprocExecutor(Executor):
 
         # The child processes will send SIGQUIT when unrecoverable
         # errors happen.
-        def sigquit_handler(signum, frame):
+        def sigusr1_handler(signum, frame):
             logger.fatal(
                 "MulitprocExecutor got SIGQUIT from worker processes, shutting "
                 "down. See stack trace above for root cause issue.")
             # Propagate error up to parent process.
             parent_process = psutil.Process().parent()
-            parent_process.send_signal(signal.SIGQUIT)
+            parent_process.send_signal(signal.SIGUSR1)
             self.shutdown()
 
-        signal.signal(signal.SIGQUIT, sigquit_handler)
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config

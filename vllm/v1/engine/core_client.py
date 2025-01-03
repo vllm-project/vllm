@@ -137,19 +137,19 @@ class MPClient(EngineCoreClient):
         executor_class: Type[Executor],
         log_stats: bool = False,
     ):
-        # The child processes will send SIGQUIT when unrecoverable
+        # The child processes will send SIGUSR1 when unrecoverable
         # errors happen. We kill the process tree here so that the
         # stack trace is very evident.
         # TODO(rob): rather than killing the main process, we should
         # figure out how to raise an AsyncEngineDeadError and
         # handle at the API server level so we can return a better
         # error code to the clients calling VLLM.
-        def sigquit_handler(signum, frame):
+        def sigusr1_handler(signum, frame):
             logger.fatal(
-                "Got SIGQUIT from worker processes, shutting "
+                "Got SIGUSR1 from worker processes, shutting "
                 "down. See stack trace above for root cause issue.")
             kill_process_tree(os.getpid())
-        signal.signal(signal.SIGQUIT, sigquit_handler)
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         # Serialization setup.
         self.encoder = PickleEncoder()
