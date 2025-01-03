@@ -497,13 +497,22 @@ class GPUModelRunner:
         req_id: str,
         scheduler_output: "SchedulerOutput",
         req_indices: npt.NDArray,
-    ) -> PromptLogprobsMetadata:
+    ) -> torch.Tensor:
 
-        # Create the prompt logprobs metadata.
-        metadata = self.input_batch.make_prompt_logprobs_metadata(
-            req_id, scheduler_output.partial_req_ids, req_indices)
+        # req_indices is the req_idx of each batched token.
+        # So if we have 3 sequences of lens [2, 5, 3],
+        # req_indices = [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
 
-        return metadata
+        req_idx = self.input_batch.req_id_to_index[req_id]
+
+        # Get the indices for this (prefill) req in current batch.
+        num_tokens = req_indices.shape[0]
+        prompt_indices = self.arange_np[:num_tokens][req_indices == req_idx]
+        if req_id not in scheduler_output.partial_req_ids:
+            # Remove the sample token if there is one.
+            indices = indices[:-1]
+
+        return prompt_indices
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs

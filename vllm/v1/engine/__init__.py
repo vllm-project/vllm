@@ -8,8 +8,6 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.sampling_params import SamplingParams
-    logprobs: int
-    prompt_logprobs: int
 
 
 @dataclass
