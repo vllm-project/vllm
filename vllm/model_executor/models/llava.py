@@ -695,7 +695,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
                 "</Image>)",  # 3 tokens
             ])
 
-        mantis_repls = self._bind_prompt_replacements([
+        mantis_mm_repls = self._bind_and_group_repls([
             PromptReplacement(
                 modality="image",
                 target=[image_token_id] * num_image_tokens,
@@ -705,7 +705,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
         prompt_ids, prompt_text, _ = self._apply_prompt_replacements(
             result["prompt_token_ids"],
-            mantis_repls,
+            mantis_mm_repls,
             mm_item_counts,
         )
 
@@ -714,9 +714,9 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        orig_repls = self._bind_prompt_replacements(unbound_orig_repls)
+        orig_repls = self._bind_and_group_repls(unbound_orig_repls)
 
-        mm_placeholders = self._find_placeholders_by_modality(
+        mm_placeholders = self._find_mm_placeholders(
             orig_repls,
             prompt_ids,
             mm_item_counts,
