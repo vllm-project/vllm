@@ -127,12 +127,12 @@ class TTCacheEngine:
         device_config: DeviceConfig,
     ) -> int:
         '''
-        Returns the number of KV heads per attention layer. Makes the assumption
-        that we are tensor parallel by the number of devices.
+        Returns the number of KV heads per attention layer (per device). Makes the assumption
+        that we are tensor parallel by min(number of devices, number of KV heads).
         '''
         num_devices = len(device_config.device.get_devices())
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        num_kv_heads //= num_devices # TP = num_devices
+        num_kv_heads //= min(num_devices, num_kv_heads)  # TP = num_devices if num_devices < num_kv_heads
         return num_kv_heads
 
     @staticmethod
