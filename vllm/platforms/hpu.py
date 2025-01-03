@@ -19,6 +19,7 @@ class HpuPlatform(Platform):
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
+    ray_device_key: str = "HPU"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:

@@ -45,10 +45,14 @@ try:
         def get_node_ip(self) -> str:
             return get_ip()
 
-        def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
+        def get_node_and_accelerator_ids(self) -> Tuple[str, List[int]]:
+
             node_id = ray.get_runtime_context().get_node_id()
-            gpu_ids = ray.get_gpu_ids()
-            return node_id, gpu_ids
+            device_key = current_platform.ray_device_key \
+                if current_platform.ray_device_key else "CUDA"
+            accelerator_ids = ray.get_runtime_context().get_accelerator_ids(
+            )[device_key]
+            return node_id, accelerator_ids
 
         def execute_model_spmd(
             self, req_or_tuple: Union[bytes,
@@ -249,11 +253,12 @@ def initialize_ray_cluster(
         # Placement group is already set.
         return
 
-    device_str = "GPU"
-    if current_platform.is_tpu():
-        device_str = "TPU"
-    elif current_platform.is_hpu():
-        device_str = 'HPU'
+    device_str = current_platform.ray_device_key
+    if not device_str:
+        device_str = "GPU"
+        logger.warning(
+            "There are no device key in ray of required %s device, "
+            "setting it to \"GPU\" for default.", device_str)
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
