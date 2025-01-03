@@ -30,6 +30,7 @@ from vllm.spec_decode.medusa_worker import MedusaWorker
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
 from vllm.spec_decode.mqa_scorer import MQAScorer
+from vllm.spec_decode.multi_proposer_worker import MultiProposerWorker
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -158,7 +159,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         draft_model_config = draft_worker_kwargs["vllm_config"].model_config
         draft_parallel_config: ParallelConfig = draft_worker_kwargs[
             'vllm_config'].parallel_config
-        if ngram_prompt_lookup_max > 0:
+        if draft_model_config.model == '[ngram]':
             draft_worker_kwargs[
                 "device_type"] = scorer_worker.device_config.device.type
             proposer_worker = NGramWorker(**draft_worker_kwargs)
@@ -187,6 +188,24 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
+
+            worker_list: Dict[str, ProposerWorkerBase] = {}
+            worker_list[draft_model_config.model] = proposer_worker
+
+            # Currently, MultiProposerWorker is designed to support NGram
+            # proposer as a backup to pair up with another slower but more
+            # accurate proposer. If NGramWorker is not configured, then we do
+            # not need MultiProposerWorker at this moment. More flexible
+            # choices will be added in the future.
+            if ngram_prompt_lookup_max > 0:
+                backup_proposer_worker = NGramWorker(**draft_worker_kwargs)
+                backup_proposer_worker.set_ngram_window_size(
+                    ngram_prompt_lookup_min, ngram_prompt_lookup_max)
+                worker_list['[ngram]'] = backup_proposer_worker
+
+            if len(worker_list.keys()) > 1:
+                proposer_worker = MultiProposerWorker(**draft_worker_kwargs,
+                                                      worker_list=worker_list)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
