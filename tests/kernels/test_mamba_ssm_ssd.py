@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Tuple
 
 import pytest
 import torch
@@ -128,8 +128,11 @@ def generate_continous_batched_examples(example_lens_by_batch,
                                                   C,
                                                   block_len=full_length // 4)
 
-    # internal function to
-    def take(example_lens):
+    # internal function that outputs a cont batch of examples
+    # given a tuple of lengths for each example in the batch
+    # e.g., example_lens=(8, 4) means take 8 samples from first eg,
+    #       4 examples from second eg, etc
+    def get_continuous_batch(example_lens: Tuple[int, ...]):
 
         indices = []
         for i, x in enumerate(example_lens):
@@ -141,14 +144,19 @@ def generate_continous_batched_examples(example_lens_by_batch,
         return (torch.concat([x[i, s:e] for i, (s, e) in enumerate(indices)
                               ]).unsqueeze(0) for x in (dt, X, B, C))
 
-    def end_boundary(n):
+    # internal function that maps "n" to the appropriate right boundary
+    # value when forming continuous batches from examples of length given
+    # by "full_length".
+    # - e.g., when n > full_length, returns n % full_length
+    #         when n == full_length, returns full_length
+    def end_boundary(n: int):
         return n - ((n - 1) // full_length) * full_length
 
     IND_E = None
     for spec in example_lens_by_batch:
 
         # get the (maybe partial) example seen in this cont batch
-        dt2, X2, B2, C2 = take(spec)
+        dt2, X2, B2, C2 = get_continuous_batch(spec)
 
         # get the metadata
         cu_seqlens = torch.tensor((0, ) + spec, device=device).cumsum(dim=0)
@@ -216,8 +224,8 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
 
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16])
-@pytest.mark.parametrize("n_heads", [4, 8])
-@pytest.mark.parametrize("dim", [64])
+@pytest.mark.parametrize("n_heads", [4, 8, 13])
+@pytest.mark.parametrize("d_head", [5, 16, 21, 32])
 @pytest.mark.parametrize(
     "seq_len_chunk_size_cases",
     [
@@ -228,21 +236,29 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
         (64, 8, 2, [(8, 8), (8, 8), (8, 8)]),  # chunk size boundary
         (64, 8, 2, [(4, 4), (4, 4), (4, 4),
                     (4, 4)]),  # chunk_size larger than cont batches
+        (64, 8, 5, [
+            (64, 32, 16, 8, 8),
+            (8, 16, 32, 16, 8),
+            (8, 8, 16, 32, 16),
+        ]),  # mode examples with varied lengths
+
+        # odd chunk_size
+        (64, 29, 2, [(11, 4), (13, 23), (19, 22),
+                     (21, 15)]),  # irregular sizes
 
         # large-ish chunk_size (256)
-        (64, 8, 1, [(5, ), (1, ), (1, ),
-                    (1, )]),  # irregular sizes with small sequences
-        (64, 8, 2, [(5, 30), (1, 2), (1, 2),
-                    (1, 2)]),  # irregular sizes with small sequences
+        (64, 256, 1, [(5, ), (1, ), (1, ),
+                      (1, )]),  # irregular sizes with small sequences
+        (64, 256, 2, [(5, 30), (1, 2), (1, 2),
+                      (1, 2)]),  # irregular sizes with small sequences
     ])
-def test_mamba_chunk_scan_cont_batch(dim, n_heads, seq_len_chunk_size_cases,
+def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
                                      itype):
 
     # this test with multiple examples in a continuous batch
     # (i.e. chunked prefill)
 
     seqlen, chunk_size, num_examples, cases = seq_len_chunk_size_cases
-    d_head = dim // n_heads
 
     # hold state during the cutting process so we know if an
     # example has been exhausted and needs to cycle
