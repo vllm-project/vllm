@@ -132,7 +132,6 @@ class Worker:
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
-        torch.cuda.synchronize()
 
         free_gpu_memory, _ = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
