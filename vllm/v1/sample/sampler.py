@@ -24,14 +24,12 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-
-        # NOTE(woosuk): Use the original logits (before any penalties or
-        # temperature scaling) for the top-k logprobs.
-        # This is different from the V0 sampler, which uses the logits that
-        # is used for sampling (after penalties and temperature scaling).
         needs_logprobs = sampling_metadata.max_num_logprobs > 0
-        raw_logits = torch.Tensor([])
         if needs_logprobs:
+            # NOTE(woosuk): Use the original logits (before any penalties or
+            # temperature scaling) for the top-k logprobs.
+            # This is different from the V0 sampler, which uses the logits that
+            # is used for sampling (after penalties and temperature scaling).
             # NOTE(rob): We have to clone the raw logits (at fp16) to
             # compute logprobs AFTER sampling, since we need return
             # the logprob of the sampled token.
