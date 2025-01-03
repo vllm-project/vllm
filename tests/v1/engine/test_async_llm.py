@@ -65,3 +65,5 @@ async def test_load(monkeypatch):
         assert failed_request_id is None, (
             f"{failed_request_id} generated {tokens} but "
             f"expected {NUM_EXPECTED_TOKENS}")
+
+        engine.shutdown()

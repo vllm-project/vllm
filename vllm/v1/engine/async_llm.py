@@ -133,6 +133,15 @@ class AsyncLLM(EngineClient):
             stat_loggers=stat_loggers,
         )
 
+    def shutdown(self):
+        """Shutdown background resources."""
+
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown()
+
+        if handler := getattr(self, "output_handler", None):
+            handler.cancel()
+
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
         executor_class: Type[Executor]
@@ -286,6 +295,9 @@ class AsyncLLM(EngineClient):
         except Exception as e:
             logger.exception("EngineCore output handler hit an error: %s", e)
             kill_process_tree(os.getpid())
+
+        finally:
+            logger.debug("AsyncLLM output handler shutting down.")
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""

@@ -53,6 +53,9 @@ class EngineCoreClient:
 
         return InprocClient(vllm_config, executor_class, log_stats)
 
+    def shutdown(self):
+        raise NotImplementedError
+
     def get_output(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
 
@@ -92,6 +95,9 @@ class InprocClient(EngineCoreClient):
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
+
+    def shutdown(self):
+        self.engine_core.shutdown()
 
     def get_output(self) -> List[EngineCoreOutput]:
         return self.engine_core.step()
@@ -159,6 +165,14 @@ class MPClient(EngineCoreClient):
                 "executor_class": executor_class,
                 "log_stats": log_stats,
             })
+
+    def shutdown(self):
+        """Clean up background resources."""
+
+        self._finalizer()
+
+        if hasattr(self, "proc_handle"):
+            self.proc_handle.shutdown()
 
 
 class SyncMPClient(MPClient):

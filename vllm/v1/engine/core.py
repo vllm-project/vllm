@@ -129,6 +129,9 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
+    def shutdown(self):
+        self.model_executor.shutdown()
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""

@@ -113,6 +113,9 @@ class BackgroundProcHandle:
             raise RuntimeError(f"{process_name} initialization failed. "
                                "See root cause above.")
 
+    def shutdown(self):
+        self._finalizer()
+
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
