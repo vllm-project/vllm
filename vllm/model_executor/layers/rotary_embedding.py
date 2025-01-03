@@ -841,6 +841,37 @@ class MRotaryEmbedding(RotaryEmbedding):
     ) -> Tuple[List[List[int]], int]:
         """Get mrope input positions and delta value."""
 
+        llm_positions, mrope_position_delta = \
+            MRotaryEmbedding.get_input_positions_tensor(
+                input_tokens,
+                image_grid_thw,
+                video_grid_thw,
+                image_token_id,
+                video_token_id,
+                vision_start_token_id,
+                vision_end_token_id,
+                spatial_merge_size,
+                context_len,
+                seq_len,
+            )
+
+        return llm_positions.tolist(), mrope_position_delta
+
+    @staticmethod
+    def get_input_positions_tensor(
+        input_tokens: List[int],
+        image_grid_thw: Union[List[List[int]], torch.Tensor],
+        video_grid_thw: Union[List[List[int]], torch.Tensor],
+        image_token_id: int,
+        video_token_id: int,
+        vision_start_token_id: int,
+        vision_end_token_id: int,
+        spatial_merge_size: int,
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, int]:
+        """Get mrope input positions and delta value."""
+
         if isinstance(image_grid_thw, torch.Tensor):
             image_grid_thw = image_grid_thw.tolist()
         if isinstance(video_grid_thw, torch.Tensor):
@@ -916,7 +947,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                                 len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
 
-        return llm_positions.tolist(), mrope_position_delta
+        return llm_positions, mrope_position_delta
 
     @staticmethod
     def get_next_input_positions(
@@ -929,6 +960,17 @@ class MRotaryEmbedding(RotaryEmbedding):
                 range(context_len + mrope_position_delta,
                       seq_len + mrope_position_delta)) for _ in range(3)
         ]
+
+    @staticmethod
+    def get_next_input_positions_tensor(
+        mrope_position_delta: int,
+        context_len: int,
+        seq_len: int,
+    ) -> torch.Tensor:
+        return torch.arange(
+            mrope_position_delta + context_len,
+            mrope_position_delta + seq_len,
+        ).expand(3, -1)
 
 
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}

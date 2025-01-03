@@ -760,6 +760,7 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
+    _placeholder_map: Optional[dict[str, list[int]]] = None
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
@@ -820,19 +821,23 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor = self._get_hf_processor()
         image_processor = _get_image_processor(hf_processor)
 
-        # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
-        # image_token and video_token registered
-        placeholder = {
-            "image": hf_processor.image_token,
-            "video": hf_processor.video_token,
-        }
+        if not self._placeholder_map:
+            # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
+            # image_token and video_token registered
+            encode_fn = hf_processor.tokenizer.encode
+            self._placeholder_map = {
+                "image": encode_fn(hf_processor.image_token),
+                "video": encode_fn(hf_processor.video_token),
+            }
+        placeholder = self._placeholder_map
+
         merge_length = image_processor.merge_size**2
 
         def get_replacement_qwen2vl(item_idx: int, modality: str):
             grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
             assert isinstance(grid_thw, torch.Tensor)
 
-            num_tokens = grid_thw.prod() // merge_length
+            num_tokens = grid_thw.prod().item() // merge_length
             return placeholder[modality] * num_tokens
 
         return [
@@ -955,11 +960,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: Qwen2VLConfig = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        assert not cache_config.enable_prefix_caching, \
-            "Qwen2-VL currently does not support prefix caching"
 
         self.config = config
         self.multimodal_config = multimodal_config
