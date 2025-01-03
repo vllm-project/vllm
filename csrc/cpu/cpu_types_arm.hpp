@@ -99,7 +99,7 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
         //          vgetq_lane_f16(temp, i);
         // }
         // 
-        // For mac os build (Clang), the arm/neon intrinsics function 
+        // For macOS build (Clang), the arm/neon intrinsics function 
         // `vgetq_lane_f16` needs the parameter `i` to be constant at compile 
         // time. 
         

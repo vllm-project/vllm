@@ -20,7 +20,7 @@ Contents:
 ## Requirements
 
 - **Operating System**: Linux or macOS
-- **Compilers**: `gcc/g++ >= 12.3.0` (optional, but recommended) or `Apple Clang >= 15.0.0` for macOs
+- **Compilers**: `gcc/g++ >= 12.3.0` (optional, but recommended) or `Apple Clang >= 15.0.0` for macOS
 - **Instruction Set Architecture (ISA)**: NEON support is required
 
 (arm-backend-quick-start-dockerfile)=
