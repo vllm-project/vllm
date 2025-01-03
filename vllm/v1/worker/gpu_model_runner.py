@@ -570,7 +570,7 @@ class GPUModelRunner:
                     prompt_hidden_states, None)
 
                 # Compute prompt logprobs.
-                # TODO(rob): Why is this in the model?
+                # TODO(rob): Should we move the sampler out of the model?
                 prompt_logprobs_dict[
                     request_id] = self.model.sampler.get_prompt_logprobs(
                         logits, metadata.logits_process_metadata,

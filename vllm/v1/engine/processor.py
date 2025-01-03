@@ -93,7 +93,6 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
-        # TODO(rob): Validate all SamplingParams.
         self._validate_logprobs(params)
         self._validate_lora(lora_request)
 

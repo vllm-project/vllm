@@ -170,9 +170,9 @@ class InputBatch:
         if sampling_params.logprobs:
             self.num_logprobs[req_id] = sampling_params.logprobs
         if sampling_params.prompt_logprobs:
-            # TODO(rob): handle prefix caching and recomputation.
-            # We need to re-run the prefill if requesting prompt
-            # logprobs w/ prefix caching.
+            # FIXME(rob): handle prefix caching and preemption.
+            # We currently get incorrect results if prompt logprobs
+            # are requested and we get a cache hit.
             self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
 
     def remove_request(self, req_id: str) -> Optional[int]:
