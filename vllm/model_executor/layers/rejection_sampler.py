@@ -118,7 +118,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         # If use Flashinfer chain_speculative_sampling kernel
         # for rejection sampling
-        if self.use_flashinfer:
+        if self.use_flashinfer and chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
             uniform_samples = self._create_uniform_samples(
                 seeded_seqs, batch_size, k, draft_probs.device)
