@@ -35,6 +35,8 @@ class Worker:
         distributed_init_method: str,
     ):
 
+        self.i = 0
+        
         # TODO: use WorkerBase.__init__(self, vllm_config=vllm_config)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -201,6 +203,10 @@ class Worker:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
+        if self.rank == 0 and self.i == 10:
+            raise ValueError("ERROR FROM HERE :)")
+        self.i += 1
+        
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.rank == 0 else None
 
