@@ -7,7 +7,8 @@ import torch.nn.functional as F
 
 from vllm.attention import AttentionMetadata, AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import (CacheConfig, LayerForwardContext,
+                         get_current_vllm_config)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -117,7 +118,10 @@ class Attention(nn.Module):
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
+        # use a placeholder kv cache tensor during init, which will be replaced
+        # after kv cache initialization
+        compilation_config.static_forward_context[
+            prefix] = LayerForwardContext(self, torch.tensor([]))
         self.layer_name = prefix
 
     def forward(
@@ -152,13 +156,11 @@ class Attention(nn.Module):
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size)
             torch.ops.vllm.unified_attention_with_output(
-                query, key, value, output, kv_cache, attn_type,
-                self.layer_name)
+                query, key, value, output, attn_type, self.layer_name)
             return output.view(-1, hidden_size)
         else:
             return torch.ops.vllm.unified_attention(query, key, value,
-                                                    kv_cache, attn_type,
-                                                    self.layer_name)
+                                                    attn_type, self.layer_name)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -236,17 +238,17 @@ def unified_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    kv_cache: torch.Tensor,
     attn_type: str,
     layer_name: str,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.dynamic_forward_context
-    self = forward_context.static_forward_context[layer_name]
+    attn_metadata = forward_context.attn_metadata
+    ctx = forward_context.layers[layer_name]
+    self = ctx.attn_module
     return self.impl.forward(query,
                              key,
                              value,
-                             kv_cache,
+                             ctx.kv_cache,
                              attn_metadata,
                              self._k_scale,
                              self._v_scale,
@@ -257,7 +259,6 @@ def unified_attention_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    kv_cache: torch.Tensor,
     attn_type: str,
     layer_name: str,
 ) -> torch.Tensor:
@@ -267,7 +268,7 @@ def unified_attention_fake(
 direct_register_custom_op(
     op_name="unified_attention",
     op_func=unified_attention,
-    mutates_args=["kv_cache"],
+    mutates_args=[],
     fake_impl=unified_attention_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -278,17 +279,17 @@ def unified_attention_with_output(
     key: torch.Tensor,
     value: torch.Tensor,
     output: torch.Tensor,
-    kv_cache: torch.Tensor,
     attn_type: str,
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.dynamic_forward_context
-    self = forward_context.static_forward_context[layer_name]
+    attn_metadata = forward_context.attn_metadata
+    ctx = forward_context.layers[layer_name]
+    self = ctx.attn_module
     self.impl.forward(query,
                       key,
                       value,
-                      kv_cache,
+                      ctx.kv_cache,
                       attn_metadata,
                       self._k_scale,
                       self._v_scale,
@@ -301,7 +302,6 @@ def unified_attention_with_output_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     output: torch.Tensor,
-    kv_cache: torch.Tensor,
     attn_type: str,
     layer_name: str,
 ) -> None:
@@ -311,7 +311,7 @@ def unified_attention_with_output_fake(
 direct_register_custom_op(
     op_name="unified_attention_with_output",
     op_func=unified_attention_with_output,
-    mutates_args=["kv_cache", "output"],
+    mutates_args=["output"],
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
 )
