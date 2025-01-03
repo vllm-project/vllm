@@ -332,7 +332,7 @@ class WorkerProc:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        worker: Optional[WorkerProc] = None
+        worker = None
         try:
             worker = WorkerProc(*args, **kwargs)
 
