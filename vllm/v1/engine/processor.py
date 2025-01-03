@@ -164,9 +164,10 @@ class Processor:
                     assert len(mm_input.modalities) == 1
 
                 # Sort MultiModalKwags to match sorted_mm_positions
-                sorted_mm_inputs = sorted(mm_inputs,
-                                        key=lambda mm_input: modality_order_dict[
-                                            list(mm_input.modalities)[0]])
+                sorted_mm_inputs = sorted(
+                    mm_inputs,
+                    key=lambda mm_input: modality_order_dict[list(
+                        mm_input.modalities)[0]])
             else:
                 sorted_mm_inputs = mm_inputs
 
