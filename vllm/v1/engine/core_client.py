@@ -250,6 +250,7 @@ class AsyncMPClient(MPClient):
         )
 
     async def get_output_async(self) -> List[EngineCoreOutput]:
+
         frames = await self.output_socket.recv_multipart(copy=False)
         engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
 
@@ -257,6 +258,7 @@ class AsyncMPClient(MPClient):
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:
+
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
 
