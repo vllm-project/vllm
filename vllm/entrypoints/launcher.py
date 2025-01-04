@@ -84,11 +84,7 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
     # because handler must first return to close the connection
     # for this request.
     engine_errored = engine.errored and not engine.is_running
-    is_already_exiting = server.should_exit
-    if (not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored
-            and not is_already_exiting):
-        # Avoid spamming the logs by only sending once.
-        logger.fatal("Engine failed, terminating server.")
+    if (not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored):
         server.should_exit = True
 
 

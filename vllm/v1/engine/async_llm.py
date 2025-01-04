@@ -326,7 +326,7 @@ class AsyncLLM(EngineClient):
             raise
 
         except Exception as e:
-            logger.error("AsyncLLM._run_output_handler failed", e)
+            logger.fatal("AsyncLLM._run_output_handler failed")
             self._set_errored_and_propagate()
             raise EngineDeadError() from e
 

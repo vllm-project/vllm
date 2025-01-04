@@ -193,7 +193,8 @@ class MultiprocExecutor(Executor):
         active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
         for p in active_procs:
             p.terminate()
-        if not wait_for_termination(active_procs, 4):
+        if not wait_for_termination(active_procs, 100):
+            
             # Send SIGKILL if still running
             active_procs = [p for p in active_procs if p.is_alive()]
             for p in active_procs:
@@ -210,7 +211,7 @@ class MultiprocExecutor(Executor):
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        if getattr(self, 'shutting_down', False):
+        if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
             for w in self.workers:
                 w.worker_response_mq = None
@@ -313,8 +314,11 @@ class WorkerProc:
     def shutdown(self):
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
+        print(f"destroy_model_parallel PID: {os.getpid()}")
         destroy_model_parallel()
+        print(f"destroy_distributed_environment PID: {os.getpid()}")
         destroy_distributed_environment()
+        print(f"done with shutdown PID: {os.getpid()}")
 
     @staticmethod
     def worker_main(*args, **kwargs):
@@ -348,7 +352,7 @@ class WorkerProc:
             worker.worker_busy_loop()
 
         except SystemExit:
-            logger.debug("Worker interrupted.")
+            logger.info("Worker interrupted.")
 
         except Exception:
             # worker_busy_loop sends exceptions exceptons to Executor
@@ -358,10 +362,12 @@ class WorkerProc:
             raise
 
         finally:
+            print(f"IN WORKER FINALLY. RANK: {kwargs["rank"]} PID: {os.getpid()}")
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()
                 worker = None
+            print(f"DONE W WORKER FINALLY. RANK: {kwargs["rank"]} PID: {os.getpid()}")
 
     @staticmethod
     def wait_for_startup(
@@ -390,10 +396,14 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
+        i = 0
         while True:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
             try:
+                if i == 10 and self.rank == 0:
+                    raise ValueError
+                i+=1
                 output = getattr(self.worker, method)(*args, **kwargs)
             except Exception as e:
                 self.worker_response_mq.enqueue(

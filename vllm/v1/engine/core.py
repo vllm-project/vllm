@@ -198,6 +198,8 @@ class EngineCoreProc(EngineCore):
         except Exception:
             traceback = get_exception_traceback()
             logger.error("EngineCore hit an exception: %s", traceback)
+            engine_core.shutdown()
+            engine_core = None
             parent_process.send_signal(signal.SIGUSR1)
 
         finally:
@@ -207,12 +209,8 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
-        i = 0
+        # Loop until process is sent a SIGINT or SIGTERM.
         while True:
-            if i == 10:
-                raise ValueError("TEST RUN")
-            i += 1
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
