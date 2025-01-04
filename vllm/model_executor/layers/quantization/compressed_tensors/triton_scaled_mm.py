@@ -152,6 +152,22 @@ def triton_scaled_mm(input: torch.Tensor,
 
     has_scalar = lambda x: x.shape[0] == 1 and x.shape[1] == 1
 
+    is_small_N = N < 8192
+    next_power_of_2_M = max(32, triton.next_power_of_2(M))
+    if next_power_of_2_M <= 32:
+        if is_small_N:
+            shape = (64, 64, 256)
+        else:
+            shape = (64, 128, 256)
+    elif next_power_of_2_M <= 64:
+        shape = (64, 64, 256)
+    elif next_power_of_2_M <= 128:
+        shape = (64, 128, 128)
+    else:
+        shape = (128, 128, 128)
+
+    block_size_m, block_size_n, block_size_k = shape
+
     block_size_sa = 1 if has_scalar(scale_a) else block_size_m
     block_size_sb = 1 if has_scalar(scale_b) else block_size_n
 
