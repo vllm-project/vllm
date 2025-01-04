@@ -122,7 +122,7 @@ class Sampler(nn.Module):
         topk_indices = topk_indices.to(torch.int32)
 
         # Concatenate with the sampled token_ids if provided.
-        if sampled_token_ids:
+        if sampled_token_ids is not None:
             # TODO(rob): do we need to return the rank of the sampled?
             # TODO(andy): is this indexing right?
             sampled_logprobs = logprobs[:, sampled_token_ids]
