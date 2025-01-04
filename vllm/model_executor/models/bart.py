@@ -71,12 +71,8 @@ class BartLearnedPositionalEmbedding(VocabParallelEmbedding):
     def forward(
         self,
         positions: torch.Tensor,
-        attn_type: AttentionType,
     ) -> torch.Tensor:
         """`input_ids' shape is expected to be [bsz x seqlen]."""
-
-        assert attn_type != AttentionType.ENCODER_DECODER
-
         return super().forward(positions + self.offset)
 
 
@@ -180,7 +176,8 @@ class BartEncoderAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+                              prefix=f"{prefix}.attn",
+                              attn_type=AttentionType.ENCODER)
 
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
@@ -189,12 +186,7 @@ class BartEncoderAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        attn_output = self.attn(q,
-                                k,
-                                v,
-                                kv_cache,
-                                attn_metadata,
-                                attn_type=AttentionType.ENCODER)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
         output, _ = self.out_proj(attn_output)
         return output
@@ -264,7 +256,8 @@ class BartDecoderSelfAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+                              prefix=f"{prefix}.attn",
+                              attn_type=AttentionType.DECODER)
 
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
@@ -273,12 +266,7 @@ class BartDecoderSelfAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        attn_output = self.attn(q,
-                                k,
-                                v,
-                                kv_cache,
-                                attn_metadata,
-                                attn_type=AttentionType.DECODER)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
         output, _ = self.out_proj(attn_output)
         return output
@@ -348,7 +336,8 @@ class BartCrossAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+                              prefix=f"{prefix}.attn",
+                              attn_type=AttentionType.ENCODER_DECODER)
 
     def forward(
         self,
@@ -372,12 +361,7 @@ class BartCrossAttention(nn.Module):
             _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
                                     dim=-1)
 
-        attn_output = self.attn(q,
-                                k,
-                                v,
-                                kv_cache,
-                                attn_metadata,
-                                attn_type=AttentionType.ENCODER_DECODER)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
         output, _ = self.out_proj(attn_output)
         return output
@@ -644,10 +628,7 @@ class BartEncoder(nn.Module):
         # retrieve input_ids and inputs_embeds
         inputs_embeds = self.embed_tokens(input_ids)
 
-        embed_pos = self.embed_positions(
-            positions,
-            AttentionType.ENCODER,
-        )
+        embed_pos = self.embed_positions(positions)
         embed_pos = embed_pos.to(inputs_embeds.device)
 
         hidden_states = inputs_embeds + embed_pos
@@ -734,10 +715,7 @@ class BartDecoder(nn.Module):
         inputs_embeds = self.embed_tokens(decoder_input_ids)
 
         # embed positions
-        embed_pos = self.embed_positions(
-            decoder_positions,
-            AttentionType.DECODER,
-        )
+        embed_pos = self.embed_positions(decoder_positions)
         embed_pos = embed_pos.to(inputs_embeds.device)
 
         hidden_states = inputs_embeds + embed_pos

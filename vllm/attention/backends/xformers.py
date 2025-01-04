@@ -379,6 +379,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -405,6 +406,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
+        self.attn_type = attn_type
+
     def forward(
         self,
         query: torch.Tensor,
@@ -414,7 +417,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         attn_metadata: "XFormersMetadata",
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -468,7 +470,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-
+        attn_type = self.attn_type
         # Check that appropriate attention metadata attributes are
         # selected for the desired attention type
         if (attn_type == AttentionType.ENCODER

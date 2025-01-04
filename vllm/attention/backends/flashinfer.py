@@ -748,6 +748,7 @@ class FlashInferImpl(AttentionImpl):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -764,6 +765,12 @@ class FlashInferImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "FlashInferImpl")
+
     def forward(
         self,
         query: torch.Tensor,
@@ -773,18 +780,10 @@ class FlashInferImpl(AttentionImpl):
         attn_metadata: FlashInferMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
         # TODO: directly write to output tensor
-
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "FlashInferImpl")
-
         num_heads: int = self.num_heads
         head_size: int = self.head_size
         num_kv_heads: int = self.num_kv_heads
