@@ -22,7 +22,7 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                                    torch::Tensor const& e,
                                    torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
-                                   c10::optional<torch::Tensor> const& bias);
+                                   std::optional<torch::Tensor> const& bias);
 #endif
 
 void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
@@ -30,7 +30,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
                               torch::Tensor const& bt_meta,
                               torch::Tensor const& a_scales,
                               torch::Tensor const& b_scales,
-                              c10::optional<torch::Tensor> const& bias) {
+                              std::optional<torch::Tensor> const& bias) {
   // Checks for conformality
   TORCH_CHECK(a.dim() == 2 && bt_nzs.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(1) == bt_nzs.size(0) && bt_nzs.size(1) * 2 == a.size(1) &&
