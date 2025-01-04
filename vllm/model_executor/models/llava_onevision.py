@@ -3,6 +3,7 @@ from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import (BatchFeature, LlavaOnevisionConfig,
@@ -127,18 +128,24 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
         current_height = npatches * num_patch_height
         current_width = npatches * num_patch_width
 
-        original_aspect_ratio = original_width / original_height
-        current_aspect_ratio = current_width / current_height
+        # NOTE: HF resizes based on float32
+        original_aspect_ratio = np.array(original_width / original_height,
+                                         dtype=np.float32)
+        current_aspect_ratio = np.array(current_width / current_height,
+                                        dtype=np.float32)
+
         if original_aspect_ratio > current_aspect_ratio:
-            new_height = int(original_height *
-                             (current_width / original_width))
+            scale_factor = np.array(current_width / original_width,
+                                    dtype=np.float32)
+            new_height = int(original_height * scale_factor)
             padding = (current_height - new_height) // 2
-            current_height -= padding * 2
+            current_height -= 2 * padding
         else:
-            new_width = int(original_width *
-                            (current_height / original_height))
+            scale_factor = np.array(current_height / original_height,
+                                    dtype=np.float32)
+            new_width = int(original_width * scale_factor)
             padding = (current_width - new_width) // 2
-            current_width -= padding * 2
+            current_width -= 2 * padding
 
         unpadded_features = current_height * current_width
         newline_features = current_height
