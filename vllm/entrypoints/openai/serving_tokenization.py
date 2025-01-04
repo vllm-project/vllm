@@ -86,7 +86,7 @@ class OpenAIServingTokenization(OpenAIServing):
                      request.prompt,
                      add_special_tokens=request.add_special_tokens,
                  )
-        except ValueError as e:
+        except Exception as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 

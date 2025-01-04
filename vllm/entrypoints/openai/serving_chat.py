@@ -171,7 +171,7 @@ class OpenAIServingChat(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
-        except ValueError as e:
+        except Exception as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
@@ -228,7 +228,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 generators.append(generator)
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
@@ -245,7 +245,7 @@ class OpenAIServingChat(OpenAIServing):
             return await self.chat_completion_full_generator(
                 request, result_generator, request_id, model_name,
                 conversation, tokenizer, request_metadata)
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 

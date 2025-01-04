@@ -136,7 +136,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                      truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
                  )
-        except ValueError as e:
+        except Exception as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
@@ -167,7 +167,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 )
 
                 generators.append(generator)
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
@@ -196,7 +196,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
