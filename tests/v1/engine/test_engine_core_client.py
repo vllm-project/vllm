@@ -86,11 +86,10 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
             UsageContext.UNKNOWN_CONTEXT)
         executor_class = AsyncLLM._get_executor_cls(vllm_config)
         client = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            UsageContext.UNKNOWN_CONTEXT,
             multiprocess_mode=multiprocessing_mode,
             asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
         )
 
         MAX_TOKENS = 20
@@ -143,9 +142,6 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         client.abort_requests([request.request_id])
 
-        # Shutdown the client.
-        client.shutdown()
-
 
 @pytest.mark.asyncio
 async def test_engine_core_client_asyncio(monkeypatch):
@@ -158,11 +154,10 @@ async def test_engine_core_client_asyncio(monkeypatch):
             usage_context=UsageContext.UNKNOWN_CONTEXT)
         executor_class = AsyncLLM._get_executor_cls(vllm_config)
         client = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            UsageContext.UNKNOWN_CONTEXT,
             multiprocess_mode=True,
             asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
         )
 
         MAX_TOKENS = 20
@@ -202,6 +197,3 @@ async def test_engine_core_client_asyncio(monkeypatch):
             else:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
                     f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-
-        # Shutdown the client.
-        client.shutdown()
