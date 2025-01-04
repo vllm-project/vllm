@@ -107,7 +107,7 @@ def multiple_allreduce_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    with graph_capture():
+    with graph_capture(device=device):
         # two tp groups can communicate independently
         if torch.distributed.get_rank() in [0, 1]:
             tensor = tensor_model_parallel_all_reduce(tensor)
