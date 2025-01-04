@@ -75,7 +75,6 @@ def run_deepseek_vl2(question: str, modality: str):
     llm = LLM(model=model_name,
               max_model_len=4096,
               max_num_seqs=2,
-              dtype="half",
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
               hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]})
 

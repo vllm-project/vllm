@@ -228,7 +228,9 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
                 for name in ("input_ids", "images", "images_spatial_crop")
             }
             # rename `images` -> `pixel_values` to avoid confusion
-            processed_outputs["pixel_values"] = processed_outputs.pop("images")
+            target_dtype = self.ctx.model_config.dtype
+            pixel_values = processed_outputs.pop("images")
+            processed_outputs["pixel_values"] = pixel_values.to(target_dtype)
 
             processed_outputs = BatchFeature(data=dict(processed_outputs),
                                              tensor_type="pt")
