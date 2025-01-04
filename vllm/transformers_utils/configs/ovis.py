@@ -3,12 +3,6 @@ from typing import List, Dict, Union, Optional
 
 from transformers import PretrainedConfig, AutoConfig
 
-IGNORE_ID = -100
-IMAGE_TOKEN_ID = -200
-IMAGE_TOKEN = "<image>"
-IMAGE_ATOM_ID = -300
-IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
-
 class BaseVisualTokenizerConfig(PretrainedConfig):
     def __init__(
         self,

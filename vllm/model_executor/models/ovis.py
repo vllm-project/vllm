@@ -1,43 +1,65 @@
-import logging
 import os
+import logging
 from packaging import version
 from importlib import import_module
-from typing import List, Callable, Union, Optional, Dict
+from typing import Iterable, List, Set, Tuple, Union, Optional, Dict
 import PIL
 
 import torch
+import torch.nn as nn
 from torch import Tensor
 from torch.nn import init
 
 import transformers
 from torch.nn.functional import softmax, gumbel_softmax, pad
-from transformers import PreTrainedModel, AutoModel, AutoTokenizer, AutoModelForCausalLM, AutoImageProcessor
-from transformers import SiglipImageProcessor, SiglipVisionModel
-from transformers.cache_utils import HybridCache
-from transformers.generation.utils import GenerateOutput
 
-from vllm.transformers_utils.configs.ovis import OvisConfig,BaseVisualTokenizerConfig,SiglipVisualTokenizerConfig,ConversationFormatter
-from vllm.transformers_utils.configs.ovis import IGNORE_ID, IMAGE_ATOM_ID, IMAGE_INDICATOR_IDS, IMAGE_TOKEN_ID
+from vllm.transformers_utils.configs.ovis import ConversationFormatter,OvisConfig
+from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.attention import AttentionMetadata
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.inputs import InputContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import cached_get_image_processor
+from vllm.sequence import IntermediateTensors
+
+from .siglip import SiglipVisionModel
 from .interfaces import SupportsMultiModal,SupportsPP  
-from .utils import (maybe_prefix,init_vllm_registered_model)
+from .utils import (AutoWeightsLoader, maybe_prefix,init_vllm_registered_model)
 
+IGNORE_ID = -100
+IMAGE_TOKEN_ID = -200
+IMAGE_TOKEN = "<image>"
+IMAGE_ATOM_ID = -300
+IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
 
-class BaseVisualTokenizer(PreTrainedModel):
-    base_model_prefix = "backbone"
-    main_input_name = None
-    _image_processor_class = None
-    _image_processor_kwargs = {}
-    _backbone_class = None
-    _backbone_name_or_path = None
+def get_max_ovis_image_tokens(ctx:InputContext,max_partitions:int=9):
+    hf_config = ctx.get_hf_config(OvisConfig)
+    visual_tokenizer_config = hf_config.visual_tokenizer_config
+    
+    hidden_stride = visual_tokenizer_config.hidden_stride
+    vocab_size = visual_tokenizer_config.vocab_size
+    
+    max_grid_size = max_partitions * max_partitions
+    max_tokens_per_grid = hidden_stride * hidden_stride * max_grid_size
+    
+    reserved_tokens = len(IMAGE_INDICATOR_IDS)
+    
+    usable_vocab_size = vocab_size - reserved_tokens
+    max_image_tokens = min(max_tokens_per_grid,usable_vocab_size)
+    return max_image_tokens
 
-    def __init__(self, config: BaseVisualTokenizerConfig, *inputs, **kwargs):
-        super().__init__(config, *inputs, **kwargs)
-        self.image_processor = AutoImageProcessor.from_pretrained(kwargs['image_processor_name_or_path'])
-        self.backbone = AutoModel.from_config(self.config.backbone_config)
+class SiglipVisualTokenizer(nn.Module):
+    def __init__(self, vllm_config: VllmConfig, *inputs, **kwargs):
+        super().__init__()
+        quant_config = vllm_config.quant_config
+        config = vllm_config.model_config.hf_config.visual_tokenizer_config
+        self.config = config
+        self.image_processor = cached_get_image_processor(kwargs['image_processor_name_or_path'])
+        self.backbone = SiglipVisionModel(config.backbone_config._name_or_path,
+                                              quant_config,
+                                              prefix="vision_backbone")
         head_dim = self.config.vocab_size - len(IMAGE_INDICATOR_IDS)  # reserved tokens for IMAGE_INDICATORS
         self.head = torch.nn.Sequential(
             torch.nn.Linear(
@@ -46,12 +68,6 @@ class BaseVisualTokenizer(PreTrainedModel):
             ),
             torch.nn.LayerNorm(head_dim)
         )
-
-        assert all((self.image_processor.do_resize,
-                    not getattr(self.image_processor, 'do_center_crop', False),
-                    self.image_processor.do_rescale,
-                    self.image_processor.do_normalize
-                    )), f"image_processor `{self.image_processor}` is not supported currently"
 
     def get_backbone(self):
         return self.backbone
@@ -65,9 +81,11 @@ class BaseVisualTokenizer(PreTrainedModel):
 
     def get_head(self):
         return self.head
-
+    
     def get_image_size(self):
-        raise NotImplementedError
+        height = self.image_processor.size["height"]
+        width = self.image_processor.size["width"]
+        return height, width
 
     @staticmethod
     def construct_image_placeholders(grid):
@@ -198,7 +216,7 @@ class BaseVisualTokenizer(PreTrainedModel):
         return tokens
 
     def encode(self, pixel_values):
-        output = self.backbone(pixel_values, output_hidden_states=True, return_dict=True)
+        output = self.backbone(pixel_values,interpolate_pos_encoding=True)
         features = output.hidden_states[-1]
         if self.config.drop_cls_token:
             features = features[:, 1:, :]
@@ -237,20 +255,6 @@ class BaseVisualTokenizer(PreTrainedModel):
         tokens = torch.cat((tokens, padding_tensor), dim=2)
         return tokens
 
-class SiglipVisualTokenizer(BaseVisualTokenizer):
-    config_class = SiglipVisualTokenizerConfig
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["SiglipVisionTransformer"]
-    _image_processor_class = SiglipImageProcessor
-    _image_processor_kwargs = {}
-    _backbone_class = SiglipVisionModel
-    _backbone_name_or_path = "google/siglip-so400m-patch14-384"
-
-    def get_image_size(self):
-        height = self.image_processor.size["height"]
-        width = self.image_processor.size["width"]
-        return height, width
-
 class VisualEmbedding(torch.nn.Embedding):
     def forward(self, visual_tokens: Tensor) -> Tensor:
         if visual_tokens.dtype in [torch.int8, torch.int16, torch.int32, torch.int64, torch.long]:
@@ -261,16 +265,9 @@ class VisualEmbedding(torch.nn.Embedding):
         init.normal_(self.weight, mean=mean, std=std)
         self._fill_padding_idx_with_zero()
 
-
-class OvisPreTrainedModel(PreTrainedModel):
-    config_class = OvisConfig
-    base_model_prefix = "ovis"
-
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens()
-@INPUT_REGISTRY.register_dummy_data()
-@INPUT_REGISTRY.register_input_processor()
-class OvisForConditionalGeneration(OvisPreTrainedModel,SupportsMultiModal,SupportsPP):
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_ovis_image_tokens)
+class OvisForConditionalGeneration(nn.Module,SupportsMultiModal,SupportsPP):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -278,18 +275,14 @@ class OvisForConditionalGeneration(OvisPreTrainedModel,SupportsMultiModal,Suppor
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-        attn_kwargs = dict()
-        if self.config.llm_attn_implementation:
-            attn_kwargs['attn_implementation'] = self.config.llm_attn_implementation
         
-        self.language_model = init_vllm_registered_model(
+        self.llm = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix,"language_model")
         )
-        assert self.config.hidden_size == self.language_model.config.hidden_size, "hidden size mismatch"
-        self.text_tokenizer = AutoTokenizer.from_pretrained(self.config.name_or_path)
-        self.visual_tokenizer = AutoModel.from_config(self.config.visual_tokenizer_config,
+        self.text_tokenizer = get_tokenizer(self.config.name_or_path)
+        self.visual_tokenizer = SiglipVisualTokenizer(self.config,
                                                       image_processor_name_or_path=self.config.name_or_path)
         self.vte = VisualEmbedding(
             self.config.visual_tokenizer_config.vocab_size,
@@ -298,64 +291,17 @@ class OvisForConditionalGeneration(OvisPreTrainedModel,SupportsMultiModal,Suppor
             dtype=self.visual_tokenizer.dtype
         )
 
-        def _merge_modules(modules_list: tuple):
-            merged_modules = []
-            for modules in modules_list:
-                merged_modules.extend(modules if modules else [])
-            return merged_modules
-
-        self._no_split_modules = _merge_modules((self.language_model._no_split_modules, self.visual_tokenizer._no_split_modules))
-        self._skip_keys_device_placement = self.language_model._skip_keys_device_placement
-        self._keep_in_fp32_modules = _merge_modules(
-            (self.language_model._keep_in_fp32_modules, self.visual_tokenizer._keep_in_fp32_modules))
-        self.is_parallelizable = all((self.language_model.is_parallelizable, self.visual_tokenizer.is_parallelizable))
-        self.supports_gradient_checkpointing = all(
-            (self.language_model.supports_gradient_checkpointing, self.visual_tokenizer.supports_gradient_checkpointing))
-        self._supports_flash_attn_2 = all(
-            (self.language_model._supports_flash_attn_2, self.visual_tokenizer._supports_flash_attn_2))
-        self._supports_sdpa = all((self.language_model._supports_sdpa, self.visual_tokenizer._supports_sdpa))
-
     def get_text_tokenizer(self):
         return self.text_tokenizer
 
     def get_visual_tokenizer(self):
         return self.visual_tokenizer
 
-    def tie_weights(self):
-        if not self.config.disable_tie_weight:
-            self.get_llm().tie_weights()
-
-    def get_llm(self):
-        return self.language_model
-
-    def get_vte(self):
-        return self.vte
-
-    def get_wte(self):
-        return self.llm.get_input_embeddings()
-
     def get_conversation_formatter(self) -> ConversationFormatter:
         if getattr(self, 'conversation_formatter', None) is None:
             self.conversation_formatter = getattr(import_module(".configuration_ovis", __package__),
                                                   self.config.conversation_formatter_class)(self.text_tokenizer)
         return self.conversation_formatter
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels: Optional[torch.Tensor],
-        pixel_values: List[Optional[torch.Tensor]],
-        **kwargs
-    ):
-        assert self.training, "`forward` can only be used in training. For inference, use `generate`."
-        _, inputs_embeds, labels, attention_mask = self.merge_multimodal(
-            text_input_ids=input_ids,
-            text_attention_masks=attention_mask,
-            text_labels=labels,
-            pixel_values=pixel_values
-        )
-        return self.llm(inputs_embeds=inputs_embeds, labels=labels, attention_mask=attention_mask, **kwargs)
 
     def merge_multimodal(
         self,
@@ -366,21 +312,18 @@ class OvisForConditionalGeneration(OvisPreTrainedModel,SupportsMultiModal,Suppor
         left_padding: bool = False
     ):
         input_device = text_input_ids.device
-        visual_vocab_szie = self.get_visual_tokenizer().config.vocab_size
+        visual_vocab_size = self.get_visual_tokenizer().config.vocab_size
         visual_indicator_embeds = self.get_vte()(
             torch.tensor(
-                list(range(visual_vocab_szie - 5, visual_vocab_szie)),
+                list(range(visual_vocab_size - 5, visual_vocab_size)),
                 dtype=torch.long,
                 device=self.get_visual_tokenizer().device
             )
         ).to(device=input_device)
 
-        if self.training:
-            # When training, to be compatible with deepspeed zero, each sample has to include pixel_value tensor.
-            # For text-only sample, one can simply use a full zero tensor as pixel_value, which will be ignored
-            # (see below in this function); so, the gradient will not be affected.
-            num_images = [x.shape[0] for x in pixel_values]
-            visual_tokens = self.visual_tokenizer(torch.cat([x for x in pixel_values], dim=0))
+        num_images = [x.shape[0] if x is not None else 0 for x in pixel_values]
+        if sum(num_images) > 0:
+            visual_tokens = self.visual_tokenizer(torch.cat([x for x in pixel_values if x is not None], dim=0))
             visual_embeds = torch.split(self.get_vte()(visual_tokens).to(dtype=self.dtype, device=input_device),
                                         split_size_or_sections=num_images, dim=0)
             visual_input_ids = torch.split(torch.argmax(visual_tokens, dim=-1).to(device=input_device),
@@ -388,23 +331,12 @@ class OvisForConditionalGeneration(OvisPreTrainedModel,SupportsMultiModal,Suppor
             visual_labels = [torch.full(x.shape, IGNORE_ID, dtype=torch.long, device=input_device) for x in
                              visual_input_ids]
         else:
-            # When inference, sample can include only text with `None` pixel_value
-            num_images = [x.shape[0] if x is not None else 0 for x in pixel_values]
-            if sum(num_images) > 0:
-                visual_tokens = self.visual_tokenizer(torch.cat([x for x in pixel_values if x is not None], dim=0))
-                visual_embeds = torch.split(self.get_vte()(visual_tokens).to(dtype=self.dtype, device=input_device),
-                                            split_size_or_sections=num_images, dim=0)
-                visual_input_ids = torch.split(torch.argmax(visual_tokens, dim=-1).to(device=input_device),
-                                               split_size_or_sections=num_images, dim=0)
-                visual_labels = [torch.full(x.shape, IGNORE_ID, dtype=torch.long, device=input_device) for x in
-                                 visual_input_ids]
-            else:
-                # just placeholders
-                visual_embeds = [None] * len(num_images)
-                visual_input_ids = [None] * len(num_images)
-                visual_labels = [None] * len(num_images)
-            if text_labels is None:
-                text_labels = torch.full(text_input_ids.shape, IGNORE_ID, dtype=torch.long, device=input_device)
+            # just placeholders
+            visual_embeds = [None] * len(num_images)
+            visual_input_ids = [None] * len(num_images)
+            visual_labels = [None] * len(num_images)
+        if text_labels is None:
+            text_labels = torch.full(text_input_ids.shape, IGNORE_ID, dtype=torch.long, device=input_device)
 
         input_embeds = []
         attention_masks = []
@@ -448,19 +380,10 @@ class OvisForConditionalGeneration(OvisPreTrainedModel,SupportsMultiModal,Suppor
                 input_embed = text_embed
                 attention_mask = text_attention_mask
                 label = text_label
-                if self.training:
-                    # Make visual_embed & visual_indicator_embeds involved in the backward graph,
-                    # to be compatible with deepspeed zero and ddp.
-                    input_embed += torch.sum(visual_embed * 0.0) + torch.sum(visual_indicator_embeds * 0.0)
             input_embeds.append(input_embed)
             attention_masks.append(attention_mask)
             labels.append(label)
 
-        if self.training:  # padding to self.config.multimodal_max_length for increased training speed
-            padding_size = max(0, self.config.multimodal_max_length - len(input_embeds[0]))
-            input_embeds[0] = torch.nn.ConstantPad2d((0, 0, 0, padding_size), 0.0)(input_embeds[0])
-            attention_masks[0] = torch.nn.ConstantPad1d((0, padding_size), False)(attention_masks[0])
-            labels[0] = torch.nn.ConstantPad1d((0, padding_size), IGNORE_ID)(labels[0])
         batch_input_embeds = self.pad_truncate_sequence(input_embeds, batch_first=True, padding_value=0.0, left_padding=left_padding)
         batch_attention_mask = self.pad_truncate_sequence(attention_masks, batch_first=True, padding_value=False, left_padding=left_padding)
         batch_labels = self.pad_truncate_sequence(labels, batch_first=True, padding_value=IGNORE_ID, left_padding=left_padding)
@@ -539,89 +462,50 @@ class OvisForConditionalGeneration(OvisPreTrainedModel,SupportsMultiModal,Suppor
         else:
             return prompt, input_ids, pixel_values
 
-    def save_pretrained(
+    def forward(
         self,
-        save_directory: Union[str, os.PathLike],
-        is_main_process: bool = True,
-        state_dict: Optional[dict] = None,
-        save_function: Callable = torch.save,
-        push_to_hub: bool = False,
-        max_shard_size: Union[int, str] = "5GB",
-        safe_serialization: bool = True,
-        variant: Optional[str] = None,
-        token: Optional[Union[str, bool]] = None,
-        save_peft_format: bool = True,
+        inputs : torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs
-    ):
-        super().save_pretrained(save_directory,
-                                is_main_process=is_main_process,
-                                state_dict=state_dict,
-                                save_function=save_function,
-                                safe_serialization=safe_serialization)
-        self.get_text_tokenizer().save_pretrained(save_directory)
-        self.get_visual_tokenizer().get_image_processor().save_pretrained(save_directory)
-
-    def _get_hybrid_cache_for_llm(self, batch_size: int, max_cache_len: int):
-        cache_cls = HybridCache
-        llm = self.get_llm()
-
-        if version.parse(transformers.__version__) >= version.parse("4.46.0"):
-            need_new_cache = (
-                not hasattr(llm, "_cache")
-                or (not isinstance(llm._cache, cache_cls))
-                or llm._cache.batch_size != batch_size
-                or llm._cache.max_cache_len < max_cache_len
-            )
-        else:
-            need_new_cache = (
-                not hasattr(llm, "_cache")
-                or (not isinstance(llm._cache, cache_cls))
-                or llm._cache.max_batch_size != batch_size
-                or llm._cache.max_cache_len < max_cache_len
-            )
-
-        if need_new_cache:
-            if hasattr(llm.config, "_pre_quantization_dtype"):
-                cache_dtype = llm.config._pre_quantization_dtype
-            else:
-                cache_dtype = llm.dtype
-            if version.parse(transformers.__version__) >= version.parse("4.46.0"):
-                llm._cache = cache_cls(
-                    config=llm.config,
-                    batch_size=batch_size,
-                    max_cache_len=max_cache_len,
-                    device=llm.device,
-                    dtype=cache_dtype,
-                )
-            else:
-                llm._cache = cache_cls(
-                    config=llm.config,
-                    max_batch_size=batch_size,
-                    max_cache_len=max_cache_len,
-                    device=llm.device,
-                    dtype=cache_dtype,
-                )
-        else:
-            llm._cache.reset()
-        return llm._cache
-
-    # TODO: support batch generation
-    def generate(
-        self,
-        inputs: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Union[GenerateOutput, torch.LongTensor]:
-        _, inputs_embeds, labels, attention_mask = self.merge_multimodal(
+    ) -> Union[SamplerOutput, IntermediateTensors]:
+        input_ids, inputs_embeds, _, _ = self.merge_multimodal(
             text_input_ids=inputs,
             text_attention_masks=kwargs.pop('attention_mask'),
             text_labels=None,
             pixel_values=kwargs.pop('pixel_values'),
             left_padding=True
         )
-        if getattr(self.generation_config, 'cache_implementation') == 'hybrid':  # mainly for Gemma2
-            kwargs['past_key_values'] = self._get_hybrid_cache_for_llm(
-                getattr(kwargs, "num_beams", inputs_embeds.shape[0]), kwargs['max_new_tokens'] + inputs_embeds.shape[-2])
-            self.get_llm()._supports_cache_class = True
-            kwargs['cache_implementation'] = None
-
-        return self.llm.generate(inputs=None, inputs_embeds=inputs_embeds, attention_mask=attention_mask, **kwargs)
+        
+        hidden_states = self.llm(
+            input_ids=input_ids,
+            positions=positions,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+            intermediate_tensors=intermediate_tensors,   
+            inputs_embeds=inputs_embeds
+        )
+        
+        return hidden_states
+    
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        return self.llm.compute_logits(hidden_states, sampling_metadata)
+    
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        return self.llm.sample(logits, sampling_metadata)
+    
+    def load_weights(self,weights:Iterable[Tuple[str,torch.Tensor]])->Set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
+        
+        
