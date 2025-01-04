@@ -219,6 +219,7 @@ class LoRAModel(AdapterModel):
 
         config["vllm_max_position_embeddings"] = max_position_embeddings
         peft_helper = PEFTHelper.from_dict(config)
+        unexpected_modules: List[str]
         if os.path.isfile(lora_tensor_path):
             tensors: Dict[str, torch.Tensor] = {}
             # Find unexpected modules.
