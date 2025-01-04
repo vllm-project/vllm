@@ -54,6 +54,6 @@ def test_processor_prompt_replacements(
     first_placeholder = image_placeholders[0]
 
     # NOTE: There is a BOS token
-    assert first_placeholder["offset"] == 1
-    assert first_placeholder["length"] + 1 == len(
+    assert first_placeholder["offset"] == 0
+    assert first_placeholder["length"] == len(
         processed_inputs["prompt_token_ids"]) // num_imgs
