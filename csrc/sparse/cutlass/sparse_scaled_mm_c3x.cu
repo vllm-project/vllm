@@ -286,7 +286,7 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
                                    torch::Tensor const& bt_meta,
                                    torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
-                                   c10::optional<torch::Tensor> const& bias) {
+                                   std::optional<torch::Tensor> const& bias) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   if (bias) {
