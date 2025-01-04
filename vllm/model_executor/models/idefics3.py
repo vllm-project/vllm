@@ -21,9 +21,7 @@ import torch
 import torch.utils.checkpoint
 from PIL import Image
 from torch import nn
-# Temporary solution for transformers below 4.46.0.
-from transformers import PretrainedConfig as Idefics3Config
-from transformers import ProcessorMixin as Idefics3ImageProcessor
+from transformers import Idefics3Config, Idefics3ImageProcessor, Idefics3Processor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -40,6 +38,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        MultiModalDataItems, ProcessorInputs,
+                                        PromptReplacement,
+                                        _BoundPromptReplacement,
+                                        _PlaceholderInfo)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
@@ -376,6 +379,33 @@ def dummy_data_for_idefics3(
     mm_data = {"image": [image] if num_images == 1 else [image] * num_images}
 
     return DummyData(seq_data, mm_data)
+
+
+class Idefics3MultimodalProcessor(BaseMultiModalProcessor):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+    
+    def _get_max_num_image_patch(self) -> int:
+        hf_processor = self._get_hf_processor()
+        image_processor = hf_processor.image_processor
+        size = image_processor.size['longest_edge']
+        max_image_size = image_processor.max_image_size['longest_edge']
+        resized_height, resized_width = size, size
+
+        grid_h = resized_height // max_image_size
+        grid_w = resized_width // max_image_size
+        return (grid_h * grid_w + 1)
+
+    def get_max_mm_tokens(self, mm_counts: Mapping[str, int]) -> int:
+    
+    def _get_hf_processor(self, *, size: Optional[Dict[str, int]] = None,) -> Idefics3Processor:
+        if size is not None:
+            size = Idefics3ProcessorSize(longest_edge=size['longest_edge'])
+            return self.ctx.get_hf_processor(size=size)
+        return self.ctx.get_hf_processor()
+    
+
 
 
 class Idefics3SimpleMLP(nn.Module):
