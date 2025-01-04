@@ -221,7 +221,7 @@ class EngineCoreProc(EngineCore):
                     except queue.Empty:
                         self._log_stats()
                         logger.debug("EngineCore busy loop waiting.")
-                    except BaseException:
+                    except Exception:
                         raise
 
             # 2) Handle any new client requests (Abort or Add).

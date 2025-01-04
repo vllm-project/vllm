@@ -1,5 +1,5 @@
+import signal
 from typing import Dict, List, Mapping, Optional, Type, Union
-
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
@@ -43,6 +43,16 @@ class LLMEngine:
         multiprocess_mode: bool = False,
     ) -> None:
         self.model_config = vllm_config.model_config
+
+        # Background processes send SIGUSR1 when unrecoverable
+        # errors occur. Start the shutdown process if this happens.
+        def sigusr1_handler():
+            logger.fatal("LLMEngine got fatal signal from worker process, "
+                         "shutting down. See stack trace for root cause.")
+            self._set_errored_and_propagate()
+
+        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
+                                                      sigusr1_handler)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -201,3 +211,9 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
+
+    def shutdown(self):
+        """Shutdown, cleaning up the background proc and IPC."""
+
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown()
