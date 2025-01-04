@@ -1,6 +1,4 @@
 import asyncio
-# import os
-import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -23,6 +21,7 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.ray_utils import initialize_ray_cluster
 
 logger = init_logger(__name__)
 
@@ -52,17 +51,6 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-
-        # EngineCore sends SIGQUIT on unrecoverable errors.
-        def sigquit_handler():
-            logger.fatal(
-                "AsyncLLM got SIGQUIT from worker processes, shutting "
-                "down. See stack trace above for root cause issue.")
-            self._propagate_error()
-            self._errored = True
-
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGQUIT, sigquit_handler)
 
         self._errored = False
         self.log_requests = log_requests
@@ -152,7 +140,11 @@ class AsyncLLM(EngineClient):
         executor_class: Type[Executor]
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
+        if distributed_executor_backend == "ray":
+            initialize_ray_cluster(vllm_config.parallel_config)
+            from vllm.v1.executor.ray_executor import RayExecutor
+            executor_class = RayExecutor
+        elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
         else:
