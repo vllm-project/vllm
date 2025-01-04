@@ -469,6 +469,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+        # The image size may be different for Pixtral-HF
+        if self.config.vision_config.model_type == "pixtral":
+            return data
+
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
         actual_dims = tuple(data.shape[1:])
