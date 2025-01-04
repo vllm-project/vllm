@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import socket
+import sys
 import tempfile
 import uuid
 from argparse import Namespace
@@ -805,6 +806,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            # Workaround to work on macOS
+            fd=sock.fileno() if sys.platform.startswith("darwin") else None,
             **uvicorn_kwargs,
         )
 

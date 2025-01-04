@@ -91,11 +91,68 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
                 vst1q_f16(reinterpret_cast<__fp16*>(ptr) + 8, reg.val[1]);
             }
         }
+
+        // Note: below is the unrolled version of the following code:
+        // 
+        // for (int i = 0; i < remainder; ++i) {
+        //     reinterpret_cast<__fp16*>(ptr)[full_blocks * 8 + i] = 
+        //          vgetq_lane_f16(temp, i);
+        // }
+        // 
+        // For macOS build (Clang), the arm/neon intrinsics function 
+        // `vgetq_lane_f16` needs the parameter `i` to be constant at compile 
+        // time. 
         
         if (remainder > 0) {
             float16x8_t temp = reg.val[full_blocks];
-            for (int i = 0; i < remainder; ++i) {
-                reinterpret_cast<__fp16*>(ptr)[full_blocks * 8 + i] = vgetq_lane_f16(temp, i);
+            __fp16* fp16_ptr = reinterpret_cast<__fp16*>(ptr);
+            switch (remainder)
+            {
+            case 1:
+              fp16_ptr[full_blocks * 8 + 0] = vgetq_lane_f16(temp, 0);
+              break;
+            case 2:
+              fp16_ptr[full_blocks * 8 + 0] = vgetq_lane_f16(temp, 0);
+              fp16_ptr[full_blocks * 8 + 1] = vgetq_lane_f16(temp, 1);
+              break;
+            case 3:
+              fp16_ptr[full_blocks * 8 + 0] = vgetq_lane_f16(temp, 0);
+              fp16_ptr[full_blocks * 8 + 1] = vgetq_lane_f16(temp, 1);
+              fp16_ptr[full_blocks * 8 + 2] = vgetq_lane_f16(temp, 2);
+              break;
+            case 4:
+              fp16_ptr[full_blocks * 8 + 0] = vgetq_lane_f16(temp, 0);
+              fp16_ptr[full_blocks * 8 + 1] = vgetq_lane_f16(temp, 1);
+              fp16_ptr[full_blocks * 8 + 2] = vgetq_lane_f16(temp, 2);
+              fp16_ptr[full_blocks * 8 + 3] = vgetq_lane_f16(temp, 3);
+              break;
+            case 5:
+              fp16_ptr[full_blocks * 8 + 0] = vgetq_lane_f16(temp, 0);
+              fp16_ptr[full_blocks * 8 + 1] = vgetq_lane_f16(temp, 1);
+              fp16_ptr[full_blocks * 8 + 2] = vgetq_lane_f16(temp, 2);
+              fp16_ptr[full_blocks * 8 + 3] = vgetq_lane_f16(temp, 3);
+              fp16_ptr[full_blocks * 8 + 4] = vgetq_lane_f16(temp, 4);
+              break;
+            case 6:
+              fp16_ptr[full_blocks * 8 + 0] = vgetq_lane_f16(temp, 0);
+              fp16_ptr[full_blocks * 8 + 1] = vgetq_lane_f16(temp, 1);
+              fp16_ptr[full_blocks * 8 + 2] = vgetq_lane_f16(temp, 2);
+              fp16_ptr[full_blocks * 8 + 3] = vgetq_lane_f16(temp, 3);
+              fp16_ptr[full_blocks * 8 + 4] = vgetq_lane_f16(temp, 4);
+              fp16_ptr[full_blocks * 8 + 5] = vgetq_lane_f16(temp, 5);
+              break;
+            case 7:
+              fp16_ptr[full_blocks * 8 + 0] = vgetq_lane_f16(temp, 0);
+              fp16_ptr[full_blocks * 8 + 1] = vgetq_lane_f16(temp, 1);
+              fp16_ptr[full_blocks * 8 + 2] = vgetq_lane_f16(temp, 2);
+              fp16_ptr[full_blocks * 8 + 3] = vgetq_lane_f16(temp, 3);
+              fp16_ptr[full_blocks * 8 + 4] = vgetq_lane_f16(temp, 4);
+              fp16_ptr[full_blocks * 8 + 5] = vgetq_lane_f16(temp, 5);
+              fp16_ptr[full_blocks * 8 + 6] = vgetq_lane_f16(temp, 6);
+              break;
+            
+            default:
+              break;
             }
         }
     }
