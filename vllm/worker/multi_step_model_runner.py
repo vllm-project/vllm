@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 MULTI_STEP_ATTENTION_BACKENDS = [
     "FLASH_ATTN", "ROCM_FLASH", "FLASHINFER", "NO_ATTENTION"
 ]
-MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["FLASH_ATTN"]
+MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["FLASH_ATTN", "FLASHINFER"]
 
 def _get_supported_attention_backends(chunked_prefill_enabled: bool) \
     -> List[str]:
