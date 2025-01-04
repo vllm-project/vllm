@@ -6,7 +6,6 @@ from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
-import numpy as np
 import torch
 import torch.utils.checkpoint
 from torch import nn
@@ -31,7 +30,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
-from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
@@ -62,7 +60,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         feature_extractor = self._get_feature_extractor()
         max_audio_tokens = math.ceil(feature_extractor.chunk_length *
                                      _AUDIO_TOKENS_PER_SECOND)
@@ -103,6 +101,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
 
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
+        assert isinstance(audios, list)
 
         if not audios:
             return super()._call_hf_processor(
@@ -116,9 +115,6 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
             **mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
-
-        # Already resampled by _get_hf_mm_data
-        assert is_list_of(audios, np.ndarray)
 
         # Ultravox processor doesn't support multiple inputs,
         # therefore we need to input text and audio one by one
@@ -177,8 +173,9 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
             )
         ]
 
-    def _get_dummy_mm_inputs(
+    def _get_dummy_processor_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         feature_extractor = self._get_feature_extractor()
