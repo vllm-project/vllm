@@ -12,7 +12,7 @@ from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
-from vllm.v1.engine.async_llm import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 logger = init_logger(__name__)
 

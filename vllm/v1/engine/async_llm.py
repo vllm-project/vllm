@@ -51,8 +51,9 @@ class AsyncLLM(EngineClient):
         # Background processes send SIGUSR1 when unrecoverable
         # errors occur. Start the shutdown process if this happens.
         def sigusr1_handler():
-            logger.fatal("AsyncLLM got fatal signal from worker process, "
-                         "shutting down. See stack trace for root cause.")
+            logger.fatal(
+                "AsyncLLM got fatal signal from background process, "
+                "starting shutdown. See stack trace for root cause.")
             self._set_errored_and_propagate()
 
         asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
