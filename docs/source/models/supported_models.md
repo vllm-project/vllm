@@ -724,7 +724,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `fixie-ai/ultravox-v0_3`
   -
   - ✅︎
-  -
+  - ✅︎
 ```
 
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  

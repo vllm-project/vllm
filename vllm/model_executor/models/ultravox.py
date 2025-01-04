@@ -1,7 +1,7 @@
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
-
 import math
+import os
 from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
@@ -36,8 +36,10 @@ from vllm.utils import is_list_of
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings,
                     merge_multimodal_embeddings_from_map)
 
+_AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
 
 
@@ -449,11 +451,15 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
 
-            # TODO(ywang96): use merge_multimodal_embeddings after
-            # v0 is deprecated
-            merge_multimodal_embeddings_from_map(
-                inputs_embeds, multimodal_embeddings,
-                attn_metadata.multi_modal_placeholder_index_maps["audio"])
+            # TODO(ywang96): remove this block after v0 is deprecated.
+            if os.environ.get("VLLM_USE_V1") == "0":
+                merge_multimodal_embeddings_from_map(
+                    inputs_embeds, multimodal_embeddings,
+                    attn_metadata.multi_modal_placeholder_index_maps["audio"])
+            else:
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, multimodal_embeddings,
+                    _AUDIO_PLACEHOLDER_TOKEN)
         return inputs_embeds
 
     def forward(self,
