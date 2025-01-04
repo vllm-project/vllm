@@ -64,8 +64,7 @@ class AsyncLLM(EngineClient):
         def sigusr1_handler():
             logger.fatal("AsyncLLM got fatal signal from worker process, "
                          "shutting down. See stack trace for root cause.")
-            self._errored = True
-            self._propagate_error()
+            self._set_errored_and_propagate()
 
         asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
                                                       sigusr1_handler)
@@ -327,16 +326,16 @@ class AsyncLLM(EngineClient):
             raise
 
         except Exception as e:
-            logger.error("run_output_handler failed", e)
-            self._errored = True
-            self._propagate_error()
+            logger.error("AsyncLLM._run_output_handler failed", e)
+            self._set_errored_and_propagate()
             raise EngineDeadError() from e
 
-    def _propagate_error(self):
+    def _set_errored_and_propagate(self):
         """Propagate to all generate() tasks."""
+        self._errored = True
 
-        # Put EngineDeadError() into each generate()'s queue,
-        # each of which will raise in their own context.
+        # Put EngineDeadError() into each generate() task's queue,
+        # each of which will raise it in their own context.
         for _, q in self.rid_to_queue.items():
             q.put_nowait(EngineDeadError())
 
