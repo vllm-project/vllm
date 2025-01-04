@@ -109,15 +109,14 @@ def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
     See https://fastapi.tiangolo.com/tutorial/handling-errors/
     for more details on how exception handlers work.
 
-    NOTE(rob): if an exception is encountered in a StreamingResponse
+    If an exception is encountered in a StreamingResponse
     generator, the exception is not raised, since we already sent
     a 200 status. Rather, we send an error message as the next chunk.
     Since the exception is not raised, this means that the server
-    will not automatically shut down.
+    will not automatically shut down. Instead, we use the watchdog
+    background task for check for errored state.
     """
 
-    # NOTE(rob): RuntimeError, AsyncEngineDeadError,
-    # MQEngineDeadError are all V0 errors.
     @app.exception_handler(RuntimeError)
     @app.exception_handler(AsyncEngineDeadError)
     @app.exception_handler(MQEngineDeadError)

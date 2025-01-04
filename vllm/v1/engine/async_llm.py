@@ -26,13 +26,12 @@ from vllm.v1.executor.ray_utils import initialize_ray_cluster
 logger = init_logger(__name__)
 
 
-# NOTE(rob): raised when a generate() fails.
+# Raised when a generate() fails. Possibly Recoverable.
 class EngineGenerateError(Exception):
     pass
 
-
-# NOTE(rob): raised when the engine dies, typically
-# by the background output handler loop. Unrecoverable.
+# Raised when the engine dies, typically by the
+# background output handler loop. Unrecoverable.
 class EngineDeadError(Exception):
     pass
 
