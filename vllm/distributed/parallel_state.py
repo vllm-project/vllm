@@ -827,7 +827,6 @@ class GroupCoordinator:
 
     def destroy(self):
         if self.device_group is not None:
-            print(f"{self.device_group}")
             torch.distributed.destroy_process_group(self.device_group)
             self.device_group = None
         if self.cpu_group is not None:
@@ -1161,16 +1160,13 @@ def get_tensor_model_parallel_rank():
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-
     global _TP
     if _TP:
-        print("calling TP.destroy()")
         _TP.destroy()
     _TP = None
 
     global _PP
     if _PP:
-        print("calling PP.destroy()")
         _PP.destroy()
     _PP = None
 
@@ -1178,7 +1174,6 @@ def destroy_model_parallel():
 def destroy_distributed_environment():
     global _WORLD
     if _WORLD:
-        print("calling WORLD.destroy()")
         _WORLD.destroy()
     _WORLD = None
     if torch.distributed.is_initialized():

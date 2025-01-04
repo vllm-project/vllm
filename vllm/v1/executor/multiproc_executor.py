@@ -42,9 +42,6 @@ class MultiprocExecutor(Executor):
         # The child processes will send SIGUSR1 when unrecoverable
         # errors happen.
         def sigusr1_handler(signum, frame):
-            logger.fatal(
-                "MulitprocExecutor got fatal signal from worker processes, "
-                "shutting down. See stack trace above for root cause issue.")
             # Propagate error up to parent process.
             parent_process = psutil.Process().parent()
             parent_process.send_signal(signal.SIGUSR1)
@@ -193,7 +190,7 @@ class MultiprocExecutor(Executor):
         active_procs = [w.proc for w in self.workers if w.proc.is_alive()]
         for p in active_procs:
             p.terminate()
-        if not wait_for_termination(active_procs, 100):
+        if not wait_for_termination(active_procs, 4):
             
             # Send SIGKILL if still running
             active_procs = [p for p in active_procs if p.is_alive()]
@@ -314,11 +311,8 @@ class WorkerProc:
     def shutdown(self):
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
-        print(f"destroy_model_parallel PID: {os.getpid()}")
         destroy_model_parallel()
-        print(f"destroy_distributed_environment PID: {os.getpid()}")
         destroy_distributed_environment()
-        print(f"done with shutdown PID: {os.getpid()}")
 
     @staticmethod
     def worker_main(*args, **kwargs):
@@ -352,22 +346,27 @@ class WorkerProc:
             worker.worker_busy_loop()
 
         except SystemExit:
-            logger.info("Worker interrupted.")
+            logger.debug("Worker interrupted.")
 
-        except Exception:
+        except Exception as e:
+            # Log rather than raise so the stack trace is in order.
+            logger.exception("WorkerProc got an Exception:", exc_info=e)
+
+            # The parent will send a SIGTERM to all worker processes
+            # after we send SIGUSR. Set this value so we don't re-throw
+            # SystemExit(), to avoid zmq Exceptions during shyt
+            shutdown_requested = True
+
             # worker_busy_loop sends exceptions exceptons to Executor
             # for shutdown, but if there is an error in startup or an
             # error with IPC itself, we need to alert the parent.
             psutil.Process().parent().send_signal(signal.SIGUSR1)
-            raise
 
         finally:
-            print(f"IN WORKER FINALLY. RANK: {kwargs["rank"]} PID: {os.getpid()}")
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()
                 worker = None
-            print(f"DONE W WORKER FINALLY. RANK: {kwargs["rank"]} PID: {os.getpid()}")
 
     @staticmethod
     def wait_for_startup(
@@ -401,15 +400,15 @@ class WorkerProc:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
             try:
-                if i == 10 and self.rank == 0:
-                    raise ValueError
-                i+=1
                 output = getattr(self.worker, method)(*args, **kwargs)
             except Exception as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
                 logger.exception("WorkerProc hit an exception: %s", exc_info=e)
                 continue
-
+            
+            if i == 10 and self.rank == 0:
+                raise ValueError
+            i+=1
             self.worker_response_mq.enqueue(
                 (WorkerProc.ResponseStatus.SUCCESS, output))
