@@ -90,8 +90,8 @@ _running_tasks: Set[asyncio.Task] = set()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        engine_client: EngineClient = app.state.engine_client
         if app.state.log_stats:
-            engine_client: EngineClient = app.state.engine_client
 
             async def _force_log():
                 while True:

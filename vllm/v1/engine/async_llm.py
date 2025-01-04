@@ -30,10 +30,12 @@ logger = init_logger(__name__)
 class EngineGenerateError(Exception):
     pass
 
+
 # NOTE(rob): raised when the engine dies, typically
 # by the background output handler loop. Unrecoverable.
 class EngineDeadError(Exception):
     pass
+
 
 class AsyncLLM(EngineClient):
 
@@ -56,18 +58,17 @@ class AsyncLLM(EngineClient):
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
-        # EngineCore and Worker processes send SIGUSR1 when 
+        # EngineCore and Worker processes send SIGUSR1 when
         # unrecoverable errors occur. Start the shutdown
         # process if this occurs.
         def sigusr1_handler():
-            logger.fatal(
-                "AsyncLLM got fatal signal from worker process, "
-                "shutting down. See stack trace for root cause.")
+            logger.fatal("AsyncLLM got fatal signal from worker process, "
+                         "shutting down. See stack trace for root cause.")
             self._propagate_error()
             self._errored = True
 
-        asyncio.get_running_loop().add_signal_handler(
-            signal.SIGUSR1, sigusr1_handler)
+        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
+                                                      sigusr1_handler)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(

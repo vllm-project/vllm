@@ -7,8 +7,9 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 
 from vllm import envs
-# from vllm.engine.async_llm_engine import AsyncEngineDeadError
-# from vllm.engine.multiprocessing import MQEngineDeadError
+from vllm.engine.async_llm_engine import AsyncEngineDeadError
+from vllm.engine.multiprocessing import MQEngineDeadError
+from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
 from vllm.v1.engine.async_llm import EngineDeadError, EngineGenerateError
@@ -33,11 +34,14 @@ async def serve_http(app: FastAPI, **uvicorn_kwargs: Any):
 
     loop = asyncio.get_running_loop()
 
+    watchdog_task = loop.create_task(
+        watchdog_loop(server, app.state.engine_client))
     server_task = loop.create_task(server.serve())
 
     def signal_handler() -> None:
         # prevents the uvicorn signal handler to exit early
         server_task.cancel()
+        watchdog_task.cancel()
 
     async def dummy_shutdown() -> None:
         pass
@@ -57,48 +61,72 @@ async def serve_http(app: FastAPI, **uvicorn_kwargs: Any):
                 port, process, " ".join(process.cmdline()))
         logger.info("Shutting down FastAPI HTTP server.")
         return server.shutdown()
+    finally:
+        watchdog_task.cancel()
 
 
-def start_termination(server: uvicorn.Server):
+async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
+    # Background task that runs in the background, checking
+    # for error state in the engine. This is needed for a
+    # clean shutdown since we cannot raise an Exception in
+    # a StreamingResponse generator() meaning we cannot use
+    # the exception handlers below.
+    VLLM_WATCHDOG_TIME_S = 3.0
+    while True:
+        await asyncio.sleep(VLLM_WATCHDOG_TIME_S)
+        terminate_if_errored(server, engine)
+
+
+def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
     # See discussions here on shutting down a uvicorn server
     # https://github.com/encode/uvicorn/discussions/1103
-    # In this case we cannot await the server shutdown here because
-    # this handler must first return to close the connection for
-    # this request.
-    logger.fatal("VLLM Engine failed, terminating server.")
-    server.should_exit = True
+    # In this case we cannot await the server shutdown here
+    # because handler must first return to close the connection
+    # for this request.
+    engine_errored = engine.errored and not engine.is_running
+    is_already_exiting = server.should_exit
+    if (not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored
+            and not is_already_exiting):
+        # Avoid spamming the logs by only sending once.
+        logger.fatal("Engine failed, terminating server.")
+        server.should_exit = True
 
 
-# NOTE(rob): VLLM V1 AsyncLLM catches exceptions and returns
-# only two types: EngineGenerateError and EngineDeadError.
-#
-# EngineGenerateError is raised by the per request generate()
-# method. This error could be request specific (and therefore
-# recoverable - e.g. if there is an error in input processing).
-#
-# EngineDeadError is raised by the background output_handler
-# method. This error is global and therefore not recoverable.
-#
-# We register these @app.exception_handlers to return nice
-# responses to the end user if they occur and shut down if needed.
-# See https://fastapi.tiangolo.com/tutorial/handling-errors/
-# for more details on how exception handlers work.
 def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
+    """
+    VLLM V1 AsyncLLM catches exceptions and returns
+    only two types: EngineGenerateError and EngineDeadError.
+    
+    EngineGenerateError is raised by the per request generate()
+    method. This error could be request specific (and therefore
+    recoverable - e.g. if there is an error in input processing).
+    
+    EngineDeadError is raised by the background output_handler
+    method. This error is global and therefore not recoverable.
+    
+    We register these @app.exception_handlers to return nice
+    responses to the end user if they occur and shut down if needed.
+    See https://fastapi.tiangolo.com/tutorial/handling-errors/
+    for more details on how exception handlers work.
 
-    if envs.VLLM_USE_V1:
+    NOTE(rob): if an exception is encountered in a StreamingResponse
+    generator, the exception is not raised, since we already sent
+    a 200 status. Rather, we send an error message as the next chunk.
+    Since the exception is not raised, this means that the server
+    will not automatically shut down.
+    """
 
-        @app.exception_handler(EngineGenerateError)
-        async def generate_error_handler(request: Request, __):
-            engine = request.app.state.engine_client
-            if (not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine.errored):
-                # Terminate if recoverable.
-                start_termination(server)
+    # NOTE(rob): RuntimeError, AsyncEngineDeadError,
+    # MQEngineDeadError are all V0 errors.
+    @app.exception_handler(RuntimeError)
+    @app.exception_handler(AsyncEngineDeadError)
+    @app.exception_handler(MQEngineDeadError)
+    @app.exception_handler(EngineDeadError)
+    @app.exception_handler(EngineGenerateError)
+    async def runtime_exception_handler(request: Request, __):
+        terminate_if_errored(
+            server=server,
+            engine=request.app.state.engine_client,
+        )
 
-            return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
-
-        @app.exception_handler(EngineDeadError)
-        async def engine_dead_handler(_, __):
-            if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH:
-                start_termination(server)
-
-            return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
