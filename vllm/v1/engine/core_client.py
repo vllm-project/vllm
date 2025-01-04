@@ -1,3 +1,4 @@
+import signal
 import weakref
 from abc import ABC, abstractmethod
 from typing import List, Type
@@ -13,6 +14,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.exceptions import engine_dead_error_guard
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import PickleEncoder
 from vllm.v1.utils import BackgroundProcHandle
@@ -181,6 +183,20 @@ class SyncMPClient(MPClient):
                  vllm_config: VllmConfig,
                  executor_class: Type[Executor],
                  log_stats: bool = False):
+
+        # Background procs sent SIGUSR1 if they hit error.
+        # We handle this by setting the _errored state to True
+        # and shutting down. Once _errored, we convert any
+        # Exceptions into an EngineDeadError for UX.
+        def sigusr1_handler(signum, frame):
+            logger.fatal("LLMEngine got fatal signal from background "
+                         "process, starting shutting down.")
+            self._errored = True
+            self.shutdown()
+
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
+        self._errored = False
+
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
@@ -188,12 +204,14 @@ class SyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
+    @engine_dead_error_guard
     def get_output(self) -> List[EngineCoreOutput]:
 
         (frame, ) = self.output_socket.recv_multipart(copy=False)
         engine_core_outputs = self.decoder.decode(frame.buffer).outputs
         return engine_core_outputs
 
+    @engine_dead_error_guard
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: EngineCoreRequestUnion) -> None:
 
@@ -227,7 +245,6 @@ class AsyncMPClient(MPClient):
         )
 
     async def get_output_async(self) -> List[EngineCoreOutput]:
-
         frames = await self.output_socket.recv_multipart(copy=False)
         engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
 

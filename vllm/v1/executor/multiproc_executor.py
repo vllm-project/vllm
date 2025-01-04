@@ -17,6 +17,7 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
+from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
@@ -39,13 +40,17 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
 
-        # The child processes will send SIGUSR1 when unrecoverable
-        # errors happen.
+        # WorkerProcs send SIGUSR1 if they get an Error.
         def sigusr1_handler(signum, frame):
-            # Propagate error up to parent process.
-            parent_process = psutil.Process().parent()
-            parent_process.send_signal(signal.SIGUSR1)
+            logger.fatal("MultiprocExecutor got fatal signal from "
+                         "background process, starting shutdown.")
+            # Shutdown first (avoid SysExit exceptions in __del__).
             self.shutdown()
+            # TODO(rob): move this to the VLLMConfig.
+            if VLLM_ENABLE_V1_MULTIPROCESSING:
+                # Propagate up if using the mp engine. Note that
+                # sending in non-mp mode crashes caller process.
+                psutil.Process().parent().send_signal(signal.SIGUSR1)
 
         signal.signal(signal.SIGUSR1, sigusr1_handler)
 
@@ -405,9 +410,9 @@ class WorkerProc:
                     (WorkerProc.ResponseStatus.FAILURE, e))
                 logger.exception("WorkerProc hit an exception: %s", exc_info=e)
                 continue
-            
+
             if i == 10 and self.rank == 0:
                 raise ValueError
-            i+=1
+            i += 1
             self.worker_response_mq.enqueue(
                 (WorkerProc.ResponseStatus.SUCCESS, output))

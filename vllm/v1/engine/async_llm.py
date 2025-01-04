@@ -19,22 +19,12 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import initialize_ray_cluster
 
 logger = init_logger(__name__)
-
-
-# Raised when a generate() fails. Possibly Recoverable.
-class EngineGenerateError(Exception):
-    pass
-
-
-# Raised when the engine dies, typically by the
-# background output handler loop. Unrecoverable.
-class EngineDeadError(Exception):
-    pass
 
 
 class AsyncLLM(EngineClient):

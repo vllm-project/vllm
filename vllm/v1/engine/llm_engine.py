@@ -1,5 +1,5 @@
-import signal
 from typing import Dict, List, Mapping, Optional, Type, Union
+
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
@@ -43,18 +43,6 @@ class LLMEngine:
         multiprocess_mode: bool = False,
     ) -> None:
         self.model_config = vllm_config.model_config
-
-        # Background processes send SIGUSR1 when unrecoverable
-        # errors occur. Start the shutdown process if this happens.
-        # NOTE: signal_handlers must be created and run in the main
-        # python thread, a workaround for this would be using polling
-        # rather than signal handling to detect a shutdown. Investigate.
-        def sigusr1_handler(signum, frame):
-            logger.fatal("LLMEngine go fatal signal from worker, shutting "
-                         "down. See stack trace above for root cause issue.")
-            self.shutdown()
-
-        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -160,7 +148,6 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
-
         # 1) Process raw inputs into the request.
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
@@ -213,9 +200,3 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
-
-    def shutdown(self):
-        """Shutdown, cleaning up the background proc and IPC."""
-
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()

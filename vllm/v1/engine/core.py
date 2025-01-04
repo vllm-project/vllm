@@ -198,13 +198,12 @@ class EngineCoreProc(EngineCore):
         except Exception:
             traceback = get_exception_traceback()
             logger.error("EngineCore hit an exception: %s", traceback)
-            engine_core.shutdown()
-            engine_core = None
             parent_process.send_signal(signal.SIGUSR1)
 
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
+                engine_core = None
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
