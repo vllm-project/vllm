@@ -174,6 +174,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                     trust_remote_code=True),
     "ChatGLMForConditionalGeneration": _HfExamplesInfo("chatglm2-6b",
                                                        is_available_online=False),
+    "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny"),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m"),
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",

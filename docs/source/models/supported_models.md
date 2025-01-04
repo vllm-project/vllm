@@ -585,6 +585,13 @@ See [this page](#generative-models) for more information on how to use generativ
   -
   - ✅︎
   - ✅︎
+* - `DeepseekVLV2ForCausalLM`
+  - DeepSeek-VL2
+  - T + I
+  - `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
+  -
+  - ✅︎
+  -
 * - `FuyuForCausalLM`
   - Fuyu
   - T + I
@@ -751,7 +758,12 @@ vLLM currently only supports adding LoRA to the language backbone of multimodal 
 ```
 
 ```{note}
-To use {code}`TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass {code}`--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+To use {code}`TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass {code}`--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+```
+
+```{note}
+The `deepseek-ai/deepseek-vl2-tiny` model doesn't work yet.
+To use {code}`DeepSeek-VL2` models, you have to pass {code}`--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
 ```
 
 ```{note}
