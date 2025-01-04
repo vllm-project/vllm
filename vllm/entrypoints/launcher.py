@@ -66,23 +66,25 @@ async def serve_http(app: FastAPI, **uvicorn_kwargs: Any):
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
-    # Background task that runs in the background, checking
-    # for error state in the engine. This is needed for a
-    # clean shutdown since we cannot raise an Exception in
-    # a StreamingResponse generator() meaning we cannot use
-    # the exception handlers below.
-    VLLM_WATCHDOG_TIME_S = 3.0
+    """
+    # Watchdog task that runs in the background, checking
+    # for error state in the engine. Needed to trigger shutdown
+    # if an exception arises is StreamingResponse() generator.
+    """
+    VLLM_WATCHDOG_TIME_S = 5.0
     while True:
         await asyncio.sleep(VLLM_WATCHDOG_TIME_S)
         terminate_if_errored(server, engine)
 
 
 def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
-    # See discussions here on shutting down a uvicorn server
-    # https://github.com/encode/uvicorn/discussions/1103
-    # In this case we cannot await the server shutdown here
-    # because handler must first return to close the connection
-    # for this request.
+    """
+    See discussions here on shutting down a uvicorn server
+    https://github.com/encode/uvicorn/discussions/1103
+    In this case we cannot await the server shutdown here
+    because handler must first return to close the connection
+    for this request.
+    """
     engine_errored = engine.errored and not engine.is_running
     if (not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored):
         server.should_exit = True
