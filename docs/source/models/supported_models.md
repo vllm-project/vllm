@@ -710,7 +710,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Qwen/Qwen2-Audio-7B-Instruct`
   -
   - ✅︎
-  -
+  - ✅︎
 * - `Qwen2VLForConditionalGeneration`
   - Qwen2-VL
   - T + I<sup>E+</sup> + V<sup>E+</sup>
