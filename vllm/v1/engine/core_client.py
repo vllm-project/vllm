@@ -184,6 +184,11 @@ class SyncMPClient(MPClient):
                  executor_class: Type[Executor],
                  log_stats: bool = False):
 
+        # NOTE(rob): signal handler only needed for SyncMPClient
+        # because AsyncLLM needs to handle the signal rather
+        # than the AsyncMPClient. TODO(follow-up): move the defn of
+        # these functions to async_llm.py and llm_engine.py to make
+        # distinction clearer.
         # Background procs sent SIGUSR1 if they hit error.
         # We handle this by setting the _errored state to True
         # and shutting down. Once _errored, we convert any
@@ -252,7 +257,6 @@ class AsyncMPClient(MPClient):
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:
-
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
 

@@ -353,12 +353,13 @@ class WorkerProc:
             logger.debug("Worker interrupted.")
 
         except Exception as e:
-            # Log rather than raise so the stack trace is in order.
+            # Log rather than raise so the stack trace is in order of
+            # WorkerProc -> EngineCore -> AsyncLLM.
             logger.exception("WorkerProc got an Exception:", exc_info=e)
 
             # The parent will send a SIGTERM to all worker processes
             # after we send SIGUSR. Set this value so we don't re-throw
-            # SystemExit(), to avoid zmq Exceptions during shyt
+            # SystemExit(), to avoid zmq exceptions during __del__.
             shutdown_requested = True
 
             # worker_busy_loop sends exceptions exceptons to Executor
