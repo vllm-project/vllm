@@ -1250,7 +1250,12 @@ class BaseMultiModalProcessor(ABC):
                 "short. To avoid this, you should increase `max_model_len`, "
                 "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
                 total_len, total_placeholders_by_modality)
-            
+
+            return DummyData(
+                seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
+                multi_modal_data=None,
+                multi_modal_placeholders=None,
+            )
 
         prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
 
