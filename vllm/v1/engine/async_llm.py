@@ -30,12 +30,10 @@ logger = init_logger(__name__)
 class EngineGenerateError(Exception):
     pass
 
-
 # NOTE(rob): raised when the engine dies, typically
 # by the background output handler loop. Unrecoverable.
 class EngineDeadError(Exception):
     pass
-
 
 class AsyncLLM(EngineClient):
 
