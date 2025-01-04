@@ -55,8 +55,11 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"video": 1}
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
-        return {"video": self._get_max_video_tokens()}
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        num_frames = self._get_dummy_num_frames(seq_len)
+        max_video_tokens = self._get_max_video_tokens(num_frames)
+
+        return {"video": max_video_tokens}
 
     def _get_mm_fields_config(
         self,
@@ -71,16 +74,13 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
         image_width: int,
         image_height: int,
     ) -> int:
-        return self._get_max_frame_tokens()
-
-    def _get_max_frame_tokens(self) -> int:
         hf_config = self._get_hf_config()
         spatial_pool_stride = hf_config.spatial_pool_stride
 
         patch_grid_length = self._vision_encoder_info.get_patch_grid_length()
-        pooled_grid_length = patch_grid_length / spatial_pool_stride
+        pooled_grid_length = math.ceil(patch_grid_length / spatial_pool_stride)
 
-        return int(pooled_grid_length * pooled_grid_length)
+        return pooled_grid_length * pooled_grid_length
 
     def _get_num_video_tokens(
         self,
@@ -96,14 +96,31 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
 
         return num_frame_tokens * num_frames
 
-    def _get_max_video_frames(self, num_videos: int = 1) -> int:
-        max_total_tokens = self.ctx.model_config.max_model_len
-        max_total_frames = int(max_total_tokens / self._get_max_frame_tokens())
+    def _get_max_video_tokens(self, num_frames: int) -> int:
+        return self._get_num_video_tokens(image_width=999999,
+                                          image_height=999999,
+                                          num_frames=num_frames)
 
-        return max(max_total_frames, 1) // max(num_videos, 1)
+    def _get_max_video_frames(self, max_tokens: int) -> int:
+        num_frames = 0
 
-    def _get_max_video_tokens(self) -> int:
-        return self._get_max_frame_tokens() * self._get_max_video_frames()
+        while True:
+            next_num_frames = num_frames + 1
+
+            if self._get_max_video_tokens(next_num_frames) > max_tokens:
+                break
+
+            num_frames = next_num_frames
+
+        return num_frames
+
+    def _get_dummy_num_frames(self, seq_len: int) -> int:
+        mm_config = self.ctx.get_mm_config()
+        max_videos = mm_config.limit_per_prompt.get("video", 1)
+
+        max_total_frames = self._get_max_video_frames(seq_len)
+
+        return max(max_total_frames, 1) // max(max_videos, 1)
 
     def _get_dummy_image_size(self) -> ImageSize:
         image_size = self._vision_encoder_info.get_image_size()
@@ -147,6 +164,7 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
 
     def _get_dummy_mm_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_videos = mm_counts.get("video", 0)
@@ -159,7 +177,7 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
-                num_frames=self._get_max_video_frames(num_videos),
+                num_frames=self._get_dummy_num_frames(seq_len),
                 num_videos=num_videos,
             )
         }

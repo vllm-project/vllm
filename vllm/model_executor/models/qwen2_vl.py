@@ -752,7 +752,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
         return preprocessed_size, num_vision_tokens
 
-    def _get_max_image_size(self) -> ImageSize:
+    def _get_dummy_image_size(self) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
@@ -766,31 +766,47 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         )
         return max_image_tokens
 
-    def _get_max_video_frames(
-        self,
-        *,
-        num_images: int = 0,
-        num_videos: int = 1,
-    ) -> int:
-        hf_config = self.ctx.get_hf_config(Qwen2VLConfig)
-        temporal_patch_size = hf_config.vision_config.temporal_patch_size
+    def _get_max_video_tokens(self, num_frames: int) -> int:
+        _, max_video_tokens = self._get_vision_info(
+            image_width=9999999,
+            image_height=9999999,
+            num_frames=num_frames,
+        )
+        return max_video_tokens
 
-        max_total_tokens = self.ctx.model_config.max_model_len
-        max_total_frames = int(max_total_tokens / self._get_max_image_tokens())
+    def _get_max_video_frames(self, max_tokens: int) -> int:
+        num_frames = 0
 
-        # How many tokens are one image worth relative to one video frame
-        i2f = temporal_patch_size * temporal_patch_size
-        max_total_frames -= num_images * i2f
+        while True:
+            next_num_frames = num_frames + 1
 
-        return max(max_total_frames, 1) // max(num_videos, 1)
+            if self._get_max_video_tokens(next_num_frames) > max_tokens:
+                break
 
-    def _get_max_video_tokens(self) -> int:
-        return self._get_max_image_tokens() * self._get_max_video_frames()
+            num_frames = next_num_frames
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+        return num_frames
+
+    def _get_dummy_num_frames(self, seq_len: int) -> int:
+        mm_config = self.ctx.get_mm_config()
+        max_images = mm_config.limit_per_prompt.get("image", 1)
+        max_videos = mm_config.limit_per_prompt.get("video", 1)
+
+        max_image_tokens = self._get_max_image_tokens() * max_images
+        max_total_frames = self._get_max_video_frames(seq_len -
+                                                      max_image_tokens)
+
+        return max(max_total_frames, 1) // max(max_videos, 1)
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        max_image_tokens = self._get_max_image_tokens()
+
+        num_frames = self._get_dummy_num_frames(seq_len)
+        max_video_tokens = self._get_max_video_tokens(num_frames)
+
         return {
-            "image": self._get_max_image_tokens(),
-            "video": self._get_max_video_tokens(),
+            "image": max_image_tokens,
+            "video": max_video_tokens,
         }
 
     def _get_data_parser(self) -> MultiModalDataParser:
@@ -886,6 +902,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
     def _get_dummy_mm_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
@@ -894,7 +911,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor = self._get_hf_processor()
         image_token: str = hf_processor.image_token
         video_token: str = hf_processor.video_token
-        target_width, target_height = self._get_max_image_size()
+        target_width, target_height = self._get_dummy_image_size()
 
         mm_data = {
             "image":
@@ -905,10 +922,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
-                num_frames=self._get_max_video_frames(
-                    num_images=num_images,
-                    num_videos=num_videos,
-                ),
+                num_frames=self._get_dummy_num_frames(seq_len),
                 num_videos=num_videos,
             )
         }

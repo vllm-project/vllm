@@ -84,7 +84,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         hf_config = self.ctx.get_hf_config(Qwen2AudioConfig)
         max_source_positions = hf_config.audio_config.max_source_positions
         max_output_lengths = (max_source_positions - 2) // 2 + 1
@@ -193,6 +193,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
 
     def _get_dummy_mm_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         feature_extractor = self._get_feature_extractor()

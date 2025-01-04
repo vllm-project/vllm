@@ -57,7 +57,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
         processor = self._get_hf_processor()
         return processor.image_seq_length
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {"image": self._get_num_image_tokens()}
 
     def _get_hf_processor(self) -> ChameleonProcessor:
@@ -92,6 +92,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor):
 
     def _get_dummy_mm_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         config = self.ctx.get_hf_config(ChameleonConfig)

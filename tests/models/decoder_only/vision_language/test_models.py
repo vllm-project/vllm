@@ -275,7 +275,7 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"image": 4},
         )],
     ),
-    "llava_one_vision": VLMTestInfo(
+    "llava_onevision": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
@@ -426,7 +426,7 @@ VLM_TEST_SETTINGS = {
             ) for inp in custom_inputs.different_patch_input_cases_internvl()
         ],
     ),
-    "llava_one_vision-multiple-images": VLMTestInfo(
+    "llava_onevision-multiple-images": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,

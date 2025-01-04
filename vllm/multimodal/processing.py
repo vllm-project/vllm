@@ -622,7 +622,7 @@ class BaseMultiModalProcessor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         """
         Get the maximum possible number of tokens per data item
         for each modality.
@@ -799,7 +799,10 @@ class BaseMultiModalProcessor(ABC):
 
         # Some HF processors (e.g. Qwen2-VL) expect corresponding
         # multi-modal tokens to be in the prompt text
-        dummy_inputs = self._get_dummy_mm_inputs(mm_missing_counts)
+        dummy_inputs = self._get_dummy_mm_inputs(
+            self.ctx.model_config.max_model_len,
+            mm_missing_counts,
+        )
 
         _, mm_missing_kwargs = self._apply_hf_processor(
             prompt_text=dummy_inputs.prompt_text,
@@ -1151,6 +1154,7 @@ class BaseMultiModalProcessor(ABC):
     @abstractmethod
     def _get_dummy_mm_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         """
@@ -1183,7 +1187,7 @@ class BaseMultiModalProcessor(ABC):
         from vllm.sequence import SequenceData
 
         mm_counts = self._get_and_validate_dummy_mm_counts()
-        mm_max_tokens_per_item = self.get_mm_max_tokens_per_item()
+        mm_max_tokens_per_item = self.get_mm_max_tokens_per_item(seq_len)
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
                 "The keys returned by `get_supported_mm_limits`"
@@ -1191,7 +1195,7 @@ class BaseMultiModalProcessor(ABC):
                 "returned by `get_mm_max_tokens_per_item` "
                 f"({set(mm_max_tokens_per_item.keys())})")
 
-        processor_inputs = self._get_dummy_mm_inputs(mm_counts)
+        processor_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         mm_inputs = self.apply(
             prompt_text=processor_inputs.prompt_text,
             mm_data=processor_inputs.mm_data,

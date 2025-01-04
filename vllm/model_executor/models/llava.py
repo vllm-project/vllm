@@ -107,7 +107,7 @@ class BaseLlavaMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {"image": self._get_max_image_tokens()}
 
     def _get_mm_fields_config(
@@ -151,6 +151,7 @@ class BaseLlavaMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
 
     def _get_dummy_mm_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)

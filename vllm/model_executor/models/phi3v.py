@@ -323,7 +323,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
             height=image_height,
         )
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         max_image_tokens = self._get_num_image_tokens(
             image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
             image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
@@ -444,6 +444,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
 
     def _get_dummy_mm_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
