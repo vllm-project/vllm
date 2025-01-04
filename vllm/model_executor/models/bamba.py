@@ -137,6 +137,7 @@ class BambaAttentionDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         self.hidden_size = config.hidden_size
@@ -161,10 +162,18 @@ class BambaAttentionDecoderLayer(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
+        if hasattr(config, "partial_rotary_factor"):
+            rotary_dim = self.head_dim * config.partial_rotary_factor
+        elif hasattr(config, "attn_rotary_emb"):
+            rotary_dim = config.attn_rotary_emb  # for backward compatibility
+        else:
+            rotary_dim = self.head_dim  # default
+
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=config.attn_rotary_emb,
+            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
+            rope_scaling=rope_scaling,
             base=rope_theta,
             is_neox_style=True,
             dtype=torch.get_default_dtype(),  # see impl of get_rope
@@ -208,29 +217,6 @@ class BambaAttentionDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        # because the bamba model may potentially handle long sequences,
-        # we should adjust the sin_cos cache if necessary to avoid out of bounds
-        # - first get the max_position
-        max_position = max(
-            getattr(attn_metadata, 'max_prefill_seq_len', 0),
-            getattr(attn_metadata, 'max_decode_seq_len', 0),
-        )
-        if max_position == 0:
-            # if we cannot get the max length from the metadata, then
-            # get it from the positions
-            max_position = positions.max().item()
-
-        # when VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 could potentially cause inputs
-        # longer than max_position_embeddings. We extend the rope cache
-        # to prevent CUDA errors. Be aware that the outputs could be of
-        # lower quality for long sequence lengths.
-        rotary = self.rotary_emb
-        if rotary.max_position_embeddings <= max_position:
-            # we set it to the next power of two that covers it
-            while rotary.max_position_embeddings <= max_position:
-                rotary.max_position_embeddings *= 2
-            rotary.cos_sin_cache = rotary._compute_cos_sin_cache()
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
