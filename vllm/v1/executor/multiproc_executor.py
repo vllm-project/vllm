@@ -191,7 +191,6 @@ class MultiprocExecutor(Executor):
         for p in active_procs:
             p.terminate()
         if not wait_for_termination(active_procs, 4):
-            
             # Send SIGKILL if still running
             active_procs = [p for p in active_procs if p.is_alive()]
             for p in active_procs:
