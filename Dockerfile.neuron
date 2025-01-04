@@ -42,4 +42,4 @@ RUN --mount=type=bind,source=.git,target=.git \
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
 
-CMD ["/bin/bash"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
