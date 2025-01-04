@@ -15,10 +15,9 @@ def processor_for_llava_next():
     return LlavaNextMultiModalProcessor
 
 
-# FIXME: image_size [(198, 176), (176, 198)]
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize("image_size", [(1669, 2560), (2560, 1669), (183, 488),
-                                        (488, 183)])
+                                        (488, 183), (198, 176), (176, 198)])
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_prompt_replacements(
     processor_for_llava_next,
