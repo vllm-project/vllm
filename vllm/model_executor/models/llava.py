@@ -723,7 +723,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             mm_item_counts,
         )
 
-        self._validate_placeholders(mm_placeholders, mm_item_counts)
+        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]

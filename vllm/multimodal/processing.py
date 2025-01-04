@@ -894,17 +894,6 @@ class BaseMultiModalProcessor(ABC):
 
         mm_kwargs = MultiModalKwargs.from_items(merged_kw_items)
 
-        if self.enable_sanity_checks:
-            mm_item_counts = mm_data_items.get_all_counts()
-
-            for modality, item_count in mm_item_counts.items():
-                for item_idx in range(item_count):
-                    try:
-                        mm_kwargs.get_item(modality, item_idx)
-                    except Exception as e:
-                        # Make it easy to set a breakpoint in the debugger
-                        raise e
-
         return prompt_ids, mm_kwargs
 
     def _bind_and_group_repls(
@@ -999,7 +988,28 @@ class BaseMultiModalProcessor(ABC):
 
         return token_ids, text, placeholders
 
-    def _validate_placeholders(
+    def _validate_mm_kwargs(
+        self,
+        mm_kwargs: MultiModalKwargs,
+        mm_item_counts: Mapping[str, int],
+    ) -> None:
+        for modality, item_count in mm_item_counts.items():
+            if modality in mm_kwargs.modalities:
+                items = mm_kwargs.get_items(modality)
+            else:
+                items = []
+
+            if len(items) != item_count:
+                raise RuntimeError(
+                    f"Expected there to be {item_count} {modality} items in "
+                    f"keyword arguments corresponding to {item_count} "
+                    f"{modality} data items, but only found {len(items)}! "
+                    "There is likely a problem with your "
+                    "implementation of merged multi-modal processor for this "
+                    "model (usually arising from an inconsistency between "
+                    "`_call_hf_processor` and `_get_mm_fields_config`).")
+
+    def _validate_mm_placeholders(
         self,
         mm_placeholders: Mapping[str, list[_PlaceholderInfo]],
         mm_item_counts: Mapping[str, int],
@@ -1061,6 +1071,8 @@ class BaseMultiModalProcessor(ABC):
         mm_prompt_repls = self._bind_and_group_repls(unbound_prompt_repls)
 
         mm_item_counts = mm_items.get_all_counts()
+        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+
         hf_mm_placeholders = self._find_mm_placeholders(
             mm_prompt_repls,
             prompt_ids,
@@ -1071,7 +1083,7 @@ class BaseMultiModalProcessor(ABC):
             mm_missing_repl_counts = mm_item_counts
             mm_missing_repls = dict(mm_prompt_repls)
         else:
-            mm_missing_repl_counts = self._validate_placeholders(
+            mm_missing_repl_counts = self._validate_mm_placeholders(
                 hf_mm_placeholders,
                 mm_item_counts,
                 allow_missing=True,
@@ -1106,7 +1118,7 @@ class BaseMultiModalProcessor(ABC):
 
             mm_placeholders = {**hf_mm_placeholders, **missing_mm_placeholders}
 
-        self._validate_placeholders(mm_placeholders, mm_item_counts)
+        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]
