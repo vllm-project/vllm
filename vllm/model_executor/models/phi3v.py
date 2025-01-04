@@ -415,12 +415,12 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
     def _apply_prompt_replacements(
         self,
         token_ids: list[int],
-        prompt_repls: Sequence[_BoundPromptReplacement],
+        mm_prompt_repls: Mapping[str, Sequence[_BoundPromptReplacement]],
         mm_item_counts: Mapping[str, int],
-    ) -> tuple[list[int], str, list[_PlaceholderInfo]]:
+    ) -> tuple[list[int], str, Mapping[str, list[_PlaceholderInfo]]]:
         token_ids, text, placeholders = super()._apply_prompt_replacements(
             token_ids=token_ids,
-            prompt_repls=prompt_repls,
+            mm_prompt_repls=mm_prompt_repls,
             mm_item_counts=mm_item_counts,
         )
 
@@ -428,10 +428,17 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         if text.startswith("<s> <|image|>"):
             text = text.replace("<s> <|image|>", "<s><|image|>", 1)
             token_ids = [token_ids[0], *token_ids[2:]]
-            placeholders = [
-                _PlaceholderInfo(p.modality, p.start_idx - 1, p.replacement)
-                for p in placeholders
-            ]
+            placeholders = {
+                modality: [
+                    _PlaceholderInfo(
+                        modality=p.modality,
+                        item_idx=p.item_idx,
+                        start_idx=p.start_idx - 1,
+                        replacement=p.replacement,
+                    ) for p in ps
+                ]
+                for modality, ps in placeholders.items()
+            }
 
         return token_ids, text, placeholders
 
