@@ -3,7 +3,6 @@ from typing import (Callable, Iterable, List, Mapping, Optional, Set, Tuple,
 
 import torch
 import torch.nn as nn
-from torch.nn.init import trunc_normal_
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
@@ -216,9 +215,7 @@ class AriaProjector(nn.Module):
         self.num_heads = num_heads
 
         self.query = nn.Parameter(
-            torch.zeros(max(patch_to_query_dict.values()), self.embed_dim))
-
-        trunc_normal_(self.query, std=0.02)
+            torch.empty(max(patch_to_query_dict.values()), self.embed_dim))
 
         self.cross_attn = CrossAttention(kv_dim, embed_dim, num_heads)
 
