@@ -37,3 +37,10 @@ model_id = "huggyllama/llama-7b"
 llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, \
 quantization="bitsandbytes", load_format="bitsandbytes")
 ```
+## OpenAI Compatible Server
+
+Append the following to your 4bit model arguments:
+
+```
+--quantization bitsandbytes --load-format bitsandbytes
+```
