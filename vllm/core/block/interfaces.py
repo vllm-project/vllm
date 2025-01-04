@@ -68,6 +68,16 @@ class Block(ABC):
 
     @property
     @abstractmethod
+    def global_computed(self) -> bool:
+        raise NotImplementedError
+
+    @global_computed.setter
+    @abstractmethod
+    def global_computed(self, value) -> bool:
+        raise NotImplementedError        
+
+    @property
+    @abstractmethod
     def last_accessed(self) -> float:
         raise NotImplementedError
 

@@ -405,6 +405,14 @@ class NaiveBlock(Block):
         raise NotImplementedError
 
     @property
+    def global_computed(self) -> bool:
+        raise NotImplementedError
+
+    @global_computed.setter
+    def global_computed(self, value) -> None:
+        raise NotImplementedError        
+
+    @property
     def last_accessed(self) -> float:
         raise NotImplementedError
 

@@ -937,6 +937,8 @@ class SequenceGroupMetadata(
     seq_data: Dict[int, SequenceData]
     sampling_params: Optional[SamplingParams]
     block_tables: Dict[int, List[int]]
+    block_global_computed_tables: Dict[int, List[int]]
+    block_hash_map: Optional[Dict[int, Dict[int, int]]] = {}
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
     lora_request: Optional[LoRARequest] = None

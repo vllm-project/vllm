@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 import torch
 
@@ -28,6 +28,7 @@ class PagedAttentionMetadata:
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
     block_tables: Optional[torch.Tensor]
+    block_hash_map: Optional[List[Dict[int, int]]]
 
 
 class PagedAttention:

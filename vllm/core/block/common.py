@@ -235,6 +235,8 @@ class BlockList:
     def __init__(self, blocks: List[Block]):
         self._blocks: List[Block] = []
         self._block_ids: List[int] = []
+        self._block_hashes: Dict[int, int] = {}
+        self._block_glb_computed: List[int] = []
 
         self.update(blocks)
 
@@ -242,10 +244,38 @@ class BlockList:
         assert block_id is not None
         self._block_ids.append(block_id)
 
+    def _add_block_hash(self,
+                        block_id: Optional[BlockId],
+                        block_hash: Optional[int]) -> None:
+        assert block_id is not None
+        self._block_hashes[block_id] = block_hash
+
+    def _add_block_glb_computed(self,
+                                block_id: Optional[BlockId]) -> None:
+        assert block_id is not None
+        self._block_glb_computed.append(block_id)
+
     def _update_block_id(self, block_index: int,
                          new_block_id: Optional[BlockId]) -> None:
         assert new_block_id is not None
         self._block_ids[block_index] = new_block_id
+
+    def _update_block_hash(self,
+                            prev_block_id: Optional[BlockId],
+                            new_block_id: Optional[BlockId],
+                            new_block_hash: Optional[int]) -> None:
+        assert new_block_id is not None
+        del self._block_hashes[prev_block_id]
+        self._block_hashes[new_block_id] = new_block_hash
+
+    def _update_block_glb_computed(self,
+                                    prev_block_id: Optional[BlockId],
+                                    new_block_id: Optional[BlockId]) -> None:
+        assert new_block_id is not None
+        for idx, block_id in enumerate(self._block_glb_computed):
+            if block_id == prev_block_id:
+                self._block_glb_computed[idx] = new_block_id
+                break
 
     def update(self, blocks: List[Block]):
         self._blocks = blocks
@@ -254,6 +284,9 @@ class BlockList:
         self._block_ids = []
         for block in self._blocks:
             self._add_block_id(block.block_id)
+            self._add_block_hash(block.block_id, block.content_hash)
+            if block.global_computed:
+                self._add_block_glb_computed(block.block_id)
 
     def append_token_ids(self, block_index: int, token_ids: List[int]) -> None:
         block = self._blocks[block_index]
@@ -264,10 +297,17 @@ class BlockList:
         # CoW or promotion may update the internal block_id
         if prev_block_id != block.block_id:
             self._update_block_id(block_index, block.block_id)
+            self._update_block_hash(
+                prev_block_id, block.block_id, block.content_hash)
+            if block.global_computed:
+                self._update_block_glb_computed(prev_block_id, block.block_id)
 
     def append(self, new_block: Block):
         self._blocks.append(new_block)
         self._add_block_id(new_block.block_id)
+        self._add_block_hash(new_block.block_id, new_block.content_hash)
+        if new_block.global_computed:
+            self._add_block_glb_computed(new_block.block_id)
 
     def __len__(self) -> int:
         return len(self._blocks)
@@ -282,12 +322,20 @@ class BlockList:
     def reset(self):
         self._blocks = []
         self._block_ids = []
+        self._block_hashes = []
+        self._block_glb_computed = []
 
     def list(self) -> List[Block]:
         return self._blocks
 
     def ids(self) -> List[int]:
         return self._block_ids
+
+    def hashes(self) -> Dict[int, int]:
+        return self._block_hashes
+
+    def global_computed_list(self) -> List[int]:
+        return self._block_glb_computed
 
 
 @dataclass

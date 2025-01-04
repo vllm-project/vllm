@@ -113,6 +113,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
+    num_global_cache_blocks: int = 0
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
@@ -441,6 +442,11 @@ class EngineArgs:
             help="Enables automatic prefix caching. "
             "Use --no-enable-prefix-caching to disable explicitly.",
         )
+        parser.add_argument(
+            "--num-global-cache-blocks",
+            type=int,
+            default=EngineArgs.num_global_cache_blocks,
+            help="number of global kv cache blocks, 0 for disable. ")        
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
@@ -1058,6 +1064,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
+            num_global_cache_blocks=self.num_global_cache_blocks,
             cpu_offload_gb=self.cpu_offload_gb,
         )
         parallel_config = ParallelConfig(
