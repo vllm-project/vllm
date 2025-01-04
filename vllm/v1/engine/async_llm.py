@@ -58,9 +58,8 @@ class AsyncLLM(EngineClient):
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
-        # EngineCore and Worker processes send SIGUSR1 when
-        # unrecoverable errors occur. Start the shutdown
-        # process if this occurs.
+        # Background processes send SIGUSR1 when unrecoverable
+        # errors occur. Start the shutdown process if this happens.
         def sigusr1_handler():
             logger.fatal("AsyncLLM got fatal signal from worker process, "
                          "shutting down. See stack trace for root cause.")
