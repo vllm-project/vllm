@@ -21,7 +21,7 @@ import torch
 import torch.utils.checkpoint
 from PIL import Image
 from torch import nn
-from transformers import Idefics3Config, Idefics3ImageProcessor, Idefics3Processor
+from transformers import BatchFeature, Idefics3Config, Idefics3ImageProcessor, Idefics3Processor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -38,11 +38,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        MultiModalFieldConfig,
                                         MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement,
-                                        _BoundPromptReplacement,
-                                        _PlaceholderInfo)
+                                        PromptReplacement)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
@@ -383,29 +383,157 @@ def dummy_data_for_idefics3(
 
 class Idefics3MultimodalProcessor(BaseMultiModalProcessor):
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
-    
-    def _get_max_num_image_patch(self) -> int:
-        hf_processor = self._get_hf_processor()
-        image_processor = hf_processor.image_processor
-        size = image_processor.size['longest_edge']
-        max_image_size = image_processor.max_image_size['longest_edge']
-        resized_height, resized_width = size, size
-
-        grid_h = resized_height // max_image_size
-        grid_w = resized_width // max_image_size
-        return (grid_h * grid_w + 1)
-
-    def get_max_mm_tokens(self, mm_counts: Mapping[str, int]) -> int:
-    
-    def _get_hf_processor(self, *, size: Optional[Dict[str, int]] = None,) -> Idefics3Processor:
+    def _get_hf_processor(
+        self,
+        *,
+        size: Optional[Dict[str, int]] = None,
+    ) -> Idefics3Processor:
         if size is not None:
             size = Idefics3ProcessorSize(longest_edge=size['longest_edge'])
             return self.ctx.get_hf_processor(size=size)
         return self.ctx.get_hf_processor()
-    
 
+    def _get_image_processor(self) -> Idefics3ImageProcessor:
+        return self._get_hf_processor().image_processor
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        hf_processor = self._get_hf_processor()
+        image_processor: Idefics3ImageProcessor = hf_processor.image_processor
+        grid_w, grid_h = self._get_image_feature_grid_size(
+            image_width=image_processor.size['longest_edge'],
+            image_height=image_processor.size['longest_edge'],
+        )
+        return {"image": (grid_w * grid_h + 1) * hf_processor.image_seq_len}
+
+    def _resize_output_size(self,
+                            *,
+                            height: int,
+                            width: int,
+                            max_len: Optional[int] = None,
+                            min_len: Optional[int] = 1,
+                            max_size: Optional[int] = None) -> tuple[int, int]:
+        # Set default value for max_len if not provided
+        max_len = max(height, width) if max_len is None else max_len
+        aspect_ratio = width / height
+
+        # Handle the maximum size constraint
+        if max_size is not None:
+            max_len = min(max_len, max_size)
+
+        # Adjust dimensions according to the aspect ratio
+        if width >= height:
+            width = max_len
+            height = int(width / aspect_ratio)
+        else:
+            height = max_len
+            width = int(height * aspect_ratio)
+
+        # Ensure both width and height are even (if needed)
+        height += 1 if height % 2 != 0 else 0
+        width += 1 if width % 2 != 0 else 0
+
+        # Ensure dimensions are not smaller than the minimum length
+        height = max(height, min_len)
+        width = max(width, min_len)
+
+        return height, width
+
+    def _get_resize_output_image_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        resolution_max_side: int,
+    ) -> tuple[int, int]:
+        max_image_size = self._get_image_processor().size['longest_edge']
+        if resolution_max_side > max_image_size:
+            raise ValueError(
+                "`resolution_max_side` cannot be larger than `max_image_size`")
+
+        height, width = image_height, image_width
+
+        # Find the output size, when rescaling the longest edge to max_len and
+        # preserving the aspect ratio
+        height, width = _resize_output_size(height,
+                                            width,
+                                            max_len=resolution_max_side)
+
+        return height, width
+
+    def _get_image_feature_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        image_processor = self._get_image_processor()
+        max_image_size = image_processor.max_image_size['longest_edge']
+        resized_height, resized_width = self._get_resize_output_image_size(
+            image_width=image_width,
+            image_height=image_height,
+            resolution_max_side=max_image_size,
+        )
+
+        grid_h = resized_height // max_image_size
+        grid_w = resized_width // max_image_size
+        return grid_w, grid_h
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            pixel_attention_mask=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        hf_processor = self._get_hf_processor()
+
+        image_token = hf_processor.image_token.content
+        fake_image_token = hf_processor.fake_image_token.content
+        global_img_token = hf_processor.global_image_tag
+        image_seq_len = hf_processor.image_seq_len
+        grid_placeholder = "<row_{n_h}_col_{n_w}>"
+
+        global_img_placeholder = global_img_token + image_token * image_seq_len
+        tile_img_placeholder = grid_placeholder + image_token * image_seq_len
+
+        def get_replacement_idefics3(item_idx: int) -> str:
+            images = mm_items.get_items("image", ImageProcessorItems)
+
+            image_size = images.get_image_size(item_idx)
+            grid_w, grid_h = self._get_image_feature_grid_size(
+                image_width=image_size.width,
+                image_height=image_size.height,
+            )
+            if grid_w == 1 and grid_h == 1:
+                image_placeholder = global_img_placeholder
+            else:
+                tiles_placeholder = sum(
+                    tile_img_placeholder.format(n_h=i + 1, n_w=j + 1)
+                    for i in range(grid_h) for j in range(grid_w))
+                image_placeholder = (tiles_placeholder + "\n\n" +
+                                     global_img_placeholder)
+            return fake_image_token + image_placeholder + fake_image_token
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=image_token,
+                replacement=get_replacement_idefics3,
+            )
+        ]
 
 
 class Idefics3SimpleMLP(nn.Module):
