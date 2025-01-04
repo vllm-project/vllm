@@ -85,6 +85,7 @@ class OpenAIServingTokenization(OpenAIServing):
                      tokenizer,
                      request.prompt,
                      add_special_tokens=request.add_special_tokens,
+                     split_special_tokens=request.split_special_tokens,
                  )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
