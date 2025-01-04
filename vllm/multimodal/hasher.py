@@ -9,8 +9,8 @@ from PIL import Image
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.multimodal.types import MultiModalHashDict
-    from vllm.prompt_adapter.request import PromptType
+    from vllm.inputs import TokensPrompt
+    from vllm.multimodal import MultiModalHashDict
 
 logger = init_logger(__name__)
 
@@ -72,7 +72,7 @@ class MultiModalHasher:
 
     @classmethod
     def hash_prompt_mm_data(
-            cls, prompt: "PromptType") -> Optional["MultiModalHashDict"]:
+            cls, prompt: "TokensPrompt") -> Optional["MultiModalHashDict"]:
         """Hash multimodal data in the user input prompt if they exist."""
 
         if "multi_modal_data" not in prompt:
