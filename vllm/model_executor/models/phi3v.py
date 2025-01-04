@@ -442,7 +442,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
 
         return token_ids, text, placeholders
 
-    def _get_dummy_mm_inputs(
+    def _get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],

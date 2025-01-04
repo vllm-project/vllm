@@ -149,7 +149,7 @@ class BaseLlavaMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
     def _get_image_token(self) -> str:
         raise NotImplementedError
 
-    def _get_dummy_mm_inputs(
+    def _get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],

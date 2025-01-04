@@ -799,7 +799,7 @@ class BaseMultiModalProcessor(ABC):
 
         # Some HF processors (e.g. Qwen2-VL) expect corresponding
         # multi-modal tokens to be in the prompt text
-        dummy_inputs = self._get_dummy_mm_inputs(
+        dummy_inputs = self._get_dummy_processor_inputs(
             self.ctx.model_config.max_model_len,
             mm_missing_counts,
         )
@@ -1164,7 +1164,7 @@ class BaseMultiModalProcessor(ABC):
         return [video] * num_videos
 
     @abstractmethod
-    def _get_dummy_mm_inputs(
+    def _get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
@@ -1194,6 +1194,19 @@ class BaseMultiModalProcessor(ABC):
 
         return mm_limits
 
+    def _get_dummy_mm_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalInputsV2:
+        processor_inputs = self._get_dummy_processor_inputs(seq_len, mm_counts)
+
+        return self.apply(
+            prompt_text=processor_inputs.prompt_text,
+            mm_data=processor_inputs.mm_data,
+            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+        )
+
     def get_dummy_data(self, seq_len: int) -> DummyData:
         # Avoid circular import
         from vllm.sequence import SequenceData
@@ -1207,13 +1220,7 @@ class BaseMultiModalProcessor(ABC):
                 "returned by `get_mm_max_tokens_per_item` "
                 f"({set(mm_max_tokens_per_item.keys())})")
 
-        processor_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
-        mm_inputs = self.apply(
-            prompt_text=processor_inputs.prompt_text,
-            mm_data=processor_inputs.mm_data,
-            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-        )
-
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
@@ -1243,6 +1250,7 @@ class BaseMultiModalProcessor(ABC):
                 "short. To avoid this, you should increase `max_model_len`, "
                 "reduce `max_num_seqs`, and/or reduce `mm_counts`.", seq_len,
                 total_len, total_placeholders_by_modality)
+            
 
         prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
 

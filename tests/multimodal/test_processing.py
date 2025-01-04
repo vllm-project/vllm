@@ -723,7 +723,10 @@ def _test_processing_cache_correctness(
         }
 
         mm_counts = {k: len(vs) for k, vs in mm_data.items()}
-        prompt = baseline_processor._get_dummy_mm_inputs(mm_counts).prompt_text
+        prompt = baseline_processor._get_dummy_processor_inputs(
+            model_config.max_model_len,
+            mm_counts,
+        ).prompt_text
 
         # Drop unnecessary keys and test single -> multi conversion
         if rng.rand() < simplify_rate:
