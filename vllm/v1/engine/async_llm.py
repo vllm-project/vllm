@@ -1,4 +1,5 @@
 import asyncio
+import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -16,7 +17,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-# from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -57,6 +57,19 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
+
+        # EngineCore and Worker processes send SIGUSR1 when 
+        # unrecoverable errors occur. Start the shutdown
+        # process if this occurs.
+        def sigusr1_handler():
+            logger.fatal(
+                "AsyncLLM got fatal signal from worker process, "
+                "shutting down. See stack trace for root cause.")
+            self._propagate_error()
+            self._errored = True
+
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGUSR1, sigusr1_handler)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -244,14 +257,14 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             while True:
-                # NOTE(rob): drain queue without await if possible (avoids
+                # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
                 if isinstance(out, EngineDeadError):
                     raise out
 
-                # NOTE(rob): both Detokenizer and EngineCore handle
-                # their own request cleanup based on finished.
+                # Note: both Detokenizer and EngineCore handle their
+                # own request cleanup based on finished.
                 if out.finished:
                     del self.rid_to_queue[request_id]
                     yield out
@@ -260,7 +273,8 @@ class AsyncLLM(EngineClient):
                 yield out
 
         # If the request is disconnected by the client, the
-        # generate() task will be canceled so, we abort.
+        # generate() task will be canceled. So, we abort the
+        # request if we end up here.
         except asyncio.CancelledError:
             await self.abort(request_id)
             if self.log_requests:
@@ -295,6 +309,7 @@ class AsyncLLM(EngineClient):
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
+
         try:
             while True:
                 # 1) Pull EngineCoreOutput from the EngineCore.
