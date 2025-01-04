@@ -49,12 +49,12 @@ class LLMEngine:
         # NOTE: signal_handlers must be created and run in the main
         # python thread, a workaround for this would be using polling
         # rather than signal handling to detect a shutdown. Investigate.
-        def sigusr1_handler():
-            logger.fatal("LLMEngine got fatal signal from worker process, "
-                         "shutting down. See stack trace for root cause.")
+        def sigusr1_handler(signum, frame):
+            logger.fatal("LLMEngine go fatal signal from worker, shutting "
+                         "down. See stack trace above for root cause issue.")
             self.shutdown()
 
-        signal().add_signal_handler(signal.SIGUSR1, sigusr1_handler)
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
