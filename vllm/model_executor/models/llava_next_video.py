@@ -120,7 +120,7 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
 
         max_total_frames = self._get_max_video_frames(seq_len)
 
-        return max(max_total_frames, 1) // max(max_videos, 1)
+        return max(max_total_frames // max(max_videos, 1), 1)
 
     def _get_dummy_image_size(self) -> ImageSize:
         image_size = self._vision_encoder_info.get_image_size()

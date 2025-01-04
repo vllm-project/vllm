@@ -796,7 +796,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
 
-        return max(max_total_frames, 1) // max(max_videos, 1)
+        return max(max_total_frames // max(max_videos, 1), 1)
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         max_image_tokens = self._get_max_image_tokens()

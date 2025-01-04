@@ -206,7 +206,7 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
 
-        return max(max_total_frames, 1) // max(max_videos, 1)
+        return max(max_total_frames // max(max_videos, 1), 1)
 
     def _get_video_token(self) -> str:
         return self._get_hf_processor().video_token
