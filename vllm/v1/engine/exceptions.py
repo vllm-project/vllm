@@ -1,14 +1,12 @@
-# There exceptions are raised by the LLMEngine and AsyncLLM
-# when errors occur. See vllm/entrypoints/launcher.py for the 
-# handlers of these exceptions in the API Server.
-
 # Raised when a AsyncLLM.generate() fails. Possibly recoverable.
 class EngineGenerateError(Exception):
     pass
 
+
 # Raised when the EngineCore dies. Unrecoverable.
 class EngineDeadError(Exception):
     pass
+
 
 def engine_dead_error_guard(func):
     """
@@ -24,6 +22,7 @@ def engine_dead_error_guard(func):
     EngineDeadError exception to make the fundamental issue
     clearer to the end user.
     """
+
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
