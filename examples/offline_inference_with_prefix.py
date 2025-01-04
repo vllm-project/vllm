@@ -45,6 +45,7 @@ for output in outputs:
     generated_text = output.outputs[0].text
     regular_generated_texts.append(generated_text)
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    print(f"TTFT: {int(1000 * (output.metrics.first_token_time - output.metrics.arrival_time))}ms")
 
 print("-" * 80)
 
@@ -72,6 +73,7 @@ for output in outputs:
     generated_text = output.outputs[0].text
     cached_generated_texts.append(generated_text)
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    print(f"TTFT: {int(1000 * (output.metrics.first_token_time - output.metrics.arrival_time))}ms")
 
 print("-" * 80)
 
