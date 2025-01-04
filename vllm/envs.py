@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_LOCAL_RANK_DEV_MAP: str = "{}"
 
 
 def get_default_cache_root():
@@ -467,8 +468,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+    "VLLM_LOCAL_RANK_DEV_MAP":
+    lambda: os.getenv("VLLM_LOCAL_RANK_DEV_MAP", "{}")
 }
-
 # end-env-vars-definition
 
 
