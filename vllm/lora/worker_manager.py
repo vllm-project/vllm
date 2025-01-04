@@ -115,6 +115,14 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 embedding_padding_modules=self.embedding_padding_modules,
                 weights_mapper=hf_to_vllm_mapper)
 
+        except FileNotFoundError as e:
+            # FileNotFoundError should be raised if both
+            # - No adapter found to download from huggingface (or in
+            #       offline mode)
+            # - No local adapter files found at `lora_request.lora_path`
+            raise ValueError(
+                f"Loading lora {lora_request.lora_name} failed: No adapter "
+                f"found for {lora_path}") from e
         except Exception as e:
             raise RuntimeError(f"Loading lora {lora_path} failed") from e
         if lora.rank > self.lora_config.max_lora_rank:
