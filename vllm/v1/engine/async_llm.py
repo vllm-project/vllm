@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 class EngineGenerateError(Exception):
     pass
 
+
 # Raised when the engine dies, typically by the
 # background output handler loop. Unrecoverable.
 class EngineDeadError(Exception):
@@ -63,8 +64,8 @@ class AsyncLLM(EngineClient):
         def sigusr1_handler():
             logger.fatal("AsyncLLM got fatal signal from worker process, "
                          "shutting down. See stack trace for root cause.")
-            self._propagate_error()
             self._errored = True
+            self._propagate_error()
 
         asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
                                                       sigusr1_handler)
@@ -230,9 +231,7 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
-
         if self.errored:
-            self._propagate_error()
             raise EngineDeadError()
 
         try:
@@ -328,17 +327,13 @@ class AsyncLLM(EngineClient):
             raise
 
         except Exception as e:
-            self._propagate_error(e)
+            logger.error("run_output_handler failed", e)
+            self._errored = True
+            self._propagate_error()
             raise EngineDeadError() from e
 
-    def _propagate_error(self, exception: Optional[Exception] = None):
-        """Propagate to generate() tasks and raise EngineDeadError."""
-
-        # Set errored state and log if we have
-        self._errored = True
-        if exception:
-            logger.error("AsyncLLM run_output_handler failed",
-                         exc_info=exception)
+    def _propagate_error(self):
+        """Propagate to all generate() tasks."""
 
         # Put EngineDeadError() into each generate()'s queue,
         # each of which will raise in their own context.
