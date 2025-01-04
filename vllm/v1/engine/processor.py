@@ -7,15 +7,15 @@ from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
 from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
-                             MultiModalRegistry)
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalHasher,
+                             MultiModalKwargs, MultiModalRegistry)
 from vllm.multimodal.utils import merge_and_sort_mm_metadata_from_modalities
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
+from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 
 
 class Processor:
@@ -48,7 +48,6 @@ class Processor:
         # Multi-modal hasher (for images)
         self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
             cache_config.enable_prefix_caching
-        self.mm_hasher = MMHasher()
 
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
     # This ideally should releases the GIL, so we should not block the
@@ -104,11 +103,9 @@ class Processor:
             # input processor.
             if decoder_inputs.multi_modal_hashes:
                 mm_hashes = decoder_inputs.multi_modal_hashes
-            # Fallback to MMhasher that only supports image hashing.
+            # Fallback to using MultiModalHasher directly.
             else:
-                image_hashes = self.mm_hasher.hash_prompt_mm_data(prompt)
-                if image_hashes:
-                    mm_hashes = {"image": image_hashes}
+                mm_hashes = MultiModalHasher.hash_prompt_mm_data(prompt)
 
         # TODO: Impl encoder-decoder
         if encoder_inputs is not None:

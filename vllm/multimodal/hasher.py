@@ -1,13 +1,19 @@
 import pickle
-from blake3 import blake3
-import torch
+from typing import TYPE_CHECKING, Iterable, Optional
+
 import numpy as np
+import torch
+from blake3 import blake3
 from PIL import Image
-from typing import Iterable
 
 from vllm.logger import init_logger
 
+if TYPE_CHECKING:
+    from vllm.multimodal.types import MultiModalHashDict
+    from vllm.prompt_adapter.request import PromptType
+
 logger = init_logger(__name__)
+
 
 class MultiModalHasher:
 
@@ -36,7 +42,8 @@ class MultiModalHasher:
         return pickle.dumps(obj)
 
     @classmethod
-    def item_to_bytes(cls, 
+    def item_to_bytes(
+        cls,
         key: str,
         obj: object,
     ) -> Iterable[tuple[bytes, bytes]]:
@@ -62,3 +69,28 @@ class MultiModalHasher:
                 hasher.update(v_bytes)
 
         return hasher.hexdigest()
+
+    @classmethod
+    def hash_prompt_mm_data(
+            cls, prompt: "PromptType") -> Optional["MultiModalHashDict"]:
+        """Hash multimodal data in the user input prompt if they exist."""
+
+        if "multi_modal_data" not in prompt:
+            return None
+
+        mm_data = prompt["multi_modal_data"]
+        if not mm_data:
+            # mm_data can be None or an empty dict.
+            return None
+
+        mm_items = {
+            modality: items if isinstance(items, list) else [items]
+            for modality, items in mm_data.items()
+        }
+
+        mm_hashes = {
+            modality: [cls.hash_kwargs(**{modality: item}) for item in items]
+            for modality, items in mm_items.items()
+        }
+
+        return mm_hashes
