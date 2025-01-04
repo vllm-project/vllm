@@ -95,6 +95,7 @@ class MultiprocExecutor(Executor):
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
+        logger.info("# GPU blocks: %d", num_gpu_blocks)
         self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
         self.collective_rpc("compile_or_warm_up_model")
 
