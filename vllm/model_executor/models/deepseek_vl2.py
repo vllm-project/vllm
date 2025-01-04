@@ -203,7 +203,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
                 "git+https://github.com/deepseek-ai/DeepSeek-VL2.git` "
                 "to use this model") from exc
 
-        processor = self.ctx.get_hf_processor()
+        processor = self.ctx.get_hf_processor(DeepseekVLV2Processor)
         processor.select_best_resolution = partial(
             select_best_resolution,
             candidate_resolutions=processor.candidate_resolutions)
