@@ -17,7 +17,7 @@ def sample_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int],
-) -> List[Tuple[str, int, int]]:
+) -> List[Tuple[str, int, int, int]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
 
@@ -66,6 +66,7 @@ def run_vllm(
     requests: List[Tuple[str, int, int]],
     n: int,
     engine_args: EngineArgs,
+    detokenize: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -84,6 +85,7 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=output_len,
+                detokenize=detokenize,
             ))
 
     start = time.perf_counter()
@@ -102,15 +104,20 @@ def main(args: argparse.Namespace):
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
         prompt = "hi" * (args.input_len - 1)
-        requests = [(prompt, args.input_len, args.output_len)
-                    for _ in range(args.num_prompts)]
+        requests = [(
+            prompt,
+            args.input_len,
+            args.output_len,
+            # Select a equi-probable random priority
+            0 if random.random() < 0.5 else 1)]
     else:
         requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
                                    args.output_len)
 
     if args.backend == "vllm":
         elapsed_time = run_vllm(requests, args.n,
-                                EngineArgs.from_cli_args(args))
+                                EngineArgs.from_cli_args(args),
+                                args.detokenize)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(prompt_len + output_len
@@ -163,6 +170,11 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='Path to save the throughput results in JSON format.')
+    parser.add_argument(
+        '--detokenize',
+        action='store_true',
+        help=('Detokenize the response (detokenization time included in the '
+              'latency measurement)'))
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
