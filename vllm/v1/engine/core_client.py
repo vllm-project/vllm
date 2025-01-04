@@ -181,7 +181,6 @@ class SyncMPClient(MPClient):
                  vllm_config: VllmConfig,
                  executor_class: Type[Executor],
                  log_stats: bool = False):
-
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
@@ -215,7 +214,6 @@ class SyncMPClient(MPClient):
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
-
     def __init__(self,
                  vllm_config: VllmConfig,
                  executor_class: Type[Executor],
