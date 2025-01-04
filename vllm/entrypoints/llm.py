@@ -225,17 +225,10 @@ class LLM:
         # Logic to switch between engines is done at runtime instead of import
         # to avoid import order issues
         self.engine_class = self.get_engine_class()
-
-        # TODO(rob): enable mp by default (issue with fork vs spawn)
         self.llm_engine = self.engine_class.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
 
         self.request_counter = Counter()
-
-    def __del__(self):
-        if hasattr(self, 'llm_engine') and self.llm_engine and hasattr(
-                self.llm_engine, "shutdown"):
-            self.llm_engine.shutdown()
 
     @staticmethod
     def get_engine_class() -> Type[LLMEngine]:

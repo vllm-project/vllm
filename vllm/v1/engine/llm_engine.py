@@ -42,8 +42,6 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-
-        # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -179,8 +177,6 @@ class LLMEngine:
 
         return request_outputs
 
-    # TODO(rob): Can we get rid of these?
-
     def get_model_config(self):
         return self.model_config
 
@@ -205,10 +201,3 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
-
-    def __del__(self):
-        self.shutdown()
-
-    def shutdown(self):
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()

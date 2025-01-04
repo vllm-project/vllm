@@ -710,15 +710,27 @@ class SequenceGroup:
 
     @property
     def multi_modal_data(self) -> MultiModalDataDict:
-        return self.first_seq.multi_modal_data
+        if self.first_seq.multi_modal_data:
+            return self.first_seq.multi_modal_data
+        elif self.encoder_seq is not None:
+            return self.encoder_seq.multi_modal_data
+        return {}
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
-        return self.first_seq.multi_modal_placeholders
+        if self.first_seq.multi_modal_data:
+            return self.first_seq.multi_modal_placeholders
+        elif self.encoder_seq is not None:
+            return self.encoder_seq.multi_modal_placeholders
+        return {}
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
-        return self.first_seq.mm_processor_kwargs
+        if self.first_seq.multi_modal_data:
+            return self.first_seq.mm_processor_kwargs
+        elif self.encoder_seq is not None:
+            return self.encoder_seq.mm_processor_kwargs
+        return {}
 
     @property
     def lora_int_id(self) -> int:
