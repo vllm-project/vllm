@@ -10,7 +10,7 @@ Start the server with tool calling enabled. This example uses Meta's Llama 3.1 8
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --enable-auto-tool-choice \
     --tool-call-parser llama3_json \
-    --chat-template examples/tool_chat_template_llama3_json.jinja
+    --chat-template examples/tool_chat_template_llama3.1_json.jinja
 ```
 
 Next, make a request to the model that should result in it using the available tools:
@@ -170,6 +170,12 @@ Recommended flags: `--tool-call-parser granite --chat-template examples/tool_cha
 
 `examples/tool_chat_template_granite.jinja`: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
 
+* `ibm-granite/granite-3.1-8b-instruct`
+
+Recommended flags: `--tool-call-parser granite`
+
+The chat template from Huggingface can be used directly. Parallel function calls are supported.
+
 * `ibm-granite/granite-20b-functioncalling`
 
 Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
@@ -284,4 +290,3 @@ Then you can use this plugin in the command line like this.
     --tool-call-parser example \
     --chat-template <your chat template> \
 ```
-

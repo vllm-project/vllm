@@ -87,6 +87,9 @@ class OpenVinoPlatform(Platform):
         # check and update cache config
         ov_core = ov.Core()
         cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
         if envs.VLLM_OPENVINO_CPU_KV_CACHE_PRECISION == "u8":
             if not OpenVinoPlatform.is_openvino_cpu():
                 logger.info("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION is"

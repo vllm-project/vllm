@@ -8,7 +8,6 @@ import msgspec
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -229,6 +228,7 @@ def initialize_ray_cluster(
             the default Ray cluster address.
     """
     assert_ray_available()
+    from vllm.platforms import current_platform
 
     # Connect to a ray cluster.
     if current_platform.is_rocm() or current_platform.is_xpu():
@@ -277,10 +277,14 @@ def initialize_ray_cluster(
                 f"Total number of devices: {device_bundles}.")
     else:
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+        # Log a warning message and delay resource allocation failure response.
+        # Avoid immediate rejection to allow user-initiated placement group
+        # created and wait cluster to be ready
         if parallel_config.world_size > num_devices_in_cluster:
-            raise ValueError(
-                f"The number of required {device_str}s exceeds the total "
-                f"number of available {device_str}s in the placement group.")
+            logger.warning(
+                "The number of required %ss exceeds the total "
+                "number of available %ss in the placement group.", device_str,
+                device_str)
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
             device_str: 1.0
