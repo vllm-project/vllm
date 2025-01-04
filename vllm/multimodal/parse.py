@@ -146,6 +146,20 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
     def __init__(self, data: Sequence[HfVideoItem]) -> None:
         super().__init__(data, "video")
 
+    def get_num_frames(self, item_idx: int) -> int:
+        return len(self.get(item_idx))
+
+    def get_frame_size(self, item_idx: int) -> ImageSize:
+        image = self.get(item_idx)[0]  # Assume that the video isn't empty
+
+        if isinstance(image, Image):
+            return ImageSize(*image.size)
+        if isinstance(image, (np.ndarray, torch.Tensor)):
+            _, h, w = image.shape
+            return ImageSize(w, h)
+
+        assert_never(image)
+
 
 class VideoEmbeddingItems(EmbeddingItems):
 

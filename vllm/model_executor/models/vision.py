@@ -1,7 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import Final, Generic, Optional, Protocol, TypeVar
 
 from transformers import PretrainedConfig
+
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        InputProcessingContext,
+                                        ProcessingCache)
 
 _C = TypeVar("_C", bound=PretrainedConfig)
 
@@ -27,11 +31,15 @@ class VisionEncoderInfo(ABC, Generic[_C]):
         raise NotImplementedError
 
     @abstractmethod
-    def get_num_patches(self) -> int:
+    def get_image_size(self) -> int:
         raise NotImplementedError
 
     @abstractmethod
-    def get_image_size(self) -> int:
+    def get_patch_size(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_patch_grid_length(self) -> int:
         raise NotImplementedError
 
 
@@ -50,3 +58,26 @@ def vision_encoder_info(vision_config: PretrainedConfig) -> VisionEncoderInfo:
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
+
+
+class VisionLanguageConfig(Protocol):
+    vision_config: Final[PretrainedConfig]
+
+
+class BaseVisionLanguageMultiModalProcessor(BaseMultiModalProcessor):
+
+    def __init__(self,
+                 ctx: InputProcessingContext,
+                 *,
+                 cache: Optional[ProcessingCache] = None,
+                 enable_sanity_checks: bool = True) -> None:
+        super().__init__(ctx,
+                         cache=cache,
+                         enable_sanity_checks=enable_sanity_checks)
+
+        vision_config = self._get_hf_config().vision_config
+        self._vision_encoder_info = vision_encoder_info(vision_config)
+
+    @abstractmethod
+    def _get_hf_config(self) -> VisionLanguageConfig:
+        raise NotImplementedError

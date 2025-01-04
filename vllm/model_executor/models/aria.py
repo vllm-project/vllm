@@ -456,7 +456,7 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
         hf_config = self.ctx.get_hf_config()
         return max(hf_config.projector_patch_to_query_dict.values())
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {"image": self._get_num_image_tokens()}
 
     def _get_mm_fields_config(
@@ -488,8 +488,9 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
             )
         ]
 
-    def _get_dummy_mm_inputs(
+    def _get_dummy_processor_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         hf_config = self.ctx.get_hf_config()
