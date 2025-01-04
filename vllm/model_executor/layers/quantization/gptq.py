@@ -1,8 +1,8 @@
 import enum
 from enum import Enum
 from fractions import Fraction
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, List, Optional, Union
+import re
 import torch
 from torch.nn.parameter import Parameter
 
@@ -30,7 +30,9 @@ class GPTQConfig(QuantizationConfig):
         group_size: int,
         desc_act: bool,
         lm_head_quantized: bool,
+        dynamic: Dict[str, Dict[str, Union[int, bool]]]
     ) -> None:
+        self.dynamic = dynamic
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
@@ -41,11 +43,30 @@ class GPTQConfig(QuantizationConfig):
                 "Currently, only 2/3/4/8-bit weight quantization is "
                 f"supported for GPTQ, but got {self.weight_bits} bits.")
 
+    def update_config(self, prefix: str):
+        if self.dynamic is None:
+            return
+        # check for variable/dynamic config
+        if len(self.dynamic) > 0 and prefix:
+            for pattern, dym in self.dynamic.items():
+                if re.match(pattern, prefix):
+                    self.weight_bits = dym.get("bits", self.weight_bits)
+                    self.group_size = dym.get("group_size", self.group_size)
+                    self.desc_act = dym.get("desc_act", self.desc_act)
+                    break
+
+        self.pack_factor = Fraction(32, self.weight_bits)
+        if self.weight_bits not in [2, 3, 4, 8]:
+            raise ValueError(
+                "Currently, only 2/3/4/8-bit weight quantization is "
+                f"supported for GPTQ, but got {self.weight_bits} bits.")
+
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
                 f"desc_act={self.desc_act}),"
-                f"lm_head_quantized={self.lm_head_quantized}")
+                f"lm_head_quantized={self.lm_head_quantized}, "
+                f"dynamic={self.dynamic}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -66,12 +87,13 @@ class GPTQConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQConfig":
+        dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
-        return cls(weight_bits, group_size, desc_act, lm_head_quantized)
+        return cls(weight_bits, group_size, desc_act, lm_head_quantized, dynamic)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["GPTQLinearMethod"]:
@@ -96,7 +118,10 @@ class GPTQLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: GPTQConfig):
-        self.quant_config = quant_config
+        self.quant_config = GPTQConfig(weight_bits=quant_config.weight_bits, group_size=quant_config.group_size,
+                                             desc_act=quant_config.desc_act,
+                                             lm_head_quantized=quant_config.lm_head_quantized,
+                                             dynamic=quant_config.dynamic)
 
     def create_weights(
         self,
