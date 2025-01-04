@@ -13,11 +13,11 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
+from vllm.lora.request import LoRARequest
 from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: argparse.Namespace):
-    print(args)
 
     engine_args = EngineArgs.from_cli_args(args)
 
@@ -33,6 +33,11 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
     )
     print(sampling_params)
+
+    lora_request = LoRARequest(
+        lora_name='lora', lora_int_id=0,
+        lora_path=args.lora_path) if args.lora_path else None
+
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
@@ -51,7 +56,8 @@ def main(args: argparse.Namespace):
                         str(profile_dir))) as p:
                 llm.generate(dummy_prompts,
                              sampling_params=sampling_params,
-                             use_tqdm=False)
+                             use_tqdm=False,
+                             lora_request=lora_request)
             print(p.key_averages())
         else:
             start_time = time.perf_counter()

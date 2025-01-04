@@ -23,7 +23,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
-                              QKVParallelLinearWithLora,
+                              ModulesToSaveWrapper, QKVParallelLinearWithLora,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
@@ -49,6 +49,7 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
     MergedQKVParallelLinearWithShardedLora,
     RowParallelLinearWithShardedLoRA,
     LinearScalingRotaryEmbeddingWithLora,
+    ModulesToSaveWrapper,
 }
 
 
@@ -93,9 +94,10 @@ def replace_submodule(model: nn.Module, module_name: str,
 
 
 def parse_fine_tuned_lora_name(
-        name: str,
-        weights_mapper: Optional[WeightsMapper] = None
-) -> Tuple[str, bool, bool]:
+    name: str,
+    enable_lora_modules_to_save: bool = False,
+    weights_mapper: Optional[WeightsMapper] = None
+) -> Tuple[str, Optional[bool], bool]:
     """Parse the name of lora weights.
 
     args:
@@ -106,7 +108,8 @@ def parse_fine_tuned_lora_name(
     return:
         Tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
-            is_lora_a whether the tensor is lora_a or lora_b.
+            is_lora_a whether the tensor is lora_a or lora_b,
+              lora_a=None if this is module_to_save lm_head or token_embeds
             is_bias whether the tensor is lora bias.
     """
 
@@ -120,11 +123,21 @@ def parse_fine_tuned_lora_name(
         name = "base_model.model." + name
 
     parts = name.split(".")
-    if parts[-1] == "weight" and (parts[-2] == "lora_A"
-                                  or parts[-2] == "lora_B"):
-        new_name = ".".join(parts[2:-2])
-        return new_name, parts[-2] == "lora_A", False
 
+    if parts[-1] == "weight":
+        if parts[-2] == "lora_A" or parts[-2] == "lora_B":
+            return ".".join(parts[2:-2]), parts[-2] == "lora_A", False
+
+        if parts[-2] in ModulesToSaveWrapper.implemented_layers:
+
+            if not enable_lora_modules_to_save:
+                error_msg = f"""enable_lora_modules_to_save is False, 
+                but found tensor name {name} in LoRA checkpoint. 
+                Set enable_lora_modules_to_save=True to process
+                lm_head and embed_tokens as fully trained tensors"""
+                raise ValueError(error_msg)
+
+            return '.'.join(parts[2:-1]), None, False
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[2:-1])
         return new_name, parts[-1] == "lora_embedding_A", False

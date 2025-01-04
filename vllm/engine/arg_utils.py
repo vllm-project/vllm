@@ -145,6 +145,9 @@ class EngineArgs:
     enable_lora_bias: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
+    # if True fully trained lm_head and embed_tokens in LoRA will be used
+    # instead of A*B-style adapters
+    enable_lora_modules_to_save: bool = False
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = 1
     max_prompt_adapter_token: int = 0
@@ -643,6 +646,11 @@ class EngineArgs:
             choices=['auto', 'float16', 'bfloat16'],
             help=('Data type for LoRA. If auto, will default to '
                   'base model dtype.'))
+        parser.add_argument(
+            '--enable_lora_modules_to_save',
+            type=bool,
+            default=EngineArgs.enable_lora_modules_to_save,
+            help='enable fully trained lm_head and embed_tokens')
         parser.add_argument(
             '--long-lora-scaling-factors',
             type=nullable_str,
@@ -1198,6 +1206,7 @@ class EngineArgs:
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             long_lora_scaling_factors=self.long_lora_scaling_factors,
+            enable_lora_modules_to_save=self.enable_lora_modules_to_save,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
