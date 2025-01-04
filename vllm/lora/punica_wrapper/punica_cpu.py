@@ -1,33 +1,21 @@
-"""
-Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
-Punica: Multi-Tenant LoRA Serving. 
-https://arxiv.org/abs/2310.18547
-"""
-
-from typing import Callable, Optional, Tuple, Union, final
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 
-from vllm.triton_utils import HAS_TRITON
-
-if HAS_TRITON:
-    from vllm.lora.ops.triton_ops import bgmv_expand
-    from vllm.lora.ops.triton_ops import bgmv_expand_slice
-    from vllm.lora.ops.triton_ops import bgmv_shrink
-    from vllm.lora.ops.triton_ops import sgmv_expand
-    from vllm.lora.ops.triton_ops import sgmv_expand_slice
-    from vllm.lora.ops.triton_ops import sgmv_shrink
+from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
+                                     bgmv_shrink, sgmv_expand,
+                                     sgmv_expand_slice, sgmv_shrink)
 
 from .punica_base import PunicaWrapperBase
 
 
-@final
-class PunicaWrapperGPU(PunicaWrapperBase):
+# The platforms that are compatible with the PyTorch-native implementation can
+# inherit this class
+class PunicaWrapperCPU(PunicaWrapperBase):
     """
-    PunicaWrapperGPU is designed to manage and provide metadata for the punica 
+    PunicaWrapperCPU is designed to manage and provide metadata for the punica 
     kernel. The main function is to maintain the state information for 
-    Multi-LoRA, and to provide the interface for the punica triton kernel.
+    Multi-LoRA, and to provide the interface for the pytorch punica ops.
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
@@ -94,8 +82,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_inputs: bool,
     ):
         #No LoRA request, so return directly
@@ -116,8 +104,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_inputs: bool,
     ):
         bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
@@ -128,8 +116,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_inputs: bool = True,
     ):
         """
@@ -299,8 +287,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default ,refer to:
-            # https://github.com/triton-lang/triton/issues/1387
+            # We set the buffer to be float32 by default, consistent with the
+            # triton op
             buffer = tuple(
                 torch.zeros(
                     (x.size(0), r), dtype=torch.float32, device=x.device)
@@ -343,8 +331,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
         if buffer is None:
-            # We set the buffer to be float32 by default ,refer to:
-            # https://github.com/triton-lang/triton/issues/1387
+            # We set the buffer to be float32 by default, consistent with the
+            # triton op
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,
                                  device=x.device)

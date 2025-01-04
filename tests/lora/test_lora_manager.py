@@ -20,6 +20,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.platforms import current_platform
 
 EMBEDDING_MODULES = {
     "embed_tokens": "input_embeddings",
@@ -28,9 +29,9 @@ EMBEDDING_MODULES = {
 
 EMBEDDING_PADDING_MODULES = ["lm_head"]
 
-CUDA_DEVICES = [
+DEVICES = ([
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+] if current_platform.is_cuda_alike() else ["cpu"])
 
 
 def test_peft_helper(sql_lora_files):
@@ -83,7 +84,7 @@ def test_peft_helper(sql_lora_files):
         PEFTHelper.from_dict(config)
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_from_lora_tensors(sql_lora_files, device):
     tensors = load_file(
         os.path.join(sql_lora_files, "adapter_model.safetensors"))
@@ -171,7 +172,7 @@ def test_replace_submodules(dist_init, dummy_model):
     manager = LoRAModelManager(
         model, 1, 1, 1,
         LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8),
-        torch.device("cuda"))
+        torch.device(DEVICES[0]))
     model = manager.model
 
     assert isinstance(model.get_submodule("dense1"),
@@ -183,7 +184,7 @@ def test_replace_submodules(dist_init, dummy_model):
                       RowParallelLinearWithLoRA)
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_lora_model_manager(dist_init, dummy_model, device):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
@@ -244,7 +245,7 @@ def test_lora_model_manager(dist_init, dummy_model, device):
     assert manager.punica_wrapper.device == device
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
@@ -336,7 +337,7 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
     assert manager.device == device
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_lru_lora_model_manager(dist_init, dummy_model, device):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
@@ -466,7 +467,7 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
     assert manager.device == device
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                                           sql_lora_files, device):
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
@@ -545,7 +546,7 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
             device)
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                                 sql_lora_files, device):
     # Should remove every LoRA not specified in the request.
@@ -621,7 +622,7 @@ def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
             device)
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_packed_loras(dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
     model.supported_lora_modules = ["gate_up_proj"]
