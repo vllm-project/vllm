@@ -10,7 +10,7 @@ struct PrepackBArgs {
   torch::Tensor const& B;
   at::ScalarType a_type;
   vllm::ScalarType b_type;
-  c10::optional<at::ScalarType> maybe_group_scales_type;
+  std::optional<at::ScalarType> maybe_group_scales_type;
 };
 
 template <typename PrepackedLayoutB>
