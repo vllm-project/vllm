@@ -10,7 +10,7 @@ Start the server with tool calling enabled. This example uses Meta's Llama 3.1 8
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --enable-auto-tool-choice \
     --tool-call-parser llama3_json \
-    --chat-template examples/tool_chat_template_llama3_json.jinja
+    --chat-template examples/tool_chat_template_llama3.1_json.jinja
 ```
 
 Next, make a request to the model that should result in it using the available tools:

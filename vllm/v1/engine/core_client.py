@@ -94,8 +94,6 @@ class InprocClient(EngineCoreClient):
 
         * pushes EngineCoreRequest directly into the EngineCore
         * pulls EngineCoreOutputs by stepping the EngineCore
-
-        TODO: support asyncio-mode for debugging.
     """
 
     def __init__(self, *args, **kwargs):

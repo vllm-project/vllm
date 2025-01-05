@@ -27,7 +27,7 @@
 Shared resampler perceiver network used in multimodal models and
 related helpers for sincos positional embeddings.
 
-Example models: Qwen (Qwen-VL), Minicpmv2.0
+Example models: Qwen (Qwen-VL), MiniCPM-V 2.0
 """
 import math
 from functools import partial
@@ -37,7 +37,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn.init import trunc_normal_
 
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -169,8 +168,8 @@ class BaseResampler(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
 
-        self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
-        trunc_normal_(self.query, std=0.02)
+        self.query = nn.Parameter(torch.empty(self.num_queries, embed_dim))
+
         if kv_dim is not None and kv_dim != embed_dim:
             self.kv_proj = ReplicatedLinear(kv_dim,
                                             embed_dim,
@@ -190,16 +189,7 @@ class BaseResampler(nn.Module):
         self.ln_post = norm_layer(embed_dim) if do_post_projection else None
         self.proj = nn.Parameter(
             (embed_dim**-0.5) *
-            torch.randn(embed_dim, embed_dim)) if do_post_projection else None
-
-    def _init_weights(self, m: nn.Module) -> None:
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=0.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
+            torch.empty(embed_dim, embed_dim)) if do_post_projection else None
 
     def _repeat(self, query, N: int):
         return query.unsqueeze(1).repeat(1, N, 1)
@@ -239,8 +229,6 @@ class Resampler2(BaseResampler):
 
         self.pos_embed = nn.Parameter(
             torch.from_numpy(pos_embed_arr).requires_grad_(False))
-
-        self.apply(self._init_weights)
 
     def forward(
         self,
