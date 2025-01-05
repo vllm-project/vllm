@@ -193,7 +193,7 @@ class SyncMPClient(MPClient):
         # Next action taken will raise EngineDeadError.
         def sigusr1_handler(signum, frame):
             logger.fatal("LLMEngine got fatal signal from background "
-                         "process, starting shutting down.")
+                         "process, shutting down.")
             self._errored = True
             self.shutdown()
 
