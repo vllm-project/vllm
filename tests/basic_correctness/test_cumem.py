@@ -4,7 +4,10 @@ from vllm import LLM, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
 from vllm.utils import GiB_bytes
 
+from ..utils import fork_new_process_for_each_test
 
+
+@fork_new_process_for_each_test
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
@@ -37,6 +40,7 @@ def test_basic_cumem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
+@fork_new_process_for_each_test
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool(mode=CuMemMode.OFFLOAD):
@@ -81,6 +85,7 @@ def test_cumem_with_cudagraph():
     assert torch.allclose(y, x + 1)
 
 
+@fork_new_process_for_each_test
 def test_end_to_end():
     llm = LLM("meta-llama/Llama-3.2-1B", enable_sleeping_mode=True)
     prompt = "How are you?"
