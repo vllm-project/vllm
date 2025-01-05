@@ -208,13 +208,20 @@ class SyncMPClient(MPClient):
             executor_class=executor_class,
             log_stats=log_stats,
         )
+    
+    def _handle_exception(self, e: Exception):
+        
+
 
     @engine_dead_error_guard
     def get_output(self) -> List[EngineCoreOutput]:
 
-        (frame, ) = self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frame.buffer).outputs
-        return engine_core_outputs
+        try:
+            (frame, ) = self.output_socket.recv_multipart(copy=False)
+            return self.decoder.decode(frame.buffer).outputs
+        except Exception as e:
+            if self._errored
+
 
     @engine_dead_error_guard
     def _send_input(self, request_type: EngineCoreRequestType,

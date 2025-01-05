@@ -29,6 +29,7 @@ class EngineClient(ABC):
     def is_running(self) -> bool:
         ...
 
+    @property
     @abstractmethod
     def is_stopped(self) -> bool:
         ...
