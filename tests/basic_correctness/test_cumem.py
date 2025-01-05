@@ -81,7 +81,7 @@ def test_cumem_with_cudagraph():
     assert torch.allclose(y, x + 1)
 
 
-def end_to_end_test():
+def test_end_to_end():
     llm = LLM("meta-llama/Llama-3.2-1B")
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
