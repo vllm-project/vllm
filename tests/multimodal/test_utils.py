@@ -9,7 +9,9 @@ import pytest
 from PIL import Image, ImageChops
 from transformers import AutoConfig, AutoTokenizer
 
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (MediaConnector,
+                                   merge_and_sort_mm_metadata_from_modalities,
                                    repeat_and_pad_placeholder_tokens)
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
@@ -191,3 +193,190 @@ def test_repeat_and_pad_placeholder_tokens(model):
         assert new_prompt == expected_prompt
         assert new_token_ids == expected_token_ids
         assert ranges == expected_ranges
+
+
+def test_merge_and_sort_mm_metadata_from_modalities():
+
+    # Each test case is a tuple of :
+    # - mm_positions: MultiModalPlaceholderDict
+    # - mm_hashes: Optional[MultiModalHashDict]
+    # - expected sorted modalities
+    # - expected sorted & flattened PlaceholderRanges
+    # - expected sorted & flattened hash strings.
+    test_cases = [
+        # Single modality should return result as is but flattened
+        (
+            {
+                "image": [
+                    PlaceholderRange(offset=0, length=2),
+                    PlaceholderRange(offset=3, length=2)
+                ]
+            },
+            {
+                "image": ["hash1", "hash2"]
+            },
+            ["image"],
+            [
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=3, length=2)
+            ],
+            ["hash1", "hash2"],
+        ),
+        # Single modality without hashes return None for mm hash.
+        (
+            {
+                "image": [
+                    PlaceholderRange(offset=0, length=2),
+                    PlaceholderRange(offset=2, length=2)
+                ]
+            },
+            None,
+            ["image"],
+            [
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=2, length=2)
+            ],
+            None,
+        ),
+        # Multiple modalities with hashes should return sorted modalities
+        # and flattened ranges and hashes.
+        (
+            {
+                "image": [
+                    PlaceholderRange(offset=7, length=4),
+                    PlaceholderRange(offset=11, length=5)
+                ],
+                "audio": [
+                    PlaceholderRange(offset=0, length=2),
+                    PlaceholderRange(offset=2, length=3)
+                ]
+            },
+            {
+                "image": ["image_hash1", "image_hash2"],
+                "audio": ["audio_hash1", "audio_hash2"]
+            },
+            ["audio", "image"],
+            [
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=2, length=3),
+                PlaceholderRange(offset=7, length=4),
+                PlaceholderRange(offset=11, length=5)
+            ],
+            ["audio_hash1", "audio_hash2", "image_hash1", "image_hash2"],
+        ),
+        # Multiple modalities without hashes should return sorted modalities
+        # and flattened ranges and None.
+        (
+            {
+                "image": [
+                    PlaceholderRange(offset=7, length=4),
+                    PlaceholderRange(offset=11, length=5)
+                ],
+                "audio": [
+                    PlaceholderRange(offset=0, length=2),
+                    PlaceholderRange(offset=2, length=3)
+                ]
+            },
+            None,
+            ["audio", "image"],
+            [
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=2, length=3),
+                PlaceholderRange(offset=7, length=4),
+                PlaceholderRange(offset=11, length=5)
+            ],
+            None,
+        ),
+        # Three modalities
+        (
+            {
+                "image": [
+                    PlaceholderRange(offset=15, length=7),
+                    PlaceholderRange(offset=22, length=8),
+                ],
+                "audio": [
+                    PlaceholderRange(offset=0, length=2),
+                ],
+                "video": [
+                    PlaceholderRange(offset=3, length=4),
+                    PlaceholderRange(offset=7, length=5),
+                    PlaceholderRange(offset=12, length=6),
+                ]
+            },
+            {
+                "image": ["image_hash1", "image_hash2"],
+                "audio": ["audio_hash1"],
+                "video": ["video_hash1", "video_hash2", "video_hash3"]
+            },
+            ["audio", "video", "audio"],
+            [
+                PlaceholderRange(offset=0, length=2),
+                PlaceholderRange(offset=3, length=4),
+                PlaceholderRange(offset=7, length=5),
+                PlaceholderRange(offset=12, length=6),
+                PlaceholderRange(offset=15, length=7),
+                PlaceholderRange(offset=22, length=8),
+            ],
+            [
+                "audio_hash1", "video_hash1", "video_hash2", "video_hash3",
+                "image_hash1", "image_hash2"
+            ],
+        ),
+    ]
+
+    for (mm_positions, mm_hashes, expected_modalities, expected_ranges,
+         expected_hashes) in test_cases:
+        modalities, ranges, hashes = merge_and_sort_mm_metadata_from_modalities(
+            mm_positions, mm_hashes)
+
+        assert modalities == expected_modalities
+        assert ranges == expected_ranges
+        assert hashes == expected_hashes
+    return test_cases
+
+
+def test_merge_and_sort_mm_metadata_from_modalities_interleaving():
+
+    test_cases = [
+
+        # <image> <audio> <image> <audio>
+        (
+            {
+                "image": [
+                    PlaceholderRange(offset=0, length=4),
+                    PlaceholderRange(offset=8, length=2)
+                ],
+                "audio": [
+                    PlaceholderRange(offset=5, length=2),
+                    PlaceholderRange(offset=11, length=4)
+                ]
+            },
+            {
+                "image": ["image_hash1", "image_hash2"],
+                "audio": ["audio_hash1", "audio_hash2"]
+            },
+        ),
+        # <image> <image> <video> <audio> <image>
+        (
+            {
+                "image": [
+                    PlaceholderRange(offset=0, length=2),
+                    PlaceholderRange(offset=2, length=3),
+                    PlaceholderRange(offset=20, length=4),
+                ],
+                "audio": [
+                    PlaceholderRange(offset=5, length=2),
+                ],
+                "video": [
+                    PlaceholderRange(offset=8, length=5),
+                ]
+            },
+            None,
+        ),
+    ]
+
+    for (mm_positions, mm_hashes) in test_cases:
+        with pytest.raises(ValueError) as ex_info:
+            merge_and_sort_mm_metadata_from_modalities(mm_positions, mm_hashes)
+
+        assert "Interleaved mixed-modality" in str(ex_info.value)
