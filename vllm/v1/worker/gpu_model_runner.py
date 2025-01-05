@@ -722,8 +722,6 @@ class GPUModelRunner:
         ]
 
         # Profile with multimodal encoder & encoder cache.
-        # TODO (ywang96): generalize this beyond image modality since
-        # mm_input_mapper only supports image inputs.
         if self.is_multimodal_model:
 
             # Create dummy batch of multimodal inputs.
@@ -735,15 +733,30 @@ class GPUModelRunner:
             dummy_mm_data = dummy_request_data.multi_modal_data
 
             # NOTE: Currently model is profiled with a single non-text
-            # modality even when it supports multiple.
-            max_tokens_per_mm_item = max(
-                self.mm_registry.get_max_tokens_per_item_by_modality(
-                    self.model_config).values())
+            # modality with the max possible input tokens even when
+            # it supports multiple.
+            max_tokens_by_modality_dict = self.mm_registry.get_max_tokens_per_item_by_modality(  # noqa: E501
+                self.model_config)
 
-            max_num_mm_items_encoder_budget = min(
-                self.max_num_encoder_input_tokens,
-                self.encoder_cache_size) // max_tokens_per_mm_item
+            dummy_data_modality, max_tokens_per_mm_item = max(
+                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
 
+            # Check how many items of this modality can be supported by
+            # the encoder cache budget.
+            encoder_cache_budget = min(self.max_num_encoder_input_tokens,
+                                       self.encoder_cache_size)
+            max_num_mm_items_encoder_budget = encoder_cache_budget // \
+                max_tokens_per_mm_item
+
+            # TODO: Allow users to set encoder_cache_budget in case this
+            # happens.
+            assert max_num_mm_items_encoder_budget > 0, (
+                f"Encoder cache budget={encoder_cache_budget} is too small to "
+                f"support the maximum possible size of multimodal embeddings"
+                f"={max_tokens_per_mm_item}.")
+
+            # Check how many items of this modality can be supported by
+            # the decoder budget.
             max_mm_items_per_req = max(
                 self.mm_registry.get_mm_limits_per_prompt(
                     self.model_config).values())
@@ -763,29 +776,26 @@ class GPUModelRunner:
             # they are scheduled to be processed separately.
 
             # Case when models have a merged processor, their dummy data is
-            # already batched `MultiModalKwargs`, therefore we need to "unbatch"
-            # and take the first item in each batched tensor.
-            # TODO (ywang96): This is somewhat hacky. Refactor this to be
-            # consistent with the other case.
+            # already batched `MultiModalKwargs`, therefore we take the first
+            # `MultiModalKwargsItem` from the desired modality to profile on.
             if isinstance(dummy_mm_data, MultiModalKwargs):
-                dummy_mm_kwargs = {
-                    k: v[0].unsqueeze(0)
-                    for k, v in dummy_mm_data.items()
-                }
+                dummy_mm_item = dummy_mm_data.get_item(
+                    modality=dummy_data_modality, item_index=0)
+                dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
             # Case when models have dummy data explicitly defined as
             # `MultiModalDataDict`, so they need to be processed through input
             # mapper.
+            # TODO (ywang96): deprecate this path once merged processor is supported
+            # on all models.
             else:
                 mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
                     mm_data=dummy_mm_data,
                     mm_hashes=None,
                     mm_processor_kwargs=None,
                     precomputed_mm_inputs=None)
-
-                # Take the first `MultiModalKwargs`
                 dummy_mm_kwargs = mm_kwargs_list[0]
-
+            
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
