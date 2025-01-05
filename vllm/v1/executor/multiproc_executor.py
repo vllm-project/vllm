@@ -385,7 +385,7 @@ class WorkerProc:
 
             # Wait for Worker to send READY.
             while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for WorkerProc to startup.")
+                logger.info("Waiting for WorkerProc to startup.")
 
                 if not proc.is_alive():
                     raise RuntimeError("WorkerProc failed to start.")

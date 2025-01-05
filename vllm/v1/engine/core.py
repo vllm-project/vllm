@@ -165,7 +165,9 @@ class EngineCoreProc(EngineCore):
                              daemon=True).start()
             # Send Readiness signal to EngineClient.
             ready_pipe.send({"status": "READY"})
-        except Exception:
+
+        except Exception as e:
+            logger.exception("EngineCore got error at startup:", exc_info=e)
             ready_pipe.send({"status": "FAILED"})
 
     @staticmethod

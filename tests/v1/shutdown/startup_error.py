@@ -20,9 +20,15 @@ def evil_forward(self, *args, **kwargs):
     return self.model(*args, **kwargs, intermediate_tensors=None)
 
 
-@pytest.mark.asyncio
+MODELS = [
+    "meta-llama/Llama-3.2-1B",  # Raises on first fwd pass.
+    "mistralai/Mixtral-8x22B-Instruct-v0.1"  # Causes OOM.
+]
+
+
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-async def test_async_llm_startup_error(monkeypatch, tensor_parallel_size):
+def test_async_llm_startup_error(monkeypatch, model, tensor_parallel_size):
 
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
@@ -34,7 +40,7 @@ async def test_async_llm_startup_error(monkeypatch, tensor_parallel_size):
         monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
 
         engine_args = AsyncEngineArgs(
-            model="meta-llama/Llama-3.2-1B",
+            model=model,
             enforce_eager=True,
             tensor_parallel_size=tensor_parallel_size)
 
@@ -50,9 +56,10 @@ async def test_async_llm_startup_error(monkeypatch, tensor_parallel_size):
         )
 
 
-@pytest.mark.parametrize("enable_multiprocessing", [True, False])
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
-def test_llm_startup_error(monkeypatch, tensor_parallel_size,
+@pytest.mark.parametrize("enable_multiprocessing", [True, False])
+def test_llm_startup_error(monkeypatch, model, tensor_parallel_size,
                            enable_multiprocessing):
 
     if cuda_device_count_stateless() < tensor_parallel_size:

@@ -318,7 +318,7 @@ class AsyncLLM(EngineClient):
         except Exception as e:
             logger.error(
                 "AsyncLLM output_handler got an exception, shutting down",
-                exec_info=e)
+                exc_info=e)
             self._set_errored_and_propagate()
 
     def _set_errored_and_propagate(self):
