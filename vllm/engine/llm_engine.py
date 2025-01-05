@@ -1876,15 +1876,15 @@ class LLMEngine:
         else:
             self.model_executor._run_workers("sleep")
 
-    def wakeup(self) -> None:
+    def wake_up(self) -> None:
         assert self.vllm_config.model_config.enable_sleeping_mode, (
             "Sleeping mode is not enabled in the model config")
         # using type instead of isinstance to check to avoid capturing
         # inherited classes (MultiprocessingGPUExecutor)
         if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.wakeup()
+            self.model_executor.wake_up()
         else:
-            self.model_executor._run_workers("wakeup")
+            self.model_executor._run_workers("wake_up")
 
     def is_tracing_enabled(self) -> bool:
         return self.tracer is not None

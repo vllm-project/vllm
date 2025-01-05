@@ -1084,8 +1084,8 @@ class LLM:
     def sleep(self):
         self.llm_engine.sleep()
 
-    def wakeup(self):
-        self.llm_engine.wakeup()
+    def wake_up(self):
+        self.llm_engine.wake_up()
 
     # LEGACY
     def _convert_v1_inputs(

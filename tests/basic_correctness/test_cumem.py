@@ -82,7 +82,7 @@ def test_cumem_with_cudagraph():
 
 
 def test_end_to_end():
-    llm = LLM("meta-llama/Llama-3.2-1B")
+    llm = LLM("meta-llama/Llama-3.2-1B", enable_sleeping_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
