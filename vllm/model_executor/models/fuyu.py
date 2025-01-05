@@ -75,7 +75,7 @@ class FuyuProcessingMixin(ProcessingMixin):
     def _get_image_processor(self) -> FuyuImageProcessor:
         return self._get_hf_processor().image_processor
 
-    def get_image_feature_grid_size(
+    def _get_image_feature_grid_size(
         self,
         *,
         image_width: int,
@@ -106,7 +106,7 @@ class FuyuProfilingInfo(FuyuProcessingMixin, BaseProfilingInfo):
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         target_width, target_height = self._get_image_size_with_most_features()
 
-        max_ncols, max_nrows = self.get_image_feature_grid_size(
+        max_ncols, max_nrows = self._get_image_feature_grid_size(
             image_width=target_width,
             image_height=target_height,
         )
@@ -207,7 +207,7 @@ class FuyuMultiModalProcessor(FuyuProcessingMixin, BaseMultiModalProcessor):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = self.get_image_feature_grid_size(
+            ncols, nrows = self._get_image_feature_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )

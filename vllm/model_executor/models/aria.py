@@ -453,7 +453,7 @@ class AriaProcessingMixin(ProcessingMixin):
     def _get_vision_config(self) -> AriaVisionConfig:
         return self._get_hf_config().vision_config
 
-    def get_num_image_tokens(self) -> int:
+    def _get_num_image_tokens(self) -> int:
         hf_config = self._get_hf_config()
         return max(hf_config.projector_patch_to_query_dict.values())
 
@@ -464,7 +464,7 @@ class AriaProfilingInfo(AriaProcessingMixin, BaseProfilingInfo):
         return {"image": None}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
+        return {"image": self._get_num_image_tokens()}
 
     def get_dummy_processor_inputs(
         self,
@@ -516,7 +516,7 @@ class AriaMultiModalProcessor(AriaProcessingMixin, BaseMultiModalProcessor):
         hf_config = self._get_hf_config()
         image_token_id = hf_config.image_token_index
 
-        num_image_tokens = self.get_num_image_tokens()
+        num_image_tokens = self._get_num_image_tokens()
 
         return [
             PromptReplacement(

@@ -75,7 +75,7 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
         return self.ctx.get_hf_processor(LlavaNextProcessor)
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L106
-    def get_num_image_tokens(
+    def _get_num_image_tokens(
         self,
         *,
         image_width: int,
@@ -156,8 +156,8 @@ class LlavaNextProfilingInfo(LlavaNextProcessingMixin, BaseLlavaProfilingInfo):
 
         largest_feature_size, largest_feature_pinpoint = 0, None
         for (height, width) in hf_config.image_grid_pinpoints:
-            feat_size = self.get_num_image_tokens(image_width=width,
-                                                  image_height=height)
+            feat_size = self._get_num_image_tokens(image_width=width,
+                                                   image_height=height)
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
                 largest_feature_pinpoint = ImageSize(width=width,

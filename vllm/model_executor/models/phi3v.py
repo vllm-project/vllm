@@ -314,7 +314,7 @@ class Phi3VProcessingMixin(ProcessingMixin):
 
         return self.ctx.get_hf_processor()
 
-    def get_num_image_tokens(
+    def _get_num_image_tokens(
         self,
         *,
         image_width: int,
@@ -336,7 +336,7 @@ class Phi3VProfilingInfo(Phi3VProcessingMixin, BaseProfilingInfo):
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         target_width, target_height = self._get_image_size_with_most_features()
 
-        max_image_tokens = self.get_num_image_tokens(
+        max_image_tokens = self._get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
         )
@@ -431,7 +431,7 @@ class Phi3VMultiModalProcessor(Phi3VProcessingMixin, BaseMultiModalProcessor):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
                 image_size = images.get_image_size(item_idx)
-                num_image_tokens = self.get_num_image_tokens(
+                num_image_tokens = self._get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )

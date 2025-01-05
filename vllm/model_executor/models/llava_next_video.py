@@ -73,7 +73,7 @@ class LlavaNextVideoProcessingMixin(ProcessingMixin):
 
         return pooled_grid_length * pooled_grid_length
 
-    def get_num_video_tokens(
+    def _get_num_video_tokens(
         self,
         *,
         image_width: int,
@@ -97,7 +97,7 @@ class LlavaNextVideoProfilingInfo(LlavaNextVideoProcessingMixin,
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         target_width, target_height = self._get_image_size_with_most_features()
 
-        max_video_tokens = self.get_num_video_tokens(
+        max_video_tokens = self._get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self._get_dummy_num_frames(seq_len),
@@ -117,7 +117,7 @@ class LlavaNextVideoProfilingInfo(LlavaNextVideoProcessingMixin,
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
+            next_max_tokens = self._get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
@@ -195,7 +195,7 @@ class LlavaNextVideoMultiModalProcessor(LlavaNextVideoProcessingMixin,
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
                 image_size = videos.get_frame_size(item_idx)
-                num_video_tokens = self.get_num_video_tokens(
+                num_video_tokens = self._get_num_video_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     num_frames=videos.get_num_frames(item_idx),

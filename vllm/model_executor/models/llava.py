@@ -117,7 +117,7 @@ class BaseLlavaProcessingMixin(ProcessingMixin, ABC):
     def _get_hf_processor(self) -> LlavaLikeProcessor:
         raise NotImplementedError
 
-    def get_num_image_tokens(
+    def _get_num_image_tokens(
         self,
         *,
         image_width: int,
@@ -164,7 +164,7 @@ class BaseLlavaProfilingInfo(BaseLlavaProcessingMixin, BaseProfilingInfo):
     def _get_max_image_tokens(self) -> int:
         target_width, target_height = self._get_image_size_with_most_features()
 
-        return self.get_num_image_tokens(
+        return self._get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
         )
@@ -237,7 +237,7 @@ class BaseLlavaMultiModalProcessor(LlavaProcessingMixin,
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
                 image_size = images.get_image_size(item_idx)
-                num_image_tokens = self.get_num_image_tokens(
+                num_image_tokens = self._get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )
@@ -725,7 +725,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         image_token_id = hf_config.image_token_index
 
         # Assume that it doesn't depend on the image size
-        num_image_tokens = self.get_num_image_tokens(
+        num_image_tokens = self._get_num_image_tokens(
             image_width=-1,
             image_height=-1,
         )

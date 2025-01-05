@@ -402,7 +402,7 @@ class Blip2ProcessingMixin(ProcessingMixin):
     def _get_hf_config(self):
         return self.ctx.get_hf_config(Blip2Config)
 
-    def get_num_image_tokens(self) -> int:
+    def _get_num_image_tokens(self) -> int:
         hf_config = self._get_hf_config()
         return hf_config.num_query_tokens
 
@@ -413,7 +413,7 @@ class Blip2ProfilingInfo(Blip2ProcessingMixin, BaseProfilingInfo):
         return {"image": 1}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
+        return {"image": self._get_num_image_tokens()}
 
     def get_dummy_processor_inputs(
         self,
@@ -460,7 +460,7 @@ class Blip2MultiModalProcessor(Blip2ProcessingMixin, BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        num_image_tokens = self.get_num_image_tokens()
+        num_image_tokens = self._get_num_image_tokens()
 
         return [
             PromptReplacement(

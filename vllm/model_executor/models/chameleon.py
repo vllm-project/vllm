@@ -57,7 +57,7 @@ class ChameleonProcessingMixin(ProcessingMixin):
     def _get_hf_processor(self):
         return self.ctx.get_hf_processor(ChameleonProcessor)
 
-    def get_num_image_tokens(self) -> int:
+    def _get_num_image_tokens(self) -> int:
         processor = self._get_hf_processor()
         return processor.image_seq_length
 
@@ -68,7 +68,7 @@ class ChameleonProfilingInfo(ChameleonProcessingMixin, BaseProfilingInfo):
         return {"image": 1}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
+        return {"image": self._get_num_image_tokens()}
 
     def get_dummy_processor_inputs(
         self,
@@ -120,7 +120,7 @@ class ChameleonMultiModalProcessor(ChameleonProcessingMixin,
                 target="<image>",
                 replacement="".join([
                     processor.image_start_token,
-                    processor.image_token * self.get_num_image_tokens(),
+                    processor.image_token * self._get_num_image_tokens(),
                     processor.image_end_token,
                 ]),
             )

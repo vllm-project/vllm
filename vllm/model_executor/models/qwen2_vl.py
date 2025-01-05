@@ -787,7 +787,7 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
 
         return preprocessed_size, num_vision_tokens
 
-    def get_num_image_tokens(
+    def _get_num_image_tokens(
         self,
         *,
         image_width: int,
@@ -799,7 +799,7 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
         )
         return num_image_tokens
 
-    def get_num_video_tokens(
+    def _get_num_video_tokens(
         self,
         *,
         image_width: int,
@@ -835,7 +835,7 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
     def _get_max_image_tokens(self) -> int:
         target_width, target_height = self._get_image_size_with_most_features()
 
-        return self.get_num_image_tokens(
+        return self._get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
         )
@@ -847,7 +847,7 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
+            next_max_tokens = self._get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
@@ -880,7 +880,7 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
     def _get_max_video_tokens(self, seq_len: int) -> int:
         target_width, target_height = self._get_image_size_with_most_features()
 
-        return self.get_num_video_tokens(
+        return self._get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self._get_dummy_num_frames(seq_len),
