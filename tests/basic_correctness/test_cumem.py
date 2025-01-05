@@ -1,6 +1,8 @@
 import torch
 
 from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
+from vllm import LLM, SamplingParams
+from vllm.utils import GiB_bytes
 
 
 def test_basic_cumem():
@@ -77,3 +79,24 @@ def test_cumem_with_cudagraph():
 
     # output content is as expected
     assert torch.allclose(y, x + 1)
+
+
+def end_to_end_test():
+    llm = LLM("meta-llama/Llama-3.2-1B")
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    free_bytes = torch.cuda.mem_get_info()[0]
+    print(f"Free memory before sleep: {free_bytes / GiB_bytes:.2f} GiB")
+    llm.sleep()
+    free_bytes_after_sleep = torch.cuda.mem_get_info()[0]
+    print(
+        f"Free memory after sleep: {free_bytes_after_sleep / GiB_bytes:.2f} GiB"
+    )
+    assert free_bytes_after_sleep > free_bytes
+
+    llm.wake_up()
+    output2 = llm.generate(prompt, sampling_params)
+
+    # cmp output
