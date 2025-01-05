@@ -74,23 +74,6 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
     def _get_hf_processor(self):
         return self.ctx.get_hf_processor(LlavaNextProcessor)
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        hf_config = self._get_hf_config()
-
-        largest_feature_size, largest_feature_pinpoint = 0, None
-        for (height, width) in hf_config.image_grid_pinpoints:
-            feat_size = self.get_num_image_tokens(image_width=width,
-                                                  image_height=height)
-            if feat_size > largest_feature_size:
-                largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width,
-                                                     height=height)
-
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
-
-        return largest_feature_pinpoint
-
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L106
     def get_num_image_tokens(
         self,
@@ -167,7 +150,23 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
 
 
 class LlavaNextProfilingInfo(LlavaNextProcessingMixin, BaseLlavaProfilingInfo):
-    pass
+
+    def _get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self._get_hf_config()
+
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for (height, width) in hf_config.image_grid_pinpoints:
+            feat_size = self.get_num_image_tokens(image_width=width,
+                                                  image_height=height)
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width,
+                                                     height=height)
+
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
+
+        return largest_feature_pinpoint
 
 
 class LlavaNextMultiModalProcessor(LlavaNextProcessingMixin,

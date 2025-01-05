@@ -180,7 +180,7 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
         }
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         num_frames = 0
 
@@ -211,7 +211,7 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
         return max(max_total_frames // max(max_videos, 1), 1)
 
     def _get_max_video_tokens(self, seq_len: int) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         return self.get_num_video_tokens(
             image_width=target_width,
@@ -230,7 +230,7 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
         processor = self._get_hf_processor()
         image_token = processor.image_token
         video_token = processor.video_token
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         mm_data = {
             "image":

@@ -72,14 +72,8 @@ class FuyuProcessingMixin(ProcessingMixin):
     def _get_hf_processor(self):
         return self.ctx.get_hf_processor(FuyuProcessor)
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
-        processor = self._get_hf_processor()
-        image_processor: FuyuImageProcessor = processor.image_processor
-
-        target_size = image_processor.size
-        return ImageSize(width=target_size["width"],
-                         height=target_size["height"])
+    def _get_image_processor(self) -> FuyuImageProcessor:
+        return self._get_hf_processor().image_processor
 
     def get_image_feature_grid_size(
         self,
@@ -87,7 +81,9 @@ class FuyuProcessingMixin(ProcessingMixin):
         image_width: int,
         image_height: int,
     ) -> tuple[int, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
+        image_processor = self._get_image_processor()
+        target_width = image_processor.size["width"]
+        target_height = image_processor.size["height"]
 
         if not (image_width <= target_width and image_height <= target_height):
             height_scale_factor = target_height / image_height
@@ -108,7 +104,7 @@ class FuyuProfilingInfo(FuyuProcessingMixin, BaseProfilingInfo):
         return {"image": 1}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         max_ncols, max_nrows = self.get_image_feature_grid_size(
             image_width=target_width,
@@ -118,12 +114,18 @@ class FuyuProfilingInfo(FuyuProcessingMixin, BaseProfilingInfo):
 
         return {"image": max_image_tokens}
 
+    def _get_image_size_with_most_features(self) -> ImageSize:
+        """Get the image size with the most features."""
+        image_processor = self._get_image_processor()
+        return ImageSize(width=image_processor.size["width"],
+                         height=image_processor.size["height"])
+
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
         mm_data = {

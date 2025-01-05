@@ -314,11 +314,6 @@ class Phi3VProcessingMixin(ProcessingMixin):
 
         return self.ctx.get_hf_processor()
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
-        # Result in the max possible feature size (h:w = 16:1)
-        return ImageSize(width=50, height=8000)
-
     def get_num_image_tokens(
         self,
         *,
@@ -339,7 +334,7 @@ class Phi3VProfilingInfo(Phi3VProcessingMixin, BaseProfilingInfo):
         return {"image": None}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         max_image_tokens = self.get_num_image_tokens(
             image_width=target_width,
@@ -348,6 +343,11 @@ class Phi3VProfilingInfo(Phi3VProcessingMixin, BaseProfilingInfo):
 
         return {"image": max_image_tokens}
 
+    def _get_image_size_with_most_features(self) -> ImageSize:
+        """Get the image size with the most features."""
+        # Result in the max possible feature size (h:w = 16:1)
+        return ImageSize(height=8000, width=50)
+
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
@@ -355,7 +355,7 @@ class Phi3VProfilingInfo(Phi3VProcessingMixin, BaseProfilingInfo):
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         mm_data = {
             "image":

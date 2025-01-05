@@ -73,12 +73,6 @@ class LlavaNextVideoProcessingMixin(ProcessingMixin):
 
         return pooled_grid_length * pooled_grid_length
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
-        vision_encoder_info = self._get_vision_encoder_info()
-        width = height = vision_encoder_info.get_image_size()
-        return ImageSize(width=width, height=height)
-
     def get_num_video_tokens(
         self,
         *,
@@ -101,7 +95,7 @@ class LlavaNextVideoProfilingInfo(LlavaNextVideoProcessingMixin,
         return {"video": 1}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         max_video_tokens = self.get_num_video_tokens(
             image_width=target_width,
@@ -111,8 +105,14 @@ class LlavaNextVideoProfilingInfo(LlavaNextVideoProcessingMixin,
 
         return {"video": max_video_tokens}
 
+    def _get_image_size_with_most_features(self) -> ImageSize:
+        """Get the image size with the most features."""
+        vision_encoder_info = self._get_vision_encoder_info()
+        width = height = vision_encoder_info.get_image_size()
+        return ImageSize(width=width, height=height)
+
     def _get_max_video_frames(self, max_tokens: int) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         num_frames = 0
 
@@ -148,7 +148,7 @@ class LlavaNextVideoProfilingInfo(LlavaNextVideoProcessingMixin,
 
         processor = self._get_hf_processor()
         video_token = processor.video_token
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         mm_data = {
             "video":

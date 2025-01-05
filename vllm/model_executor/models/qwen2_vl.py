@@ -787,14 +787,6 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
 
         return preprocessed_size, num_vision_tokens
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
-        max_image_size, _ = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
-        )
-        return max_image_size
-
     def get_num_image_tokens(
         self,
         *,
@@ -833,8 +825,16 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
             "video": self._get_max_video_tokens(seq_len),
         }
 
+    def _get_image_size_with_most_features(self) -> ImageSize:
+        """Get the image size with the most features."""
+        max_image_size, _ = self._get_vision_info(
+            image_width=9999999,
+            image_height=9999999,
+        )
+        return max_image_size
+
     def _get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         return self.get_num_image_tokens(
             image_width=target_width,
@@ -842,7 +842,7 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
         )
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         num_frames = 0
 
@@ -879,7 +879,7 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
         return num_frames
 
     def _get_max_video_tokens(self, seq_len: int) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         return self.get_num_video_tokens(
             image_width=target_width,
@@ -898,7 +898,7 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
         hf_processor = self._get_hf_processor()
         image_token: str = hf_processor.image_token
         video_token: str = hf_processor.video_token
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         mm_data = {
             "image":

@@ -113,12 +113,6 @@ class BaseLlavaProcessingMixin(ProcessingMixin, ABC):
     def _get_vision_encoder_info(self):
         return get_vision_encoder_info(self._get_hf_config())
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
-        vision_encoder_info = self._get_vision_encoder_info()
-        width = height = vision_encoder_info.get_image_size()
-        return ImageSize(width=width, height=height)
-
     @abstractmethod
     def _get_hf_processor(self) -> LlavaLikeProcessor:
         raise NotImplementedError
@@ -162,8 +156,14 @@ class BaseLlavaProfilingInfo(BaseLlavaProcessingMixin, BaseProfilingInfo):
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {"image": self._get_max_image_tokens()}
 
+    def _get_image_size_with_most_features(self) -> ImageSize:
+        """Get the image size with the most features."""
+        vision_encoder_info = self._get_vision_encoder_info()
+        width = height = vision_encoder_info.get_image_size()
+        return ImageSize(width=width, height=height)
+
     def _get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         return self.get_num_image_tokens(
             image_width=target_width,
@@ -179,7 +179,7 @@ class BaseLlavaProfilingInfo(BaseLlavaProcessingMixin, BaseProfilingInfo):
 
         processor = self._get_hf_processor()
         image_token = processor.image_token
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self._get_image_size_with_most_features()
 
         mm_data = {
             "image":
