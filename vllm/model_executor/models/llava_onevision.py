@@ -800,7 +800,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # tensor correspoending to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
-        # NOTE: It is imported to iterate over the keys in this dictionary
+        # NOTE: It is important to iterate over the keys in this dictionary
         # to preserve the order of the modalities.
         for modality in modalities:
             if modality == "images":
