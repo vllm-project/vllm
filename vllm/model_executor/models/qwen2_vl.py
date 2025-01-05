@@ -21,7 +21,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
-import math
 from functools import cached_property, partial
 from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
                     Set, Tuple, Type, TypedDict, Union)
@@ -790,9 +789,11 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         """Get the image size with the most features."""
-        image_processor = self._get_image_processor()
-        max_width = max_height = math.ceil(image_processor.max_pixels**0.5)
-        return ImageSize(width=max_width, height=max_height)
+        max_image_size, _ = self._get_vision_info(
+            image_width=9999999,
+            image_height=9999999,
+        )
+        return max_image_size
 
     def get_num_image_tokens(
         self,
