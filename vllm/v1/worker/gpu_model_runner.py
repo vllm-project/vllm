@@ -786,8 +786,8 @@ class GPUModelRunner:
             # Case when models have dummy data explicitly defined as
             # `MultiModalDataDict`, so they need to be processed through input
             # mapper.
-            # TODO (ywang96): deprecate this path once merged processor is supported
-            # on all models.
+            # TODO (ywang96): deprecate this path once merged processor is
+            # supported on all models.
             else:
                 mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
                     mm_data=dummy_mm_data,
@@ -795,7 +795,7 @@ class GPUModelRunner:
                     mm_processor_kwargs=None,
                     precomputed_mm_inputs=None)
                 dummy_mm_kwargs = mm_kwargs_list[0]
-            
+
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
