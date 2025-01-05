@@ -1,7 +1,7 @@
 import torch
 
-from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
 from vllm import LLM, SamplingParams
+from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
 from vllm.utils import GiB_bytes
 
 
@@ -100,3 +100,4 @@ def test_end_to_end():
     output2 = llm.generate(prompt, sampling_params)
 
     # cmp output
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
