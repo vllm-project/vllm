@@ -14,7 +14,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.engine.exceptions import engine_dead_error_guard
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import PickleEncoder
 from vllm.v1.utils import BackgroundProcHandle
@@ -184,15 +184,13 @@ class SyncMPClient(MPClient):
                  executor_class: Type[Executor],
                  log_stats: bool = False):
 
-        # NOTE(rob): signal handler only needed for SyncMPClient
+        # TODO(rob): signal handler only needed for SyncMPClient
         # because AsyncLLM needs to handle the signal rather
-        # than the AsyncMPClient. TODO(follow-up): move the defn of
-        # these functions to async_llm.py and llm_engine.py to make
-        # distinction clearer.
+        # than the AsyncMPClient. TODO(rob): move the Client def
+        # to async_llm and llm_engine to make this clearer.
         # Background procs sent SIGUSR1 if they hit error.
-        # We handle this by setting the _errored state to True
-        # and shutting down. Once _errored, we convert any
-        # Exceptions into an EngineDeadError for UX.
+        # Handle by setting _errored=True and shutting down.
+        # Next action taken will raise EngineDeadError.
         def sigusr1_handler(signum, frame):
             logger.fatal("LLMEngine got fatal signal from background "
                          "process, starting shutting down.")
@@ -208,28 +206,30 @@ class SyncMPClient(MPClient):
             executor_class=executor_class,
             log_stats=log_stats,
         )
-    
-    def _handle_exception(self, e: Exception):
-        
 
+    def _format_exception(self, e: Exception) -> Exception:
+        # If we are in the _errored state, raise EngineDeadError
+        # so the root cause is clear in the stack trace.
+        return (EngineDeadError(
+            "EngineCore encountered an issue. See stack trace "
+            "for the root cause.",
+            suppress_context=True) if self._errored else e)
 
-    @engine_dead_error_guard
     def get_output(self) -> List[EngineCoreOutput]:
-
         try:
             (frame, ) = self.output_socket.recv_multipart(copy=False)
             return self.decoder.decode(frame.buffer).outputs
         except Exception as e:
-            if self._errored
+            raise self._format_exception(e) from None
 
-
-    @engine_dead_error_guard
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: EngineCoreRequestUnion) -> None:
-
-        # (RequestType, SerializedRequest)
-        msg = (request_type.value, self.encoder.encode(request))
-        self.input_socket.send_multipart(msg, copy=False)
+        try:
+            # (RequestType, SerializedRequest)
+            msg = (request_type.value, self.encoder.encode(request))
+            self.input_socket.send_multipart(msg, copy=False)
+        except Exception as e:
+            raise self._format_exception(e) from None
 
     def add_request(self, request: EngineCoreRequest) -> None:
         self._send_input(EngineCoreRequestType.ADD, request)

@@ -5,10 +5,8 @@ class EngineGenerateError(Exception):
 
 class EngineDeadError(Exception):
     """Raised when the EngineCore dies. Unrecoverable."""
-    def __init__(self,
-                 *args, 
-                 suppress_context: bool = False, 
-                 **kwargs):
+
+    def __init__(self, *args, suppress_context: bool = False, **kwargs):
         super().__init__(args, kwargs)
 
         # If we get an EngineDead signal when using LLMEngine,
