@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from typing import List, Tuple, Type
 
+from vllm.v1.executor.ray_executor import RayExecutor
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
@@ -168,6 +169,7 @@ class EngineCoreProc(EngineCore):
                 EngineCoreRequestUnion] = asyncio.Queue()
             self.microbatch_queue = asyncio.Queue(
                 vllm_config.parallel_config.pipeline_parallel_size)
+            self.microbatch_queue_size = vllm_config.parallel_config.pipeline_parallel_size
         else:
             self.input_queue: queue.Queue[
                 EngineCoreRequestUnion] = queue.Queue()
@@ -223,7 +225,7 @@ class EngineCoreProc(EngineCore):
     ) -> EngineCoreProcHandle:
         context = get_mp_context()
 
-        async_engine_core = True
+        async_engine_core = True if vllm_config.parallel_config.distributed_executor_backend == "ray" else False
         process_kwargs = {
             "input_path": input_path,
             "output_path": output_path,
@@ -293,24 +295,32 @@ class EngineCoreProc(EngineCore):
         consumer = asyncio.create_task(self.finish_microbatch())
         await asyncio.gather(producer, consumer)
 
+    async def can_schedule(self):
+        while True:
+            if self.scheduler.has_schedulable_requests():
+                logger.info("can_schedule: has_schedulable_requests")
+                return True
+            if not self.input_queue.empty():
+                logger.info("can_schedule: input_queue not empty")
+                return True
+            logger.info("can_schedule: waiting")
+            await asyncio.sleep(0.1)
+
+    async def can_submit(self):
+        while True:
+            if self.microbatch_queue.qsize() < self.microbatch_queue_size:
+                logger.info(
+                    "can_submit: microbatch_queue.size() < microbatch_queue_size"
+                )
+                return True
+            logger.info("can_submit: waiting")
+            await asyncio.sleep(0.1)
+
     async def submit_microbatch(self):
         print("submit_microbatch")
         while True:
-            if not self.scheduler.has_schedulable_requests():
-                logger.info("submit_microbatch: no unfinished requests")
-                try:
-                    req = await asyncio.wait_for(self.input_queue.get(),
-                                                 timeout=1)
-                    logger.info("submit_microbatch: got req")
-                    self._handle_client_request(req)
-                except asyncio.TimeoutError:
-                    logger.info("submit_microbatch: no req")
-                    continue
-                except BaseException as e:
-                    logger.exception(e)
-                    raise e
-            else:
-                logger.info("submit_microbatch: got schedulable requests")
+            await asyncio.gather(self.can_schedule(), self.can_submit())
+            logger.info("submit_microbatch: can continue")
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
                 logger.info("submit_microbatch: got req")
