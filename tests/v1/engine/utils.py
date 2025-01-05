@@ -7,7 +7,7 @@ import numpy.typing as npt
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from vllm.outputs import RequestOutput
-from vllm.v1.engine.detokenizer import DetokenizerRequest
+from vllm.v1.engine import EngineCoreRequest
 
 random.seed(42)
 
@@ -206,7 +206,7 @@ def _decode_token(
 
 
 def validate_requests_logprobs(
-    requests: List[DetokenizerRequest],
+    requests: List[EngineCoreRequest],
     request_outputs: List[RequestOutput],
     tokenizer: PreTrainedTokenizer,
 ) -> None:
@@ -229,7 +229,9 @@ def validate_requests_logprobs(
       request_outputs: list of detokenizer outputs
     """
     for req, req_out in zip(requests, request_outputs):
-        if req.logprobs is not None and req.logprobs > 0:
+        logprobs = req.sampling_params.logprobs
+        prompt_logprobs = req.sampling_params.prompt_logprobs
+        if logprobs is not None and logprobs > 0:
             # Validate sample logprobs
             for comp in req_out.outputs:
                 # For each completion
@@ -243,7 +245,7 @@ def validate_requests_logprobs(
                             tok_id,
                             tokenizer), "sample logprob decoded token mismatch"
 
-        if req.prompt_logprobs is not None and req.prompt_logprobs > 0 and len(
+        if prompt_logprobs is not None and prompt_logprobs > 0 and len(
                 req_out.prompt_logprobs) > 0:
             # Validate prompt logprobs
             assert req_out.prompt_logprobs[
