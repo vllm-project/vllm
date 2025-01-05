@@ -27,7 +27,7 @@ def test_basic_cumem():
     free_bytes = torch.cuda.mem_get_info()[0]
     allocator.sleep()
     free_bytes_after_sleep = torch.cuda.mem_get_info()[0]
-    assert free_bytes_after_sleep < free_bytes
+    assert free_bytes_after_sleep > free_bytes
     allocator.wake_up()
 
     # they can be used together
