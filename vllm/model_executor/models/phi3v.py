@@ -317,7 +317,7 @@ class Phi3VProcessingMixin(ProcessingMixin):
     def get_image_size_with_most_features(self) -> ImageSize:
         """Get the image size with the most features."""
         # Result in the max possible feature size (h:w = 16:1)
-        return ImageSize(width=15, height=8000)
+        return ImageSize(width=50, height=8000)
 
     def get_num_image_tokens(
         self,
