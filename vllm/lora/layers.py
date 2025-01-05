@@ -406,8 +406,8 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.n_slices = 1
 
     def forward(
-            self,
-            input_) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of ReplicatedLinearWithLoRA
 
         Args:
@@ -499,8 +499,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         return bias
 
     def forward(
-            self,
-            input_) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -838,8 +838,8 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         return bias
 
     def forward(
-            self,
-            input_) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of RowParallelLinear
 
         Args:
