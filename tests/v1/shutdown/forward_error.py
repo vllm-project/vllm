@@ -32,6 +32,9 @@ def evil_forward(self, *args, **kwargs):
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
 
+    if cuda_device_count_stateless() < tensor_parallel_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
