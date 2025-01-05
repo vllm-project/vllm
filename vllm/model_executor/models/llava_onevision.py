@@ -528,8 +528,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities = {}
 
-        # Preserve the order of modalities from the kwargs if there are
-        # multiple of them.
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
         for input_key in kwargs:
             if input_key == "pixel_values" and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
