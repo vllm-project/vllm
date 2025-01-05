@@ -116,3 +116,9 @@ class CuMemAllocator:
                                             self.python_free_callback):
             yield
             self.current_mode = old_mode
+
+    def get_current_usage(self):
+        sum_bytes = 0
+        for ptr, handle in self.pointer_to_handle.items():
+            sum_bytes += handle[1]
+        return sum_bytes
