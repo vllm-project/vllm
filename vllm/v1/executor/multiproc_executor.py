@@ -40,10 +40,12 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
 
-        # WorkerProcs send SIGUSR1 if they get an Error.
+        # The child processes will send SIGUSR1 when unrecoverable
+        # errors happen.
         def sigusr1_handler(signum, frame):
-            logger.fatal("MultiprocExecutor got fatal signal from "
-                         "background process, starting shutdown.")
+            logger.fatal(
+                "MulitprocExecutor got fatal signal from worker processes, "
+                "shutting down. See stack trace above for root cause issue.")
             # Shutdown first (avoid SysExit exceptions in __del__).
             self.shutdown()
             # TODO(rob): move this to the VLLMConfig.
