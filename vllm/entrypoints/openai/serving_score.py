@@ -101,7 +101,7 @@ class OpenAIServingScores(OpenAIServing):
             if not self.model_config.is_cross_encoder:
                 raise ValueError("Model is not cross encoder.")
 
-        except Exception as e:
+        except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
@@ -155,7 +155,7 @@ class OpenAIServingScores(OpenAIServing):
                 )
 
                 generators.append(generator)
-        except Exception as e:
+        except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
@@ -184,7 +184,7 @@ class OpenAIServingScores(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except Exception as e:
+        except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
