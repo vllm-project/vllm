@@ -84,7 +84,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         hf_config = self.ctx.get_hf_config(Qwen2AudioConfig)
         max_source_positions = hf_config.audio_config.max_source_positions
         max_output_lengths = (max_source_positions - 2) // 2 + 1
@@ -184,15 +184,16 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
         ]
 
     def _always_apply_prompt_replacements(self) -> bool:
-        # HF never applies prompt replacements, so we have to do it ourselves
-        # _find_placeholders may incorrectly think that HF has already performed
-        # processing for multi-audio input when the input audios are short
-        # (the corresponding placeholders may take up fewer tokens than
-        # the number of audio items)
+        # HF never applies prompt replacements, so we have to do it ourselves.
+        # NOTE: `_find_placeholders_by_modality` may incorrectly think that HF
+        # has already performed processing for multi-audio input when the input
+        # audios are short (the corresponding placeholders may take up fewer
+        # tokens than the number of audio items)
         return True
 
-    def _get_dummy_mm_inputs(
+    def _get_dummy_processor_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         feature_extractor = self._get_feature_extractor()

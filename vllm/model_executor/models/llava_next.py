@@ -2,6 +2,7 @@ from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, LlavaNextConfig, LlavaNextProcessor
@@ -67,9 +68,6 @@ class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
     def _get_hf_processor(self) -> LlavaNextProcessor:
         return self.ctx.get_hf_processor(LlavaNextProcessor)
 
-    def _get_image_token(self) -> str:
-        return self._get_hf_processor().image_token
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -80,6 +78,9 @@ class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
             image_sizes=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
+
+    def _get_image_token(self) -> str:
+        return self._get_hf_processor().image_token
 
     def _get_max_image_tokens(self) -> int:
         largest_feature_size, _ = self._get_pinpoint_with_most_features()
@@ -97,20 +98,20 @@ class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
         image_height: int,
     ) -> int:
         hf_config = self._get_hf_config()
+        vision_encoder_info = self._vision_encoder_info
 
         base_feature_size = self._apply_feature_select_strategy(
             hf_config.vision_feature_select_strategy,
-            self._vision_encoder_info.get_num_image_tokens(
+            vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
         )
-        num_patches = self._vision_encoder_info.get_num_patches()
 
         num_patch_height, num_patch_width = get_anyres_image_grid_shape(
             image_size=(image_height, image_width),
             grid_pinpoints=hf_config.image_grid_pinpoints,
-            patch_size=self._vision_encoder_info.get_image_size(),
+            patch_size=vision_encoder_info.get_image_size(),
         )
 
         (
@@ -119,7 +120,7 @@ class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
         ) = self._get_num_unpadded_features(
             original_height=image_height,
             original_width=image_width,
-            npatches=num_patches,
+            npatches=vision_encoder_info.get_patch_grid_length(),
             num_patch_height=num_patch_height,
             num_patch_width=num_patch_width,
         )
@@ -139,22 +140,28 @@ class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
         current_height = npatches * num_patch_height
         current_width = npatches * num_patch_width
 
-        original_aspect_ratio = original_width / original_height
-        current_aspect_ratio = current_width / current_height
+        # NOTE: HF resizes based on float32
+        original_aspect_ratio = np.array(original_width / original_height,
+                                         dtype=np.float32)
+        current_aspect_ratio = np.array(current_width / current_height,
+                                        dtype=np.float32)
 
         if original_aspect_ratio > current_aspect_ratio:
-            scale_factor = current_width / original_width
+            scale_factor = np.array(current_width / original_width,
+                                    dtype=np.float32)
             new_height = int(original_height * scale_factor)
             padding = (current_height - new_height) // 2
             current_height -= 2 * padding
         else:
-            scale_factor = current_height / original_height
+            scale_factor = np.array(current_height / original_height,
+                                    dtype=np.float32)
             new_width = int(original_width * scale_factor)
             padding = (current_width - new_width) // 2
             current_width -= 2 * padding
 
         unpadded_features = current_height * current_width
         newline_features = current_height
+
         return (unpadded_features, newline_features)
 
     def _get_pinpoint_with_most_features(self) -> tuple[int, ImageSize]:
