@@ -530,30 +530,11 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # Preserve the order of modalities from the kwargs if there are
         # multiple of them.
-        if "pixel_values" in kwargs and "pixel_values_videos" in kwargs:
-            keys_order = list(kwargs.keys())
-
-            # Find the indices of the keys
-            index_image = keys_order.index("pixel_values")
-            index_video = keys_order.index("pixel_values_videos")
-
-            if index_image < index_video:
+        for input_key in kwargs:
+            if input_key == "pixel_values" and "image" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-                modalities["videos"] = self._parse_and_validate_video_input(
-                    **kwargs)
-            else:
-                modalities["videos"] = self._parse_and_validate_video_input(
-                    **kwargs)
-                modalities["images"] = self._parse_and_validate_image_input(
-                    **kwargs)
-
-        # Single modality
-        else:
-            if "pixel_values" in kwargs:
-                modalities["images"] = self._parse_and_validate_image_input(
-                    **kwargs)
-            if "pixel_values_videos" in kwargs:
+            if input_key == "pixel_values_videos" and "videos" not in modalities:  # noqa E501
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 
