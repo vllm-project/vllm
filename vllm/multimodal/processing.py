@@ -578,7 +578,11 @@ class ProcessingCache:
 
 
 class ProcessingMixin:
-    """Contains helper functions to perform processing."""
+    """
+    Contains helper functions to perform processing.
+
+    Not to be confused with :class:`transformers.ProcessorMixin`.
+    """
     ctx: InputProcessingContext
 
     def _get_tokenizer(self) -> AnyTokenizer:
@@ -598,6 +602,8 @@ class ProcessingMixin:
 class BaseMultiModalProcessor(ProcessingMixin, ABC):
     """
     Abstract base class to process multi-modal inputs to be used in vLLM.
+
+    Not to be confused with :class:`transformers.ProcessorMixin`.
     """
 
     def __init__(self,
