@@ -143,7 +143,7 @@ class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
         image_width: int,
         image_height: int,
     ) -> int:
-        hf_config = self._get_hf_processor()
+        hf_config = self._get_hf_config()
         spatial_pool_stride = getattr(hf_config, "spatial_pool_stride", 2)
 
         vision_encoder_info = self._get_vision_encoder_info()
