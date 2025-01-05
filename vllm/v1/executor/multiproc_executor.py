@@ -402,7 +402,6 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
-        i = 0
         while True:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
@@ -414,8 +413,5 @@ class WorkerProc:
                 logger.exception("WorkerProc hit an exception: %s", exc_info=e)
                 continue
 
-            if i == 10 and self.rank == 0:
-                raise ValueError
-            i += 1
             self.worker_response_mq.enqueue(
                 (WorkerProc.ResponseStatus.SUCCESS, output))
