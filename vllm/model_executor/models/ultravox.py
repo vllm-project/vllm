@@ -1,7 +1,6 @@
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 import math
-import os
 from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
@@ -15,6 +14,7 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
+from vllm import envs
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
@@ -452,7 +452,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         if multimodal_embeddings is not None:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
-            if os.environ.get("VLLM_USE_V1") == "0":
+            if not envs.VLLM_USE_V1:
                 merge_multimodal_embeddings_from_map(
                     inputs_embeds, multimodal_embeddings,
                     attn_metadata.multi_modal_placeholder_index_maps["audio"])
