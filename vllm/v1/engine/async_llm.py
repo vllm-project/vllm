@@ -42,7 +42,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
     ) -> None:
 
-        self._errored = False
+        self.engine_core_errored = False
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
@@ -129,7 +129,7 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
-
+        
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
 
@@ -166,6 +166,9 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
     ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
+
+        if self.engine_core_errored:
+            raise EngineDeadError()
 
         # 1) Create a new output queue for the request.
         if request_id in self.rid_to_queue:
@@ -219,8 +222,6 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
-        if self.errored:
-            raise EngineDeadError()
 
         try:
             # We start the output_handler on the first call to generate() so
@@ -258,25 +259,25 @@ class AsyncLLM(EngineClient):
 
                 yield out
 
-        # If the request is disconnected by the client, the
-        # generate() task will be canceled. So, we abort the
-        # request if we end up here.
+        # If the request is disconnected by the client, generate()
+        # is cancelled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
 
-        # EngineCore or output_handler pushed error. Raise so API Server
-        # can handle and shutdown in vllm/entrypoints/launcher.py.
+        # EngineCore or output_handler pushed error.
         except EngineDeadError:
+            # NOTE: we do not abort, since the EngineCore is dead
+            # and we will shut down anyways (unrecoverable).
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise
 
-        # Error in the generate() task (possibly recoverable). Raise so API
-        # Server can handle and maybe shutdown vllm/entrypoints/launcher.py.
+        # Error in the generate() task (possibly recoverable).
         except Exception as e:
+            await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
@@ -315,13 +316,14 @@ class AsyncLLM(EngineClient):
             raise
 
         except Exception as e:
-            logger.fatal("AsyncLLM._run_output_handler failed")
+            logger.error(
+                "AsyncLLM output_handler got an exception, shutting down",
+                exec_info=e)
             self._set_errored_and_propagate()
-            raise EngineDeadError() from e
 
     def _set_errored_and_propagate(self):
         """Propagate to all generate() tasks."""
-        self._errored = True
+        self.engine_core_errored = True
 
         # Put EngineDeadError() into each generate() task's queue,
         # each of which will raise it in their own context.
@@ -396,7 +398,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self._errored
+        return self.engine_core_errored
 
     @property
     def dead_error(self) -> BaseException:
