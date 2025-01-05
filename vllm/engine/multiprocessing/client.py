@@ -403,6 +403,10 @@ class MQLLMEngineClient(EngineClient):
         return not self.errored
 
     @property
+    def is_stopped(self) -> bool:
+        return self.errored
+
+    @property
     def errored(self) -> bool:
         return self._errored_with is not None
 
