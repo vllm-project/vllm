@@ -208,8 +208,7 @@ class SyncMPClient(MPClient):
         )
 
     def _format_exception(self, e: Exception) -> Exception:
-        # If we are in the _errored state, raise EngineDeadError
-        # so the root cause is clear in the stack trace.
+        """If _errored, use EngineDeadError so root cause is clear."""
         return (EngineDeadError(
             "EngineCore encountered an issue. See stack trace "
             "for the root cause.",
