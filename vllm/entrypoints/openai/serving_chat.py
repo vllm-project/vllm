@@ -171,7 +171,7 @@ class OpenAIServingChat(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
-        except ValueError as e:
+        except Exception as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
@@ -228,7 +228,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 generators.append(generator)
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
@@ -245,7 +245,7 @@ class OpenAIServingChat(OpenAIServing):
             return await self.chat_completion_full_generator(
                 request, result_generator, request_id, model_name,
                 conversation, tokenizer, request_metadata)
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
@@ -301,7 +301,7 @@ class OpenAIServingChat(OpenAIServing):
                 ] * num_choices
             else:
                 tool_parsers = [None] * num_choices
-        except RuntimeError as e:
+        except Exception as e:
             logger.exception("Error in tool parser creation.")
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
@@ -591,7 +591,7 @@ class OpenAIServingChat(OpenAIServing):
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens)
 
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(str(e))
@@ -618,7 +618,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
@@ -682,7 +682,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 try:
                     tool_parser = self.tool_parser(tokenizer)
-                except RuntimeError as e:
+                except Exception as e:
                     logger.exception("Error in tool parser creation.")
                     return self.create_error_response(str(e))
 
