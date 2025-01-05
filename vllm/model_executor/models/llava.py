@@ -1,4 +1,4 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
                     Protocol, Set, Tuple, TypedDict, Union)
@@ -105,7 +105,7 @@ class LlavaLikeProcessor(Protocol):
     image_token: Final[str]
 
 
-class BaseLlavaProcessingMixin(ProcessingMixin):
+class BaseLlavaProcessingMixin(ProcessingMixin, ABC):
 
     def _get_hf_config(self) -> LlavaLikeConfig:
         return self.ctx.get_hf_config(LlavaConfig)
