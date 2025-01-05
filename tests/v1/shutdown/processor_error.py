@@ -1,11 +1,12 @@
 """Test error handling in Processor."""
 
 import asyncio
+
 import pytest
 
 from vllm import SamplingParams
-from vllm.inputs.data import TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineGenerateError
 
@@ -30,7 +31,7 @@ async def test_async_llm_processor_error(monkeypatch):
                     pass
             except Exception as e:
                 return e
-        
+
         NUM_REQS = 3
         tasks = [generate(f"request-{idx}") for idx in range(NUM_REQS)]
         outputs = await asyncio.gather(*tasks)
@@ -46,8 +47,9 @@ async def test_async_llm_processor_error(monkeypatch):
         # This should be no problem.
         outputs = []
         async for out in async_llm.generate(
-            "Hello my name is", request_id="abc", 
-            sampling_params=SamplingParams(max_tokens=5)):
+                "Hello my name is",
+                request_id="abc",
+                sampling_params=SamplingParams(max_tokens=5)):
             outputs.append(out)
         assert len(outputs) == 5
 

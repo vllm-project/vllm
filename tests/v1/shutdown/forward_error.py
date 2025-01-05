@@ -1,17 +1,18 @@
 """Test that we handle an Error in model forward and shutdown."""
 
 import asyncio
+
 import pytest
 
+from tests.utils import wait_for_gpu_memory_to_clear
 from vllm import LLM, SamplingParams
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.utils import cuda_device_count_stateless 
-from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from tests.utils import wait_for_gpu_memory_to_clear
 
 def evil_forward(self, *args, **kwargs):
     """Evil forward method that raise an exception after 5 calls."""
@@ -19,9 +20,9 @@ def evil_forward(self, *args, **kwargs):
 
     if not hasattr(self, "num_calls"):
         self.num_calls = 0
-    
-    if (self.num_calls == NUMBER_OF_GOOD_PASSES and
-        get_tensor_model_parallel_rank() == 0):
+
+    if (self.num_calls == NUMBER_OF_GOOD_PASSES
+            and get_tensor_model_parallel_rank() == 0):
         raise Exception("Simulated illegal memory access on Rank 0!")
     self.num_calls += 1
 
@@ -56,7 +57,7 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
                     pass
             except Exception as e:
                 return e
-        
+
         NUM_REQS = 3
         tasks = [generate(f"request-{idx}") for idx in range(NUM_REQS)]
         outputs = await asyncio.gather(*tasks)
@@ -71,8 +72,9 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size):
         # We should not be able to make another request.
         with pytest.raises(EngineDeadError):
             async for _ in async_llm.generate(
-                "Hello my name is", request_id="abc",
-                sampling_params=SamplingParams()):
+                    "Hello my name is",
+                    request_id="abc",
+                    sampling_params=SamplingParams()):
                 raise Exception("We should not get here.")
 
         # Confirm all the processes are cleaned up.
@@ -110,7 +112,7 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size,
 
         with pytest.raises(EngineDeadError):
             llm.generate("Hello my name is Robert and I")
-    
+
     # Confirm all the processes are cleaned up.
     wait_for_gpu_memory_to_clear(
         devices=list(range(tensor_parallel_size)),

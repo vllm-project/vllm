@@ -145,24 +145,28 @@ class EngineCoreProc(EngineCore):
         executor_class: Type[Executor],
         log_stats: bool = False,
     ):
-        super().__init__(vllm_config, executor_class, log_stats)
+        try:
+            super().__init__(vllm_config, executor_class, log_stats)
 
-        # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ socket IO with GPU since they release the GIL,
-        # and to overlap some serialization/deserialization with the
-        # model forward pass.
-        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[EngineCoreRequestUnion] = queue.Queue()
-        self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
-        threading.Thread(target=self.process_input_socket,
-                         args=(input_path, ),
-                         daemon=True).start()
-        threading.Thread(target=self.process_output_socket,
-                         args=(output_path, ),
-                         daemon=True).start()
-
-        # Send Readiness signal to EngineClient.
-        ready_pipe.send({"status": "READY"})
+            # Background Threads and Queues for IO. These enable us to
+            # overlap ZMQ socket IO with GPU since they release the GIL,
+            # and to overlap some serialization/deserialization with the
+            # model forward pass.
+            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+            self.input_queue: queue.Queue[
+                EngineCoreRequestUnion] = queue.Queue()
+            self.output_queue: queue.Queue[
+                List[EngineCoreOutput]] = queue.Queue()
+            threading.Thread(target=self.process_input_socket,
+                             args=(input_path, ),
+                             daemon=True).start()
+            threading.Thread(target=self.process_output_socket,
+                             args=(output_path, ),
+                             daemon=True).start()
+            # Send Readiness signal to EngineClient.
+            ready_pipe.send({"status": "READY"})
+        except Exception:
+            ready_pipe.send({"status": "FAILED"})
 
     @staticmethod
     def run_engine_core(*args, **kwargs):

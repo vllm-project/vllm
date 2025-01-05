@@ -110,8 +110,8 @@ class BackgroundProcHandle:
 
         # Wait for startup.
         if reader.recv()["status"] != "READY":
-            raise RuntimeError(f"{process_name} initialization failed. "
-                               "See root cause above.")
+            raise Exception(f"{process_name} initialization failed. "
+                            "See stack trace for root cause.")
 
     def shutdown(self):
         self._finalizer()
