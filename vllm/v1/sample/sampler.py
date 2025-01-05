@@ -125,9 +125,11 @@ class Sampler(nn.Module):
         if sampled_token_ids is not None:
             # TODO(rob): do we need to return the rank of the sampled?
             # TODO(andy): is this indexing right?
-            sampled_logprobs = logprobs[:, sampled_token_ids]
-            topk_indices = torch.cat([sampled_token_ids, topk_indices])
-            topk_logprobs = torch.cat([sampled_logprobs, topk_logprobs])
+            sampled_logprobs = logprobs[torch.arange(logprobs.size(0)),
+                                        sampled_token_ids].unsqueeze(-1)
+            sampled_token_ids = sampled_token_ids.unsqueeze(-1)
+            topk_indices = torch.cat([sampled_token_ids, topk_indices], dim=1)
+            topk_logprobs = torch.cat([sampled_logprobs, topk_logprobs], dim=1)
 
         return topk_logprobs.cpu(), topk_indices.cpu()
 
