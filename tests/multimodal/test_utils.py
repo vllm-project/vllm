@@ -308,7 +308,7 @@ def test_merge_and_sort_mm_metadata_from_modalities():
                 "audio": ["audio_hash1"],
                 "video": ["video_hash1", "video_hash2", "video_hash3"]
             },
-            ["audio", "video", "audio"],
+            ["audio", "video", "image"],
             [
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=3, length=4),
@@ -332,7 +332,6 @@ def test_merge_and_sort_mm_metadata_from_modalities():
         assert modalities == expected_modalities
         assert ranges == expected_ranges
         assert hashes == expected_hashes
-    return test_cases
 
 
 def test_merge_and_sort_mm_metadata_from_modalities_interleaving():
