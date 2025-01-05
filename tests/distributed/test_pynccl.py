@@ -137,7 +137,7 @@ def worker_fn_with_cudagraph():
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f'cuda:{pynccl_comm.rank}')
         torch.cuda.synchronize()
-        with torch.cuda.graph(graph, stream=torch.cuda.current_stream()), \
+        with torch.cuda.graph(graph), \
             pynccl_comm.change_state(enable=True):
             a_out = pynccl_comm.all_reduce(a)
         torch.cuda.synchronize()
