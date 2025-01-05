@@ -310,8 +310,7 @@ class GroupCoordinator:
             if not pynccl_comm:
                 maybe_pynccl_context = nullcontext()
             else:
-                maybe_pynccl_context = pynccl_comm.change_state(
-                    stream=torch.cuda.current_stream())
+                maybe_pynccl_context = pynccl_comm.change_state()
             with maybe_pynccl_context:
                 yield graph_capture_context
 
