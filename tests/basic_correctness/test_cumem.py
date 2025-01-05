@@ -1,5 +1,7 @@
-from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
 import torch
+
+from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
+
 
 def test_basic_cumem():
     # some tensors from default memory pool

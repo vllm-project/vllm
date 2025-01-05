@@ -11,7 +11,8 @@ from typing import Dict, Optional
 
 import torch
 from vllm_allocator_adaptor import (HandleType, create_and_map,
-                                    get_pluggable_allocator, unmap_and_release)
+                                    unmap_and_release,
+                                    use_memory_pool_with_allocator)
 
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.utils import is_pin_memory_available
@@ -61,10 +62,6 @@ class CuMemAllocator:
                                                 Optional[torch.Tensor]] = {}
         self.pointer_to_mode: Dict[int, CuMemMode] = {}
         self.current_mode = CuMemMode.OFFLOAD
-        self.pytorch_allocator = get_pluggable_allocator(
-            self.python_malloc_callback, self.python_free_callback)
-        self.mem_pool = torch.cuda.memory.MemPool(
-            self.pytorch_allocator._allocator)
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         py_d_mem = allocation_handle[2]
@@ -92,12 +89,12 @@ class CuMemAllocator:
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 self.pointer_to_cpu_backup_tensor[ptr] = cpu_backup_tensor
-            elif mode == CuMemMode.DISCARD:
-                unmap_and_release(handle)
+            unmap_and_release(handle)
 
     def wake_up(self):
         for ptr, mode in self.pointer_to_mode.items():
             handle = self.pointer_to_handle[ptr]
+            create_and_map(handle)
             if mode == CuMemMode.OFFLOAD:
                 cpu_backup_tensor = self.pointer_to_cpu_backup_tensor.pop(ptr)
                 if cpu_backup_tensor is not None:
@@ -105,8 +102,6 @@ class CuMemAllocator:
                     ) * cpu_backup_tensor.element_size()
                     cpu_ptr = cpu_backup_tensor.data_ptr()
                     libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-            elif mode == CuMemMode.DISCARD:
-                create_and_map(handle)
 
         self.pointer_to_cpu_backup_tensor = {
             ptr: None
@@ -117,6 +112,7 @@ class CuMemAllocator:
     def use_memory_pool(self, mode: CuMemMode = CuMemMode.OFFLOAD):
         old_mode = self.current_mode
         self.current_mode = mode
-        with torch.cuda.memory.use_mem_pool(self.mem_pool):
+        with use_memory_pool_with_allocator(self.python_malloc_callback,
+                                            self.python_free_callback):
             yield
             self.current_mode = old_mode
