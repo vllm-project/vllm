@@ -35,8 +35,9 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors, PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
+                                        MultiModalDataItems, ProcessingMixin,
                                         PromptReplacement)
+from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -63,12 +64,16 @@ class FuyuImagePatchInputs(TypedDict):
     """
 
 
-class FuyuMultiModalProcessor(BaseMultiModalProcessor):
+class FuyuProcessingMixin(ProcessingMixin):
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": 1}
+    def _get_hf_config(self):
+        return self.ctx.get_hf_config(FuyuConfig)
 
-    def _get_image_target_size(self) -> ImageSize:
+    def _get_hf_processor(self):
+        return self.ctx.get_hf_processor(FuyuProcessor)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        """Get the image size with the most features."""
         processor = self._get_hf_processor()
         image_processor: FuyuImageProcessor = processor.image_processor
 
@@ -76,13 +81,13 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         return ImageSize(width=target_size["width"],
                          height=target_size["height"])
 
-    def _get_image_feature_grid_size(
+    def get_image_feature_grid_size(
         self,
         *,
         image_width: int,
         image_height: int,
     ) -> tuple[int, int]:
-        target_width, target_height = self._get_image_target_size()
+        target_width, target_height = self.get_image_size_with_most_features()
 
         if not (image_width <= target_width and image_height <= target_height):
             height_scale_factor = target_height / image_height
@@ -96,10 +101,16 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         nrows = math.ceil(image_height / 30)
         return ncols, nrows
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        target_width, target_height = self._get_image_target_size()
 
-        max_ncols, max_nrows = self._get_image_feature_grid_size(
+class FuyuProfilingInfo(FuyuProcessingMixin, BaseProfilingInfo):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        max_ncols, max_nrows = self.get_image_feature_grid_size(
             image_width=target_width,
             image_height=target_height,
         )
@@ -107,8 +118,31 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
 
         return {"image": max_image_tokens}
 
-    def _get_hf_processor(self) -> FuyuProcessor:
-        return self.ctx.get_hf_processor(FuyuProcessor)
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        target_width, target_height = self.get_image_size_with_most_features()
+        num_images = mm_counts.get("image", 0)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text="",
+            mm_data=mm_data,
+        )
+
+
+class FuyuMultiModalProcessor(FuyuProcessingMixin, BaseMultiModalProcessor):
+
+    def _get_profiling_info(self) -> BaseProfilingInfo:
+        return FuyuProfilingInfo(self.ctx)
 
     def _call_hf_processor(
         self,
@@ -161,7 +195,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_config = self.ctx.get_hf_config(FuyuConfig)
+        hf_config = self._get_hf_config()
         bos_token_id = hf_config.bos_token_id
 
         tokenizer = self._get_tokenizer()
@@ -172,7 +206,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = self._get_image_feature_grid_size(
+            ncols, nrows = self.get_image_feature_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
@@ -207,26 +241,6 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         }
 
         return result
-
-    def _get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        target_width, target_height = self._get_image_target_size()
-        num_images = mm_counts.get("image", 0)
-
-        mm_data = {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
-        }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor)

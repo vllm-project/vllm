@@ -1,6 +1,6 @@
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Final, Iterable, List, Literal, Mapping, Optional,
+                    Protocol, Set, Tuple, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -17,12 +17,14 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
 from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.profiling import BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
-from .llava import (LlavaMultiModalProcessor, LlavaMultiModalProjector,
-                    init_vision_tower_for_llava)
+from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingMixin,
+                    BaseLlavaProfilingInfo, LlavaLikeConfig,
+                    LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
@@ -60,45 +62,44 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
                              LlavaNextImageEmbeddingInputs]
 
 
-class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
+class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
+    image_grid_pinpoints: Final[list[list[int]]]
 
-    def _get_hf_config(self) -> LlavaNextConfig:
+
+class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
+
+    def _get_hf_config(self) -> LlavaNextLikeConfig:
         return self.ctx.get_hf_config(LlavaNextConfig)
 
-    def _get_hf_processor(self) -> LlavaNextProcessor:
+    def _get_hf_processor(self):
         return self.ctx.get_hf_processor(LlavaNextProcessor)
 
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-        )
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self._get_hf_config()
 
-    def _get_image_token(self) -> str:
-        return self._get_hf_processor().image_token
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for (height, width) in hf_config.image_grid_pinpoints:
+            feat_size = self.get_num_image_tokens(image_width=width,
+                                                  image_height=height)
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width,
+                                                     height=height)
 
-    def _get_max_image_tokens(self) -> int:
-        largest_feature_size, _ = self._get_pinpoint_with_most_features()
-        return largest_feature_size
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
 
-    def _get_dummy_image_size(self) -> ImageSize:
-        _, pinpoint = self._get_pinpoint_with_most_features()
-        return pinpoint
+        return largest_feature_pinpoint
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L106
-    def _get_num_image_tokens(
+    def get_num_image_tokens(
         self,
         *,
         image_width: int,
         image_height: int,
     ) -> int:
         hf_config = self._get_hf_config()
-        vision_encoder_info = self._vision_encoder_info
+        vision_encoder_info = self._get_vision_encoder_info()
 
         base_feature_size = self._apply_feature_select_strategy(
             hf_config.vision_feature_select_strategy,
@@ -140,7 +141,7 @@ class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
         current_height = npatches * num_patch_height
         current_width = npatches * num_patch_width
 
-        # NOTE: HF resizes based on float32
+        # NOTE: Use float32 to remain consistent with HF output
         original_aspect_ratio = np.array(original_width / original_height,
                                          dtype=np.float32)
         current_aspect_ratio = np.array(current_width / current_height,
@@ -164,26 +165,27 @@ class LlavaNextMultiModalProcessor(LlavaMultiModalProcessor):
 
         return (unpadded_features, newline_features)
 
-    def _get_pinpoint_with_most_features(self) -> tuple[int, ImageSize]:
-        """
-        Get the grid pinpoint with the most features and
-        the corresponding feature size.
-        """
-        hf_config = self._get_hf_config()
 
-        largest_feature_size, largest_feature_pinpoint = 0, None
-        for (height, width) in hf_config.image_grid_pinpoints:
-            feat_size = self._get_num_image_tokens(image_width=width,
-                                                   image_height=height)
-            if feat_size > largest_feature_size:
-                largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width,
-                                                     height=height)
+class LlavaNextProfilingInfo(LlavaNextProcessingMixin, BaseLlavaProfilingInfo):
+    pass
 
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
 
-        return largest_feature_size, largest_feature_pinpoint
+class LlavaNextMultiModalProcessor(LlavaNextProcessingMixin,
+                                   BaseLlavaMultiModalProcessor):
+
+    def _get_profiling_info(self) -> BaseProfilingInfo:
+        return LlavaNextProfilingInfo(self.ctx)
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor)
