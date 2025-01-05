@@ -647,7 +647,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `llava-hf/llava-onevision-qwen2-7b-ov-hf`, `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `MiniCPMV`
   - MiniCPM-V
   - T + I<sup>E+</sup>
