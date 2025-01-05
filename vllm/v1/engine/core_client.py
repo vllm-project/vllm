@@ -170,6 +170,7 @@ class MPClient(EngineCoreClient):
 
     def shutdown(self):
         """Clean up background resources."""
+        print("IN MPCLIENT.shutdown.")
         if hasattr(self, "proc_handle"):
             self.proc_handle.shutdown()
 
