@@ -11,6 +11,7 @@ import numpy.typing as npt
 from PIL import Image
 from transformers import BatchFeature, ProcessorMixin
 
+from vllm import envs
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
@@ -1203,7 +1204,9 @@ class BaseMultiModalProcessor(ABC):
                 "tokens.")
 
         total_len = len(prompt_token_ids)
-        if total_len > seq_len:
+
+        # V0 does not support chunked prefill.
+        if total_len > seq_len and not envs.VLLM_USE_V1:
             logger.warning(
                 "The context length (%d) of the model is too short "
                 "to hold the multi-modal embeddings in the worst case "
