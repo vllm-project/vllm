@@ -344,7 +344,6 @@ class Phi3VProfilingInfo(Phi3VProcessingMixin, BaseProfilingInfo):
         return {"image": max_image_tokens}
 
     def _get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
         # Result in the max possible feature size (h:w = 16:1)
         return ImageSize(height=8000, width=50)
 

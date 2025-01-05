@@ -826,7 +826,6 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
         }
 
     def _get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,

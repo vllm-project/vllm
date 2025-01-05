@@ -115,7 +115,6 @@ class FuyuProfilingInfo(FuyuProcessingMixin, BaseProfilingInfo):
         return {"image": max_image_tokens}
 
     def _get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
         image_processor = self._get_image_processor()
         return ImageSize(width=image_processor.size["width"],
                          height=image_processor.size["height"])

@@ -157,7 +157,6 @@ class BaseLlavaProfilingInfo(BaseLlavaProcessingMixin, BaseProfilingInfo):
         return {"image": self._get_max_image_tokens()}
 
     def _get_image_size_with_most_features(self) -> ImageSize:
-        """Get the image size with the most features."""
         vision_encoder_info = self._get_vision_encoder_info()
         width = height = vision_encoder_info.get_image_size()
         return ImageSize(width=width, height=height)
