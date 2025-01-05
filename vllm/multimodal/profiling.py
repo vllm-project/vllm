@@ -102,7 +102,7 @@ class BaseProfilingInfo(ABC):
     def get_mm_limits(self) -> Mapping[str, int]:
         mm_config = self.ctx.get_mm_config()
         mm_limit_per_prompt = mm_config.limit_per_prompt
-    
+
         supported_mm_limits = self.get_supported_mm_limits()
 
         mm_limits = {
