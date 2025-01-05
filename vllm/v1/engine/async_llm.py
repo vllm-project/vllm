@@ -392,7 +392,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def is_stopped(self) -> bool:
-        return False
+        return self.errored
 
     @property
     def errored(self) -> bool:
