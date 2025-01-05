@@ -528,13 +528,34 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities = {}
 
-        if "pixel_values" in kwargs:
-            modalities["images"] = self._parse_and_validate_image_input(
-                **kwargs)
+        # Preserve the order of modalities from the kwargs if there are
+        # multiple of them.
+        if "pixel_values" in kwargs and "pixel_values_videos" in kwargs:
+            keys_order = list(kwargs.keys())
 
-        if "pixel_values_videos" in kwargs:
-            modalities["videos"] = self._parse_and_validate_video_input(
-                **kwargs)
+            # Find the indices of the keys
+            index_image = keys_order.index("pixel_values")
+            index_video = keys_order.index("pixel_values_videos")
+
+            if index_image < index_video:
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+                modalities["videos"] = self._parse_and_validate_video_input(
+                    **kwargs)
+            else:
+                modalities["videos"] = self._parse_and_validate_video_input(
+                    **kwargs)
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+
+        # Single modality
+        else:
+            if "pixel_values" in kwargs:
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+            if "pixel_values_videos" in kwargs:
+                modalities["videos"] = self._parse_and_validate_video_input(
+                    **kwargs)
 
         return modalities
 
@@ -798,14 +819,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # tensor correspoending to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
-        if "images" in modalities:
-            image_input = modalities["images"]
-            vision_embeddings = self._process_image_input(image_input)
-            multimodal_embeddings += tuple(vision_embeddings)
-        if "videos" in modalities:
-            video_input = modalities["videos"]
-            video_embeddings = self._process_video_pixels(video_input)
-            multimodal_embeddings += tuple(video_embeddings)
+        for modality in modalities:
+            if modality == "images":
+                image_input = modalities["images"]
+                vision_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(vision_embeddings)
+            if modality == "videos":
+                video_input = modalities["videos"]
+                video_embeddings = self._process_video_pixels(video_input)
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
