@@ -200,9 +200,9 @@ def test_merge_and_sort_mm_metadata_from_modalities():
     # Each test case is a tuple of :
     # - mm_positions: MultiModalPlaceholderDict
     # - mm_hashes: Optional[MultiModalHashDict]
-    # - expected sorted modalities
-    # - expected sorted & flattened PlaceholderRanges
-    # - expected sorted & flattened hash strings.
+    # - expected sorted modalities: list[str]
+    # - expected sorted & flattened PlaceholderRanges: list[PlaceholderRange]
+    # - expected sorted & flattened hash strings: Optional[list[str]]
     test_cases = [
         # Single modality should return result as is but flattened
         (
