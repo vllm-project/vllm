@@ -9,7 +9,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalHasher,
                              MultiModalKwargs, MultiModalRegistry)
-from vllm.multimodal.utils import merge_and_sort_mm_metadata_from_modalities
+from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -135,7 +135,7 @@ class Processor:
         mm_positions = decoder_inputs.multi_modal_placeholders
 
         if mm_positions:
-            sorted_modalities, sorted_mm_positions, sorted_mm_hashes = merge_and_sort_mm_metadata_from_modalities(  # noqa: E501
+            sorted_modalities, sorted_mm_positions, sorted_mm_hashes = merge_and_sort_multimodal_metadata(  # noqa: E501
                 mm_positions,
                 mm_hashes,
             )

@@ -442,7 +442,7 @@ def consecutive_placeholder_ranges(
     ]
 
 
-def merge_and_sort_mm_metadata_from_modalities(
+def merge_and_sort_multimodal_metadata(
     mm_positions: "MultiModalPlaceholderDict",
     mm_hashes: Optional["MultiModalHashDict"],
 ) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:

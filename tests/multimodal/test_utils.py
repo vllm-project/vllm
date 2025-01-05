@@ -11,7 +11,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (MediaConnector,
-                                   merge_and_sort_mm_metadata_from_modalities,
+                                   merge_and_sort_multimodal_metadata,
                                    repeat_and_pad_placeholder_tokens)
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
@@ -195,7 +195,7 @@ def test_repeat_and_pad_placeholder_tokens(model):
         assert ranges == expected_ranges
 
 
-def test_merge_and_sort_mm_metadata_from_modalities():
+def test_merge_and_sort_multimodal_metadata():
 
     # Each test case is a tuple of :
     # - mm_positions: MultiModalPlaceholderDict
@@ -326,7 +326,7 @@ def test_merge_and_sort_mm_metadata_from_modalities():
 
     for (mm_positions, mm_hashes, expected_modalities, expected_ranges,
          expected_hashes) in test_cases:
-        modalities, ranges, hashes = merge_and_sort_mm_metadata_from_modalities(
+        modalities, ranges, hashes = merge_and_sort_multimodal_metadata(
             mm_positions, mm_hashes)
 
         assert modalities == expected_modalities
@@ -334,7 +334,7 @@ def test_merge_and_sort_mm_metadata_from_modalities():
         assert hashes == expected_hashes
 
 
-def test_merge_and_sort_mm_metadata_from_modalities_interleaving():
+def test_merge_and_sort_multimodal_metadata_with_interleaving():
 
     test_cases = [
 
@@ -376,6 +376,6 @@ def test_merge_and_sort_mm_metadata_from_modalities_interleaving():
 
     for (mm_positions, mm_hashes) in test_cases:
         with pytest.raises(ValueError) as ex_info:
-            merge_and_sort_mm_metadata_from_modalities(mm_positions, mm_hashes)
+            merge_and_sort_multimodal_metadata(mm_positions, mm_hashes)
 
         assert "Interleaved mixed-modality" in str(ex_info.value)
