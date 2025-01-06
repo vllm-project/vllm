@@ -90,8 +90,12 @@ class BambaMixerDecoderLayer(nn.Module):
                                 use_conv_bias = config.mamba_conv_bias,
                                 use_bias = config.mamba_proj_bias,
                                 use_rms_norm=True,
+                                n_groups=config.mamba_n_groups,
+                                num_heads=config.mamba_n_heads,
+                                head_dim=config.mamba_d_head,
                                 rms_norm_eps=config.rms_norm_eps,
                                 activation=config.hidden_act,
+                                chunk_size=config.mamba_chunk_size,
                                 quant_config=quant_config)
 
         self.feed_forward = BambaMLP(config, quant_config=quant_config)
