@@ -1,6 +1,6 @@
-(supported-hardware-for-quantization)=
+(quantization-supported-hardware)=
 
-# Supported Hardware for Quantization Kernels
+# Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
 
@@ -120,12 +120,12 @@ The table below shows the compatibility of various quantization implementations 
   - ✗
 ```
 
-## Notes:
-
 - Volta refers to SM 7.0, Turing to SM 7.5, Ampere to SM 8.0/8.6, Ada to SM 8.9, and Hopper to SM 9.0.
 - "✅︎" indicates that the quantization method is supported on the specified hardware.
 - "✗" indicates that the quantization method is not supported on the specified hardware.
 
-Please note that this compatibility chart may be subject to change as vLLM continues to evolve and expand its support for different hardware platforms and quantization methods.
+```{note}
+This compatibility chart is subject to change as vLLM continues to evolve and expand its support for different hardware platforms and quantization methods.
 
 For the most up-to-date information on hardware support and quantization methods, please refer to <gh-dir:vllm/model_executor/layers/quantization> or consult with the vLLM development team.
+```

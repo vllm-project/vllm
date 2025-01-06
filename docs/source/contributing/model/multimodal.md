@@ -2,15 +2,11 @@
 
 # Enabling Multimodal Inputs
 
-This document walks you through the steps to extend a vLLM model so that it accepts [multi-modal inputs](#multimodal-inputs).
-
-```{seealso}
-[Adding a New Model](adding-a-new-model)
-```
+This document walks you through the steps to extend a basic model so that it accepts [multi-modal inputs](#multimodal-inputs).
 
 ## 1. Update the base vLLM model
 
-It is assumed that you have already implemented the model in vLLM according to [these steps](#adding-a-new-model).
+It is assumed that you have already implemented the model in vLLM according to [these steps](#new-model-basic).
 Further update the model as follows:
 
 - Implement the {class}`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
