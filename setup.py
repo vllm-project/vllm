@@ -24,7 +24,7 @@ def load_module_from_path(module_name, path):
     return module
 
 
-os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.6.2+ipexllm"
+os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.6.6+ipexllm"
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
 
@@ -378,7 +378,7 @@ def _is_xpu() -> bool:
 
 
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu()
+    return _is_cuda() or _is_hip() or _is_cpu() or _is_xpu()
 
 
 def _build_core_ext() -> bool:
@@ -578,6 +578,9 @@ def get_requirements() -> List[str]:
 
 
 ext_modules = []
+
+if _build_core_ext():
+    ext_modules.append(CMakeExtension(name="vllm._core_C"))
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
