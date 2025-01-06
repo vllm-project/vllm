@@ -23,12 +23,10 @@ class MsgpackEncoder:
         self.encoder = msgpack.Encoder(enc_hook=custom_enc_hook)
 
     def encode(self, obj: Any) -> bytes:
-        #return self.encoder.encode(obj)
-        return pickle.dumps(obj)
+        return self.encoder.encode(obj)
 
     def encode_into(self, obj: Any, buf: bytearray) -> None:
-        #self.encoder.encode_into(obj, buf)
-        buf[:] = pickle.dumps(obj)
+        self.encoder.encode_into(obj, buf)
 
 
 class MsgpackDecoder:
@@ -38,8 +36,7 @@ class MsgpackDecoder:
         self.decoder = msgpack.Decoder(t, ext_hook=custom_ext_hook)
 
     def decode(self, obj: Any):
-        #return self.decoder.decode(obj)
-        return pickle.loads(obj)
+        return self.decoder.decode(obj)
 
 
 def custom_enc_hook(obj: Any) -> Any:
@@ -47,9 +44,7 @@ def custom_enc_hook(obj: Any) -> Any:
         # NOTE(rob): it is fastest to use numpy + pickle
         # when serializing torch tensors.
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
-        #return msgpack.Ext(CUSTOM_TYPE_CODE_PICKLE, pickle.dumps(obj.numpy()))
-        return msgpack.Ext(CUSTOM_TYPE_CODE_PICKLE,
-                           msgpack.Encoder().encode(obj.numpy()))
+        return msgpack.Ext(CUSTOM_TYPE_CODE_PICKLE, pickle.dumps(obj.numpy()))
     else:
         raise NotImplementedError(
             f"Objects of type {type(obj)} are not supported")
