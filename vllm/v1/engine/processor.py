@@ -93,6 +93,17 @@ class Processor:
             decoder_inputs = SingletonInputsAdapter(processed_inputs)
             encoder_inputs = None
 
+        # TODO: Impl encoder-decoder
+        if encoder_inputs is not None:
+            raise NotImplementedError
+
+        assert isinstance(params, SamplingParams)
+        # TODO: can we avoid cloning here in multiproc case
+        sampling_params = params.clone()
+        sampling_params.update_from_generation_config(
+            self.generation_config_fields, eos_token_id)
+
+        # Multimodal related.
         # Compute MM hashes (if enabled)
         mm_hashes = None
         if self.use_hash:
@@ -103,16 +114,6 @@ class Processor:
             # Fallback to using MultiModalHasher directly.
             else:
                 mm_hashes = MultiModalHasher.hash_prompt_mm_data(prompt)
-
-        # TODO: Impl encoder-decoder
-        if encoder_inputs is not None:
-            raise NotImplementedError
-
-        assert isinstance(params, SamplingParams)
-        # TODO: can we avoid cloning here in multiproc case
-        sampling_params = params.clone()
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields, eos_token_id)
 
         # For merged preprocessor, mm_data is already mm_inputs
         precomputed_mm_inputs: Optional[list[MultiModalKwargs]] = None
@@ -128,13 +129,15 @@ class Processor:
                 for item in decoder_mm_data.get_items(modality)
             ]
 
-        # Merge and flatten multimodal placeholders, hashes and inputs
-        # from dictionaries to lists, and sort them by each item's position
-        # in the input sequence.
-        # NOTE: interleaved modalities are not supported.
         mm_positions = decoder_inputs.multi_modal_placeholders
 
+        # Last-mile processing of multimodal metadata and inputs.
         if mm_positions:
+
+            # Merge and flatten multimodal placeholders, hashes and inputs
+            # from dictionaries to lists, and sort them by each item's position
+            # in the input sequence.
+            # NOTE: interleaved modalities are not supported.
             (
                 sorted_modalities,
                 sorted_mm_positions,
@@ -143,38 +146,37 @@ class Processor:
                 mm_positions,
                 mm_hashes,
             )
-        else:
-            sorted_modalities = []
-            sorted_mm_positions = None
-            sorted_mm_hashes = None
+            # NOTE: We sort multimodal inputs/kwargs only if there are multiple
+            # modalities involved and the model supports merged input processor.
+            if precomputed_mm_inputs is not None and len(
+                    sorted_modalities) > 1:
+                modality_order_dict = {
+                    modality: order
+                    for order, modality in enumerate(sorted_modalities)
+                }
 
-        # NOTE: We sort multimodal inputs/kwargs only if there are multiple
-        # modalities involved and the model supports merged input processor.
-        if precomputed_mm_inputs is not None and len(sorted_modalities) > 1:
-            modality_order_dict = {
-                modality: order
-                for order, modality in enumerate(sorted_modalities)
-            }
+                # Sanity check to make sure each multimodal input
+                # has only one modality key.
+                for mm_input in precomputed_mm_inputs:
+                    assert len(mm_input.modalities) == 1
 
-            # Sanity check to make sure each multimodal input
-            # has only one modality key.
-            for mm_input in precomputed_mm_inputs:
-                assert len(mm_input.modalities) == 1
+                # Sort MultiModalKwags to match sorted_mm_positions
+                precomputed_mm_inputs = sorted(
+                    precomputed_mm_inputs,
+                    key=lambda mm_input: modality_order_dict[list(
+                        mm_input.modalities)[0]])
 
-            # Sort MultiModalKwags to match sorted_mm_positions
-            precomputed_mm_inputs = sorted(
-                precomputed_mm_inputs,
-                key=lambda mm_input: modality_order_dict[list(mm_input.
-                                                              modalities)[0]])
-
-        # Apply mm input cache update (and input mapper is necessary).
-        if len(decoder_mm_data) > 0:
+            # Apply mm input cache update (and input mapper is necessary).
             sorted_mm_inputs = self.mm_input_mapper_client.process_inputs(
                 mm_data=decoder_mm_data,
                 mm_hashes=sorted_mm_hashes,
                 mm_processor_kwargs=decoder_inputs.mm_processor_kwargs,
                 precomputed_mm_inputs=precomputed_mm_inputs,
             )
+        else:
+            sorted_mm_inputs = None
+            sorted_mm_hashes = None
+            sorted_mm_positions = None
 
         return EngineCoreRequest(
             request_id=request_id,
