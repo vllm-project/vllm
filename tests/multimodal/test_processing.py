@@ -586,9 +586,10 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
     )
 
     processor = processor_factory(ctx, cache=None)
+    profiler = processor.profiling_info
 
     mock_supported_mm_limits = MagicMock(return_value={"image": num_supported})
-    processor.get_supported_mm_limits = mock_supported_mm_limits
+    profiler.get_supported_mm_limits = mock_supported_mm_limits
 
     if is_valid:
         exc_ctx = nullcontext()
@@ -596,7 +597,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         exc_ctx = pytest.raises(ValueError, match="this model only supports")
 
     with exc_ctx:
-        processor._get_and_validate_dummy_mm_counts()
+        profiler.get_mm_limits()
 
 
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
@@ -723,7 +724,7 @@ def _test_processing_cache_correctness(
         }
 
         mm_counts = {k: len(vs) for k, vs in mm_data.items()}
-        prompt = baseline_processor._get_dummy_processor_inputs(
+        prompt = baseline_processor.profiling_info.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
         ).prompt_text
