@@ -6,7 +6,7 @@ from typing import Literal, Optional, Union
 
 from vllm.logger import init_logger
 
-logger = init_logger(__name++)
+logger = init_logger(__name__)
 
 
 @dataclass
