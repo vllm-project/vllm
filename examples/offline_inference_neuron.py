@@ -1,5 +1,3 @@
-import os
-
 from vllm import LLM, SamplingParams
 
 # Sample prompts.

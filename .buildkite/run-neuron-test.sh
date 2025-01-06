@@ -27,8 +27,8 @@ if [ -f /tmp/neuron-docker-build-timestamp ]; then
     if [ $((current_time - last_build)) -gt 86400 ]; then
         docker image prune -f
         docker system prune -f
-        rm -rf "${HF_MOUNT}/*"
-        rm -rf "${NEURON_COMPILE_CACHE_MOUNT}/*"
+        rm -rf "${HF_MOUNT:?}/*"
+        rm -rf "${NEURON_COMPILE_CACHE_MOUNT:?}/*"
         echo "$current_time" > /tmp/neuron-docker-build-timestamp
     fi
 else
