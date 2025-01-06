@@ -6,18 +6,12 @@ This guide walks you through the steps to implement a basic vLLM model.
 
 ## 1. Bring your model code
 
-Start by forking our [GitHub repository](https://github.com/vllm-project/vllm) and then [build it from source](#build-from-source).
-This gives you the ability to modify the codebase and test your model.
-
-Clone the PyTorch model code from the HuggingFace Transformers repository and put it into the <gh-dir:vllm/model_executor/models> directory.
-For instance, vLLM's [OPT model](gh-file:vllm/model_executor/models/opt.py) was adapted from the HuggingFace's [modeling_opt.py](https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py) file.
+First, clone the PyTorch model code from the source repository.
+For instance, vLLM's [OPT model](gh-file:vllm/model_executor/models/opt.py) was adapted from
+HuggingFace's [modeling_opt.py](https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py) file.
 
 ```{warning}
-When copying the model code, make sure to review and adhere to the code's copyright and licensing terms.
-```
-
-```{tip}
-If you don't want to fork the repository and modify vLLM's codebase, please refer to [Out-of-Tree Model Integration](#new-model-oot).
+Make sure to review and adhere to the original code's copyright and licensing terms!
 ```
 
 ## 2. Make your code compatible with vLLM
@@ -105,4 +99,4 @@ This method should load the weights from the HuggingFace's checkpoint file and a
 
 ## 5. Register your model
 
-Finally, add your `*ForCausalLM` class to `_VLLM_MODELS` in <gh-file:vllm/model_executor/models/registry.py> so that it is available by default.
+See [this page](#new-model-registration) for instructions on how to register your new model to be used by vLLM.

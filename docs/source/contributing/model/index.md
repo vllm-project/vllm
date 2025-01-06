@@ -9,8 +9,8 @@ This section provides more information on how to integrate a [HuggingFace Transf
 :maxdepth: 1
 
 basic
+registration
 multimodal
-oot
 ```
 
 ```{note}
