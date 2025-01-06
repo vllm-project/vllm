@@ -1,4 +1,4 @@
-# Alternative model loaders
+# Alternative Model Loaders
 
 ```{toctree}
 :maxdepth: 1
