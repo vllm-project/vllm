@@ -100,3 +100,16 @@ This method should load the weights from the HuggingFace's checkpoint file and a
 ## 5. Register your model
 
 See [this page](#new-model-registration) for instructions on how to register your new model to be used by vLLM.
+
+## Frequently Asked Questions
+
+### How to support models with interleaving sliding windows?
+
+For models with interleaving sliding windows (e.g. `google/gemma-2-2b-it` and `mistralai/Ministral-8B-Instruct-2410`), the scheduler will treat the model as a full-attention model, i.e., kv-cache of all tokens will not be dropped. This is to make sure prefix caching works with these models. Sliding window only appears as a parameter to the attention kernel computation.
+
+To support a model with interleaving sliding windows, we need to take care of the following details:
+
+- Make sure [this line](https://github.com/vllm-project/vllm/blob/996357e4808ca5eab97d4c97c7d25b3073f46aab/vllm/config.py#L308) evaluates `has_interleaved_attention` to `True` for this model, and set `self.hf_text_config.interleaved_sliding_window` to the format of interleaving sliding windows the model can understand. Then, `self.hf_text_config.sliding_window` will be deleted, and the model will be treated as a full-attention model.
+- In the modeling code, parse the correct sliding window value for every layer, and pass it to the attention layer's `per_layer_sliding_window` argument. For reference, check [this line](https://github.com/vllm-project/vllm/blob/996357e4808ca5eab97d4c97c7d25b3073f46aab/vllm/model_executor/models/llama.py#L171).
+
+With these two steps, interleave sliding windows should work with the model.
