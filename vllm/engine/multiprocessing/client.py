@@ -242,13 +242,12 @@ class MQLLMEngineClient(EngineClient):
                         queue = self.output_queues.get(request_id)
                         if queue is not None:
                             queue.put_nowait(exception)
+                # Put each output into the appropriate queue.
+                elif isinstance(request_outputs, RPCAdapterLoadedResponse):
+                    self._add_output(request_outputs)
                 else:
-                    # Put each output into the appropriate queue.
-                    if isinstance(request_outputs, RPCAdapterLoadedResponse):
-                        self._add_output(request_outputs)
-                    else:
-                        for request_output in request_outputs:
-                            self._add_output(request_output)
+                    for request_output in request_outputs:
+                        self._add_output(request_output)
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient output handler.")
