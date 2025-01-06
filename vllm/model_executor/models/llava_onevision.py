@@ -35,6 +35,9 @@ from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
+# For profile run
+_MAX_FRAMES_PER_VIDEO = 16
+
 
 class LlavaOnevisionVideoPixelInputs(TypedDict):
     type: Literal["pixel_values_videos"]
@@ -223,8 +226,10 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
         max_image_tokens = self._get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        return max(max_total_frames // max(max_videos, 1), 1)
+        return max(max_frames_per_video, 1)
 
     def _get_max_video_tokens(self, seq_len: int) -> int:
         target_width, target_height = self._get_image_size_with_most_features()
@@ -558,13 +563,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities = {}
 
-        if "pixel_values" in kwargs:
-            modalities["images"] = self._parse_and_validate_image_input(
-                **kwargs)
-
-        if "pixel_values_videos" in kwargs:
-            modalities["videos"] = self._parse_and_validate_video_input(
-                **kwargs)
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key == "pixel_values" and "images" not in modalities:
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+            if input_key == "pixel_values_videos" and "videos" not in modalities:  # noqa E501
+                modalities["videos"] = self._parse_and_validate_video_input(
+                    **kwargs)
 
         return modalities
 
@@ -824,21 +831,21 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if not modalities:
             return None
 
-        # We make a tuple of each embedding with its modality string. This is a
-        # temporary workaround for models to handle mixed modalities when
-        # get_multimodal_embeddings and get_input_embeddings are called
-        # separately.
-        # TODO(ywang96): Add support for mixed-modality inference for v1.
-        multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
-        if "images" in modalities:
-            image_input = modalities["images"]
-            vision_embeddings = self._process_image_input(image_input)
-            multimodal_embeddings.append((vision_embeddings, "image"))
-        if "videos" in modalities:
-            video_input = modalities["videos"]
-            video_embeddings = self._process_video_pixels(video_input)
-            multimodal_embeddings.append((video_embeddings, "video"))
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        for modality in modalities:
+            if modality == "images":
+                image_input = modalities["images"]
+                vision_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(vision_embeddings)
+            if modality == "videos":
+                video_input = modalities["videos"]
+                video_embeddings = self._process_video_pixels(video_input)
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
@@ -850,15 +857,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            for embeddings, modality in multimodal_embeddings:
-                if modality == "image":
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, embeddings,
-                        self.config.image_token_index)
-                if modality == "video":
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, embeddings,
-                        self.config.video_token_index)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [self.config.image_token_index, self.config.video_token_index])
         return inputs_embeds
 
     def forward(
