@@ -2,7 +2,9 @@ from vllm.v1.executor.ray_executor import RayExecutor
 from vllm.v1.executor.ray_utils import ray
 from vllm.v1.outputs import ModelRunnerOutput
 
+
 class RayXPUExecutor(RayExecutor):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._device = "xpu"
@@ -20,7 +22,10 @@ class RayXPUExecutor(RayExecutor):
         # FIXME: XPU do not support ray dag now.
         # Only the first worker (with rank 0) returns the execution result.
         # Others return None.
-        async_outputs = [worker.execute_model.remote(scheduler_output) for worker in self.workers]
+        async_outputs = [
+            worker.execute_model.remote(  # type: ignore[attr-defined]
+                scheduler_output) for worker in self.workers
+        ]
         outputs = [ray.get(output) for output in async_outputs]
         output = outputs[0]
         return output
