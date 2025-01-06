@@ -516,7 +516,7 @@ class MultiModalInputsV2(TypedDict):
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: NotRequired["MultiModalHashDict"]
+    mm_hashes: NotRequired[Optional["MultiModalHashDict"]]
     """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict

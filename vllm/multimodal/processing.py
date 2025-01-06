@@ -996,19 +996,23 @@ class BaseMultiModalProcessor(ProcessingMixin, ABC):
         """
         mm_items = self._to_mm_items(mm_data)
 
-        # Create MM hashes
+        # Create MM hashes (only used in V1)
         # TODO: Use these hash keys for caching operations in apply_hf_processor
         # instead of rehashing.
-        model_id = self.ctx.model_config.model
-        mm_hashes = {
-            modality: [
-                MultiModalHasher.hash_kwargs(model_id=model_id,
-                                             **{modality: item},
-                                             **hf_processor_mm_kwargs)
-                for item in items
-            ]
-            for modality, items in mm_items.items()
-        }
+
+        if envs.VLLM_USE_V1:
+            model_id = self.ctx.model_config.model
+            mm_hashes = {
+                modality: [
+                    MultiModalHasher.hash_kwargs(model_id=model_id,
+                                                 **{modality: item},
+                                                 **hf_processor_mm_kwargs)
+                    for item in items
+                ]
+                for modality, items in mm_items.items()
+            }
+        else:
+            mm_hashes = None
 
         prompt_ids, mm_kwargs = self._cached_apply_hf_processor(
             prompt_text,
