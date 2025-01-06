@@ -79,10 +79,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
-docs/source/getting_started/examples/*.rst
-!**/*.template.rst
-docs/source/getting_started/examples/*.md
-!**/*.template.md
+docs/source/getting_started/examples/
 
 # PyBuilder
 .pybuilder/
