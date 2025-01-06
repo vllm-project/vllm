@@ -48,8 +48,8 @@ class MultiprocExecutor(Executor):
                 "shutting down. See stack trace above for root cause issue.")
             # Shutdown first (avoid SysExit exceptions in __del__).
             self.shutdown()
-            # TODO(rob): move this to the VLLMConfig.
             if VLLM_ENABLE_V1_MULTIPROCESSING:
+                # TODO(rob): move this to the VLLMConfig.
                 # Propagate up if using the mp engine. Note that
                 # sending in non-mp mode crashes caller process.
                 psutil.Process().parent().send_signal(signal.SIGUSR1)

@@ -1,3 +1,4 @@
+import asyncio
 import signal
 import weakref
 from abc import ABC, abstractmethod
@@ -157,6 +158,7 @@ class MPClient(EngineCoreClient):
                                             zmq.constants.PUSH)
 
         # Start EngineCore in background process.
+        self.engine_core_errored = False
         self.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
@@ -167,14 +169,30 @@ class MPClient(EngineCoreClient):
                 "executor_class": executor_class,
                 "log_stats": log_stats,
             })
+        self.proc_handle.wait_for_startup()
 
     def shutdown(self):
         """Clean up background resources."""
-        print("IN MPCLIENT.shutdown.")
-        if hasattr(self, "proc_handle"):
-            self.proc_handle.shutdown()
 
+        self.proc_handle.shutdown()
         self._finalizer()
+
+    def _sigusr1_handler(self):
+        """
+        EngineCoreProc sends SIGUSR1 if it encounters an Exception.
+        Set self in errored state and begin shutdown.
+        """
+        logger.fatal("Got fatal signal from EngineCore, shutting down.")
+        self.engine_core_errored = True
+        self.shutdown()
+
+    def _format_exception(self, e: Exception) -> Exception:
+        """If errored, use EngineDeadError so root cause is clear."""
+
+        return (EngineDeadError(
+            "EngineCore encountered an issue. See stack trace "
+            "for the root cause.",
+            suppress_context=True) if self.engine_core_errored else e)
 
 
 class SyncMPClient(MPClient):
@@ -185,21 +203,11 @@ class SyncMPClient(MPClient):
                  executor_class: Type[Executor],
                  log_stats: bool = False):
 
-        # TODO(rob): signal handler only needed for SyncMPClient
-        # because AsyncLLM needs to handle the signal rather
-        # than the AsyncMPClient. TODO(rob): move the Client def
-        # to async_llm and llm_engine to make this clearer.
-        # Background procs sent SIGUSR1 if they hit error.
-        # Handle by setting _errored=True and shutting down.
-        # Next action taken will raise EngineDeadError.
+        # Setup EngineCore signal handler.
         def sigusr1_handler(signum, frame):
-            logger.fatal("LLMEngine got fatal signal from background "
-                         "process, shutting down.")
-            self._errored = True
-            self.shutdown()
+            self._sigusr1_handler()
 
         signal.signal(signal.SIGUSR1, sigusr1_handler)
-        self._errored = False
 
         super().__init__(
             asyncio_mode=False,
@@ -207,13 +215,6 @@ class SyncMPClient(MPClient):
             executor_class=executor_class,
             log_stats=log_stats,
         )
-
-    def _format_exception(self, e: Exception) -> Exception:
-        """If _errored, use EngineDeadError so root cause is clear."""
-        return (EngineDeadError(
-            "EngineCore encountered an issue. See stack trace "
-            "for the root cause.",
-            suppress_context=True) if self._errored else e)
 
     def get_output(self) -> List[EngineCoreOutput]:
         try:
@@ -249,6 +250,23 @@ class AsyncMPClient(MPClient):
                  vllm_config: VllmConfig,
                  executor_class: Type[Executor],
                  log_stats: bool = False):
+
+        # EngineCore sends SIGUSR1 when it gets an Exception.
+        def sigusr1_handler_asyncio():
+            self._sigusr1_handler()
+
+        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
+                                                      sigusr1_handler_asyncio)
+
+        # super().__init__ blocks the event loop until background
+        # procs are setup. This handler allows us to catch issues
+        # during startup.
+        def sigusr1_handler(signum, frame):
+            self._sigusr1_handler()
+
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
+
+        # Initialize EngineCore + all background processes.
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
@@ -256,18 +274,23 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
+        # Remove the non-asyncio handler.
+        signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+
     async def get_output_async(self) -> List[EngineCoreOutput]:
-
-        frames = await self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-
-        return engine_core_outputs
+        try:
+            frames = await self.output_socket.recv_multipart(copy=False)
+            return self.decoder.decode(frames[0].buffer).outputs
+        except Exception as e:
+            raise self._format_exception(e) from None
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:
-
-        msg = (request_type.value, self.encoder.encode(request))
-        await self.input_socket.send_multipart(msg, copy=False)
+        try:
+            msg = (request_type.value, self.encoder.encode(request))
+            await self.input_socket.send_multipart(msg, copy=False)
+        except Exception as e:
+            raise self._format_exception(e) from None
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         await self._send_input(EngineCoreRequestType.ADD, request)

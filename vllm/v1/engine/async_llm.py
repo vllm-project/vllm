@@ -1,5 +1,4 @@
 import asyncio
-import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -17,7 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import AsyncMPClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.processor import Processor
@@ -48,16 +47,6 @@ class AsyncLLM(EngineClient):
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
 
-        # Background processes send SIGUSR1 when unrecoverable
-        # errors occur. Start the shutdown process if this happens.
-        def sigusr1_handler():
-            logger.fatal("AsyncLLM got fatal signal from background process, "
-                         "starting shutdown. See stack trace for root cause.")
-            self._set_errored_and_propagate()
-
-        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
-                                                      sigusr1_handler)
-
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
@@ -87,15 +76,14 @@ class AsyncLLM(EngineClient):
         )
 
         # EngineCore (starts the engine in background process).
-        self.engine_core = EngineCoreClient.make_client(
-            multiprocess_mode=True,
-            asyncio_mode=True,
+        self.engine_core = AsyncMPClient(
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
 
-        self.output_handler: Optional[asyncio.Task] = None
+        # Output handler background task.
+        self.output_handler = asyncio.create_task(self._run_output_handler())
 
     @classmethod
     def from_engine_args(
@@ -129,12 +117,11 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
+        if handler := getattr(self, "output_handler", None):
+            handler.cancel()
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
-
-        if handler := getattr(self, "output_handler", None):
-            handler.cancel()
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
@@ -224,13 +211,6 @@ class AsyncLLM(EngineClient):
         """
 
         try:
-            # We start the output_handler on the first call to generate() so
-            # we can call __init__ before the event loop, which enables us
-            # to handle startup failure gracefully in the OpenAI server.
-            if self.output_handler is None:
-                self.output_handler = asyncio.create_task(
-                    self._run_output_handler())
-
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -316,9 +296,8 @@ class AsyncLLM(EngineClient):
             raise
 
         except Exception as e:
-            logger.error(
-                "AsyncLLM output_handler got an exception, shutting down",
-                exc_info=e)
+            logger.error("AsyncLLM output_handler got an Exception:",
+                         exc_info=e)
             self._set_errored_and_propagate()
 
     def _set_errored_and_propagate(self):

@@ -93,7 +93,8 @@ class BackgroundProcHandle:
         process_kwargs: Dict[Any, Any],
     ):
         context = get_mp_context()
-        reader, writer = context.Pipe(duplex=False)
+        self.reader, writer = context.Pipe(duplex=False)
+        self.process_name = process_name
 
         assert ("ready_pipe" not in process_kwargs
                 and "input_path" not in process_kwargs
@@ -102,19 +103,37 @@ class BackgroundProcHandle:
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
 
+        # Flag for shutdown state. BackgroundProcs send signals
+        # when errors occur which calls shutdown(). If we are in
+        # startup loop when signaled, this flag breaks us out.
+        self.shutting_down = False
+
         # Run busy loop in background process.
         self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
         self._finalizer = weakref.finalize(self, shutdown, self.proc,
                                            input_path, output_path)
         self.proc.start()
 
-        # Wait for startup.
-        if reader.recv()["status"] != "READY":
-            raise Exception(f"{process_name} initialization failed. "
-                            "See stack trace for root cause.")
-
     def shutdown(self):
+        self.shutting_down = True
         self._finalizer()
+
+    def wait_for_startup(self):
+        """Wait until the background process is ready."""
+
+        e = Exception(f"{self.process_name} initialization failed due to "
+                      "an exception in a background process. See stack trace "
+                      "for root cause.")
+
+        while not self.reader.poll(timeout=1):
+            if self.shutting_down:
+                raise e
+        try:
+            if self.reader.recv()["status"] != "READY":
+                raise e
+        except EOFError:
+            e.__suppress_context__ = True
+            raise e from None
 
 
 # Note(rob): shutdown function cannot be a bound method,
