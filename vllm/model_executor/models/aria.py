@@ -3,7 +3,6 @@ from typing import (Callable, Iterable, List, Mapping, Optional, Set, Tuple,
 
 import torch
 import torch.nn as nn
-from torch.nn.init import trunc_normal_
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
@@ -216,9 +215,7 @@ class AriaProjector(nn.Module):
         self.num_heads = num_heads
 
         self.query = nn.Parameter(
-            torch.zeros(max(patch_to_query_dict.values()), self.embed_dim))
-
-        trunc_normal_(self.query, std=0.02)
+            torch.empty(max(patch_to_query_dict.values()), self.embed_dim))
 
         self.cross_attn = CrossAttention(kv_dim, embed_dim, num_heads)
 
@@ -456,7 +453,7 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
         hf_config = self.ctx.get_hf_config()
         return max(hf_config.projector_patch_to_query_dict.values())
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {"image": self._get_num_image_tokens()}
 
     def _get_mm_fields_config(
@@ -488,8 +485,9 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
             )
         ]
 
-    def _get_dummy_mm_inputs(
+    def _get_dummy_processor_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         hf_config = self.ctx.get_hf_config()

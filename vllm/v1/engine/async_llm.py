@@ -1,6 +1,5 @@
 import asyncio
 import os
-import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -23,6 +22,7 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.ray_utils import initialize_ray_cluster
 
 logger = init_logger(__name__)
 
@@ -41,21 +41,6 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-
-        # The child processes will send SIGQUIT when unrecoverable
-        # errors happen. We kill the process tree here so that the
-        # stack trace is very evident.
-        # TODO: rather than killing the main process, we should
-        # figure out how to raise an AsyncEngineDeadError and
-        # handle at the API server level so we can return a better
-        # error code to the clients calling VLLM.
-        def sigquit_handler(signum, frame):
-            logger.fatal(
-                "AsyncLLM got SIGQUIT from worker processes, shutting "
-                "down. See stack trace above for root cause issue.")
-            kill_process_tree(os.getpid())
-
-        signal.signal(signal.SIGQUIT, sigquit_handler)
 
         assert start_engine_loop
 
@@ -103,9 +88,6 @@ class AsyncLLM(EngineClient):
 
         self.output_handler: Optional[asyncio.Task] = None
 
-    def __del__(self):
-        self.shutdown()
-
     @classmethod
     def from_engine_args(
         cls,
@@ -150,7 +132,11 @@ class AsyncLLM(EngineClient):
         executor_class: Type[Executor]
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
+        if distributed_executor_backend == "ray":
+            initialize_ray_cluster(vllm_config.parallel_config)
+            from vllm.v1.executor.ray_executor import RayExecutor
+            executor_class = RayExecutor
+        elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
         else:

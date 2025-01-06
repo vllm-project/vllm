@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
 from collections import UserDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Generic, NamedTuple, Optional, TypeVar
+from typing import (TYPE_CHECKING, Any, Generic, NamedTuple, Optional, TypeVar,
+                    Union)
 
 import numpy as np
 import torch
@@ -87,7 +88,7 @@ class EmbeddingItems(ModalityDataItems[NestedTensors, torch.Tensor]):
     def get_count(self) -> int:
         return len(self.data)
 
-    def get(self, index: int) -> object:
+    def get(self, index: int) -> torch.Tensor:
         return self.data[index]
 
     def get_processor_data(self) -> Mapping[str, object]:
@@ -95,6 +96,9 @@ class EmbeddingItems(ModalityDataItems[NestedTensors, torch.Tensor]):
 
     def get_passthrough_data(self) -> Mapping[str, object]:
         return {f"{self.modality}_embeds": self.data}
+
+    def get_feature_size(self, item_idx: int) -> int:
+        return len(self.get(item_idx))
 
 
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
@@ -142,6 +146,20 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
     def __init__(self, data: Sequence[HfVideoItem]) -> None:
         super().__init__(data, "video")
 
+    def get_num_frames(self, item_idx: int) -> int:
+        return len(self.get(item_idx))
+
+    def get_frame_size(self, item_idx: int) -> ImageSize:
+        image = self.get(item_idx)[0]  # Assume that the video isn't empty
+
+        if isinstance(image, Image):
+            return ImageSize(*image.size)
+        if isinstance(image, (np.ndarray, torch.Tensor)):
+            _, h, w = image.shape
+            return ImageSize(w, h)
+
+        assert_never(image)
+
 
 class VideoEmbeddingItems(EmbeddingItems):
 
@@ -182,7 +200,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     def get_items(
         self,
         modality: str,
-        typ: type[_D],
+        typ: Union[type[_D], tuple[type[_D], ...]],
     ) -> _D:
         """
         Get the data items belonging to a modality,
@@ -199,7 +217,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
                             f"Expected type: {typ}, but "
                             f"found type: {type(items)}")
 
-        return items
+        return items  # type: ignore[return-value]
 
 
 ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],

@@ -76,7 +76,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         return ImageSize(width=target_size["width"],
                          height=target_size["height"])
 
-    def _get_image_grid_size(
+    def _get_image_feature_grid_size(
         self,
         *,
         image_width: int,
@@ -96,10 +96,10 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
         nrows = math.ceil(image_height / 30)
         return ncols, nrows
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         target_width, target_height = self._get_image_target_size()
 
-        max_ncols, max_nrows = self._get_image_grid_size(
+        max_ncols, max_nrows = self._get_image_feature_grid_size(
             image_width=target_width,
             image_height=target_height,
         )
@@ -172,7 +172,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = self._get_image_grid_size(
+            ncols, nrows = self._get_image_feature_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
@@ -208,8 +208,9 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor):
 
         return result
 
-    def _get_dummy_mm_inputs(
+    def _get_dummy_processor_inputs(
         self,
+        seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         target_width, target_height = self._get_image_target_size()
