@@ -1,7 +1,7 @@
 import math
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Final, Iterable, List, Literal, Mapping, Optional,
+                    Protocol, Set, Tuple, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -21,15 +21,16 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 from vllm.multimodal.parse import (MultiModalDataItems, VideoEmbeddingItems,
                                    VideoProcessorItems)
-from vllm.multimodal.processing import (MultiModalFieldConfig, ProcessorInputs,
-                                        PromptReplacement)
+from vllm.multimodal.processing import MultiModalFieldConfig, PromptReplacement
+from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
-from .llava import init_vision_tower_for_llava
-from .llava_next import LlavaNextMultiModalProcessor
+from .llava import BaseLlavaProfilingInfo, init_vision_tower_for_llava
+from .llava_next import (LlavaNextLikeConfig, LlavaNextMultiModalProcessor,
+                         LlavaNextProcessingMixin)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -82,39 +83,17 @@ LlavaOnevisionMultiInputs = Union[LlavaOnevisionImageInputs,
                                   LlavaOnevisionVideoPixelInputs]
 
 
-class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
+class LlavaOnevisionLikeConfig(LlavaNextLikeConfig, Protocol):
+    video_token_index: Final[int]
 
-    def _get_hf_config(self) -> LlavaOnevisionConfig:
+
+class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
+
+    def _get_hf_config(self) -> LlavaOnevisionLikeConfig:
         return self.ctx.get_hf_config(LlavaOnevisionConfig)
 
-    def _get_hf_processor(self) -> LlavaOnevisionProcessor:
+    def _get_hf_processor(self):
         return self.ctx.get_hf_processor(LlavaOnevisionProcessor)
-
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        max_image_tokens = self._get_max_image_tokens()
-
-        num_frames = self._get_dummy_num_frames(seq_len)
-        max_video_tokens = self._get_max_video_tokens(num_frames)
-
-        return {
-            "image": max_image_tokens,
-            "video": max_video_tokens,
-        }
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-            pixel_values_videos=MultiModalFieldConfig.batched("video"),
-        )
 
     def _get_num_unpadded_features(
         self,
@@ -128,7 +107,7 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
         current_height = npatches * num_patch_height
         current_width = npatches * num_patch_width
 
-        # NOTE: HF resizes based on float32
+        # NOTE: Use float32 to remain consistent with HF output
         original_aspect_ratio = np.array(original_width / original_height,
                                          dtype=np.float32)
         current_aspect_ratio = np.array(current_width / current_height,
@@ -167,7 +146,8 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
         hf_config = self._get_hf_config()
         spatial_pool_stride = getattr(hf_config, "spatial_pool_stride", 2)
 
-        patch_grid_length = self._vision_encoder_info.get_patch_grid_length()
+        vision_encoder_info = self._get_vision_encoder_info()
+        patch_grid_length = vision_encoder_info.get_patch_grid_length()
         pooled_grid_length = math.ceil(patch_grid_length / spatial_pool_stride)
 
         return pooled_grid_length * pooled_grid_length
@@ -186,18 +166,33 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
 
         return num_frame_tokens * num_frames + 1  # Newline token
 
-    def _get_max_video_tokens(self, num_frames: int) -> int:
-        return self._get_num_video_tokens(image_width=999999,
-                                          image_height=999999,
-                                          num_frames=num_frames)
+
+class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
+                                  BaseLlavaProfilingInfo):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None, "video": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        return {
+            "image": self._get_max_image_tokens(),
+            "video": self._get_max_video_tokens(seq_len),
+        }
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
+        target_width, target_height = self._get_image_size_with_most_features()
+
         num_frames = 0
 
         while True:
             next_num_frames = num_frames + 1
+            next_max_tokens = self._get_num_video_tokens(
+                image_width=target_width,
+                image_height=target_height,
+                num_frames=next_num_frames,
+            )
 
-            if self._get_max_video_tokens(next_num_frames) > max_tokens:
+            if next_max_tokens > max_tokens:
                 break
 
             num_frames = next_num_frames
@@ -215,8 +210,65 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
 
         return max(max_total_frames // max(max_videos, 1), 1)
 
-    def _get_video_token(self) -> str:
-        return self._get_hf_processor().video_token
+    def _get_max_video_tokens(self, seq_len: int) -> int:
+        target_width, target_height = self._get_image_size_with_most_features()
+
+        return self._get_num_video_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            num_frames=self._get_dummy_num_frames(seq_len),
+        )
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
+        processor = self._get_hf_processor()
+        image_token = processor.image_token
+        video_token = processor.video_token
+        target_width, target_height = self._get_image_size_with_most_features()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images),
+            "video":
+            self._get_dummy_videos(
+                width=target_width,
+                height=target_height,
+                num_frames=self._get_dummy_num_frames(seq_len),
+                num_videos=num_videos,
+            )
+        }
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images + video_token * num_videos,
+            mm_data=mm_data,
+        )
+
+
+class LlavaOnevisionMultiModalProcessor(LlavaOnevisionProcessingMixin,
+                                        LlavaNextMultiModalProcessor):
+
+    def _get_profiling_info(self) -> BaseProfilingInfo:
+        return LlavaOnevisionProfilingInfo(self.ctx)
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+            pixel_values_videos=MultiModalFieldConfig.batched("video"),
+        )
 
     def _call_hf_processor(
         self,
@@ -235,7 +287,8 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
                 mm_kwargs=mm_kwargs,
             )
 
-        video_token = self._get_video_token()
+        processor = self._get_hf_processor()
+        video_token = processor.video_token
 
         # LLaVA-OneVision processor doesn't support multiple videos
         # with different sizes when converting back to tensors
@@ -302,37 +355,6 @@ class LlavaOnevisionMultiModalProcessor(LlavaNextMultiModalProcessor):
                 replacement=get_video_replacement,
             ),
         ]
-
-    def _get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
-        image_token = self._get_image_token()
-        video_token = self._get_video_token()
-        target_width, target_height = self._get_dummy_image_size()
-
-        mm_data = {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images),
-            "video":
-            self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=self._get_dummy_num_frames(seq_len),
-                num_videos=num_videos,
-            )
-        }
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images + video_token * num_videos,
-            mm_data=mm_data,
-        )
 
 
 class LlavaOnevisionMultiModalProjector(nn.Module):
