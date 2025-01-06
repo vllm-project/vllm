@@ -334,6 +334,8 @@ def test_merge_and_sort_multimodal_metadata():
 def test_merge_and_sort_multimodal_metadata_with_interleaving():
 
     test_cases = [
+
+        # <image> <audio> <image> <audio>
         TestCase(mm_positions={
             "image": [
                 PlaceholderRange(offset=0, length=4),
@@ -351,6 +353,8 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                  expected_modalities=None,
                  expected_ranges=None,
                  expected_hashes=None),
+
+        # <image> <image> <video> <audio> <image>
         TestCase(mm_positions={
             "image": [
                 PlaceholderRange(offset=0, length=2),
