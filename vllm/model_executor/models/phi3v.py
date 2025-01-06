@@ -14,7 +14,7 @@
 # limitations under the License.
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Any, List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -28,22 +28,23 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
-from vllm.multimodal.parse import ImageEmbeddingItems, ImageProcessorItems
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   ImageSize)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
+                                        MultiModalDataItems, ProcessingMixin,
                                         PromptReplacement,
                                         _BoundPromptReplacement,
                                         _PlaceholderInfo)
+from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
-from .clip import dummy_image_for_clip
+from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
@@ -53,10 +54,6 @@ logger = init_logger(__name__)
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 32044
-
-# Result in the max possible feature size (h:w = 16:1)
-MAX_IMAGE_FEATURE_SIZE_HEIGHT = 8000
-MAX_IMAGE_FEATURE_SIZE_WIDTH = 50
 
 CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      hidden_act="quick_gelu",
@@ -305,10 +302,17 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
 
-class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
+class Phi3VProcessingMixin(ProcessingMixin):
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
+    def _get_hf_processor(
+        self,
+        *,
+        num_crops: Optional[int] = None,
+    ) -> ProcessorMixin:
+        if num_crops is not None:
+            return self.ctx.get_hf_processor(num_crops=num_crops)
+
+        return self.ctx.get_hf_processor()
 
     def _get_num_image_tokens(
         self,
@@ -323,23 +327,55 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
             height=image_height,
         )
 
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
+
+class Phi3VProfilingInfo(Phi3VProcessingMixin, BaseProfilingInfo):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        target_width, target_height = self._get_image_size_with_most_features()
+
         max_image_tokens = self._get_num_image_tokens(
-            image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-            image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+            image_width=target_width,
+            image_height=target_height,
         )
 
         return {"image": max_image_tokens}
 
-    def _get_hf_processor(
-        self,
-        *,
-        num_crops: Optional[int] = None,
-    ) -> ProcessorMixin:
-        if num_crops is not None:
-            return self.ctx.get_hf_processor(num_crops=num_crops)
+    def _get_image_size_with_most_features(self) -> ImageSize:
+        # Result in the max possible feature size (h:w = 16:1)
+        return ImageSize(height=8000, width=50)
 
-        return self.ctx.get_hf_processor()
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = self._get_image_size_with_most_features()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        hf_processor = self._get_hf_processor()
+        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+
+        return ProcessorInputs(
+            prompt_text="".join(image_tokens[:num_images]),
+            mm_data=mm_data,
+        )
+
+
+class Phi3VMultiModalProcessor(Phi3VProcessingMixin, BaseMultiModalProcessor):
+
+    def _get_profiling_info(self) -> BaseProfilingInfo:
+        return Phi3VProfilingInfo(self.ctx)
 
     def _call_hf_processor(
         self,
@@ -377,10 +413,10 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self._get_hf_processor()
+        hf_processor = self._get_hf_processor(**hf_processor_mm_kwargs)
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
 
         tokenizer = self._get_tokenizer()
@@ -415,12 +451,12 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
     def _apply_prompt_replacements(
         self,
         token_ids: list[int],
-        prompt_repls: Sequence[_BoundPromptReplacement],
+        mm_prompt_repls: Mapping[str, Sequence[_BoundPromptReplacement]],
         mm_item_counts: Mapping[str, int],
-    ) -> tuple[list[int], str, list[_PlaceholderInfo]]:
+    ) -> tuple[list[int], str, Mapping[str, list[_PlaceholderInfo]]]:
         token_ids, text, placeholders = super()._apply_prompt_replacements(
             token_ids=token_ids,
-            prompt_repls=prompt_repls,
+            mm_prompt_repls=mm_prompt_repls,
             mm_item_counts=mm_item_counts,
         )
 
@@ -428,33 +464,19 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor):
         if text.startswith("<s> <|image|>"):
             text = text.replace("<s> <|image|>", "<s><|image|>", 1)
             token_ids = [token_ids[0], *token_ids[2:]]
-            placeholders = [
-                _PlaceholderInfo(p.modality, p.start_idx - 1, p.replacement)
-                for p in placeholders
-            ]
+            placeholders = {
+                modality: [
+                    _PlaceholderInfo(
+                        modality=p.modality,
+                        item_idx=p.item_idx,
+                        start_idx=p.start_idx - 1,
+                        replacement=p.replacement,
+                    ) for p in ps
+                ]
+                for modality, ps in placeholders.items()
+            }
 
         return token_ids, text, placeholders
-
-    def _get_dummy_mm_inputs(
-        self,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
-
-        data = dummy_image_for_clip(
-            CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-            num_images,
-            image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-            image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
-        )
-
-        hf_processor = self._get_hf_processor()
-        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
-
-        return ProcessorInputs(
-            prompt_text="".join(image_tokens[:num_images]),
-            mm_data=data,
-        )
 
     def apply(
         self,

@@ -223,7 +223,8 @@ class MultiModalRegistry:
         if self.has_processor(model_config):
             tokenizer = cached_get_tokenizer(model_config.tokenizer)
             processor = self.create_processor(model_config, tokenizer)
-            return processor.get_mm_max_tokens_per_item()
+            seq_len = model_config.max_model_len
+            return processor.profiling_info.get_mm_max_tokens_per_item(seq_len)
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)
