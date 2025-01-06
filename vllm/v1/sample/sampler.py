@@ -49,12 +49,12 @@ class Sampler(nn.Module):
         if needs_logprobs:
             # Get sampled and topk token logprobs.
             # NOTE: CPU<>GPU sync happens here.
-            logprob_token_ids, logprobs = self.get_logprobs(
+            logprobs, logprob_token_ids = self.get_logprobs(
                 raw_logits,
                 sampling_metadata.max_num_logprobs,
                 sampled_token_ids=sampled)
         else:
-            logprob_token_ids, logprobs = None, None
+            logprobs, logprob_token_ids = None, None
 
         # NOTE: CPU-GPU synchronization happens here.
         sampler_output = SamplerOutput(

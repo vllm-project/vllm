@@ -450,7 +450,7 @@ class Scheduler:
                     assert logprobs_cpu is not None
                     # Here we assume there is 1 generated token per step.
                     logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
-                    logprobs = logprobs_cpu[req_index]
+                    logprobs = [logprobs_cpu[req_index]]
 
                 # Extract prompt logprobs for this req if needed.
                 # FIXME(rob): Currently we throw away the prompt logprobs
