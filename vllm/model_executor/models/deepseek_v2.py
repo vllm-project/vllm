@@ -417,20 +417,19 @@ class DeepseekV2MLAAttention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        # Note(simon): Added some symbols for shapes, hoping to help clarity.
-        self.hidden_size = hidden_size  # H
-        self.qk_nope_head_dim = qk_nope_head_dim  # P
-        self.qk_rope_head_dim = qk_rope_head_dim  # R
-        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim  # P + R
-        self.v_head_dim = v_head_dim  # V
+        self.hidden_size = hidden_size
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.v_head_dim = v_head_dim
 
         self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank  # L
+        self.kv_lora_rank = kv_lora_rank
 
-        self.num_heads = num_heads  # N
+        self.num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
         assert num_heads % tp_size == 0
-        self.num_local_heads = num_heads // tp_size  # N'
+        self.num_local_heads = num_heads // tp_size
 
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
@@ -444,24 +443,20 @@ class DeepseekV2MLAAttention(nn.Module):
                                              prefix=f"{prefix}.q_a_proj")
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
-                q_lora_rank,
-                # self.q_b_proj = ReplicatedLinear(q_lora_rank,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_b_proj")
+            self.q_b_proj = ColumnParallelLinear(q_lora_rank,
+                                                 self.num_heads *
+                                                 self.qk_head_dim,
+                                                 bias=False,
+                                                 quant_config=quant_config,
+                                                 prefix=f"{prefix}.q_b_proj")
         else:
-            # (H -> N(P+R))
-            self.q_proj = ColumnParallelLinear(
-                self.hidden_size,
-                # self.q_proj = ReplicatedLinear(self.hidden_size,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_proj")
+            self.q_proj = ColumnParallelLinear(self.hidden_size,
+                                               self.num_heads *
+                                               self.qk_head_dim,
+                                               bias=False,
+                                               quant_config=quant_config,
+                                               prefix=f"{prefix}.q_proj")
 
-        # (H -> (L+R))
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
@@ -470,15 +465,12 @@ class DeepseekV2MLAAttention(nn.Module):
             prefix=f"{prefix}.kv_a_proj_with_mqa")
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
-        # ((L -> (N(P+V)))
         self.kv_b_proj = ColumnParallelLinear(
-            # self.kv_b_proj = ReplicatedLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
-        # (NV -> H)
         self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                         self.hidden_size,
                                         bias=False,
@@ -531,6 +523,9 @@ class DeepseekV2MLAAttention(nn.Module):
         # self.W_UK = self.W_UK.view(self.kv_lora_rank, self.num_local_heads * self.qk_nope_head_dim)
         # self.W_UV = self.W_UV.view(self.kv_lora_rank, self.num_local_heads * self.v_head_dim)
 
+        self.prefix = prefix
+        self.debug_layer_idx = int(self.prefix.split(".")[-2])
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -540,6 +535,9 @@ class DeepseekV2MLAAttention(nn.Module):
     ) -> torch.Tensor:
         # TODO(simon): support append/chunked prefill by two kernels,
         # or using the decode kernel somehow.
+        if attn_metadata.prefill_metadata and attn_metadata.decode_metadata:
+            raise ValueError(
+                "Chunked prefill is not supported when MLA is enabled.")
         if attn_metadata.prefill_metadata:
             return self.forward_prefill(positions, hidden_states, kv_cache,
                                         attn_metadata)
@@ -554,7 +552,6 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # BH -> B(N(P+R)) -> BN(P+R)
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             q = self.q_a_layernorm(q)
@@ -564,37 +561,27 @@ class DeepseekV2MLAAttention(nn.Module):
             q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
                                                    self.qk_head_dim)
 
-        # BN(P+R) -> BNP, BNR
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
-                               dim=-1)
-        # BH -> B(L+R)
+        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
+                          dim=-1)
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        # B(L+R) -> BL, BR
         kv_a, _ = latent_cache.split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        # B(L+R) -> B1(L+R)
         latent_cache = latent_cache.unsqueeze(1)
-        # BL -> BL
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
-        # BL -> B(N'(P+V))
         kv = self.kv_b_proj(kv_a)[0]
-        # B(N'(P+V)) -> BN'(P+V)
         kv = kv.view(-1, self.num_local_heads,
                      self.qk_nope_head_dim + self.v_head_dim)
-        # BN'(P+V) -> BN'P, BN'V
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        # B1(L+R) -> B1R
         k_pe = latent_cache[:, :, self.kv_lora_rank:]
-        # BNR, B1R -> BNR, B1R
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-        # BN(P+R)
         q[..., self.qk_nope_head_dim:] = q_pe
-        # BN(P+R)
         k = torch.empty_like(q)
         k[..., :self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim:] = k_pe
 
-        # HACK
+        # HACK(simon): these need to be passed into the attention backend
+        # to write to the kv cache.
+        # TODO(simon): do we need to free these?
         attn_metadata.extras = {
             "kv_a":
             kv_a.unsqueeze(1),  # restore the head dim to write to kv cache
@@ -628,11 +615,13 @@ class DeepseekV2MLAAttention(nn.Module):
 
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
+
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
         kv_a, k_pe = latent_cache.split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
         k_pe = k_pe.unsqueeze(1)
+
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
         # Apply UK, q_nope (B, N, P) @ W_UK (L, N, P) -> (B, N, L)
         q_nope = torch.einsum("bnp,lnp->bnl", q_nope, self.W_UK)
@@ -651,6 +640,7 @@ class DeepseekV2MLAAttention(nn.Module):
             k_pe, [0, self.kv_lora_rank - self.qk_rope_head_dim], value=0)
         assert k.numel() == v.numel(), f"{k.numel()=} != {v.numel()=}"
 
+        attn_metadata.debug_layer_idx = self.debug_layer_idx
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
         # idk why but the attn_output is fp32
