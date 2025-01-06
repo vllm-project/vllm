@@ -1,4 +1,8 @@
-from typing import List, Optional, Type
+import os
+import signal
+import weakref
+from abc import ABC, abstractmethod
+from typing import List, Type
 
 import msgspec
 import zmq
@@ -6,7 +10,8 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import get_open_zmq_ipc_path, make_zmq_socket
+from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
+                        make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType, EngineCoreRequestUnion)
@@ -18,7 +23,7 @@ from vllm.v1.utils import BackgroundProcHandle
 logger = init_logger(__name__)
 
 
-class EngineCoreClient:
+class EngineCoreClient(ABC):
     """
     EngineCoreClient: subclasses handle different methods for pushing 
         and pulling from the EngineCore for asyncio / multiprocessing.
@@ -52,8 +57,9 @@ class EngineCoreClient:
 
         return InprocClient(vllm_config, executor_class, log_stats)
 
+    @abstractmethod
     def shutdown(self):
-        pass
+        ...
 
     def get_output(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
@@ -88,8 +94,6 @@ class InprocClient(EngineCoreClient):
 
         * pushes EngineCoreRequest directly into the EngineCore
         * pulls EngineCoreOutputs by stepping the EngineCore
-
-        TODO: support asyncio-mode for debugging.
     """
 
     def __init__(self, *args, **kwargs):
@@ -106,9 +110,6 @@ class InprocClient(EngineCoreClient):
 
     def shutdown(self):
         self.engine_core.shutdown()
-
-    def __del__(self):
-        self.shutdown()
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
@@ -134,15 +135,33 @@ class MPClient(EngineCoreClient):
         executor_class: Type[Executor],
         log_stats: bool = False,
     ):
+        # The child processes will send SIGUSR1 when unrecoverable
+        # errors happen. We kill the process tree here so that the
+        # stack trace is very evident.
+        # TODO(rob): rather than killing the main process, we should
+        # figure out how to raise an AsyncEngineDeadError and
+        # handle at the API server level so we can return a better
+        # error code to the clients calling VLLM.
+        def sigusr1_handler(signum, frame):
+            logger.fatal("Got fatal signal from worker processes, shutting "
+                         "down. See stack trace above for root cause issue.")
+            kill_process_tree(os.getpid())
+
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
+
         # Serialization setup.
         self.encoder = PickleEncoder()
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.
-        if asyncio_mode:
-            self.ctx = zmq.asyncio.Context()
-        else:
-            self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.ctx = (
+            zmq.asyncio.Context()  # type: ignore[attr-defined]
+            if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
+
+        # Note(rob): shutdown function cannot be a bound method,
+        # else the gc cannot collect the object.
+        self._finalizer = weakref.finalize(self, lambda x: x.destroy(linger=0),
+                                           self.ctx)
 
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
@@ -153,7 +172,6 @@ class MPClient(EngineCoreClient):
                                             zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        self.proc_handle: Optional[BackgroundProcHandle]
         self.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
@@ -166,12 +184,11 @@ class MPClient(EngineCoreClient):
             })
 
     def shutdown(self):
-        # Shut down the zmq context.
-        self.ctx.destroy(linger=0)
-
-        if hasattr(self, "proc_handle") and self.proc_handle:
+        """Clean up background resources."""
+        if hasattr(self, "proc_handle"):
             self.proc_handle.shutdown()
-            self.proc_handle = None
+
+        self._finalizer()
 
 
 class SyncMPClient(MPClient):
