@@ -21,7 +21,7 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, random_uuid
+from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -118,6 +118,8 @@ async def run_server(args: Namespace,
                      **uvicorn_kwargs: Any) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
+
+    set_ulimit()
 
     app = await init_app(args, llm_engine)
     assert engine is not None

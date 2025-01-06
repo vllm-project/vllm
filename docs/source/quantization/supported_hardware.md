@@ -4,121 +4,120 @@
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
 
-```{eval-rst}
-.. list-table::
-   :header-rows: 1
-   :widths: 20 8 8 8 8 8 8 8 8 8 8
+```{list-table}
+:header-rows: 1
+:widths: 20 8 8 8 8 8 8 8 8 8 8
 
-   * - Implementation
-     - Volta
-     - Turing
-     - Ampere
-     - Ada
-     - Hopper
-     - AMD GPU
-     - Intel GPU
-     - x86 CPU
-     - AWS Inferentia
-     - Google TPU
-   * - AWQ
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-   * - GPTQ
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-   * - Marlin (GPTQ/AWQ/FP8)
-     - ✗
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - INT8 (W8A8)
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✅︎
-     - ✗
-     - ✗
-   * - FP8 (W8A8)
-     - ✗
-     - ✗
-     - ✗
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - AQLM
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - bitsandbytes
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - DeepSpeedFP
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-   * - GGUF
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✅︎
-     - ✗
-     - ✗
-     - ✗
-     - ✗
-     - ✗
+* - Implementation
+  - Volta
+  - Turing
+  - Ampere
+  - Ada
+  - Hopper
+  - AMD GPU
+  - Intel GPU
+  - x86 CPU
+  - AWS Inferentia
+  - Google TPU
+* - AWQ
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+* - GPTQ
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+* - Marlin (GPTQ/AWQ/FP8)
+  - ✗
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - INT8 (W8A8)
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✅︎
+  - ✗
+  - ✗
+* - FP8 (W8A8)
+  - ✗
+  - ✗
+  - ✗
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - AQLM
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - bitsandbytes
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - DeepSpeedFP
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+* - GGUF
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✅︎
+  - ✗
+  - ✗
+  - ✗
+  - ✗
+  - ✗
 ```
 
 ## Notes:
@@ -129,4 +128,4 @@ The table below shows the compatibility of various quantization implementations 
 
 Please note that this compatibility chart may be subject to change as vLLM continues to evolve and expand its support for different hardware platforms and quantization methods.
 
-For the most up-to-date information on hardware support and quantization methods, please check the [quantization directory](https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/layers/quantization) or consult with the vLLM development team.
+For the most up-to-date information on hardware support and quantization methods, please refer to <gh-dir:vllm/model_executor/layers/quantization> or consult with the vLLM development team.

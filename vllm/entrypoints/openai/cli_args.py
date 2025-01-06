@@ -12,7 +12,7 @@ from typing import List, Optional, Sequence, Union, get_args
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
-from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.utils import FlexibleArgumentParser
@@ -196,7 +196,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action="store_true",
         help="If specified, will run the OpenAI frontend server in the same "
         "process as the model serving engine.")
-
+    parser.add_argument(
+        "--enable-request-id-headers",
+        action="store_true",
+        help="If specified, API server will add X-Request-Id header to "
+        "responses. Caution: this hurts performance at high QPS.")
     parser.add_argument(
         "--enable-auto-tool-choice",
         action="store_true",

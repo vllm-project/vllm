@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
+from pathlib import Path
+from typing import (TYPE_CHECKING, Any, Callable, Generic, NamedTuple,
                     Optional, Sequence, Tuple, Type, TypeVar, Union)
 
 from torch import nn
@@ -14,12 +15,12 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.sequence import SequenceGroupMetadata
 
-from .inputs import (MultiModalData, MultiModalDataDict, MultiModalKwargs,
+from .inputs import (ModalityData, MultiModalDataDict, MultiModalKwargs,
                      PlaceholderRange)
 
 logger = init_logger(__name__)
 
-MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
+MultiModalInputMapper = Callable[[InputContext, ModalityData[object]],
                                  MultiModalKwargs]
 """
 Return a dictionary to be passed as keyword arguments to
@@ -68,7 +69,7 @@ class MultiModalPlugin(ABC):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[Any],
+        data: ModalityData[Any],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         """
@@ -117,8 +118,8 @@ class MultiModalPlugin(ABC):
     def map_input(
         self,
         model_config: "ModelConfig",
-        data: MultiModalData[Any],
-        mm_processor_kwargs: Optional[Dict[str, Any]],
+        data: ModalityData[Any],
+        mm_processor_kwargs: Optional[dict[str, Any]],
     ) -> MultiModalKwargs:
         """
         Transform the data into a dictionary of model inputs using the
@@ -254,10 +255,10 @@ class MultiModalPlaceholderMap:
     """
 
     class IndexMap(NamedTuple):
-        src: List[int]
-        dest: List[int]
+        src: list[int]
+        dest: list[int]
 
-    src_ranges: List[range]
+    src_ranges: list[range]
     """
     The indices of the multi-modal embeddings that will replace the
     corresponding placeholder embeddings pointed to by ``dest_ranges``.
@@ -268,7 +269,7 @@ class MultiModalPlaceholderMap:
     The total number of flattened multi-modal embeddings.
     """
 
-    dest_ranges: List[range]
+    dest_ranges: list[range]
     """
     The indices of the placeholder embeddings that will be replaced by the
     multimodal embeddings.
@@ -288,7 +289,7 @@ class MultiModalPlaceholderMap:
     @classmethod
     def from_seq_group(
         cls, seq_group: "SequenceGroupMetadata", positions: range
-    ) -> Tuple[Optional[MultiModalDataDict], Dict[str,
+    ) -> Tuple[Optional[MultiModalDataDict], dict[str,
                                                   "MultiModalPlaceholderMap"]]:
         """
         Returns the multi-modal items that intersect with the portion of a
@@ -296,35 +297,37 @@ class MultiModalPlaceholderMap:
         ``MultiModalPlaceholderMap`` that relates the multi-modal embedding
         vectors to their corresponding placeholders.
 
-        Consider the following scenarios:
+        Examples:
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |.................................|
+        .. code-block::
 
-            images      = [A, B]
-            src_ranges  = [(0, 4), (4, 8)]
-            dest_ranges = [(0, 4), (5, 9)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |.................................|
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |  .....                          |
+                images      = [A, B]
+                src_ranges  = [(0, 4), (4, 8)]
+                dest_ranges = [(0, 4), (5, 9)]
 
-            images      = [A, B]
-            src_ranges  = [(2, 4), (4, 6)]
-            dest_ranges = [(0, 2), (3, 5)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |  .....                          |
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |     .........                   |
+                images      = [A, B]
+                src_ranges  = [(2, 4), (4, 6)]
+                dest_ranges = [(0, 2), (3, 5)]
 
-            images      = [B]
-            src_ranges  = [(0, 4)]
-            dest_ranges = [(0, 4)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |     .........                   |
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |          .......................|
+                images      = [B]
+                src_ranges  = [(0, 4)]
+                dest_ranges = [(0, 4)]
 
-            images      = []
-            src_ranges  = []
-            dest_ranges = []
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |          .......................|
+
+                images      = []
+                src_ranges  = []
+                dest_ranges = []
         """
         seq_mm_data = seq_group.multi_modal_data
         seq_mm_placeholders = seq_group.multi_modal_placeholders
@@ -376,9 +379,9 @@ class MultiModalPlaceholderMap:
     def append_items_from_seq_group(
         self,
         positions: range,
-        multi_modal_items: List[_T],
+        multi_modal_items: list[_T],
         multi_modal_placeholders: Sequence[PlaceholderRange],
-    ) -> List[_T]:
+    ) -> list[_T]:
         """
         Adds the multi-modal items that intersect ```positions`` to this
         placeholder map and returns the intersecting items.
@@ -454,3 +457,22 @@ class MultiModalPlaceholderMap:
 
         return MultiModalPlaceholderMap.IndexMap(src=src_indices,
                                                  dest=dest_indices)
+
+
+class MediaIO(ABC, Generic[_T]):
+
+    @abstractmethod
+    def load_bytes(self, data: bytes) -> _T:
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_base64(self, media_type: str, data: str) -> _T:
+        """
+        List of media types:
+        https://www.iana.org/assignments/media-types/media-types.xhtml
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_file(self, filepath: Path) -> _T:
+        raise NotImplementedError
