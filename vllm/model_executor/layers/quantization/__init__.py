@@ -81,7 +81,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "experts_int8": ExpertsInt8Config,
         "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
-        "exllamav2": Exl2Config,
+        "exl2": Exl2Config,
     }
 
     return method_to_config[quantization]
