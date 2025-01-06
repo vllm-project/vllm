@@ -456,7 +456,7 @@ class Scheduler:
                 # FIXME(rob): Currently we throw away the prompt logprobs
                 # of an in progress partial request. We can handle this
                 # by updating the Request object to hold prompt logprobs.
-                prompt_logprobs_token_ids, prompt_logprobs = (
+                prompt_logprobs, prompt_logprobs_token_ids = (
                     prompt_logprobs_dict.get(req_id, (None, None)))
 
                 # Add EngineCoreOutput for this Request.

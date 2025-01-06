@@ -144,18 +144,23 @@ class IncrementalDetokenizer:
             decoded_tokens = detokenize_non_incrementally(
                 self.tokenizer, topk_token_ids)
 
-            # Make the Logprob objects the position.
-            pos_logprobs_dict = self._make_pos_logprob_dict(
-                topk_token_ids.tolist(), topk_logprobs.tolist(),
-                decoded_tokens, self.num_logprobs)
-
-            # Add the sampled Logprob if it was not in topk.
-            if sampled_token_id not in pos_logprobs_dict:
-                token = self.tokenizer.decode(sampled_token_id)
-                pos_logprobs_dict[sampled_token_id] = Logprob(
+            # Make the dict of top-token Logprob objects associated with the
+            # current sequence offset
+            if sampled_token_id in topk_token_ids:
+                pos_logprobs_dict = self._make_pos_logprob_dict(
+                    topk_logprobs.tolist(), topk_token_ids.tolist(),
+                    decoded_tokens, self.num_logprobs)
+            else:
+                # If the sampled token is not one of the top tokens
+                # at this sequence offset, inject the sampled token
+                # & its Logprob instance into the dict
+                sample_logprob_obj = Logprob(
                     logprob=sampled_token_logprob,
-                    rank=None,  # TODO: is this needed?
-                    decoded_token=token)
+                    decoded_token=self.tokenizer.decode(sampled_token_id))
+                pos_logprobs_dict = self._make_pos_logprob_dict(
+                    topk_logprobs.tolist(), topk_token_ids.tolist(),
+                    decoded_tokens, self.num_logprobs,
+                    (sampled_token_id, sample_logprob_obj))
 
             self.logprobs.append(pos_logprobs_dict)
             self.cumulative_logprob += sampled_token_logprob
@@ -205,19 +210,56 @@ class IncrementalDetokenizer:
         token_ids: List[int],
         decoded_tokens: List[str],
         num_logprobs: int,
+        sampled_token_id_logprob: Optional[Tuple[int, Logprob]] = None,
     ) -> Dict[int, Logprob]:
-        """Make a Logprob dictionary for a position in the sequence."""
+        """Make a Logprob dictionary for a position in the sequence.
+        
+        Returns a dictionary mapping top token ids to Logprob data
+        structures. Each Logprob data structure includes log probability,
+        decoded token, and rank (1-indexed). The size of the dict returned
+        will be be num_logprobs.
 
+        If the sampled token is not among the top logprobs, then 
+        sampled_token_id_logprob = (sampled_token_id,sample_logprob) must be
+        provided; an additional dictionary entry mapping sampled_token_id -> 
+        sample_logprob will be injected with rank equal to num_logprobs + 1 
+        (sampled_token_id must be lowest-rank if we are having to inject it.)
+        Note that the size of the dict returned will then be num_logprobs + 1.
+
+        Args:
+          logprobs: list of log probabilities
+          token_ids: list of top token ids
+          decoded_tokens: list of decoded top tokens
+          num_logprobs: number of top tokens
+          sampled_token_id_logprob: (optional) tuple of
+                                    (sampled_token_id,sample_logprob)
+
+        Returns:
+          Dict[top token id, Logprob]; num_logprobs or num_logprobs+1
+          keys in total
+        
+        """
         # Sampler uses torch.topk() which sorts so the
-        # index in lists is equivalent to rank.
-        return {
+        # index in lists is equivalent to rank-1.
+        logprobs_dict = {
             token_ids[idx]: Logprob(
                 logprob=logprobs[idx],
-                rank=idx,
+                rank=idx + 1,
                 decoded_token=decoded_tokens[idx],
             )
             for idx in range(num_logprobs)
         }
+
+        # Inject sampled token Logprob if necessary
+        if sampled_token_id_logprob:
+            sampled_token_id = sampled_token_id_logprob[0]
+            sample_logprob_obj = sampled_token_id_logprob[1]
+            assert sampled_token_id is not None
+            assert sample_logprob_obj is not None
+            sample_logprob_obj.rank = num_logprobs + 1
+            logprobs_dict[sampled_token_id] = sample_logprob_obj
+
+        return logprobs_dict
 
     def add_tokens(
         self,
