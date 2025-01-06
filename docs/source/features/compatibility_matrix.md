@@ -32,7 +32,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 
    * - Feature
      - [CP](#chunked-prefill)
-     - [APC](#apc)
+     - [APC](#automatic-prefix-caching)
      - [LoRA](#lora-adapter)
      - <abbr title="Prompt Adapter">prmpt adptr</abbr>
      - [SD](#spec_decode)
@@ -64,7 +64,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      -
      -
      -
-   * - [APC](#apc)
+   * - [APC](#automatic-prefix-caching)
      - ✅
      -
      -
@@ -345,7 +345,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-   * - [APC](#apc)
+   * - [APC](#automatic-prefix-caching)
      - [✗](gh-issue:3687)
      - ✅
      - ✅
