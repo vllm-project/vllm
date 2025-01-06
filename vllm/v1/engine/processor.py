@@ -146,17 +146,18 @@ class Processor:
                 mm_positions,
                 mm_hashes,
             )
-            # NOTE: We sort multimodal inputs/kwargs only if there are multiple
-            # modalities involved and the model supports merged input processor.
-            if precomputed_mm_inputs is not None and len(
-                    sorted_modalities) > 1:
+
+            # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
+            # modalities involved AND the model supports merged input processor.
+            if len(sorted_modalities) > 1 and precomputed_mm_inputs:
+
                 modality_order_dict = {
                     modality: order
                     for order, modality in enumerate(sorted_modalities)
                 }
 
-                # Sanity check to make sure each multimodal input
-                # has only one modality key.
+                # Sanity check to make sure each multimodal input has only one
+                # modality key.
                 for mm_input in precomputed_mm_inputs:
                     assert len(mm_input.modalities) == 1
 
