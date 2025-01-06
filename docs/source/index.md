@@ -71,13 +71,13 @@ getting_started/faq
 
 serving/offline_inference
 serving/openai_compatible_server
+serving/multimodal_inputs
 serving/distributed_serving
 serving/metrics
-serving/integrations/index
-serving/multimodal_inputs
 serving/engine_args
 serving/env_vars
 serving/usage_stats
+serving/integrations/index
 ```
 
 ```{toctree}
