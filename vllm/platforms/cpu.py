@@ -50,7 +50,7 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
             logger.warning(
