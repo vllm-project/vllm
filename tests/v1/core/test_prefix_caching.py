@@ -1,7 +1,7 @@
 """Compare the with and without prefix caching."""
 import pytest
 
-from vllm.multimodal.inputs import PlaceholderRange, MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
